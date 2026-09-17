@@ -151,9 +151,16 @@ standard refuses -- so both directions are asserted rather than assumed.
 
 ## `struct ModuleClassification` › `crate_path: String,`
 
-The path a denied entry would name this module by, or empty when the
-module is not reachable from outside its parent (a private `mod`, or the
-binary crate root).
+The path a denied entry would name this module by: `upstroke::` and the
+module path the file declares, for every library module -- a private `mod`
+included, because clippy resolves a `disallowed-methods` path through one,
+and a `pub(super)` item of a private `mod` of `engine` is visible to every
+module under `engine::topology` (#306, `PR7-WRAPPERS-EMPTY-DOMAIN`). Empty
+only for the binary crate root, which has no `upstroke::` path;
+`only_the_binary_crate_root_leaves_its_crate_path_empty` holds both halves.
+Until #306 the field read "empty when the module is not reachable from
+outside its parent", and the three private engine modules that satisfied
+that sentence were exactly where an effectful `pub(super)` fn went undenied.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {`
 
@@ -578,6 +585,75 @@ fixtures that were green having never executed.
 function values, method calls, and macro-expanded code" -- and
 `proof_tests[4]` names four fixtures. The grid covers the union plus the
 type list, which is seven, and all three lints fire.
+
+## `fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {`
+
+The guard #306 owes for putting `#![allow(clippy::disallowed_methods)]` on
+`src/engine/mod.rs`. A lint level is scoped by the module tree, so that allow
+reaches every module under `engine::topology` unless something below it says
+otherwise, and the placement scan cannot notice: `governed_allows` records
+what a file writes, and a child exempted by inheritance writes nothing. The
+`deny` on `src/engine/topology.rs` is what says otherwise, and an attribute
+somebody can delete is held here twice. Lexically: the facade allows exactly
+the set this test models, the root denies all three governed lints at file
+level, and no child under the root writes an allow of its own. Executed:
+three fixtures compiled with `lint_fixture` against the real denylist -- a
+facade root declaring a topology module declaring a child that reaches one
+denied primitive per governed lint (a denied wrapper called, a denied type
+in a signature, a denied macro) while the facade calls a second denied
+wrapper itself. With no attribute anywhere all four reaches are reported. With the
+facade's allow and an open topology file, the child's reach into the wrapper
+goes unreported -- the hazard, executed rather than described. With the
+facade's allow and the tree's deny, the child's three come back as build
+errors and the facade's own call stays allowed. What it catches: the deny
+deleted or narrowed, a child re-allowing below it, the facade's allow widened
+past what the root re-denies, and a toolchain whose inheritance or override
+semantics moved.
+
+## `fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {`
+
+The guard the test above left owing. That one holds the deny on the topology
+root and walks only `src/engine/topology/`; the facade declares nine other
+children, and a lint level inherits into each of them just the same. The
+third review of #306 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) proved it: a
+`pub(super) fn` calling `std::fs::write`, added to `src/engine/assembly.rs`
+and referenced from the production body of `park_question` in
+`src/engine/topology/integrate.rs`, passed `clippy -- -D warnings` and the
+whole suite, because `assembly`, `classify`, `options`, `preflight` and
+`report` wrote no attribute, inherited the facade's allow, and so appeared
+nowhere in `effects/allowlist.toml` -- the placement scan records what a file
+writes. Since round 3 those five carry the topology root's fence.
+
+The boundary is derived, never listed. Starting from the facade, every `mod`
+declaration is read by `scan_module_declarations` and resolved by
+`candidates_for` to exactly one file, and the walk carries the allows in
+effect at each parent: what it inherited, less what it denies, plus what it
+writes. A module inheriting a governed lint must either deny it at file level
+(`file_level_denies`) or write its own module-level allow of it that
+`effects/allowlist.toml` records for that path; one that inherits something
+and writes no allow at all must carry the whole three-lint fence, the form the
+topology root wrote first. The walk recurses through recording children too,
+so a helper declared under `attempt.rs` tomorrow would be judged against
+`attempt.rs`'s allow the day it is declared. Then the review's witness is
+compiled with `lint_fixture` against the real denylist, in three shapes: with
+no attribute anywhere, a sibling's `std::fs::write` and the facade's own
+`write_json` are both reported; with the facade's allow, the sibling open and a
+denying topology module referencing the sibling's fn, nothing is reported and
+the crate builds -- the hole, executed; with the facade's allow and the sibling
+carrying the fence the children write, the sibling's reach is a build error
+and the facade's own call stays allowed.
+
+What it catches: a fenced module's deny deleted or narrowed; a module declared
+anywhere under `engine` without a fence or a row while something is in effect
+above it; a recording module whose row stops recording a lint its parent
+allows; the facade's allow widened past what a child re-denies; a toolchain
+whose inheritance or override semantics moved. What it does not see: the
+facade's own items, which its allow covers by design and its row justifies; a
+`deny` written through `cfg_attr`, which the file-level reader does not
+evaluate and this test therefore does not credit; a `mod` declaration
+carrying a `path` attribute, which the scanner refuses rather than resolves;
+and every module outside `engine`, where the same inheritance rule holds and
+nothing here walks.
 
 ## `fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {`
 

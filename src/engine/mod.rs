@@ -1,5 +1,9 @@
 //! Extended notes: `docs/internals/engine/mod.md`
 
+// LEGACY-EFFECT: this module is in the frozen legacy section of
+// `effects/allowlist.toml`, which carries its justification.
+#![allow(clippy::disallowed_methods)]
+
 mod assembly;
 mod attempt;
 mod classify;

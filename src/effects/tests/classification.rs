@@ -16,7 +16,7 @@ pub(super) mod checks {
     };
     use crate::effects::{
         CLASSIFIED_MODULES, CLIPPY_TOML, WRAPPERS_TOML, blank_comments_and_strings,
-        externally_reachable_fns, production_region,
+        externally_reachable_fns, production_code,
     };
 
     pub(in crate::effects::tests) fn reachable_fns_are_classified() {
@@ -131,6 +131,57 @@ pub(super) mod checks {
         }
     }
 
+    pub(in crate::effects::tests) fn crate_paths_name_the_modules() {
+        // `crate_path = ""` is the record's escape hatch: the check above
+        // refuses an effectful row it cannot path, so an empty path pushes
+        // every effectful body of that module into `effectful_unnameable`,
+        // the class the denial check skips. #306 found three private `mod`s
+        // of `engine` using it on the claim that a private module has no
+        // clippy path. It has: a `pub(super)` fn there is visible to every
+        // module under `engine::topology`, and a reference to
+        // `crate::engine::attempt::run_attempt` from
+        // `engine::topology::integrate` passed clippy undenied and was refused
+        // once the path was listed. The hatch is legitimate for exactly one
+        // module, the binary crate root, which has no `upstroke::` path at all.
+        let record = wrappers();
+        let empty: Vec<&str> = record
+            .module
+            .iter()
+            .filter(|module| module.crate_path.is_empty())
+            .map(|module| module.path.as_str())
+            .collect();
+        assert_eq!(
+            empty,
+            vec!["src/main.rs"],
+            "a library module records no crate path, so an effectful name in it cannot \
+             be denied and would be filed `effectful_unnameable` on a claim clippy does \
+             not honour (`PR7-WRAPPERS-EMPTY-DOMAIN`)"
+        );
+        let mut checked = 0;
+        for module in &record.module {
+            if module.crate_path.is_empty() {
+                continue;
+            }
+            let expected = format!(
+                "upstroke::{}",
+                module
+                    .path
+                    .trim_start_matches("src/")
+                    .trim_end_matches(".rs")
+                    .trim_end_matches("/mod")
+                    .replace('/', "::")
+            );
+            assert_eq!(
+                module.crate_path, expected,
+                "{}: the crate path does not name the module the file declares, so a \
+                 denial built from it would resolve to nothing",
+                module.path
+            );
+            checked += 1;
+        }
+        assert!(checked > 50, "only {checked} crate paths were checked");
+    }
+
     pub(in crate::effects::tests) fn funnel_rows_name_a_site() {
         let record = wrappers();
         let mut checked = 0;
@@ -139,7 +190,7 @@ pub(super) mod checks {
                 continue;
             }
             let source = fs::read_to_string(repo_root().join(&module.path)).expect("read module");
-            let production = blank_comments_and_strings(&production_region(&source));
+            let production = production_code(&source);
             assert!(
                 production.contains("EffectSiteId") || production.contains("Site"),
                 "{} classifies funnels and never names a site",

@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/engine/classify.md`
 
+#![deny(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use crate::events::{AttemptRecord, FailureRecord, ReviewPassOutcome, ReviewRecord};
 use crate::gates::{self, GateFailure};
 use crate::ir::TaskKind;

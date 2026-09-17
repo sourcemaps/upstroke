@@ -1104,6 +1104,486 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
     }
 }
 
+#[test]
+fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
+    // #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs` allows
+    // `clippy::disallowed_methods` so the v0.1 conductor's facade can call the
+    // two denied entry points `coordinator::run_harness_inner_on` and
+    // `resume::resume_harness_inner_on`. A lint level is scoped by the module
+    // tree, so that allow reaches every module under `engine::topology` --
+    // forty files, none writing an attribute of its own -- and the placement
+    // scan cannot see it: `governed_allows` records what a file WRITES, and a
+    // child exempted by inheritance writes nothing. What stops the allow at
+    // the facade is `#![deny(..)]` on `src/engine/topology.rs`, the one root
+    // every topology child descends from. An attribute somebody can delete is
+    // a weaker guarantee than the absence of an allow ever was, so this test
+    // holds it twice: lexically, from the two files, and executed, by
+    // compiling the same shape -- a facade with this tree's allow, a topology
+    // root with this tree's deny, a child reaching one denied primitive per
+    // governed lint -- against the real denylist, beside the shape without
+    // the deny, which is what removing it would leave.
+    const FACADE: &str = "src/engine/mod.rs";
+    const TOPOLOGY_ROOT: &str = "src/engine/topology.rs";
+    const GOVERNED: [&str; 3] = [
+        "clippy::disallowed_methods",
+        "clippy::disallowed_types",
+        "clippy::disallowed_macros",
+    ];
+
+    let facade = fs::read_to_string(repo_root().join(FACADE)).expect(FACADE);
+    let allowed: BTreeSet<String> = governed_allows(&facade)
+        .iter()
+        .filter(|allow| allow.inner && allow.module_level && allow.keywords == ["allow"])
+        .flat_map(|allow| allow.lints.iter().cloned())
+        .collect();
+    let expected: BTreeSet<String> = ["clippy::disallowed_methods"]
+        .iter()
+        .filter_map(|lint| normalize_lint(lint))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        allowed, expected,
+        "{FACADE} allows a different set of governed lints than the one this test models"
+    );
+
+    let topology = fs::read_to_string(repo_root().join(TOPOLOGY_ROOT)).expect(TOPOLOGY_ROOT);
+    let denied: Vec<&str> = GOVERNED
+        .iter()
+        .copied()
+        .filter(|lint| file_level_denies(&topology, lint))
+        .collect();
+    assert_eq!(
+        denied, GOVERNED,
+        "{TOPOLOGY_ROOT} no longer denies every governed lint at file level, so every module \
+         under `engine::topology` inherits what {FACADE} allows and the placement scan cannot \
+         see it (`PR7-WRAPPERS-EMPTY-DOMAIN`, #306)"
+    );
+    let mut children = 0;
+    for (path, source) in scanned_sources() {
+        if !path.starts_with("src/engine/topology/") {
+            continue;
+        }
+        children += 1;
+        assert!(
+            governed_allows(&source).is_empty(),
+            "{path} allows a governed lint below the topology root's deny; that deny is the \
+             guarantee this test holds and a child's allow re-opens it"
+        );
+    }
+    assert!(children > 30, "only {children} topology children scanned");
+
+    let scratch = scratch_dir("facade");
+    fs::write(
+        scratch.join("facade-child.rs"),
+        "pub fn probe(p: &std::path::Path) -> bool {\n\
+         \x20   let _ = upstroke::util::write_text(p, \"x\");\n\
+         \x20   println!(\"{}\", p.display());\n\
+         \x20   p.exists()\n\
+         }\n\
+         pub fn takes(_command: std::process::Command) {}\n",
+    )
+    .expect("the child fixture");
+    fs::write(
+        scratch.join("facade-topology-open.rs"),
+        "#[path = \"facade-child.rs\"]\npub mod child;\n",
+    )
+    .expect("the open topology fixture");
+    fs::write(
+        scratch.join("facade-topology-denying.rs"),
+        format!(
+            "#![deny({})]\n#[path = \"facade-child.rs\"]\npub mod child;\n",
+            denied.join(", ")
+        ),
+    )
+    .expect("the denying topology fixture");
+    let facade_allow = format!(
+        "#![allow({})]\n",
+        allowed.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    let root = |allow: &str, topology_file: &str| {
+        format!(
+            "{allow}#[path = \"{topology_file}\"]\npub mod topology;\n\
+             pub fn conductor(p: &std::path::Path) {{\n\
+             \x20   let _ = upstroke::util::write_json(p, &1_u8);\n\
+             }}\n"
+        )
+    };
+    let codes = |diagnostics: &[(String, String)]| -> Vec<String> {
+        let mut codes: Vec<String> = diagnostics.iter().map(|(code, _)| code.clone()).collect();
+        codes.sort();
+        codes
+    };
+    let naming = |diagnostics: &[(String, String)], needle: &str| -> usize {
+        diagnostics
+            .iter()
+            .filter(|(_, message)| message.contains(needle))
+            .count()
+    };
+
+    // No attribute anywhere: all four reaches are refused, so the fixture
+    // sees everything the two shapes below can hide.
+    let (ok, control) = lint_fixture(
+        &scratch,
+        "facade_control",
+        &root("", "facade-topology-open.rs"),
+    );
+    assert!(
+        ok,
+        "the control shape must compile with warnings only: {control:#?}"
+    );
+    assert_eq!(
+        codes(&control),
+        vec![
+            "clippy::disallowed_macros",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_types",
+        ],
+        "{control:#?}"
+    );
+    assert_eq!(
+        naming(&control, "upstroke::util::write_json"),
+        1,
+        "{control:#?}"
+    );
+    assert_eq!(
+        naming(&control, "upstroke::util::write_text"),
+        1,
+        "{control:#?}"
+    );
+
+    // The facade's allow with nothing below it: the child's reach into a
+    // denied wrapper goes unrefused, and no file wrote the allow that let it.
+    let (ok, inherited) = lint_fixture(
+        &scratch,
+        "facade_inherit",
+        &root(&facade_allow, "facade-topology-open.rs"),
+    );
+    assert!(
+        ok,
+        "the inherited shape must compile with warnings only: {inherited:#?}"
+    );
+    assert_eq!(
+        codes(&inherited),
+        vec!["clippy::disallowed_macros", "clippy::disallowed_types"],
+        "a module-level allow on the facade did not reach the topology child, so the deny \
+         this test holds guards nothing: {inherited:#?}"
+    );
+    assert_eq!(
+        naming(&inherited, "upstroke::util::write_text"),
+        0,
+        "{inherited:#?}"
+    );
+
+    // This tree's shape: the root's deny makes the child's three reaches build
+    // errors again, and the facade keeps the allow it exists for.
+    let (ok, tree) = lint_fixture(
+        &scratch,
+        "facade_tree",
+        &root(&facade_allow, "facade-topology-denying.rs"),
+    );
+    assert!(
+        !ok,
+        "the topology root's deny must make the child's reach a build error: {tree:#?}"
+    );
+    assert_eq!(
+        codes(&tree),
+        vec![
+            "clippy::disallowed_macros",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_types",
+        ],
+        "{tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "upstroke::util::write_text"),
+        1,
+        "the topology child reached a denied wrapper under the facade's allow and was not \
+         refused: {tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "upstroke::util::write_json"),
+        0,
+        "the facade's own call is what its allow is for: {tree:#?}"
+    );
+}
+
+#[test]
+fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {
+    // #306, round 3 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`): the guard
+    // above holds the deny on `src/engine/topology.rs` and walks only the
+    // files under it. `src/engine/mod.rs` declares nine other children, and a
+    // lint level inherits into each of them just the same: `assembly`,
+    // `classify`, `options`, `preflight` and `report` wrote no attribute, so
+    // they inherited the facade's allow, the placement scan recorded nothing,
+    // and the third review proved it -- a `pub(super) fn` in
+    // `engine/assembly.rs` calling `std::fs::write`, referenced from a
+    // production body of `engine::topology::integrate`, passed clippy and the
+    // whole suite. So the boundary is walked from the facade's own `mod`
+    // declarations, recursively, never from a list: every module carries
+    // forward the allows in effect at its parent, and for each lint it
+    // inherits it must deny that lint at file level or write its own
+    // module-level allow that `effects/allowlist.toml` records; a module that
+    // inherits something and writes no allow at all carries the whole
+    // three-lint fence the topology root wrote first. Then the review's
+    // witness is compiled: a facade with this tree's allow, a sibling
+    // reaching `std::fs::write`, a denying topology module referencing the
+    // sibling -- open, the reach is unreported and the crate builds; fenced
+    // with the attribute the children write, it is a build error again.
+    use crate::effects::census_domain::{candidates_for, scan_module_declarations, sole_present};
+
+    const FACADE: &str = "src/engine/mod.rs";
+    const GOVERNED: [&str; 3] = [
+        "clippy::disallowed_methods",
+        "clippy::disallowed_types",
+        "clippy::disallowed_macros",
+    ];
+    const SIBLING: &str = "pub(crate) fn r2_unrecorded_inherited_effect(\n\
+         \x20   p: &std::path::Path,\n\
+         ) -> std::io::Result<()> {\n\
+         \x20   std::fs::write(p, b\"r2 effect\")\n\
+         }\n";
+
+    let governed: BTreeSet<String> = GOVERNED
+        .iter()
+        .filter_map(|lint| normalize_lint(lint))
+        .map(str::to_owned)
+        .collect();
+    let root = repo_root();
+    let roots = crate_roots();
+    let list = allowlist();
+    let recorded: BTreeMap<&str, BTreeSet<String>> = list
+        .funnel
+        .iter()
+        .chain(list.legacy.iter())
+        .map(|entry| {
+            let allows = entry
+                .allows
+                .iter()
+                .filter_map(|lint| normalize_lint(lint))
+                .map(str::to_owned)
+                .collect();
+            (entry.path.as_str(), allows)
+        })
+        .collect();
+    let written_allows = |source: &str| -> BTreeSet<String> {
+        governed_allows(source)
+            .iter()
+            .filter(|allow| allow.inner && allow.module_level)
+            .flat_map(|allow| allow.lints.iter().cloned())
+            .collect()
+    };
+
+    let facade = fs::read_to_string(root.join(FACADE)).expect(FACADE);
+    let allowed = written_allows(&facade);
+    let allowed_as_written: Vec<String> = governed_allows(&facade)
+        .iter()
+        .filter(|allow| allow.inner && allow.module_level)
+        .flat_map(|allow| allow.written.iter().cloned())
+        .collect();
+    assert!(
+        !allowed.is_empty(),
+        "{FACADE} allows no governed lint at module level, so nothing below it inherits one and \
+         this guard measures nothing; if the facade's allow is gone, retire this test with it"
+    );
+
+    // Each entry: a module's path relative to the root, what it inherits from
+    // its parent, and that parent.
+    let mut pending: Vec<(String, BTreeSet<String>, String)> =
+        vec![(FACADE.to_owned(), BTreeSet::new(), String::new())];
+    let mut visited: Vec<String> = Vec::new();
+    let mut fenced: Vec<String> = Vec::new();
+    let mut recording: Vec<String> = Vec::new();
+    while let Some((path, inherited, parent)) = pending.pop() {
+        let source = fs::read_to_string(root.join(&path)).expect("a module the walk resolved");
+        let own = written_allows(&source);
+        let denied: BTreeSet<String> = GOVERNED
+            .iter()
+            .filter(|lint| file_level_denies(&source, lint))
+            .filter_map(|lint| normalize_lint(lint))
+            .map(str::to_owned)
+            .collect();
+        let rows = recorded.get(path.as_str());
+        for lint in &inherited {
+            let records = own.contains(lint) && rows.is_some_and(|allows| allows.contains(lint));
+            assert!(
+                denied.contains(lint) || records,
+                "{path}, declared by {parent}, neither denies `{lint}` at file level nor records its \
+                 own allow of it in {ALLOWLIST_TOML}, so it is exempt by inheritance from {parent}'s \
+                 allow and the placement scan cannot see it -- the third review's sibling witness \
+                 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`, #306); it writes {own:?} and the \
+                 allowlist records {rows:?}"
+            );
+        }
+        if !inherited.is_empty() {
+            if own.is_empty() {
+                assert_eq!(
+                    denied, governed,
+                    "{path} inherits {inherited:?} from {parent} and writes no allow of its own, so \
+                     it must carry the whole fence `src/engine/topology.rs` wrote first: every \
+                     governed lint denied at file level"
+                );
+                fenced.push(path.clone());
+            } else {
+                recording.push(path.clone());
+            }
+        }
+        let in_effect: BTreeSet<String> = inherited
+            .difference(&denied)
+            .cloned()
+            .chain(own.iter().cloned())
+            .collect();
+        let declared_in = root.join(&path);
+        let declarations =
+            scan_module_declarations(&source).unwrap_or_else(|refusal| panic!("{path}: {refusal}"));
+        for declaration in declarations {
+            let candidates = candidates_for(
+                roots,
+                &declared_in,
+                &declaration.inline_path,
+                &declaration.name,
+            )
+            .unwrap_or_else(|refusal| panic!("{path}: {refusal}"));
+            let file = sole_present(&candidates, &|candidate: &Path| candidate.is_file())
+                .unwrap_or_else(|present| {
+                    panic!(
+                        "`mod {};` in {path} resolves to {present} files among {candidates:?}; the \
+                         tree has to be readable for this guard to walk it",
+                        declaration.name
+                    )
+                });
+            let child = file
+                .strip_prefix(&root)
+                .expect("under the manifest")
+                .to_string_lossy()
+                .replace('\\', "/");
+            pending.push((child, in_effect.clone(), path.clone()));
+        }
+        visited.push(path);
+    }
+    assert!(
+        visited.len() > 40,
+        "only {} modules walked from {FACADE}: {visited:?}",
+        visited.len()
+    );
+    assert!(
+        fenced.len() > 1 && recording.len() > 1,
+        "the walk from {FACADE} found {fenced:?} fenced and {recording:?} recording, which is not \
+         the tree this guard was written against"
+    );
+
+    // The review's witness, compiled: a sibling reaching `std::fs::write`, a
+    // topology module carrying the root's deny and referencing the sibling,
+    // and a facade allowing what this tree's facade allows.
+    let scratch = scratch_dir("siblings");
+    let fence = format!("#![deny({})]\n", GOVERNED.join(", "));
+    fs::write(scratch.join("sibling-open.rs"), SIBLING).expect("the open sibling fixture");
+    fs::write(
+        scratch.join("sibling-fenced.rs"),
+        format!("{fence}{SIBLING}"),
+    )
+    .expect("the fenced sibling fixture");
+    fs::write(
+        scratch.join("sibling-topology.rs"),
+        format!(
+            "{fence}pub fn park(p: &std::path::Path) -> bool {{\n\
+             \x20   crate::sibling::r2_unrecorded_inherited_effect(p).is_ok()\n\
+             }}\n"
+        ),
+    )
+    .expect("the topology fixture");
+    let facade_allow = format!("#![allow({})]\n", allowed_as_written.join(", "));
+    let root_of = |allow: &str, sibling: &str| {
+        format!(
+            "{allow}#[path = \"{sibling}\"]\nmod sibling;\n\
+             #[path = \"sibling-topology.rs\"]\npub mod topology;\n\
+             pub fn conductor(p: &std::path::Path) {{\n\
+             \x20   let _ = upstroke::util::write_json(p, &1_u8);\n\
+             }}\n"
+        )
+    };
+    let codes = |diagnostics: &[(String, String)]| -> Vec<String> {
+        let mut codes: Vec<String> = diagnostics.iter().map(|(code, _)| code.clone()).collect();
+        codes.sort();
+        codes
+    };
+    let naming = |diagnostics: &[(String, String)], needle: &str| -> usize {
+        diagnostics
+            .iter()
+            .filter(|(_, message)| message.contains(needle))
+            .count()
+    };
+
+    // No attribute anywhere: the sibling's reach and the facade's own are
+    // both reported, so the fixture sees what the two shapes below can hide.
+    let (ok, control) = lint_fixture(
+        &scratch,
+        "siblings_control",
+        &root_of("", "sibling-open.rs"),
+    );
+    assert!(
+        ok,
+        "the control shape must compile with warnings only: {control:#?}"
+    );
+    assert_eq!(
+        codes(&control),
+        vec!["clippy::disallowed_methods", "clippy::disallowed_methods"],
+        "{control:#?}"
+    );
+    assert_eq!(naming(&control, "std::fs::write"), 1, "{control:#?}");
+    assert_eq!(
+        naming(&control, "upstroke::util::write_json"),
+        1,
+        "{control:#?}"
+    );
+
+    // The facade's allow over an open sibling, the topology root denying: the
+    // sibling's reach goes unreported, the crate builds, and no file wrote the
+    // allow that let it -- the hole the third review executed.
+    let (ok, hole) = lint_fixture(
+        &scratch,
+        "siblings_inherited",
+        &root_of(&facade_allow, "sibling-open.rs"),
+    );
+    assert!(
+        ok,
+        "the inherited shape must compile with warnings only: {hole:#?}"
+    );
+    assert!(
+        hole.is_empty(),
+        "the facade's allow did not reach the open sibling, so the fence this test holds guards \
+         nothing: {hole:#?}"
+    );
+
+    // This tree's shape: the sibling carries the fence the children write, its
+    // reach is a build error again, and the facade keeps the allow it exists for.
+    let (ok, tree) = lint_fixture(
+        &scratch,
+        "siblings_fenced",
+        &root_of(&facade_allow, "sibling-fenced.rs"),
+    );
+    assert!(
+        !ok,
+        "the sibling's fence must make its reach a build error: {tree:#?}"
+    );
+    assert_eq!(
+        codes(&tree),
+        vec!["clippy::disallowed_methods"],
+        "{tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "std::fs::write"),
+        1,
+        "the sibling reached a denied primitive under the facade's allow and was not refused: \
+         {tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "upstroke::util::write_json"),
+        0,
+        "the facade's own call is what its allow is for: {tree:#?}"
+    );
+}
+
 fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {
     let (deps, rlib) = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
@@ -1894,6 +2374,11 @@ fn every_effectful_wrapper_is_on_the_disallowed_list() {
 }
 
 #[test]
+fn only_the_binary_crate_root_leaves_its_crate_path_empty() {
+    checks::crate_paths_name_the_modules();
+}
+
+#[test]
 fn every_funnel_classified_fn_names_a_site() {
     checks::funnel_rows_name_a_site();
 }
@@ -2207,6 +2692,16 @@ fn no_topology_module_calls_a_funnel_in_production() {
 #[test]
 fn the_reachable_fn_parser_finds_each_shape_this_tree_uses() {
     oracles::the_reachable_fn_parser_finds_every_shape();
+}
+
+#[test]
+fn a_configured_item_above_a_production_fn_does_not_hide_it_from_the_domain() {
+    oracles::the_domain_reaches_past_a_configured_item();
+}
+
+#[test]
+fn every_classified_module_that_declares_a_visible_fn_has_a_domain() {
+    oracles::every_classified_module_that_declares_a_visible_fn_has_a_domain();
 }
 
 #[test]

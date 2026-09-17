@@ -40,8 +40,9 @@ longer reaches it. The two lints it does not need are re-denied, so a
 this file is reached only through `#[cfg(test)] mod tests;` so it has no
 attribute of its own for a scan to cut on. The marker below is redundant to
 the compiler and load-bearing to every reader that still consults the
-TRUNCATING region — `effects::externally_reachable_fns` and the three
-censuses in `src/runner/container/exec.rs` — for which it makes this file's
+TRUNCATING region — the three censuses in `src/runner/container/exec.rs`;
+`effects::externally_reachable_fns` left it for `effects::production_code`
+under `PR7-WRAPPERS-EMPTY-DOMAIN` — for which it makes this file's
 production region empty, so a fixture that names a primitive is not reported
 as a production offender (`PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN`, used here in
 the direction it is wanted).

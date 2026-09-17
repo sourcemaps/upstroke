@@ -959,9 +959,10 @@ Do not split a UTF-8 sequence: back up to a character boundary.
 ## `mod tests;`
 
 -- test-only declarations ----------------------------------------------
-At the BOTTOM: `effects::production_region`, which
-`effects::externally_reachable_fns` and the three censuses now in
-`exec/tests.rs` still use, cuts a source at its first `#[cfg(test)]`
+At the BOTTOM: `effects::production_region`, which the three censuses now in
+`exec/tests.rs` still use (`effects::externally_reachable_fns` reads
+`effects::production_code` since `PR7-WRAPPERS-EMPTY-DOMAIN`), cuts a source
+at its first `#[cfg(test)]`
 (`PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN`).
 
 **This declaration carries no `#[allow]`, and that is a change.** While the

@@ -574,6 +574,7 @@ fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> boo
 }
 
 pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[
+    "src/engine/mod.rs",
     "src/engine/coordinator.rs",
     "src/engine/resume.rs",
     "src/engine/attempt.rs",
@@ -691,7 +692,7 @@ pub const CLASSIFIED_MODULES: &[&str] = &[
 
 #[must_use]
 pub fn externally_reachable_fns(source: &str) -> Vec<String> {
-    let region = blank_comments_and_strings(&production_region(source));
+    let region = production_code(source);
     let bytes = region.as_bytes();
     let mut names = BTreeSet::new();
     let mut trait_impl_spans = Vec::new();

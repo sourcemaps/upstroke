@@ -419,10 +419,16 @@ inside a comment or a string.
 The production **code** of `source`: comments and string literals blanked,
 and every `#[cfg(test)]`-configured item removed.
 
-[`production_region`] answers a different question and keeps its answer: it
-*truncates* at the first `#[cfg(test)]`, which is what a **domain** question
-wants (everything above the cut is certainly production) and what a
-**prohibition** question must not have. Three failures a prohibition census
+[`production_region`] keeps its truncating answer for the censuses that pin
+its cut point by name (`every_production_region_that_stops_early_stops_at_a_module`),
+and it is no longer what the classification domain reads.
+`PR7-WRAPPERS-EMPTY-DOMAIN` measured why: the truncating region was said to be
+what a **domain** question wants, because everything above the cut is
+certainly production -- but everything below it is certainly outside the
+domain, and in six classified modules the cut was a `#[cfg(test)] use` among
+the imports, so the domain was empty and an all-empty record passed. This
+function's answer is production in both directions, and
+[`externally_reachable_fns`] reads it. Three failures a prohibition census
 pays for with a truncating region, all three measured on this tree:
 
 * A file that declares its tests as `#[cfg(test)] mod tests;` — the
@@ -525,6 +531,18 @@ The legacy section of `effects/allowlist.toml` as PR5 freezes it.
 Held here rather than only in the TOML because the TOML is the thing under
 test: a frozen list that lived in the file it freezes would agree with any
 edit to that file.
+
+One entry was added after PR5, by the owner's decision on #306
+(`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs`, the v0.1 conductor's
+facade, whose only denied calls are the two conductor entry points denied by
+path in that change. The list and the TOML grew in the same commit, which is
+the only way `the_legacy_section_is_frozen_and_may_only_shrink` admits an
+entry; the row in `effects/allowlist.toml` says what the allow costs and how
+every module below the facade is kept from inheriting it: `src/engine/topology.rs`
+and the five siblings that write no allow of their own deny the governed lints
+at file level, the rest record their own allows in the same section, and
+`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+holds that boundary from the facade's own `mod` declarations.
 
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
@@ -710,8 +728,24 @@ memo, `windows_job` and `termination` stayed in `src/agent/proc.rs`.
 
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String> {`
 
-Every `fn` of `source`'s production region that is reachable from outside its
-module.
+Every `fn` of `source`'s production code that is reachable from outside its
+module. The region is [`production_code`]: comments and string literals
+blanked, every `#[cfg(test)]` item removed in place.
+
+**The region was the truncating one until `PR7-WRAPPERS-EMPTY-DOMAIN`.**
+[`production_region`] cuts a file at its first `#[cfg(test)]`, and in six
+classified modules -- `src/engine/{attempt,coordinator,resume}.rs` and
+`src/agent/{claude,codex,copilot}.rs` -- that is a `use` among the imports, so
+the derived domain was empty, `effects/wrappers.toml` recorded all four
+buckets as `[]`, and `reachable_fns_are_classified` compared an empty set
+with an empty set: forty-seven names classified by a census that read none
+of them, and a `pub(super) fn` below the cut, called from a live topology
+module, passed clippy and the suite. `src/agent/proc.rs` was cut inside
+`windows_job` and lost fifteen names the same way. Pinned by
+`a_configured_item_above_a_production_fn_does_not_hide_it_from_the_domain`
+(the shape) and `every_classified_module_that_declares_a_visible_fn_has_a_domain`
+(the six modules by name, and every classified module that declares a
+visible fn).
 
 Three shapes, because "pubfn" in the packet's sentence has three of them in
 this tree and a classification that saw one would be complete against a
