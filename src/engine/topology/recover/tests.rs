@@ -29,7 +29,7 @@ use crate::runner::{CommandSpec, Runner, RunnerError, RunnerRequest};
 use crate::topology::effects::EventSite;
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, LockSite, ObjectSite, RefSite,
-    RunDirSite, SubEffectPoint, WorktreeSite,
+    RunDirSite, SnapshotSite, SubEffectPoint, WorktreeSite,
 };
 use crate::topology::events::{
     AttemptFinished4, AttemptSettlement, AttemptStarted4, BudgetExceeded4, CommitSha, Epoch,
@@ -2891,6 +2891,7 @@ fn steps_d_and_e_reach_every_generation_not_the_first() {
             "{name}'s retained generation survived the resume"
         );
     }
+    assert_replays_twice_equal(&fixture, "loops-reach-every");
 }
 
 /// `T-ATTEMPT.resume_action`: "the task worktree scrubbed with force". Step
@@ -3178,6 +3179,250 @@ fn retry_refused_after_resume() {
         format!("{refused}").contains("generation"),
         "the refusal is about the generation: {refused}"
     );
+    assert_replays_twice_equal(&fixture, "retained-retry");
+}
+
+/// Rows 9 and 10 of Gate 5's audit, `Worktree.Verify` before and after: the retry row's prefix
+/// built as a crash leaves it. A stepping incarnation has always resumed once (the creator never
+/// steps), so the run is resumed first — the creator's marker removed, the execution root and the
+/// integration ref created, `run_resumed` durable, the handle released — and only then does the
+/// dead incarnation's work go in: the dispatch at the recorded base, the attempt, and its
+/// settlement retained for that incarnation's epoch, with the attempt's worktree standing at the
+/// base and the worker's edit staged in it (R9). The next resume closes the retained generation
+/// at step (e), reclaims the worktree and its intent through their own funnels, verifies nothing
+/// and repairs nothing else, and its first step runs a fresh generation to an accepted attempt.
+#[test]
+fn a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed()
+ {
+    use crate::topology::events::GenerationCloseReason;
+    use crate::topology::fold::GenerationClass;
+    use crate::workspace_manager::fixture::{git, git_out, write_file};
+
+    let tag = "retained-idle-exact";
+    let fixture = Fixture::healthy(tag);
+    let marker = fixture.public().join(rundir::MARKER);
+    {
+        let (_, handle) = resume_as(
+            &fixture,
+            RESUMER,
+            &runtime_holding_the_record(),
+            &mut HarnessTopologyHooks::new(harness()),
+        )
+        .expect("the run's first resume");
+        drop(handle);
+    }
+    assert!(
+        !marker.exists() && fixture.manager().execution_root().is_dir(),
+        "{tag}: the first resume removed the creator's marker and created the execution root"
+    );
+    let epoch = replayed(&fixture)
+        .epoch()
+        .expect("a resumed run has an epoch");
+    assert_eq!(
+        epoch,
+        Epoch(1),
+        "{tag}: one resume, so the retaining incarnation is epoch 1"
+    );
+    let planted = durable_kinds(&fixture).len();
+
+    append_events(
+        &fixture,
+        &[
+            dispatched_at(&fixture.base_sha),
+            attempt_started(1),
+            attempt_finished(
+                1,
+                AttemptSettlement::Retained {
+                    retained_session: SessionId("session-of-the-dead-incarnation".to_owned()),
+                    retained_incarnation: epoch,
+                },
+            ),
+        ],
+    );
+    let retained_worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    write_file(
+        &retained_worktree.join("worker.txt"),
+        b"the worker's edit\n",
+    );
+    git(&retained_worktree, &["add", "--", "worker.txt"]);
+    let edit = git(&retained_worktree, &["hash-object", "worker.txt"]);
+    let retained_slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let manager = fixture.manager();
+    assert!(
+        replayed(&fixture).ready_retry(ALPHA),
+        "{tag}: the retained generation is retryable by the incarnation that retained it, or the \
+         close below closes nothing"
+    );
+    assert!(
+        retained_worktree.is_dir()
+            && registered_with_git(&manager, &retained_worktree)
+            && manager.intents().expect("intents").contains(&retained_slot),
+        "{tag}: the dead incarnation left the retained generation's worktree, registered with \
+         Git, and its intent"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&edit),
+        "{tag}: R9: the retained worktree's index keeps the staged edit reachable"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: no process holds the run"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.retained_closed, 1,
+        "{tag}: step (e) closes the retained generation"
+    );
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "task_dispatched",
+            "attempt_started",
+            "attempt_finished",
+            "generation_closed",
+            "run_resumed",
+        ],
+        "{tag}: the close is appended by the recovery, before its `run_resumed`"
+    );
+    let closed = TopologyFold::parse_log(&fixture.log_bytes())
+        .expect("parses")
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::GenerationClosed { data } if data.key == ALPHA => Some(data),
+            _ => None,
+        })
+        .expect("the generation is closed");
+    assert_eq!(
+        closed.reason,
+        GenerationCloseReason::ResumeDiscardsRetainedSession,
+        "{tag}: the session died with its incarnation"
+    );
+    let after = replayed(&fixture);
+    assert!(
+        !after.ready_retry(ALPHA),
+        "{tag}: the retained session is gone, so there is no retry to verify a worktree for"
+    );
+    assert_eq!(
+        after
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(GenerationClass::Closed),
+        "{tag}"
+    );
+    assert!(
+        !retained_worktree.exists()
+            && !registered_with_git(&manager, &retained_worktree)
+            && !manager.intents().expect("intents").contains(&retained_slot),
+        "{tag}: the closed generation's worktree is reclaimed with the close, its Git \
+         registration and its intent with it"
+    );
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&edit)
+            && git_out(&fixture.repo_root, &["cat-file", "-e", &edit])
+                .status
+                .success(),
+        "{tag}: R27: the scrub released the staged edit to Git, neither adopted nor deleted"
+    );
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(EffectSiteId::Worktree(WorktreeSite::Remove), phase)
+                    && seen.observed(EffectSiteId::Worktree(WorktreeSite::RemoveIntent), phase),
+                "{tag}: the reclaim went through the worktree's own funnels ({phase})"
+            );
+        }
+        assert!(
+            !seen.observed(
+                EffectSiteId::Worktree(WorktreeSite::Verify),
+                HookPhase::Before
+            ),
+            "{tag}: the resume verifies nothing: a retained generation is closed, never retried"
+        );
+        assert_eq!(
+            seen.count(
+                EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+                HookPhase::Before
+            ),
+            0,
+            "{tag}: the prefix carries no marker for the resume to remove"
+        );
+        assert_eq!(
+            seen.count(
+                EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
+                HookPhase::Before
+            ),
+            0,
+            "{tag}: nor a missing execution root to recreate"
+        );
+    }
+    assert_replays_twice_equal(&fixture, tag);
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "task_dispatched",
+            "attempt_started",
+            "attempt_finished",
+            "generation_closed",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the close, then a fresh generation's whole attempt"
+    );
+    assert_eq!(
+        repair_dispatches(&driven.log, ALPHA)
+            .iter()
+            .map(|dispatched| dispatched.generation)
+            .collect::<Vec<_>>(),
+        vec![GEN, GenerationId(1)],
+        "{tag}: a closed generation is never retried; the task opens its next one"
+    );
+    assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
 }
 
 #[test]
@@ -12201,6 +12446,7 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
                 .contains(&retained_slot),
         "the closed generation stays reclaimed across a later resume"
     );
+    assert_replays_twice_equal(&fixture, "retained-repair");
 }
 
 /// `R11` across a budget stop: the rejected candidate's ref is what keeps the
@@ -13914,6 +14160,43 @@ fn candidate_sequence_kill_child() {
             EffectSiteId::Ref(RefSite::CreateCandidates),
             HookPhase::After,
         ),
+        "before-candidates-ref" => (
+            EffectSiteId::Ref(RefSite::CreateCandidates),
+            HookPhase::Before,
+        ),
+        "after-candidate-pin" => (
+            EffectSiteId::Ref(RefSite::PinCandidatePrepared),
+            HookPhase::After,
+        ),
+        "after-candidate-stage" => (
+            EffectSiteId::Object(ObjectSite::CandidateStage),
+            HookPhase::After,
+        ),
+        "before-candidate-write-tree" => (
+            EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+            HookPhase::Before,
+        ),
+        "after-candidate-write-tree" => (
+            EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+            HookPhase::After,
+        ),
+        "after-snapshot-commit-tree" => (
+            EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+            HookPhase::After,
+        ),
+        "snapshot-commit-tree-id-unread" => (
+            EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+            HookPhase::Point {
+                point: SubEffectPoint::IdUnread,
+                mode: InjectionMode::Kill,
+            },
+        ),
+        "after-snapshot-intent" => (
+            EffectSiteId::Snapshot(SnapshotSite::WriteIntent),
+            HookPhase::After,
+        ),
+        "before-snapshot-add" => (EffectSiteId::Snapshot(SnapshotSite::Add), HookPhase::Before),
+        "after-snapshot-add" => (EffectSiteId::Snapshot(SnapshotSite::Add), HookPhase::After),
         other => panic!("`{other}` is not a coordinate of the candidate sequence"),
     };
     let fixture = Fixture::adopted_by_a_kill_child(root, plan());
@@ -14558,6 +14841,822 @@ fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_whic
         "{tag}: one queue position across the kill and the recovery"
     );
     assert_replays_twice_equal(&fixture, tag);
+}
+
+fn index_blobs_of(worktree: &Path) -> Vec<String> {
+    crate::workspace_manager::fixture::git(worktree, &["ls-files", "-s"])
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_owned))
+        .collect()
+}
+
+/// The unreferenced commits in the object store that are the judge's snapshot inputs: what a
+/// snapshot's ephemeral commit is once nothing checks it out (R27).
+fn ephemeral_snapshot_commits_left_to_git(fixture: &Fixture) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+
+    crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+        .expect("fsck")
+        .into_iter()
+        .filter(|object| {
+            git(&fixture.repo_root, &["cat-file", "-t", object]) == "commit"
+                && git(&fixture.repo_root, &["show", "-s", "--format=%s", object])
+                    == "upstroke: ephemeral snapshot input"
+        })
+        .collect()
+}
+
+fn object_present(fixture: &Fixture, object: &str) -> bool {
+    crate::workspace_manager::fixture::git_out(&fixture.repo_root, &["cat-file", "-e", object])
+        .status
+        .success()
+}
+
+fn snapshot_slots_of(
+    manager: &crate::workspace_manager::WorkspaceManager,
+) -> Vec<crate::workspace_manager::Slot> {
+    manager
+        .intents()
+        .expect("intents")
+        .into_iter()
+        .filter(|slot| matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }))
+        .collect()
+}
+
+/// What a kill inside the attempt's capture or the judge's gates snapshot leaves for the next
+/// resume to read, beside the attempt in flight and its worktree with the worker's edit staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptResidue {
+    /// Only the staged edit (R9): no snapshot commit, intent or worktree.
+    Staged,
+    /// One ephemeral snapshot commit written and unreferenced (R27); no snapshot intent.
+    EphemeralCommit,
+    /// The snapshot intent durable with no snapshot worktree; the ephemeral commit unreferenced.
+    SnapshotIntent,
+    /// The snapshot worktree checked out at the ephemeral commit, which its HEAD keeps
+    /// reachable (R24), and its intent.
+    SnapshotWorktree,
+}
+
+fn a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+    coordinate: &str,
+    site: EffectSiteId,
+    residue: AttemptResidue,
+    tag: &str,
+) {
+    use crate::engine::topology::candidate::{CandidateRecovery, recovery_for};
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, coordinate, tag);
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is in flight and nothing durable names a capture or a snapshot"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R9: the attempt's worktree and intent stand"
+    );
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
+    let edit = git(&worktree, &["hash-object", "worker.txt"]);
+    assert!(
+        index_blobs_of(&worktree).contains(&edit),
+        "{tag}: the capture staged the worker's edit before the kill"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&edit),
+        "{tag}: R9: the task index keeps the staged blob reachable"
+    );
+    assert!(
+        pins_of(&fixture).is_empty() && candidates_refs_of(&fixture).is_empty(),
+        "{tag}: no ref names a candidate"
+    );
+    let snapshots = snapshot_slots_of(&manager);
+    let unreferenced = ephemeral_snapshot_commits_left_to_git(&fixture);
+    let snapshot_path = snapshots.first().map(|slot| manager.slot_path(slot));
+    let snapshot_head = match residue {
+        AttemptResidue::Staged => {
+            assert!(
+                snapshots.is_empty() && unreferenced.is_empty(),
+                "{tag}: no snapshot was begun: {snapshots:?} {unreferenced:?}"
+            );
+            None
+        }
+        AttemptResidue::EphemeralCommit => {
+            assert!(
+                snapshots.is_empty(),
+                "{tag}: no snapshot intent names the commit: {snapshots:?}"
+            );
+            assert_eq!(
+                unreferenced.len(),
+                1,
+                "{tag}: R27: exactly one ephemeral commit, unreferenced: {unreferenced:?}"
+            );
+            None
+        }
+        AttemptResidue::SnapshotIntent => {
+            assert_eq!(
+                snapshots.len(),
+                1,
+                "{tag}: the synced snapshot intent survives: {snapshots:?}"
+            );
+            let path = snapshot_path.as_deref().expect("the snapshot slot");
+            assert!(
+                !path.exists() && !registered_with_git(&manager, path),
+                "{tag}: and no snapshot worktree was added for it, nor registered"
+            );
+            assert_eq!(
+                unreferenced.len(),
+                1,
+                "{tag}: the ephemeral commit written before the intent is unreferenced: \
+                 {unreferenced:?}"
+            );
+            None
+        }
+        AttemptResidue::SnapshotWorktree => {
+            assert_eq!(
+                snapshots.len(),
+                1,
+                "{tag}: one snapshot intent survives: {snapshots:?}"
+            );
+            let path = snapshot_path.as_deref().expect("the snapshot slot");
+            assert!(
+                path.is_dir() && registered_with_git(&manager, path),
+                "{tag}: and its worktree was added and registered"
+            );
+            let head = git(path, &["rev-parse", "HEAD"]);
+            assert_eq!(
+                git(&fixture.repo_root, &["show", "-s", "--format=%s", &head]),
+                "upstroke: ephemeral snapshot input",
+                "{tag}"
+            );
+            assert!(
+                !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+                    .expect("fsck")
+                    .contains(&head),
+                "{tag}: R24: the snapshot's HEAD keeps its ephemeral commit reachable"
+            );
+            assert!(
+                unreferenced.is_empty(),
+                "{tag}: and no other ephemeral commit is loose: {unreferenced:?}"
+            );
+            Some(head)
+        }
+    };
+    assert_eq!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA).expect("classify"),
+        CandidateRecovery {
+            promotion: None,
+            orphan_pin: None,
+            settles_interrupted: true,
+        },
+        "{tag}: the unsettled attempt is owed an interrupted settlement and nothing of a candidate"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt the dead incarnation left in flight"
+    );
+    assert!(
+        recovered.finished.is_empty(),
+        "{tag}: there is no promotion to finish"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+        ],
+        "{tag}: the settlement is appended by the recovery, before its `run_resumed`"
+    );
+    assert!(
+        !worktree.exists()
+            && !registered_with_git(&manager, &worktree)
+            && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree is scrubbed, its Git registration and intent gone"
+    );
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&edit)
+            && object_present(&fixture, &edit),
+        "{tag}: R27: the scrub released the staged edit to Git, neither adopted nor deleted"
+    );
+    assert!(
+        manager.intents().expect("intents").is_empty(),
+        "{tag}: the snapshot intent, where one stood, is reclaimed with the attempt's"
+    );
+    if let Some(path) = snapshot_path.as_deref() {
+        assert!(
+            !path.exists() && !registered_with_git(&manager, path),
+            "{tag}: the snapshot worktree is gone and no longer registered"
+        );
+    }
+    let left = ephemeral_snapshot_commits_left_to_git(&fixture);
+    match residue {
+        AttemptResidue::Staged => assert!(
+            left.is_empty(),
+            "{tag}: the recovery writes no snapshot: {left:?}"
+        ),
+        AttemptResidue::EphemeralCommit | AttemptResidue::SnapshotIntent => assert_eq!(
+            left, unreferenced,
+            "{tag}: the ephemeral commit is left to Git, neither adopted nor deleted"
+        ),
+        AttemptResidue::SnapshotWorktree => {
+            let head = snapshot_head.as_deref().expect("the snapshot's HEAD");
+            assert_eq!(
+                left,
+                vec![head.to_owned()],
+                "{tag}: R27: the ephemeral commit went back to Git once its snapshot was removed"
+            );
+        }
+    }
+    for commit in &left {
+        assert!(
+            object_present(&fixture, commit),
+            "{tag}: released, not deleted: {commit}"
+        );
+    }
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(EffectSiteId::Worktree(WorktreeSite::Remove), phase)
+                    && seen.observed(EffectSiteId::Worktree(WorktreeSite::RemoveIntent), phase),
+                "{tag}: the scrub went through the worktree's own funnels ({phase})"
+            );
+            let snapshot_reclaimed = seen
+                .observed(EffectSiteId::Snapshot(SnapshotSite::Remove), phase)
+                && seen.observed(EffectSiteId::Snapshot(SnapshotSite::RemoveIntent), phase);
+            assert_eq!(
+                snapshot_reclaimed,
+                matches!(
+                    residue,
+                    AttemptResidue::SnapshotIntent | AttemptResidue::SnapshotWorktree
+                ),
+                "{tag}: the snapshot residue is reclaimed through its own funnels exactly when an \
+                 intent named it ({phase})"
+            );
+        }
+        for own in [
+            EffectSiteId::Object(ObjectSite::CandidateStage),
+            EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+            EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+            EffectSiteId::Snapshot(SnapshotSite::WriteIntent),
+            EffectSiteId::Snapshot(SnapshotSite::Add),
+        ] {
+            assert!(
+                !seen.observed(own, HookPhase::Before),
+                "{tag}: the recovery performs no `{own}` of its own"
+            );
+        }
+    }
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: nothing is owed after the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the settlement, then the next generation's whole attempt"
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the next generation performs `{site}` ({phase}) from the prefix in which \
+             nothing was performed"
+        );
+    }
+    assert!(
+        manager.intents().expect("intents").is_empty(),
+        "{tag}: the next generation's snapshots are removed as each role finishes, and its \
+         worktree with its promotion"
+    );
+    assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
+}
+
+#[test]
+fn a_kill_after_the_candidate_stage_is_settled_interrupted_and_the_scrub_releases_the_staged_edit()
+{
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "after-candidate-stage",
+        EffectSiteId::Object(ObjectSite::CandidateStage),
+        AttemptResidue::Staged,
+        "kill-after-candidate-stage",
+    );
+}
+
+#[test]
+fn a_kill_before_the_candidate_write_tree_is_settled_interrupted_and_the_scrub_releases_the_staged_edit()
+ {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "before-candidate-write-tree",
+        EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+        AttemptResidue::Staged,
+        "kill-before-candidate-write-tree",
+    );
+}
+
+#[test]
+fn a_kill_after_the_candidate_write_tree_is_settled_interrupted_and_the_scrub_releases_the_staged_edit()
+ {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "after-candidate-write-tree",
+        EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+        AttemptResidue::Staged,
+        "kill-after-candidate-write-tree",
+    );
+}
+
+#[test]
+fn a_kill_after_the_snapshot_commit_tree_is_settled_interrupted_and_leaves_the_ephemeral_commit_to_git()
+ {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "after-snapshot-commit-tree",
+        EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+        AttemptResidue::EphemeralCommit,
+        "kill-after-snapshot-commit-tree",
+    );
+}
+
+#[test]
+fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_ephemeral_commit_to_git()
+ {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "snapshot-commit-tree-id-unread",
+        EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+        AttemptResidue::EphemeralCommit,
+        "kill-snapshot-commit-tree-id-unread",
+    );
+}
+
+#[test]
+fn a_kill_after_the_snapshot_intent_is_settled_interrupted_and_the_intent_reclaimed() {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "after-snapshot-intent",
+        EffectSiteId::Snapshot(SnapshotSite::WriteIntent),
+        AttemptResidue::SnapshotIntent,
+        "kill-after-snapshot-intent",
+    );
+}
+
+#[test]
+fn a_kill_before_the_snapshot_add_is_settled_interrupted_and_the_intent_reclaimed() {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "before-snapshot-add",
+        EffectSiteId::Snapshot(SnapshotSite::Add),
+        AttemptResidue::SnapshotIntent,
+        "kill-before-snapshot-add",
+    );
+}
+
+#[test]
+fn a_kill_after_the_snapshot_add_is_settled_interrupted_and_the_snapshot_reclaimed() {
+    a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(
+        "after-snapshot-add",
+        EffectSiteId::Snapshot(SnapshotSite::Add),
+        AttemptResidue::SnapshotWorktree,
+        "kill-after-snapshot-add",
+    );
+}
+
+#[test]
+fn a_kill_before_the_candidates_ref_is_created_is_finished_by_the_next_resume_which_creates_it_and_appends_the_queue_position_once()
+ {
+    use crate::engine::topology::candidate::recovery_for;
+    use crate::topology::effects::{EntryPhase, ResumeAction};
+    use crate::topology::fold::GenerationClass;
+
+    let tag = "kill-before-candidates-ref";
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, "before-candidates-ref", tag);
+
+    let site = EffectSiteId::Ref(RefSite::CreateCandidates);
+    let semantics = site.semantics(EntryPhase::Before);
+    assert!(
+        semantics.rows.is_empty(),
+        "{tag}: nothing of `{site}` was performed, so no row holds anything ({:?})",
+        semantics.rows
+    );
+    assert_eq!(semantics.action, ResumeAction::ResumeUnperformed, "{tag}");
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared"
+        ],
+        "{tag}: the candidate is prepared, and neither its ref nor its queue position exists"
+    );
+    let prepared = prepared_candidates_of(&fixture);
+    let candidate = prepared.first().expect("the prepared candidate").clone();
+    let commit = candidate.commit_sha.0.clone();
+    assert!(
+        candidates_refs_of(&fixture).is_empty(),
+        "{tag}: no candidates ref was created"
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate.prepared_ref.as_str()),
+        Some(commit.clone()),
+        "{tag}: R23: the pin holds the prepared commit"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&commit),
+        "{tag}: and keeps it reachable"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: the promoting generation's worktree and intent stand"
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task(ALPHA)
+            .and_then(|task| task.generations.last())
+            .map(|generation| generation.class.clone()),
+        Some(GenerationClass::Promoting),
+        "{tag}"
+    );
+    let recovery = recovery_for(&manager, RUN_ID, &fold, ALPHA).expect("classify");
+    assert!(
+        !recovery.settles_interrupted && recovery.orphan_pin.is_none(),
+        "{tag}: {recovery:?}"
+    );
+    let Some(promoting) = recovery.promotion else {
+        panic!("{tag}: a durable `candidate_prepared` is an unfinished promotion");
+    };
+    assert_eq!(
+        promoting.candidate().commit_sha,
+        candidate.commit_sha,
+        "{tag}"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.finished,
+        vec![ALPHA],
+        "{tag}: step (f) finishes the promotion"
+    );
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the recovery performs `{site}` ({phase}) from the prefix in which nothing \
+             was performed"
+        );
+    }
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+            "run_resumed",
+        ],
+        "{tag}: the queue position is appended by the recovery, before its `run_resumed`"
+    );
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(candidate.candidate_ref.0.clone(), commit.clone())],
+        "{tag}: R11: the candidates ref, at the recorded commit"
+    );
+    assert!(pins_of(&fixture).is_empty(), "{tag}: the pin is pruned");
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the promoted generation's worktree and intent are reclaimed"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: a finished promotion owes nothing"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated { key: ALPHA, .. }))
+        ),
+        "{tag}: the finished candidate integrates: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()),
+        Some(commit),
+        "{tag}: the integration ref is at the candidate the dead incarnation prepared"
+    );
+    assert_eq!(
+        durable_kinds(&fixture)
+            .iter()
+            .filter(|kind| *kind == "task_candidate_created")
+            .count(),
+        1,
+        "{tag}: one queue position across the kill and the recovery"
+    );
+    assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
+}
+
+#[test]
+fn a_kill_after_the_candidate_pin_is_settled_interrupted_by_the_next_resume_which_prunes_the_orphan_pin()
+ {
+    use crate::engine::topology::candidate::{CandidateNames, recovery_for};
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let tag = "kill-after-candidate-pin";
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, "after-candidate-pin", tag);
+
+    let site = EffectSiteId::Ref(RefSite::PinCandidatePrepared);
+    assert_eq!(
+        site.semantics(EntryPhase::After).rows,
+        vec![ResourceRow::R23],
+        "{tag}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is in flight and nothing durable names the pinned commit"
+    );
+    let pin = CandidateNames::of(RUN_ID, ALPHA, GEN).prepared_ref;
+    let object = ref_target(&fixture, pin.as_str()).expect("the pin the dead incarnation created");
+    assert_eq!(
+        pins_of(&fixture),
+        vec![pin.0.clone()],
+        "{tag}: the pin, and only the pin"
+    );
+    assert!(
+        candidates_refs_of(&fixture).is_empty(),
+        "{tag}: no candidates ref"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&object),
+        "{tag}: R23: while the pin holds it the commit is reachable"
+    );
+    assert!(
+        candidate_commits_left_to_git(&fixture).is_empty(),
+        "{tag}: and no candidate commit is loose"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir()
+            && registered_with_git(&manager, &worktree)
+            && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R9: the attempt's worktree stands, registered with Git, with its intent"
+    );
+    let recovery = recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA).expect("classify");
+    assert!(
+        recovery.settles_interrupted && recovery.promotion.is_none(),
+        "{tag}: {recovery:?}"
+    );
+    let Some(orphan) = recovery.orphan_pin else {
+        panic!("{tag}: an unsettled attempt with a pin on disk owes an orphan pin");
+    };
+    assert_eq!(
+        (orphan.refname.as_str(), orphan.object.0.as_str()),
+        (pin.as_str(), object.as_str()),
+        "{tag}: the orphan pin at its exact recorded value"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt the dead incarnation left in flight"
+    );
+    assert!(
+        recovered.finished.is_empty(),
+        "{tag}: an unprepared commit is no promotion to finish"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+        ],
+        "{tag}: the settlement is appended by the recovery, before its `run_resumed`"
+    );
+    assert!(
+        pins_of(&fixture).is_empty(),
+        "{tag}: step (f) prunes the orphan pin"
+    );
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()),
+        None,
+        "{tag}: the pin is gone"
+    );
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&object)
+            && object_present(&fixture, &object),
+        "{tag}: R27: the commit is again Git's, and not deleted"
+    );
+    assert_eq!(
+        candidate_commits_left_to_git(&fixture),
+        vec![object.clone()],
+        "{tag}: it is the one candidate commit left to Git"
+    );
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(EffectSiteId::Ref(RefSite::DeleteCandidatePin), phase),
+                "{tag}: the prune went through its own funnel ({phase})"
+            );
+        }
+        for own in [site, EffectSiteId::Ref(RefSite::CreateCandidates)] {
+            assert!(
+                !seen.observed(own, HookPhase::Before),
+                "{tag}: the recovery performs no `{own}` of its own"
+            );
+        }
+    }
+    assert!(
+        !worktree.exists()
+            && !registered_with_git(&manager, &worktree)
+            && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree is reclaimed, its Git registration and intent \
+         gone"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: nothing is owed after the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the settlement, then the next generation's whole candidate sequence"
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the next generation pins its own candidate ({phase})"
+        );
+    }
+    let prepared = prepared_candidates_of(&fixture);
+    let [candidate] = prepared.as_slice() else {
+        panic!("{tag}: one candidate across the kill: {prepared:?}");
+    };
+    assert_eq!(candidate.generation, GenerationId(1), "{tag}");
+    assert!(
+        pins_of(&fixture).is_empty(),
+        "{tag}: its pin is pruned with its promotion"
+    );
+    assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
 }
 
 #[test]
@@ -15778,6 +16877,15 @@ fn staging_path_kill_child() {
         .as_str()
     {
         "before-prepared-pin" => (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::Before),
+        "after-staging-intent" => (
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::After,
+        ),
+        "before-staging-add" => (
+            EffectSiteId::Worktree(WorktreeSite::AddStaging),
+            HookPhase::Before,
+        ),
+        "after-prepared-pin" => (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::After),
         other => panic!("`{other}` is not a coordinate of the staging path"),
     };
     let fixture = Fixture::adopted_by_a_kill_child(root, plan_with(true));
@@ -15882,6 +16990,265 @@ fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_res
     assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
         &fixture, &driven, &head, tag,
     );
+}
+
+fn kill_the_staging_path(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let planted = durable_kinds(fixture).len();
+    let Some(status) = run_kill_child_within(
+        STAGING_PATH_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(coordinate),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{coordinate}` did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+    planted
+}
+
+fn a_kill_between_the_staging_intent_and_its_worktree_leaves_an_intent_the_next_resume_reclaims(
+    coordinate: &str,
+    site: EffectSiteId,
+    tag: &str,
+) {
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let planted = kill_the_staging_path(&fixture, coordinate, tag);
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the staging path records nothing before its verification starts"
+    );
+    let manager = fixture.manager();
+    let slot =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
+    let staging = manager.slot_path(&slot);
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![slot.clone()],
+        "{tag}: R10: the staging intent is durable, and it is the only intent"
+    );
+    assert!(
+        !staging.exists() && !registered_with_git(&manager, &staging),
+        "{tag}: and no staging worktree was added for it, nor registered"
+    );
+    assert_eq!(
+        ref_target(
+            &fixture,
+            crate::engine::topology::integrate::prepared_pin_ref(
+                RUN_ID,
+                crate::topology::events::SequenceId(1)
+            )
+            .as_str()
+        ),
+        None,
+        "{tag}: no prepared pin exists"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed)).recording_durability();
+    let (recovered, handle) = resume_with_real_refs_hooked(&fixture, &mut hooks)
+        .expect("the resume reclaims the staging intent rather than refusing");
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(EffectSiteId::Worktree(WorktreeSite::RemoveStaging), phase)
+                    && seen.observed(
+                        EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+                        phase
+                    ),
+                "{tag}: the reclaim went through the staging slot's own funnels ({phase})"
+            );
+        }
+        for own in [
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            EffectSiteId::Worktree(WorktreeSite::AddStaging),
+            EffectSiteId::Ref(RefSite::PinPrepared),
+        ] {
+            assert!(
+                !seen.observed(own, HookPhase::Before),
+                "{tag}: the recovery performs no `{own}` of its own"
+            );
+        }
+    }
+    drop(handle);
+    assert_replays_twice_equal(&fixture, tag);
+
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the next step performs `{site}` ({phase}) from the prefix in which nothing \
+             was performed"
+        );
+    }
+}
+
+#[test]
+fn a_kill_after_the_staging_intent_leaves_an_intent_the_next_resume_reclaims_and_the_candidate_integrates()
+ {
+    a_kill_between_the_staging_intent_and_its_worktree_leaves_an_intent_the_next_resume_reclaims(
+        "after-staging-intent",
+        EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+        "kill-after-staging-intent",
+    );
+}
+
+#[test]
+fn a_kill_before_the_staging_worktree_is_added_leaves_an_intent_the_next_resume_reclaims_and_the_candidate_integrates()
+ {
+    a_kill_between_the_staging_intent_and_its_worktree_leaves_an_intent_the_next_resume_reclaims(
+        "before-staging-add",
+        EffectSiteId::Worktree(WorktreeSite::AddStaging),
+        "kill-before-staging-add",
+    );
+}
+
+#[test]
+fn a_kill_after_the_proposals_pin_leaves_a_pinned_staging_worktree_the_next_resume_reclaims_with_its_pin_and_the_candidate_integrates()
+ {
+    use crate::workspace_manager::fixture::git;
+
+    let tag = "kill-after-prepared-pin";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let planted = kill_the_staging_path(&fixture, "after-prepared-pin", tag);
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the pin precedes the verification's start, so nothing durable records the \
+         sequence"
+    );
+    let manager = fixture.manager();
+    let slot =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
+    let staging = manager.slot_path(&slot);
+    assert!(
+        staging.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R10: the staging worktree and its intent stand"
+    );
+    let proposal = git(&staging, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(&fixture.repo_root, &["rev-parse", &format!("{proposal}^")]),
+        head.0,
+        "{tag}: the pick completed: the staging worktree's head is the proposal on the moved head"
+    );
+    let pin = crate::engine::topology::integrate::prepared_pin_ref(
+        RUN_ID,
+        crate::topology::events::SequenceId(1),
+    );
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()),
+        Some(proposal.clone()),
+        "{tag}: R12: the prepared pin names the proposal"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&proposal),
+        "{tag}: and keeps it reachable"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed)).recording_durability();
+    let (recovered, handle) = resume_with_real_refs_hooked(&fixture, &mut hooks)
+        .expect("the resume reclaims the pinned staging worktree rather than refusing");
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()),
+        None,
+        "{tag}: the orphan pin at the next sequence is deleted, so the sequence can take the name"
+    );
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(EffectSiteId::Ref(RefSite::DeletePreparedPin), phase),
+                "{tag}: the pin's deletion went through its own funnel ({phase})"
+            );
+            assert!(
+                seen.observed(EffectSiteId::Worktree(WorktreeSite::RemoveStaging), phase)
+                    && seen.observed(
+                        EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+                        phase
+                    ),
+                "{tag}: and the reclaim through the staging slot's ({phase})"
+            );
+        }
+        for own in [
+            EffectSiteId::Ref(RefSite::PinPrepared),
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            EffectSiteId::Worktree(WorktreeSite::AddStaging),
+        ] {
+            assert!(
+                !seen.observed(own, HookPhase::Before),
+                "{tag}: the recovery performs no `{own}` of its own"
+            );
+        }
+    }
+    drop(handle);
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&proposal)
+            && object_present(&fixture, &proposal),
+        "{tag}: the unpinned proposal commit is left to Git, neither adopted nor deleted"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(EffectSiteId::Ref(RefSite::PinPrepared), phase),
+            "{tag}: the next step pins its own proposal ({phase})"
+        );
+    }
 }
 
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
