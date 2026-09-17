@@ -610,6 +610,51 @@ deleted or narrowed, a child re-allowing below it, the facade's allow widened
 past what the root re-denies, and a toolchain whose inheritance or override
 semantics moved.
 
+## `fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {`
+
+The guard the test above left owing. That one holds the deny on the topology
+root and walks only `src/engine/topology/`; the facade declares nine other
+children, and a lint level inherits into each of them just the same. The
+third review of #306 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) proved it: a
+`pub(super) fn` calling `std::fs::write`, added to `src/engine/assembly.rs`
+and referenced from the production body of `park_question` in
+`src/engine/topology/integrate.rs`, passed `clippy -- -D warnings` and the
+whole suite, because `assembly`, `classify`, `options`, `preflight` and
+`report` wrote no attribute, inherited the facade's allow, and so appeared
+nowhere in `effects/allowlist.toml` -- the placement scan records what a file
+writes. Since round 3 those five carry the topology root's fence.
+
+The boundary is derived, never listed. Starting from the facade, every `mod`
+declaration is read by `scan_module_declarations` and resolved by
+`candidates_for` to exactly one file, and the walk carries the allows in
+effect at each parent: what it inherited, less what it denies, plus what it
+writes. A module inheriting a governed lint must either deny it at file level
+(`file_level_denies`) or write its own module-level allow of it that
+`effects/allowlist.toml` records for that path; one that inherits something
+and writes no allow at all must carry the whole three-lint fence, the form the
+topology root wrote first. The walk recurses through recording children too,
+so a helper declared under `attempt.rs` tomorrow would be judged against
+`attempt.rs`'s allow the day it is declared. Then the review's witness is
+compiled with `lint_fixture` against the real denylist, in three shapes: with
+no attribute anywhere, a sibling's `std::fs::write` and the facade's own
+`write_json` are both reported; with the facade's allow, the sibling open and a
+denying topology module referencing the sibling's fn, nothing is reported and
+the crate builds -- the hole, executed; with the facade's allow and the sibling
+carrying the fence the children write, the sibling's reach is a build error
+and the facade's own call stays allowed.
+
+What it catches: a fenced module's deny deleted or narrowed; a module declared
+anywhere under `engine` without a fence or a row while something is in effect
+above it; a recording module whose row stops recording a lint its parent
+allows; the facade's allow widened past what a child re-denies; a toolchain
+whose inheritance or override semantics moved. What it does not see: the
+facade's own items, which its allow covers by design and its row justifies; a
+`deny` written through `cfg_attr`, which the file-level reader does not
+evaluate and this test therefore does not credit; a `mod` declaration
+carrying a `path` attribute, which the scanner refuses rather than resolves;
+and every module outside `engine`, where the same inheritance rule holds and
+nothing here walks.
+
 ## `fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {`
 
 Compile `body` as its own crate under the repo's `clippy.toml`, and return

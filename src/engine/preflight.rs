@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/engine/preflight.md`
 
+#![deny(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;

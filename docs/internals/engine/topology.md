@@ -104,6 +104,18 @@ denied primitive per lint -- against the real denylist, beside the same shape
 without the deny, in which the child's reach into a denied wrapper goes
 unrefused.
 
+**This deny fences this subtree and nothing else.** The third review of #306
+(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) put a `pub(super) fn` calling
+`std::fs::write` in `src/engine/assembly.rs`, referenced it from a production
+body of [`integrate`](topology/integrate.md), and clippy and the suite stayed
+green: the facade's other children inherited its allow exactly as this one
+would have. Since round 3 the five of them that write no allow of their own --
+`assembly`, `classify`, `options`, `preflight`, `report` -- carry this same
+attribute, and
+`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+walks every module the facade declares, so the boundary is held as a whole
+rather than one root at a time.
+
 ## `pub mod preflight;`
 
 The schema-4 attempt-plan assembler, which lives engine-side.

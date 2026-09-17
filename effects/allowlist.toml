@@ -811,7 +811,19 @@ being absent from it would be the one omission nobody would think to look for.""
 # `#![deny(..)]` of all three governed lints on `src/engine/topology.rs`, the
 # root all forty of those files descend from, and
 # `effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
-# holds that deny lexically and by compiling the shape.
+# holds that deny lexically and by compiling the shape. That fence stopped at
+# the topology and nowhere else. The third review of #306
+# (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) put a `pub(super) fn` calling
+# `std::fs::write` in `src/engine/assembly.rs`, referenced it from a production
+# body under `engine::topology`, and clippy and the whole suite stayed green:
+# `assembly`, `classify`, `options`, `preflight` and `report` wrote no attribute,
+# so they inherited this file's allow and appear nowhere in this list. Since
+# round 3 those five carry the same `#![deny(..)]` as the topology root, and
+# `effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+# walks this file's own `mod` declarations, recursively, and refuses any module
+# that neither denies each lint in effect at its parent at file level nor
+# records its own allow of it below -- so a child declared tomorrow is judged
+# the day it is declared, not the day somebody remembers it.
 [[legacy]]
 path = "src/engine/mod.rs"
 allows = ["clippy::disallowed_methods"]
@@ -825,8 +837,17 @@ the coordinator removes both run halves with `fs::remove_dir_all` on a failed \
 start, and the resume conductor re-materialises open questions through \
 `interaction::write_question`. Nothing else in this file reaches an effect: it \
 declares the engine's modules and threads a `Contained` token. The allow is \
-`disallowed_methods` alone, and `src/engine/topology.rs` denies all three \
-governed lints at its root, so the allow stops at this file's own items."""
+`disallowed_methods` alone, and it does NOT stop at this file's own items: a \
+lint level inherits down the module tree, so any child declared here that \
+writes no attribute of its own is exempt by inheritance and recorded nowhere. \
+Every child is therefore either fenced or recorded. `topology.rs`, \
+`assembly.rs`, `classify.rs`, `options.rs`, `preflight.rs` and `report.rs` deny \
+all three governed lints at file level; `attempt.rs`, `coordinator.rs`, \
+`resume.rs` and `tests.rs` write allows of their own, each a row of this \
+section; and \
+`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits` \
+holds that over this file's own `mod` declarations, so the allow reaches \
+nothing that is not either denied or in this list."""
 shrinks_when = "the v0.1 conductor is retired, or its entry points move into the allowed legacy modules they call, at which point this file calls nothing denied."
 
 
@@ -867,9 +888,16 @@ allows = []
 packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths"
 legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
-primitive today, so it carries no attribute; listed so that a legacy effect \
-added here is reviewed into `allows` rather than appearing silently."""
-shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything."
+primitive today, so it carries no allow. Since #306 round 3 it carries \
+`#![deny(..)]` of all three governed lints instead, because its parent \
+`src/engine/mod.rs` allows `disallowed_methods` and a lint level inherits down \
+the module tree: without that deny an effect added here would be exempt by \
+inheritance while this row still read `allows = []`, which is exactly the \
+promise the third review of #306 found broken in `assembly.rs` \
+(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). Listed so that a legacy effect \
+added here is reviewed into `allows`, with the deny lifted in the same change, \
+rather than appearing silently."""
+shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the deny it carries needs no row."
 
 [[legacy]]
 path = "src/workspace.rs"

@@ -15,12 +15,24 @@ The one row added after PR5, on #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): this
 facade's entry points call `coordinator::run_harness_inner_on` and
 `resume::resume_harness_inner_on`, effectful wrappers denied by path since
 then, and nothing else here reaches an effect. A lint level is scoped by the
-module tree, so this allow would reach every module under
-[`topology`](topology.md); `src/engine/topology.rs` denies all three governed
-lints at its root, and
+module tree, so this allow reaches every child declared below that writes no
+attribute of its own, and the placement scan cannot see it, because
+`governed_allows` records what a file writes. It does not stop at this file's
+own items; what stops it is each child. `src/engine/topology.rs` denies all
+three governed lints at its root, held by
 `effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
-holds that deny -- lexically and by compiling the shape -- so the allow
-stops at this file's own items.
+lexically and by compiling the shape. The third review of #306
+(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) showed that fence stopped there and
+nowhere else: a `pub(super) fn` calling `std::fs::write` in
+[`assembly`](assembly.md), referenced from a production body under
+[`topology`](topology.md), passed clippy and the whole suite, because
+`assembly`, `classify`, `options`, `preflight` and `report` inherited this
+allow unrecorded. Since round 3 those five carry the same `#![deny(..)]`;
+`attempt`, `coordinator`, `resume` and `tests` carry recorded allows of their
+own; and
+`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+walks this file's `mod` declarations, recursively, and refuses a module that
+does neither.
 
 ## Module
 

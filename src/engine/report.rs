@@ -1,4 +1,11 @@
 //! Extended notes: `docs/internals/engine/report.md`
+
+#![deny(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::fmt::Write as _;
 use std::time::Duration;
 

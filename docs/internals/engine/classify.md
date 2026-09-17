@@ -40,6 +40,26 @@ engine's own point in its own order, and only the *decision* about what
 their result means is shared — the same split `ShellGate::command` makes
 for a gate's command.
 
+## `#![deny(`
+
+**Fenced against the facade's allow, and behaviour-preserving.** Since #306
+`src/engine/mod.rs` carries `#![allow(clippy::disallowed_methods)]` for the
+two conductor entry points its facade calls, and a lint level inherits down
+the module tree: this file wrote no attribute, so it inherited that allow, and
+the placement scan -- which records what a file writes -- recorded nothing.
+The third review of #306 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) proved
+the consequence in `assembly.rs`, a sibling under the same parent: a `pub(super) fn` calling `std::fs::write`,
+referenced from a production body under `engine::topology`, passed clippy and
+the whole suite. This attribute restores the level the file had before the
+facade's allow existed -- the three governed lints were already errors under
+`-D warnings` -- and changes nothing else: no statement here reaches a denied
+primitive, so the deny reddens nothing today and only matters against the
+inherited allow. It is the form `src/engine/topology.rs` wrote first, needs no
+row in `effects/allowlist.toml` (the scan records `allow` and `expect`, never
+`deny`), and
+`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+refuses its absence.
+
 ## `pub(crate) fn unjudgeable_diff(diff: &str, has_reviewers: bool) -> Option<AttemptFailure> {`
 
 The first of [`diff_failure`]'s two observations on its own: a diff no

@@ -538,7 +538,11 @@ facade, whose only denied calls are the two conductor entry points denied by
 path in that change. The list and the TOML grew in the same commit, which is
 the only way `the_legacy_section_is_frozen_and_may_only_shrink` admits an
 entry; the row in `effects/allowlist.toml` says what the allow costs and how
-`src/engine/topology.rs`'s root `deny` keeps it from reaching the topology.
+every module below the facade is kept from inheriting it: `src/engine/topology.rs`
+and the five siblings that write no allow of their own deny the governed lints
+at file level, the rest record their own allows in the same section, and
+`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+holds that boundary from the facade's own `mod` declarations.
 
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
