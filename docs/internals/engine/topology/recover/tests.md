@@ -1219,9 +1219,14 @@ implement.
 
 ## `fn steps_d_and_e_reach_every_generation_not_the_first() {`
 
-**Steps (d) and (e) handle every entry, not the first one.** The two retained generations are
-the retry row's prefix of Gate 5's audit (rows 9 and 10) twice over, resumed by production, and
-after the resume the log replays twice to equal states.
+**Steps (d) and (e) handle every entry, not the first one.** The two retained generations stand
+in the log alone — each task's dispatch, its attempt and a settlement retained for epoch 0 — on
+the P6 fixture (the creator's marker still published, no execution root, no integration ref). The
+test plants no worktree and no intent for either, so this is not the retry row's prefix of Gate
+5's audit (rows 9 and 10), which a crash at `Worktree.Verify` leaves with the generation's
+worktree and intent standing (R9). The resume is production's `run_recovery_order`: it repairs the
+fixture's damage, closes both generations at step (e) with nothing to scrub, and afterwards the
+log replays twice to equal states.
 
 Two catalogue entries survived the whole suite at `6a21be6` for one reason —
 no fixture had a second thing for these loops to reach:
@@ -1291,8 +1296,12 @@ and the fold refuses one.
 This is the retry row's prefix of Gate 5's audit (rows 9 and 10, `Worktree.Verify` before and
 after): a `RetainedIdle` generation with its worktree, and no retry started. The resume is
 production's `run_recovery_order`, the worktree is reclaimed with the close, and the log replays
-twice to equal states. The prefix stands on the P6 fixture (the creator's marker still published,
-no execution root); `a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed`
+twice to equal states. The prefix stands on the P6 fixture and carries its damage: the creator's
+marker still published, the integration ref missing, and the settlement retained for epoch 0, the
+creator's, which never steps. `plant_task_worktree` writes the generation's intent and adds its
+worktree under the execution root, so the resume removes the marker and creates the ref but never
+creates the root;
+`a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed`
 builds the same prefix as a crash leaves it.
 
 `recovery_order` (i): "`ready_retry` is never evaluated before (h) and the
