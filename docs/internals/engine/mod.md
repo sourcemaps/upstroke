@@ -6,6 +6,22 @@ The code is the authority for what it does; this file is the whole of its prose,
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
 
+## `#![allow(clippy::disallowed_methods)]`
+
+LEGACY-EFFECT: this module is in the **frozen legacy section** of
+`effects/allowlist.toml`, which carries its justification and the condition
+under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
+The one row added after PR5, on #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): this
+facade's entry points call `coordinator::run_harness_inner_on` and
+`resume::resume_harness_inner_on`, effectful wrappers denied by path since
+then, and nothing else here reaches an effect. A lint level is scoped by the
+module tree, so this allow would reach every module under
+[`topology`](topology.md); `src/engine/topology.rs` denies all three governed
+lints at its root, and
+`effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
+holds that deny -- lexically and by compiling the shape -- so the allow
+stops at this file's own items.
+
 ## Module
 
 Sequential execution engine (DESIGN.md §14) and the verification ladder it

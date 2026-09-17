@@ -1104,6 +1104,210 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
     }
 }
 
+#[test]
+fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
+    // #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs` allows
+    // `clippy::disallowed_methods` so the v0.1 conductor's facade can call the
+    // two denied entry points `coordinator::run_harness_inner_on` and
+    // `resume::resume_harness_inner_on`. A lint level is scoped by the module
+    // tree, so that allow reaches every module under `engine::topology` --
+    // forty files, none writing an attribute of its own -- and the placement
+    // scan cannot see it: `governed_allows` records what a file WRITES, and a
+    // child exempted by inheritance writes nothing. What stops the allow at
+    // the facade is `#![deny(..)]` on `src/engine/topology.rs`, the one root
+    // every topology child descends from. An attribute somebody can delete is
+    // a weaker guarantee than the absence of an allow ever was, so this test
+    // holds it twice: lexically, from the two files, and executed, by
+    // compiling the same shape -- a facade with this tree's allow, a topology
+    // root with this tree's deny, a child reaching one denied primitive per
+    // governed lint -- against the real denylist, beside the shape without
+    // the deny, which is what removing it would leave.
+    const FACADE: &str = "src/engine/mod.rs";
+    const TOPOLOGY_ROOT: &str = "src/engine/topology.rs";
+    const GOVERNED: [&str; 3] = [
+        "clippy::disallowed_methods",
+        "clippy::disallowed_types",
+        "clippy::disallowed_macros",
+    ];
+
+    let facade = fs::read_to_string(repo_root().join(FACADE)).expect(FACADE);
+    let allowed: BTreeSet<String> = governed_allows(&facade)
+        .iter()
+        .filter(|allow| allow.inner && allow.module_level && allow.keywords == ["allow"])
+        .flat_map(|allow| allow.lints.iter().cloned())
+        .collect();
+    let expected: BTreeSet<String> = ["clippy::disallowed_methods"]
+        .iter()
+        .filter_map(|lint| normalize_lint(lint))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        allowed, expected,
+        "{FACADE} allows a different set of governed lints than the one this test models"
+    );
+
+    let topology = fs::read_to_string(repo_root().join(TOPOLOGY_ROOT)).expect(TOPOLOGY_ROOT);
+    let denied: Vec<&str> = GOVERNED
+        .iter()
+        .copied()
+        .filter(|lint| file_level_denies(&topology, lint))
+        .collect();
+    assert_eq!(
+        denied, GOVERNED,
+        "{TOPOLOGY_ROOT} no longer denies every governed lint at file level, so every module \
+         under `engine::topology` inherits what {FACADE} allows and the placement scan cannot \
+         see it (`PR7-WRAPPERS-EMPTY-DOMAIN`, #306)"
+    );
+    let mut children = 0;
+    for (path, source) in scanned_sources() {
+        if !path.starts_with("src/engine/topology/") {
+            continue;
+        }
+        children += 1;
+        assert!(
+            governed_allows(&source).is_empty(),
+            "{path} allows a governed lint below the topology root's deny; that deny is the \
+             guarantee this test holds and a child's allow re-opens it"
+        );
+    }
+    assert!(children > 30, "only {children} topology children scanned");
+
+    let scratch = scratch_dir("facade");
+    fs::write(
+        scratch.join("facade-child.rs"),
+        "pub fn probe(p: &std::path::Path) -> bool {\n\
+         \x20   let _ = upstroke::util::write_text(p, \"x\");\n\
+         \x20   println!(\"{}\", p.display());\n\
+         \x20   p.exists()\n\
+         }\n\
+         pub fn takes(_command: std::process::Command) {}\n",
+    )
+    .expect("the child fixture");
+    fs::write(
+        scratch.join("facade-topology-open.rs"),
+        "#[path = \"facade-child.rs\"]\npub mod child;\n",
+    )
+    .expect("the open topology fixture");
+    fs::write(
+        scratch.join("facade-topology-denying.rs"),
+        format!(
+            "#![deny({})]\n#[path = \"facade-child.rs\"]\npub mod child;\n",
+            denied.join(", ")
+        ),
+    )
+    .expect("the denying topology fixture");
+    let facade_allow = format!(
+        "#![allow({})]\n",
+        allowed.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    let root = |allow: &str, topology_file: &str| {
+        format!(
+            "{allow}#[path = \"{topology_file}\"]\npub mod topology;\n\
+             pub fn conductor(p: &std::path::Path) {{\n\
+             \x20   let _ = upstroke::util::write_json(p, &1_u8);\n\
+             }}\n"
+        )
+    };
+    let codes = |diagnostics: &[(String, String)]| -> Vec<String> {
+        let mut codes: Vec<String> = diagnostics.iter().map(|(code, _)| code.clone()).collect();
+        codes.sort();
+        codes
+    };
+    let naming = |diagnostics: &[(String, String)], needle: &str| -> usize {
+        diagnostics
+            .iter()
+            .filter(|(_, message)| message.contains(needle))
+            .count()
+    };
+
+    // No attribute anywhere: all four reaches are refused, so the fixture
+    // sees everything the two shapes below can hide.
+    let (ok, control) = lint_fixture(
+        &scratch,
+        "facade_control",
+        &root("", "facade-topology-open.rs"),
+    );
+    assert!(
+        ok,
+        "the control shape must compile with warnings only: {control:#?}"
+    );
+    assert_eq!(
+        codes(&control),
+        vec![
+            "clippy::disallowed_macros",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_types",
+        ],
+        "{control:#?}"
+    );
+    assert_eq!(
+        naming(&control, "upstroke::util::write_json"),
+        1,
+        "{control:#?}"
+    );
+    assert_eq!(
+        naming(&control, "upstroke::util::write_text"),
+        1,
+        "{control:#?}"
+    );
+
+    // The facade's allow with nothing below it: the child's reach into a
+    // denied wrapper goes unrefused, and no file wrote the allow that let it.
+    let (ok, inherited) = lint_fixture(
+        &scratch,
+        "facade_inherit",
+        &root(&facade_allow, "facade-topology-open.rs"),
+    );
+    assert!(
+        ok,
+        "the inherited shape must compile with warnings only: {inherited:#?}"
+    );
+    assert_eq!(
+        codes(&inherited),
+        vec!["clippy::disallowed_macros", "clippy::disallowed_types"],
+        "a module-level allow on the facade did not reach the topology child, so the deny \
+         this test holds guards nothing: {inherited:#?}"
+    );
+    assert_eq!(
+        naming(&inherited, "upstroke::util::write_text"),
+        0,
+        "{inherited:#?}"
+    );
+
+    // This tree's shape: the root's deny makes the child's three reaches build
+    // errors again, and the facade keeps the allow it exists for.
+    let (ok, tree) = lint_fixture(
+        &scratch,
+        "facade_tree",
+        &root(&facade_allow, "facade-topology-denying.rs"),
+    );
+    assert!(
+        !ok,
+        "the topology root's deny must make the child's reach a build error: {tree:#?}"
+    );
+    assert_eq!(
+        codes(&tree),
+        vec![
+            "clippy::disallowed_macros",
+            "clippy::disallowed_methods",
+            "clippy::disallowed_types",
+        ],
+        "{tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "upstroke::util::write_text"),
+        1,
+        "the topology child reached a denied wrapper under the facade's allow and was not \
+         refused: {tree:#?}"
+    );
+    assert_eq!(
+        naming(&tree, "upstroke::util::write_json"),
+        0,
+        "the facade's own call is what its allow is for: {tree:#?}"
+    );
+}
+
 fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {
     let (deps, rlib) = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
@@ -1891,6 +2095,11 @@ fn every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified() {
 #[test]
 fn every_effectful_wrapper_is_on_the_disallowed_list() {
     checks::effectful_wrappers_are_denied();
+}
+
+#[test]
+fn only_the_binary_crate_root_leaves_its_crate_path_empty() {
+    checks::crate_paths_name_the_modules();
 }
 
 #[test]

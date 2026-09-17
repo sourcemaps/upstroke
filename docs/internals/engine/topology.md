@@ -76,6 +76,34 @@ fact — the production binary does not drive schema 4 yet.
 production callers and the allow stops being true rather than stops being
 convenient.
 
+## `#![deny(`
+
+**The topology subtree's effect denials, restated at its root rather than
+inherited from the crate's defaults.** Since #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`)
+the parent, `src/engine/mod.rs`, carries `#![allow(clippy::disallowed_methods)]`
+as a row of `effects/allowlist.toml`'s legacy section, because the v0.1
+conductor's entry points it calls are denied effectful wrappers. A lint level
+is scoped by the module tree, not the file: without this line that allow
+would reach all forty files under `engine::topology`, none of which writes an
+attribute of its own, and the placement scan
+(`every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist`) would
+never see it, because it records what a file writes. This `deny` overrides
+the inherited level for the whole subtree. It changes nothing on its own --
+the three lints were already errors under `-D warnings` -- and it is the
+whole difference between "topology is denied" and "topology is exempt": it
+must land in the same commit as the parent's allow, never separately.
+Deny-at-module is the established form (`connect/render.rs`,
+`status/render.rs`, `util/terminal.rs`, `validate/graph.rs`,
+`validate/render.rs`), and a `deny` needs no allowlist row, since the scan
+records only `allow` and `expect`. An attribute somebody can delete is a
+weaker guarantee than the absence of an allow was, so
+`effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
+holds it: it reads both files and refuses a missing or narrowed deny, and it
+compiles the shape -- the facade's allow, this deny, a child reaching one
+denied primitive per lint -- against the real denylist, beside the same shape
+without the deny, in which the child's reach into a denied wrapper goes
+unrefused.
+
 ## `pub mod preflight;`
 
 The schema-4 attempt-plan assembler, which lives engine-side.

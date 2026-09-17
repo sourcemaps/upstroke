@@ -8,23 +8,24 @@ item before `›`, find that item first, then the following fragment within it.
 
 ## Module
 
-`(3) Wrapper classification`: the four checks that hold
+`(3) Wrapper classification`: the five checks that hold
 `effects/wrappers.toml` against the tree it classifies.
 
 The domain derivation, both directions of the effectful/denied
-correspondence, the funnel rows, and the `libc::` sweep. All four *read* --
-`effects/wrappers.toml`, `clippy.toml`, and the modules those two name --
-and none of them writes anything or starts a process.
+correspondence, the crate paths the denials are built from, the funnel rows,
+and the `libc::` sweep. All five *read* -- `effects/wrappers.toml`,
+`clippy.toml`, and the modules those two name -- and none of them writes
+anything or starts a process.
 
 Everything they read with stays where it was. The schemas and readers
 (`ModuleClassification`, `wrappers`, `denylist`, `scanned_sources`,
 `repo_root`) are `super`'s, and the production scanners
-(`externally_reachable_fns`, `production_region`,
+(`externally_reachable_fns`, `production_code`,
 `blank_comments_and_strings`) are `crate::effects`'. This file consumes
 them; it re-derives none of them.
 
-**No name here is a test name.** The four `#[test]` wrappers stay in `super`
-under the harness names the contract and CI know, and the four functions
+**No name here is a test name.** The five `#[test]` wrappers stay in `super`
+under the harness names the contract and CI know, and the five functions
 below are deliberately named otherwise -- so `--list` over the test binary is
 unchanged and nothing nests under `effects::tests::classification`.
 
@@ -111,9 +112,31 @@ The other direction: every crate-internal denial is a row somebody
 classified. A `upstroke::…` entry nobody classified is a denial with no
 review behind it.
 
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn crate_paths_name_the_modules() {`
+
+`crate_path = ""` is the record's escape hatch: `effectful_wrappers_are_denied`
+refuses an effectful row it cannot path, so an empty path pushes every
+effectful body of that module into `effectful_unnameable`, the class the
+denial check skips. #306 found three private `mod`s of `engine` using it on
+the claim that a private module has no clippy path -- and a `pub(super)` fn
+there is visible to every module under `engine::topology`, and clippy
+resolves the path: a reference to `crate::engine::attempt::run_attempt` from
+`engine::topology::integrate` was undenied, then refused once the path was
+listed. So the hatch is the binary crate root's alone, and every other path
+is derived from the file it classifies, so a denial built from it resolves
+to the module it names rather than to nothing.
+
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn funnel_rows_name_a_site() {`
 
 A row classified `funnel` really does name a site.
+
+Read from [`crate::effects::production_code`] since #306, the region the
+classifier's domain reads. `Supervisor::begin` and `finish`, the Terminate
+site's funnel rows in `src/agent/proc.rs`, are declared below that file's
+first `#[cfg(test)]` (line 958, inside `windows_job`), where the truncating
+region could not see them: the #306 regression review measured a funnel row
+for `begin` failing with `declares no such fn` under the old reader. A funnel
+row and the domain it belongs to are now read from one region.
 
 ## `pub(in crate::effects::tests) fn funnel_rows_name_a_site()` › `let path = format!("{}::{name}", module.crate_path);`
 

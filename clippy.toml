@@ -178,6 +178,19 @@ disallowed-methods = [
     { path = "upstroke::review::run_review", reason = "UPSTROKE-WRAPPER: writes review transcripts through util::write_text" },
     { path = "upstroke::answer::answer", reason = "UPSTROKE-WRAPPER: creates the answers directory before staging" },
     { path = "upstroke::connect::run_with", reason = "UPSTROKE-WRAPPER: creates a directory and writes the operator's upstroke.toml" },
+    # The legacy engine's own conductors, in the classification domain since
+    # #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `pub(super)` items of the private
+    # modules `engine::{attempt,coordinator,resume}`, which every module under
+    # `engine::topology` can see, and which clippy resolves through the private
+    # module (measured: a reference from `engine::topology::integrate` was
+    # undenied without these entries and refused with them). Their legitimate
+    # callers are the legacy modules under their `effects/allowlist.toml`
+    # allows; `effects/wrappers.toml`'s three engine records classify them.
+    { path = "upstroke::engine::attempt::run_attempt", reason = "UPSTROKE-WRAPPER: the legacy attempt writes transcripts through util::write_text and runs gates through gates::run_all" },
+    { path = "upstroke::engine::coordinator::run_harness_inner_with_id", reason = "UPSTROKE-WRAPPER: the legacy coordinator; tears its run directories down with fs::remove_dir_all on a failed start" },
+    { path = "upstroke::engine::coordinator::run_harness_inner_on", reason = "UPSTROKE-WRAPPER: run_harness_inner_with_id with the production id draw supplied" },
+    { path = "upstroke::engine::coordinator::Run::drain_and_report", reason = "UPSTROKE-WRAPPER: drains the legacy run; re-materialises answered questions through interaction::write_question" },
+    { path = "upstroke::engine::resume::resume_harness_inner_on", reason = "UPSTROKE-WRAPPER: the legacy resume conductor; re-materialises open questions through interaction::write_question" },
 
     # -- docker invocation helpers ------------------------------------------
     # `mechanism` (1) names "docker invocation helpers" in its own enumeration,

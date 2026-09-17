@@ -574,6 +574,7 @@ fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> boo
 }
 
 pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[
+    "src/engine/mod.rs",
     "src/engine/coordinator.rs",
     "src/engine/resume.rs",
     "src/engine/attempt.rs",

@@ -151,9 +151,16 @@ standard refuses -- so both directions are asserted rather than assumed.
 
 ## `struct ModuleClassification` › `crate_path: String,`
 
-The path a denied entry would name this module by, or empty when the
-module is not reachable from outside its parent (a private `mod`, or the
-binary crate root).
+The path a denied entry would name this module by: `upstroke::` and the
+module path the file declares, for every library module -- a private `mod`
+included, because clippy resolves a `disallowed-methods` path through one,
+and a `pub(super)` item of a private `mod` of `engine` is visible to every
+module under `engine::topology` (#306, `PR7-WRAPPERS-EMPTY-DOMAIN`). Empty
+only for the binary crate root, which has no `upstroke::` path;
+`only_the_binary_crate_root_leaves_its_crate_path_empty` holds both halves.
+Until #306 the field read "empty when the module is not reachable from
+outside its parent", and the three private engine modules that satisfied
+that sentence were exactly where an effectful `pub(super)` fn went undenied.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {`
 
@@ -578,6 +585,30 @@ fixtures that were green having never executed.
 function values, method calls, and macro-expanded code" -- and
 `proof_tests[4]` names four fixtures. The grid covers the union plus the
 type list, which is seven, and all three lints fire.
+
+## `fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {`
+
+The guard #306 owes for putting `#![allow(clippy::disallowed_methods)]` on
+`src/engine/mod.rs`. A lint level is scoped by the module tree, so that allow
+reaches every module under `engine::topology` unless something below it says
+otherwise, and the placement scan cannot notice: `governed_allows` records
+what a file writes, and a child exempted by inheritance writes nothing. The
+`deny` on `src/engine/topology.rs` is what says otherwise, and an attribute
+somebody can delete is held here twice. Lexically: the facade allows exactly
+the set this test models, the root denies all three governed lints at file
+level, and no child under the root writes an allow of its own. Executed:
+three fixtures compiled with `lint_fixture` against the real denylist -- a
+facade root declaring a topology module declaring a child that reaches one
+denied primitive per governed lint (a denied wrapper called, a denied type
+in a signature, a denied macro) while the facade calls a second denied
+wrapper itself. With no attribute anywhere all four reaches are reported. With the
+facade's allow and an open topology file, the child's reach into the wrapper
+goes unreported -- the hazard, executed rather than described. With the
+facade's allow and the tree's deny, the child's three come back as build
+errors and the facade's own call stays allowed. What it catches: the deny
+deleted or narrowed, a child re-allowing below it, the facade's allow widened
+past what the root re-denies, and a toolchain whose inheritance or override
+semantics moved.
 
 ## `fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {`
 

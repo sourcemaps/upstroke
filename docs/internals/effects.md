@@ -532,6 +532,14 @@ Held here rather than only in the TOML because the TOML is the thing under
 test: a frozen list that lived in the file it freezes would agree with any
 edit to that file.
 
+One entry was added after PR5, by the owner's decision on #306
+(`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs`, the v0.1 conductor's
+facade, whose only denied calls are the two conductor entry points denied by
+path in that change. The list and the TOML grew in the same commit, which is
+the only way `the_legacy_section_is_frozen_and_may_only_shrink` admits an
+entry; the row in `effects/allowlist.toml` says what the allow costs and how
+`src/engine/topology.rs`'s root `deny` keeps it from reaching the topology.
+
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
 The modules the legacy section may never contain, verbatim from `mechanism`.

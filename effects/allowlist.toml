@@ -793,7 +793,42 @@ being absent from it would be the one omission nobody would think to look for.""
 # `the_legacy_section_never_contains_a_topology_module` fails if one appears.
 # Both tests are also driven with synthetic input that DOES grow and DOES name a
 # topology module, so the refusals are executed rather than assumed.
+#
+# ONE GROWTH SINCE PR5, by the owner's decision on #306: `src/engine/mod.rs`,
+# the first row below. `FROZEN_LEGACY_ALLOWLIST` grew with it in the same
+# commit, which is the only way the test above admits an entry, and the row
+# says what it is for and what it cost. The section is otherwise as PR5 froze
+# it.
 # ---------------------------------------------------------------------------
+
+# Added on #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`). The three engine conductors'
+# effectful `pub(super)` fns are denied by their crate paths since then; two of
+# them, `coordinator::run_harness_inner_on` and `resume::resume_harness_inner_on`,
+# have their only production caller in this facade, which carried no allow. A
+# module-level allow here reaches every module under `engine::topology` by
+# inheritance -- a lint level is scoped by the module tree, not the file, and
+# the placement scan records only what a file writes -- so the same commit put
+# `#![deny(..)]` of all three governed lints on `src/engine/topology.rs`, the
+# root all forty of those files descend from, and
+# `effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
+# holds that deny lexically and by compiling the shape.
+[[legacy]]
+path = "src/engine/mod.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths -- the public facade of src/engine/{coordinator,resume}.rs, added on #306"
+legacy_effect = """
+LEGACY-EFFECT: the v0.1 conductor's public entry points (`run`, `run_with`, \
+`run_harness`, `resume`, `resume_with`, `resume_harness`) call \
+`coordinator::run_harness_inner_on` and `resume::resume_harness_inner_on`, \
+effectful wrappers denied by path since #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): \
+the coordinator removes both run halves with `fs::remove_dir_all` on a failed \
+start, and the resume conductor re-materialises open questions through \
+`interaction::write_question`. Nothing else in this file reaches an effect: it \
+declares the engine's modules and threads a `Contained` token. The allow is \
+`disallowed_methods` alone, and `src/engine/topology.rs` denies all three \
+governed lints at its root, so the allow stops at this file's own items."""
+shrinks_when = "the v0.1 conductor is retired, or its entry points move into the allowed legacy modules they call, at which point this file calls nothing denied."
+
 
 [[legacy]]
 path = "src/engine/coordinator.rs"
