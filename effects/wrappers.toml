@@ -971,20 +971,76 @@ effect_free = [
     "resolve",
 ]
 
+# The legacy conductor's three modules, added to the domain by the
+# `PR7-WRAPPERS-EMPTY-DOMAIN` repair. Until it, `externally_reachable_fns` read
+# the truncating region; each of these files has a `#[cfg(test)] use` among its
+# imports, so each derived domain was empty and the all-empty record that stood
+# here compared equal to it -- forty-seven names across six files, classified
+# by a census that read none of them. `crate_path` is empty because all three
+# are private `mod`s of `engine`: nothing here has a clippy path, so a body that
+# reaches an effect is `effectful_unnameable` and never `effectful`.
+#
+# THE RULE THESE ROWS APPLY, stated once so a reviewer checks every row against
+# it rather than against the classifier's mood. A body is classified by what it
+# calls ITSELF. It is effectful when it calls an effect primitive
+# (`fs::remove_dir_all`, `Command::spawn`) or a wrapper this file already
+# classifies effectful (`util::write_text`, `interaction::write_question`,
+# `gates::run_all`, `Workspace::ensure_run_exclusions`): the precedents are
+# `review::run_review`, effectful for writing through `util::write_text`, and
+# `util::fsync_file_at`, effectful for delegating to `fsync_file`. It is
+# effect-free when what it calls is a site-taking funnel (the sanctioned path;
+# `runner::host::HostRunner::run` is the precedent), a `Runner` or adapter it
+# was handed, a method another record classifies effect-free, a read, or a
+# private helper of its own module -- because the closure over private helpers
+# is the whole program, which the header above refuses.
 [[module]]
 path = "src/engine/coordinator.rs"
 crate_path = ""
 funnel = []
 effectful = []
-effectful_unnameable = []
-effect_free = []
+# `run_harness_inner_with_id` removes the run's public and private directories
+# itself (`fs::remove_dir_all`, twice) when freezing the plan or creating the
+# branch fails after `create_fresh`, and calls `Workspace::ensure_run_exclusions`,
+# a classified effectful wrapper. `run_harness_inner_on` is that function with
+# the production id draw (`ulid::ulid`) supplied and nothing else, and is
+# classified as its sibling is.
+effectful_unnameable = [
+    "run_harness_inner_on",
+    "run_harness_inner_with_id",
+]
+# `emit` appends through the Event funnel with `EventSite::LegacyAppend`;
+# `emit_capacity_snapshot` and `fail_task_with_policy` build one event each and
+# call `emit`; `drain_and_report` drains through this module's private helpers
+# and writes the report through `rundir::write_report`, a funnel whose site is
+# its own. `ParkSubject::of`, `prepared_pin_ref` and the three question
+# builders make values and strings.
+effect_free = [
+    "drain_and_report",
+    "emit",
+    "emit_capacity_snapshot",
+    "fail_task_with_policy",
+    "of",
+    "prepared_pin_ref",
+    "question_context",
+    "question_options",
+    "topology_question_options",
+]
 
 [[module]]
 path = "src/engine/resume.rs"
 crate_path = ""
 funnel = []
 effectful = []
-effectful_unnameable = []
+# One reachable fn, the resume conductor, effectful in its own body for one
+# call: it re-materialises every open question through
+# `interaction::write_question`, a classified effectful wrapper that supplies
+# the site the funnel takes. Everything else it causes goes through funnels and
+# effect-free wrappers other records classify -- the two leases, `EventLog::open`
+# with `EventSite::LegacyOpenLog`, `Run::emit`, `rundir::write_report`, the
+# `Workspace` methods -- and its only primitive is a read of the frozen plan.
+effectful_unnameable = [
+    "resume_harness_inner_on",
+]
 effect_free = []
 
 [[module]]
@@ -992,8 +1048,29 @@ path = "src/engine/attempt.rs"
 crate_path = ""
 funnel = []
 effectful = []
-effectful_unnameable = []
-effect_free = []
+# `run_attempt` writes the worker's transcript and stderr through
+# `util::write_text` and runs the gates through `gates::run_all`, both
+# classified effectful wrappers; `LegacyReviewPasses::run` is
+# `review::run_review`, a third. The process starts themselves are the
+# `Runner`'s, inside the Process funnel.
+effectful_unnameable = [
+    "run",
+    "run_attempt",
+]
+# `load_artifacts` and `materialize_prompt` read artifact files
+# (`fs::read_to_string`), and a read is not an effect on this denylist.
+# `LegacyReviewInputPolicy::problem` opens the workspace and asks it about a
+# tree, both effect-free rows of `src/workspace.rs`. The rest build values.
+effect_free = [
+    "artifact_path",
+    "evaluate_outcome",
+    "load_artifacts",
+    "materialize_prompt",
+    "pool_option",
+    "problem",
+    "review_failure",
+    "worker_question",
+]
 
 [[module]]
 path = "src/engine/preflight.rs"
@@ -1125,9 +1202,52 @@ funnel = [
     "run_with_timeout_classified",
 ]
 effectful = []
-effectful_unnameable = []
+# Added to the domain by the `PR7-WRAPPERS-EMPTY-DOMAIN` repair: this file's
+# first `#[cfg(test)]` sits inside `windows_job`, so the truncating region ended
+# there and the rest of `windows_job` and the whole of `termination` were
+# outside the domain -- fifteen names. Both are private `mod`s of the funnel,
+# so nothing in them has a clippy path of its own; an effect there is
+# `effectful_unnameable`, as the funnel's `pipe_io` and `input` children record
+# theirs. The rule the `src/engine/coordinator.rs` block states applies here
+# unchanged.
+effectful_unnameable = [
+    # `windows_job`: `spawn_suspended_in_job_with` starts the agent
+    # (`Command::spawn`, created suspended), and `spawn_suspended_in_job` is
+    # that call with the real Win32 primitives supplied; `real_assign_to_job`
+    # puts a process in a job; `resume_only_thread` resumes the suspended
+    # primary thread; `join_ambient` creates the ambient job and assigns this
+    # process to it, once.
+    "join_ambient",
+    "real_assign_to_job",
+    "resume_only_thread",
+    "spawn_suspended_in_job",
+    "spawn_suspended_in_job_with",
+    # `termination`: `Supervisor::begin` refuses any site but
+    # `Process.Terminate` and forks the cleanup reaper; `prepare` hands the
+    # `Command` a `pre_exec` that creates the private process group and
+    # registers it with the reaper; `finish` settles the group through the
+    # reaper. They are the Terminate site's body and run only inside
+    # `run_with_timeout_at`, the funnel row above; recorded here rather than as
+    # funnel rows because they are the funnel's private internals, as its
+    # children's are.
+    "begin",
+    "finish",
+    "prepare",
+    # One name, five `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
+    # close a Win32 handle (a job's with KILL_ON_JOB_CLOSE, which terminates
+    # whatever is still in it); `Supervisor`'s cancels the reaper or finishes
+    # the group; `GroupSnapshot`'s is test-only bookkeeping.
+    "drop",
+]
 effect_free = [
     "active_processes_with",
+    # Added by the `PR7-WRAPPERS-EMPTY-DOMAIN` repair, with the
+    # `effectful_unnameable` rows above. `ambient_established` reads the
+    # ambient-job memo; `ambient_contains`, `process_creation_time` and
+    # `process_alive` open a process handle and query it (`IsProcessInJob`,
+    # the creation time, a zero-timeout `WaitForSingleObject`), reads all.
+    "ambient_contains",
+    "ambient_established",
     # The test-only group oracle and its lifecycle record. `observe_child_group`
     # asks `waitid` with `WNOWAIT`, `getpgid` and on macOS `proc_pidinfo`,
     # every one a read of process-table state that reaps, signals and moves
@@ -1146,6 +1266,14 @@ effect_free = [
     # `Ok`, and touches nothing.
     "memoised_outcome",
     "observe_child_group",
+    # See `ambient_contains`.
+    "process_alive",
+    "process_creation_time",
+    # `Supervisor::register` records the child's group in the shared state.
+    "register",
+    # Renders the reaper's container argv for the next reaper -- a `PATH`
+    # lookup through `util::find_program` and `CString`s -- and stores it.
+    "set_container_reclaim_scope",
     "terminate_and_wait",
     "terminate_and_wait_with",
 ]
@@ -1278,29 +1406,80 @@ effectful_unnameable = []
 # Cancellation, joining and failure slots affect only process-local state.
 effect_free = ["drop", "record", "settle", "spawn", "take"]
 
+# The three adapters, added to the domain by the `PR7-WRAPPERS-EMPTY-DOMAIN`
+# repair: each file's first `#[cfg(test)]` is a `use` among its imports, so each
+# derived domain was empty. The rule the `src/engine/coordinator.rs` block
+# states applies here unchanged. Three `AgentAdapter` methods per adapter reach
+# outside the process. `probe` and `discover` hand the `Runner` they are given
+# a request and read what comes back: the process start is the runner's,
+# inside the Process funnel, and the two are classified as
+# `engine::preflight::preflight` (their caller) and `runner::host::HostRunner::run`
+# are -- effect-free -- rather than as wrappers of it. `materialize_permissions`
+# writes the worker's settings file through `util::write_json`, a classified
+# effectful wrapper of `fs::write`, which makes it effectful; it is
+# trait-dispatched, so no clippy path names it and the class is
+# `effectful_unnameable`, as `src/runner/container/view.rs` records its
+# `GitView` methods. `build` returns a `CommandSpec` and starts nothing; the
+# argument and permission builders, `id` and `parse` are pure.
 [[module]]
 path = "src/agent/claude.rs"
 crate_path = "upstroke::agent::claude"
 funnel = []
 effectful = []
-effectful_unnameable = []
-effect_free = []
+effectful_unnameable = [
+    "materialize_permissions",
+]
+effect_free = [
+    "build",
+    "build_args",
+    "discover",
+    "id",
+    "parse",
+    "permission_settings",
+    "probe",
+]
 
 [[module]]
 path = "src/agent/codex.rs"
 crate_path = "upstroke::agent::codex"
 funnel = []
 effectful = []
-effectful_unnameable = []
-effect_free = []
+# `drop` is `MissingOutputSchema`'s `Drop`: it removes the configuration-probe
+# directory the probe created (`std::fs::remove_dir`), a removal in this body.
+effectful_unnameable = [
+    "drop",
+    "materialize_permissions",
+]
+# `get` is `AdapterSource::get`, an id comparison.
+effect_free = [
+    "build",
+    "build_args",
+    "discover",
+    "get",
+    "id",
+    "parse",
+    "probe",
+]
 
 [[module]]
 path = "src/agent/copilot.rs"
 crate_path = "upstroke::agent::copilot"
 funnel = []
 effectful = []
-effectful_unnameable = []
-effect_free = []
+effectful_unnameable = [
+    "materialize_permissions",
+]
+# This adapter's `discover` runs nothing: the CLI reports no non-interactive
+# auth state, so it builds notes from the caps it is given.
+effect_free = [
+    "build",
+    "build_args",
+    "discover",
+    "id",
+    "parse",
+    "permission_args",
+    "probe",
+]
 
 [[module]]
 path = "src/capacity.rs"

@@ -8,7 +8,7 @@ item before `›`, find that item first, then the following fragment within it.
 
 ## Module
 
-The **source oracles**: the twelve checks that hold this crate's own lexical
+The **source oracles**: the sixteen checks that hold this crate's own lexical
 instruments against the tree they read.
 
 Four instruments, and every whole-tree census in this repository is built on
@@ -37,7 +37,7 @@ none of them, and it defines no region of its own — which is what
 
 **No name here is a test name.** The twelve `#[test]` wrappers stay in
 `super` under the harness names the contract, CI and `reviews/FINDINGS.md`
-know, and the twelve functions below are deliberately named otherwise — so
+know, and the sixteen functions below are deliberately named otherwise — so
 every name `--list` reports for this file is one of those wrappers and
 nothing nests under `effects::tests::source_oracles`. `effects/wrappers.toml` names
 `no_topology_module_calls_a_funnel_in_production` and `reviews/FINDINGS.md`
@@ -65,7 +65,7 @@ file that writes the declaration. The derivation deliberately does not close
 over the file graph, so `super` being a test module itself does not make
 this one. No skip is derived and no file leaves any census. That matters
 more here than anywhere else in this directory:
-`the_whole_file_modules_are_read_from_the_declarations` is one of the twelve
+`the_whole_file_modules_are_read_from_the_declarations` is one of the sixteen
 bodies below, and a declaration written the other way would make this file a
 member of the very set it is itself asserting the membership of.
 
@@ -792,6 +792,35 @@ below was outside the classification domain of a CLASSIFIED module, and
 clippy, all 79 effects tests and all 38 container tests passed with it in
 the tree. It is in the domain now, which means somebody has to classify it.
 
+## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_domain_reaches_past_a_configured_item() {`
+
+The shape `PR7-WRAPPERS-EMPTY-DOMAIN` measured in six classified modules: a
+`#[cfg(test)] use` among the imports, every production `pub fn` below it.
+Under the truncating region the fixture derived nothing, and an empty derived
+set is equal to an empty record, so `reachable_fns_are_classified` passed
+over a module it had not read. The fixture also carries the three test-only
+shapes `production_code` must still remove -- a configured `pub fn`, a
+configured `impl` block (the `src/agent/bin.rs` shape) and a configured
+`mod` -- so the repair is pinned from both sides: the production `pub(super)
+fn` and the trait-impl `fmt` are derived, the three test-only names are not.
+Fails at the head before the repair with `derived: []`.
+
+## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn every_classified_module_that_declares_a_visible_fn_has_a_domain() {`
+
+The same defect on the tree rather than on a fixture, in three parts. The
+six modules the finding measured are pinned by name, so the empty-domain
+shape cannot return silently in the files it was found in. Then every entry
+of `CLASSIFIED_MODULES` whose production code spells `pub fn `,
+`pub(crate) fn ` or `pub(super) fn ` must derive at least one name -- a
+lexical sufficient condition, deliberately not a second parser: any of those
+three spellings in the blanked production code is a visible fn whatever
+else the file holds, and the count of such modules is asserted above forty
+so the scan cannot pass by finding nothing. Last, `src/rundir/names.rs`, the
+one classified module whose record is all-empty legitimately: it declares
+constants and no `fn` at all, and both halves of that are asserted, so a fn
+added there without a row fails here before it fails the classification
+census with a less specific message.
+
 ## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_comment_blanker_models_raw_strings() {`
 
 The comment blanker models raw strings, so an unparsed literal cannot erase
@@ -1271,8 +1300,11 @@ count at the bottom now pins. Every whole-tree census that asks a
 [`crate::effects::production_code`]: the whole file, comments and string
 literals blanked, every `#[cfg(test)]` **item** removed rather than the file
 truncated at the first one. It is a fourth semantics and deliberately not a
-fourth `production_region`: truncation is right for a *domain* question and
-wrong for a prohibition, and the two names say which is which.
+fourth `production_region`. The claim that truncation is right for a *domain*
+question did not survive `PR7-WRAPPERS-EMPTY-DOMAIN`: a cut at a
+`#[cfg(test)] use` among the imports empties the domain, so
+`externally_reachable_fns` reads this region too, and `production_region`
+remains for the censuses that pin its cut point by name.
 `events::log::tests::production_region` survives because two censuses in that
 file ask about one named file each and assert their own strip removed
 something before counting.

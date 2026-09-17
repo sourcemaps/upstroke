@@ -2210,6 +2210,16 @@ fn the_reachable_fn_parser_finds_each_shape_this_tree_uses() {
 }
 
 #[test]
+fn a_configured_item_above_a_production_fn_does_not_hide_it_from_the_domain() {
+    oracles::the_domain_reaches_past_a_configured_item();
+}
+
+#[test]
+fn every_classified_module_that_declares_a_visible_fn_has_a_domain() {
+    oracles::every_classified_module_that_declares_a_visible_fn_has_a_domain();
+}
+
+#[test]
 fn the_comment_blanker_models_raw_strings_and_still_blanks_comments() {
     oracles::the_comment_blanker_models_raw_strings();
 }

@@ -23,8 +23,9 @@
 // this file is reached only through `#[cfg(test)] mod tests;` so it has no
 // attribute of its own to cut on. The marker below is redundant to the compiler
 // and load-bearing to every reader that still consults the TRUNCATING region —
-// `effects::externally_reachable_fns` and the three censuses in
-// `src/runner/container/exec.rs` — for which it makes this file's production
+// the three censuses in `src/runner/container/exec.rs`;
+// `effects::externally_reachable_fns` reads `effects::production_code` since
+// `PR7-WRAPPERS-EMPTY-DOMAIN` — for which it makes this file's production
 // region empty. It does **not** do that for the four whole-tree censuses, which
 // read `effects::production_code`: that excises this marker as the configured
 // item it is and scans the file in full, and what keeps this file out of their
