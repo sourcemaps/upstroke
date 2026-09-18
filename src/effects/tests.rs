@@ -1665,8 +1665,9 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, RUSTFLAGS_KEY,
-    TEST_COMMAND, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
+    QUEUE_LANE, RUSTFLAGS_KEY, TEST_COMMAND, TEST_WINDOWS_LABELS, TEST_WINDOWS_PLATFORM,
+    TEST_WINDOWS_RUNS_ON, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
@@ -1768,13 +1769,36 @@ fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
 }
 
 #[test]
-fn the_self_hosted_windows_leg_runs_these_fixtures_on_the_pinned_labels() {
+fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {
     let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
     let complaints = ci_test_windows_job_complaints(&doc);
     assert!(
         complaints.is_empty(),
-        "the self-hosted Windows leg does not run these fixtures the way the contract pins:\n{}",
+        "the Windows leg does not run these fixtures the way the contract pins:\n{}",
         complaints.join("\n")
+    );
+}
+
+#[test]
+fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {
+    let labels = TEST_WINDOWS_LABELS
+        .iter()
+        .map(|label| format!("\"{label}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert_eq!(
+        TEST_WINDOWS_RUNS_ON,
+        format!("${{{{ {QUEUE_LANE} && '{TEST_WINDOWS_PLATFORM}' || fromJSON('[{labels}]') }}}}"),
+        "the pinned `runs-on:` is not the lane test, the hosted platform and the self-hosted \
+         labels this contract names, so the install step's `if:` and the runner it is written \
+         for can disagree while both pins hold"
+    );
+    assert!(
+        CI_TARGETS
+            .iter()
+            .any(|target| target.runner == TEST_WINDOWS_PLATFORM),
+        "the hosted lane's runner `{TEST_WINDOWS_PLATFORM}` is not one the cfg census models, \
+         so what its compilations set is not decided here"
     );
 }
 
@@ -1816,15 +1840,41 @@ fn no_repository_file_overrides_what_ci_compiles_or_runs() {
 }
 
 #[test]
-fn the_self_hosted_leg_counts_the_tests_it_ran() {
+fn the_windows_leg_counts_the_tests_it_ran() {
+    let cargo_lines = WINDOWS_TEST_WITNESS
+        .lines()
+        .filter(|line| line.starts_with(TEST_COMMAND))
+        .count();
+    assert_eq!(
+        cargo_lines, 1,
+        "the Windows leg's step does not run `{TEST_COMMAND}` on exactly one line, so the \
+         suite it witnesses is not the suite the other legs run"
+    );
+    let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
+    for (variable, tool, asked) in [
+        ("rustc", "rustc", "the compiler Cargo will run"),
+        (
+            "path_rustc",
+            "rustc",
+            "the `rustc` on PATH, which the suite's fixtures spawn",
+        ),
+        ("cargo", "cargo", "the `cargo` on PATH"),
+    ] {
+        assert!(
+            WINDOWS_TEST_WITNESS.contains(&format!("${variable} -notmatch '^{tool} {version} '")),
+            "the Windows leg's step does not refuse {asked} being other than the image's \
+             `{GOLDEN_IMAGE_TOOLCHAIN}` before running the suite, so the toolchain the install \
+             step pins and the one the suite runs on can differ with every pin matching"
+        );
+    }
     assert!(
-        WINDOWS_TEST_WITNESS.starts_with(TEST_COMMAND),
-        "the self-hosted leg's step does not open with `{TEST_COMMAND}`, so the suite it \
-         witnesses is not the suite the other legs run"
+        WINDOWS_TEST_WITNESS.find("-notmatch") < WINDOWS_TEST_WITNESS.find(TEST_COMMAND),
+        "the compiler check comes after the suite, so the suite has already run on the wrong \
+         compiler by the time the step refuses"
     );
     assert!(
         WINDOWS_TEST_WITNESS.contains(&format!("-lt {WINDOWS_TEST_FLOOR}")),
-        "the self-hosted leg's step does not test the count against \
+        "the Windows leg's step does not test the count against \
          {WINDOWS_TEST_FLOOR}, so the floor this contract documents is not the floor it runs"
     );
 }

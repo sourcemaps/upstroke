@@ -41,12 +41,13 @@ The command that executes this file's fixtures, character for character.
 
 ## `pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";`
 
-The hosted codegen and link witness for the platform whose tests run
-self-hosted, character for character.
+The hosted codegen and link witness for the platform whose tests run in
+their own job, character for character.
 
 `cargo check` and Clippy type-check and stop before codegen, and the
-self-hosted leg links with the golden image's toolchain, which moves only
-by re-curation. Without this step nothing on GitHub's current stable ever
+Windows test leg links with the golden image's toolchain on both of its
+lanes -- the guest carries it, the hosted lane installs it -- which moves
+only by re-curation. Without this step nothing on GitHub's current stable ever
 code-generates or links the Windows tree: a Windows-only codegen or link
 failure on current stable would pass every hosted leg while the guest, one
 stable behind, links and passes. `cargo build --all-targets` rather than
@@ -58,7 +59,7 @@ nothing, so the suite's execution stays where the decision record put it.
 
 In the dev profile. `cargo test` builds the test profile, which inherits
 from dev and is identical to it until the manifest says otherwise, and that
-compile happens on the guest with the image's toolchain; so what stays
+compile happens in the test leg with the image's toolchain; so what stays
 hosted on current stable is the dev-profile compile and link of every
 target, and what moves with execution is the test-profile compile. A
 `[profile.test]` override that splits the two is a manifest edit in the
@@ -84,13 +85,13 @@ Every script a test job may run: the identity script and the suite.
 
 ## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, WINDOWS_TEST_WITNESS];`
 
-The scripts the self-hosted leg runs: the identity script, and the suite
-with the witness that it executed.
+The scripts the Windows test leg runs, on either lane: the identity script,
+and the suite with the witness that it executed.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
-The count the self-hosted leg's suite must report before the job is allowed
-to succeed.
+The count the Windows leg's suite must report before the job is allowed to
+succeed, on either lane.
 
 At `cb8ac1f` it reports 1771 there: 1761 from the lib harness, 10 from the
 bin one, 0 from the example. The floor sits below that by a margin wide enough that
@@ -100,8 +101,48 @@ is a deliberate act, and it edits this number in the same change.
 
 ## `pub(super) const WINDOWS_TEST_WITNESS: &str`
 
-The self-hosted leg's suite step, character for character: the pinned test
-command, its exit status, and a count of what libtest reported.
+The Windows leg's suite step, character for character: a refusal to run on
+any compiler but the image's, then the pinned test command, its exit
+status, and a count of what libtest reported. One step for both lanes: the
+count is the same claim on either machine, and a step per lane would be two
+scripts to pin and a condition on each.
+
+The compiler check comes first because the install step cannot make the
+claim on its own. `dtolnay/rust-toolchain` at the pinned commit runs
+`rustup default` under `continue-on-error` and then verifies only
+`rustc +<toolchain>`, so on the hosted lane the install can report success
+while bare `cargo` still resolves to the runner's preinstalled stable. And
+the `rustc` on PATH is not what compiles: Cargo selects its compiler
+through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in any config it
+reads, and the guest's service environment and Cargo home are inputs this
+contract cannot see. So the script asks Cargo itself --
+`cargo rustc --lib -- --version` runs the compiler Cargo would run and
+prints its version, and honours every one of those overrides. The `rustc`
+on PATH is a second question rather than a substitute: the suite's own
+fixtures spawn bare `rustc` against what Cargo built -- the effect-denial
+fixtures here, the log and run-directory tests -- and a PATH rustc of
+another version fails them with an incompatible-rlib error, so a lane
+whose PATH disagrees with its Cargo is not the same suite either. The
+script asks all three, Cargo's compiler, PATH's rustc and PATH's cargo,
+and throws unless every one is
+[`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the image
+carries and its environment selects, on the hosted lane what the install
+selected, and `the_windows_leg_counts_the_tests_it_ran` holds the number
+in the script to the constant, so re-curation edits both or neither.
+
+What the three questions bound is the compiler a lane selects by accident:
+a rustup default that did not move, a `RUSTC` in the service environment, a
+PATH that names another install. They are asked from the step's own
+process, and the test executables get a process of their own: Cargo builds
+their environment, prepends its output directories to their PATH, and
+applies a Cargo config's `[env]` table to them, so a config written with
+`[env] PATH = { value = "...", force = true }` answers all three questions
+with one compiler and hands the fixtures another. That is not a
+misconfiguration the questions can catch; it is a config written to defeat
+them, a forgery in the paragraph above's sense, on a machine the operator
+provisions, and no reading of `ci.yml` sees it -- the same standing the
+witness gives a wrapper that answers `--version` with one compiler and
+compiles with another. Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
 
 Every other pin in this contract is an equality over `ci.yml`, and each
 refuses one named way of arriving at a green job over a suite that never
@@ -124,10 +165,12 @@ is where forgeries are bounded.
 What it does not do is bound a hostile candidate, and no step in this file
 does. An edit to `ci.yml` deletes this one as easily as the guards it
 replaces, and the decision record says so where it says where the boundary
-actually is. What it bounds is the guest: the machine that now executes this
-platform's suite is provisioned outside the repository, so its Cargo home
-and its environment are inputs no reviewer of a diff can check, and this is
-the leg saying that it ran what it claims to have run.
+actually is. What it bounds is the guest: the machine that executes this platform's
+suite on the pull-request lane is provisioned outside the repository, so
+its Cargo home and its environment are inputs no reviewer of a diff can
+check, and this is the leg saying that it ran what it claims to have run.
+On the hosted lane it bounds nothing the other hosted legs do not already
+trust, and it costs nothing to keep.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
 
@@ -177,31 +220,99 @@ action at a pinned commit with an allowlisted input name. Measured,
 ## `pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";`
 
 The job that runs those fixtures for the one platform whose test execution
-left GitHub's runners, and the labels it must run on -- exactly.
+is not in the `test` matrix, and the two machines it runs on, by lane.
 
 The Windows suite is spawn- and worktree-heavy, and on `windows-latest` it
 was the whole CI wall clock: a median of 12.5 minutes and a tail of 21 on
 identical code, because the harness varied 535-1154 s with the host the
-runner landed on. It runs instead on an ephemeral self-hosted guest -- a
-throwaway overlay of a frozen image, one job per boot, registered with a
-single-use just-in-time config -- in about two and a half minutes
-(`decisions/2026-09-01-self-hosted-windows-test-leg.md`).
+runner landed on. On 2026-09-01 it moved to an ephemeral self-hosted guest --
+a throwaway overlay of a frozen image, one job per boot, registered with a
+single-use just-in-time config -- and a second guest took the merge queue's
+builds so a queue entry never waited behind a pull request. Measured again
+on 2026-09-15/16: five hosted samples (run 34980597250, at `126b8832`) ran
+the harness in 1122-1499 s, 21m 30s to 28m 03s a job, and the guest, on
+three green runs of pull request #299, in 346 s, 6m 47s to 6m 55s a job --
+three to four times faster. Since 2026-09-16 the queue lane runs on
+`windows-latest` after all: nothing waits on the queue interactively, six to
+ten merges a day are a tenth to a sixth of the 57 a serial lane at 25
+minutes an entry can take in a day, bursts queue rather than fail, and the
+second guest can then be retired from a box where two guests and
+the builds contend for one set of cores. The pull-request lane keeps the
+guest, because a pull request waits on it. What the queue's hosted run does
+not prove is behaviour that differs between the two machines: a test whose
+outcome depends on the runner passes on `windows-latest` in the queue and
+fails on the guest, and the push to master, which runs the guest, is the
+first run to see it. The compiler pin narrows that gap to runtime
+differences; it does not close it.
 
-The labels are an equality because a looser `runs-on:` is a different
-machine: `[self-hosted, windows]` admits any Windows runner the account ever
-registers, and the third label is what names the curated image. The
-platform's Clippy and MSRV legs stay on [`CI_TARGETS`]'s `windows-latest`,
-which is why that entry is unchanged: GitHub's runner is still the witness
-that compiles every `#[cfg(windows)]` body, and through
-[`WINDOWS_BUILD_WITNESS`] the one that code-generates and links it on
-current stable, shipped binaries and test harnesses alike.
+## `pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";`
 
-## `pub(super) const SELF_HOSTED_TEST_PLATFORM: &str = "windows-latest";`
+The lane test, spelled once and pinned in two places: the `runs-on:`
+expression selects the hosted runner where it holds, and the hosted lane's
+toolchain install carries it as its `if:`. The two are held to one string
+because they have to name the same lane: inverted in one place and not the
+other, the hosted lane runs on whatever GitHub's image preinstalled and the
+guest lane installs over its own curated compiler, with every other pin
+matching. Measured, `MUT-TEST-WINDOWS-LANES-SWAPPED` and
+`MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE`.
+
+## `pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];`
+
+The labels the pull-request and push lane runs on. An equality inside the
+expression because a looser set is a different machine: `[self-hosted,
+windows]` admits any Windows runner the account ever registers, and the
+third label is what names the curated image. Measured,
+`MUT-TEST-WINDOWS-LABEL-DROPPED`.
+
+## `pub(super) const TEST_WINDOWS_RUNS_ON: &str`
+
+The job's `runs-on:`, character for character: a ternary over the lane test
+that yields the hosted runner's name on the queue and the label set,
+through `fromJSON`, everywhere else. A scalar `windows-latest` sends the
+pull-request lane to the hosted runner and its six minutes become
+twenty-five; a bare label set sends every build to the pull-request guest,
+where a queue entry's install -- conditioned on the event, not the machine
+-- runs over the image's compiler. The literal is
+held to [`QUEUE_LANE`], [`TEST_WINDOWS_PLATFORM`] and
+[`TEST_WINDOWS_LABELS`] by
+`the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for`,
+so the three cannot drift apart while the pin still reads back. Measured,
+`MUT-TEST-WINDOWS-REHOSTED` and `MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED`.
+
+## `pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";`
+
+The compiler the golden image carries, and so the one the hosted lane
+installs and the one [`WINDOWS_TEST_WITNESS`] refuses to run without, on
+either lane -- not `stable`. Current stable is ahead of the image
+(`lint (windows)` installed 1.98.1 on 2026-09-16 against the image's
+1.97.1), so `stable` here would run the suite on a compiler the
+pull-request lane never ran it on: a test whose outcome depends on the
+compiler -- a version-gated test, a std behaviour change, a new lint in
+test code under the workflow-wide `-D warnings` -- passes on one lane and
+fails on the other, for a reason unrelated to the diff. The pin keeps the
+two test lanes one compiler. It shields the queue from nothing else, and
+nothing here does: `lint (windows)` compiles current stable on both events
+and is required by the aggregate, so a stable that adds a lint between a
+pull request's green and its enqueue ejects the entry through that leg,
+exactly as before the hosted lane existed. The pin moves when the image is
+re-curated, in the same change. Measured,
+`MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS` and
+`MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`.
+
+## `pub(super) const TEST_WINDOWS_TOOLCHAIN_COMPONENTS: &str = "clippy";`
+
+The components the hosted lane installs, exactly. `clippy` is a test
+dependency of this job as it is of `test`: the effect-denial fixtures drive
+`clippy-driver`, and the action installs the minimal profile. Measured,
+`MUT-TEST-WINDOWS-COMPONENTS-WITHOUT-CLIPPY`.
+
+## `pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";`
 
 The [`CI_TARGETS`] runner whose tests run in [`TEST_WINDOWS_JOB`] rather than
-in the `test` matrix. Its shell and cfg valuations carry over: the guest
-carries PowerShell 7, so a `run:` step resolves to `pwsh` there exactly as
-on `windows-latest`, and it builds the same MSVC tuple.
+in the `test` matrix -- and, on the queue lane, the runner that job runs on.
+Its shell and cfg valuations carry over to the guest: the image carries
+PowerShell 7, so a `run:` step resolves to `pwsh` there exactly as on
+`windows-latest`, and it builds the same MSVC tuple.
 
 ## `pub(super) const MSRV_JOB: &str = "msrv";`
 
@@ -315,14 +426,32 @@ the compile. Measured, `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
 
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
-The same declaration on the self-hosted step, `1` outright: one runner, no
-matrix. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+The same declaration on the Windows step, `1` outright: one job, no
+matrix, and NTFS folds case on the guest and on `windows-latest` alike.
+Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
 
 ## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
 
 The fields the step that runs the suite may declare: [`STEP_FIELDS`] plus the
 `env` whose map [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] pin. Every
 other step of both test jobs keeps [`STEP_FIELDS`].
+
+## `pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];`
+
+The fields the hosted lane's toolchain install may declare: a `uses:` step's
+fields plus the `if:` that names the lane. The condition skips the step on
+the guest, not its archive: the runner resolves and downloads every `uses:`
+during job setup before any `if:` is read, so the guest lane depends on
+GitHub serving this archive as it already depends on it serving
+`actions/checkout`, and a download failure fails the job before the skipped
+step. That availability dependency is the price of one job for both lanes. The one place in this contract
+`if:` is admitted on a step, and admitted for that step alone: on the step
+that runs the suite it is a job that reports success having run nothing on
+the other lane, and on a `run:` step it is a script one lane executes and
+the pull-request lane -- the one a reviewer watches -- never shows. No
+`run:` in the set, so a lane-conditional step cannot be a script at all.
+Measured, `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
+`MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`.
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 
@@ -342,8 +471,8 @@ The fields the job that runs these fixtures declares.
 
 ## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 4] =`
 
-The fields the self-hosted test job declares: the `test` job's set without a
-`strategy:`, since one runner needs no matrix. `if:` and `continue-on-error:`
+The fields the Windows test job declares: the `test` job's set without a
+`strategy:`, since one job routed by lane needs no matrix. `if:` and `continue-on-error:`
 are absent by construction, as everywhere in this contract.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
@@ -436,16 +565,18 @@ The leg whose execution left GitHub's runners is covered instead by
 
 ## `pub(super) const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@";`
 
-The toolchain every leg but the MSRV floor installs, and the action that
+The toolchain every gate and the `test` matrix install, and the action that
 installs it.
 
 The action is pinned by commit in [`PINNED_ACTIONS`]; this pins its
 **input**, which is the part that decides which compiler runs. A
 `lint (windows)` downgraded from `stable` to the guest's own `1.97.1` makes
-the hosted witness link the same toolchain the self-hosted leg already
-links, so nothing in CI code-generates the Windows tree on current stable
-and a build script emitting a bad link directive only on newer rustc goes
-green. The MSRV leg pins its own floor separately, from the manifest.
+the hosted witness link the same toolchain the test leg already links, so
+nothing in CI code-generates the Windows tree on current stable and a build
+script emitting a bad link directive only on newer rustc goes green. The
+MSRV leg pins its own floor separately, from the manifest, and the Windows
+test leg's hosted lane pins [`GOLDEN_IMAGE_TOOLCHAIN`], the image's version,
+for the opposite reason: that leg must match the guest, not lead it.
 Measured, `MUT-GATE-TOOLCHAIN-DOWNGRADED`.
 
 ## `pub(super) const KNOWN_SHELLS: [&str; 6] = ["bash", "cmd", "powershell", "pwsh", "python", "sh"];`
