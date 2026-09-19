@@ -1784,7 +1784,8 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     variable MODULE reads from the environment is set, in a repeat of the run that read it, to
 #     each string MODULE's code holds. Any run -- turned or not -- that goes past ten seconds is
 #     ended where it is, and the question, which runs MODULE's hook, is ended after two and answers
-#     UNPROVEN.
+#     UNPROVEN. The probe's own reading of MODULE's state is not a run: only the snapshot `perform`
+#     takes is bounded, and a reading that waits anywhere else is never ended (`perform`).
 #   * A DEFAULT IS AN INPUT, AND A REFUSAL A DEFAULT HOLDS IS NOT THE DECODE'S OWN. A default is
 #     what a caller gets by passing nothing, so a refusal it holds is one any caller can take away.
 #     At every scan, each default of a function of MODULE's on the stack -- or of the one the sweep
@@ -1812,18 +1813,22 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     found an `itertools.count` outside the containers the walk named, and round 14 found values the
 #     next rule's structural tests passed over -- a count inside a tuple, a list subclass's slot, an
 #     `array` subclass whose reduction carries a dictionary beside its buffer -- and a correct reader
-#     refused, because two names for one stream were rebuilt as two. So NOTHING DECIDES THAT A VALUE
-#     IS BACK. Every value the walk reaches is read in full (`picture`: its members, its own bytes, what
-#     it refers to, the buffer it exports, and the copy protocol's reading of it); a
-#     value that moved is put back in place, or rebuilt ONCE from a copy taken when the run started,
-#     with every holder rebound to that one copy; and then the state is READ AGAIN and compared with
-#     what the run started from. A value that is not back is NAMED unproven, by the path the walk
-#     reached it at -- a lock the first call took and nothing releases reads `unproven=_gate` -- so a
-#     carrier nobody has thought of is either back or reported, and never passed over. What no reading
-#     of MODULE's own values reaches is stated with its witnesses in the section on what this does not
-#     reach. The protocol names the interpreter keeps in MODULE's namespace on its behalf -- the
-#     loader's, `__builtins__`, the registry `warnings` writes there -- are put back with the rest and
-#     are not counted as state.
+#     refused, because two names for one stream were rebuilt as two. So NOTHING BUT A READING DECIDES
+#     THAT A VALUE IS BACK. Every value the walk reaches is read (`picture`: its members, its own bytes,
+#     what it refers to, the buffer it exports, and the copy protocol's reading of it -- but of a
+#     function only its defaults, closure, dictionary and annotations, of a class its attributes, and
+#     of a cell what it holds); a value that moved is put back in place, or rebuilt ONCE from a copy
+#     taken when the run started, with every holder rebound to that one copy; and then, WHERE ANY
+#     PICTURE MOVED, the state is READ AGAIN and compared with what the run started from. A value that
+#     is not back is NAMED unproven, by the path the walk reached it at -- a lock the first call took
+#     and nothing releases reads `unproven=_gate`. WHAT THE READING CANNOT SEE IS PASSED OVER, NOT
+#     NAMED: two atoms of one type and one value are one atom to it whatever their identity or sign, a
+#     binding rebound away from what the walk pictured moves no picture, and what a module-level
+#     `__dunder__` name holds is not read. Those, and what no reading of MODULE's own values reaches,
+#     are stated with their witnesses in the section on what this does not reach. Every `__dunder__`
+#     name in MODULE's namespace holding no function of MODULE's is left out of the walk: the loader's,
+#     `__builtins__`, the registry `warnings` writes there -- and `__annotations__`, which MODULE's own
+#     code writes.
 #   * THE DOCUMENT THAT MATTERS IS ASKED IN EVERY STATE A CALL FOUND MODULE IN. A reader answering
 #     each call from the state it finds decides which call a document reaches, and the probe's order
 #     of calls is not the program's: `if calls % 2 == 0: return {"verdict": "PASS", ...}` puts every
@@ -2458,7 +2463,9 @@ def expired(signum, frame):
     # Never inside the probe's own bookkeeping: the timer fires again a second later, and a run that
     # is still going is by then in MODULE's code. Inside the question it does -- at the depth of
     # bookkeeping the question started at, which is MODULE's hook running -- and `ask` answers for a
-    # question that did not end.
+    # question that did not end. So bookkeeping that WAITS is never ended: where the probe's own reading
+    # runs MODULE's code inside `recorded` -- the snapshot and restorations `attempt` makes -- and that
+    # code blocks, this fires every second and takes neither branch, for ever.
     if asking and busy[0] > asking[-1]:
         late[0] = True
     elif asking or (not probing[0] and not busy[0]):
@@ -2600,11 +2607,14 @@ EMPTY = object()      # what a cell with nothing in it holds, as the probe recor
 
 def kept(space, name, value):
     """Whether NAME, in the dictionary SPACE, is MODULE's own state. Every entry of every dictionary
-    is, but the protocol names the interpreter keeps in MODULE's namespace on its behalf -- the
-    loader's `__spec__` and `__loader__`, `__builtins__`, the registry `warnings` writes there when
-    a warning is raised from MODULE's code -- which are `__dunder__` names holding no function
-    MODULE's file holds. They are still put back with the rest of the namespace; they are not what a
-    call of MODULE's leaves behind for the next one."""
+    is, but a `__dunder__` name in MODULE's namespace holding no function MODULE's file holds. That
+    leaves out the names the interpreter keeps there on MODULE's behalf -- the loader's `__spec__` and
+    `__loader__`, `__builtins__`, the registry `warnings` writes there when a warning is raised from
+    MODULE's code -- AND ONE MODULE'S OWN CODE WRITES, `__annotations__`. They are still put back with
+    the rest of the namespace, but what they hold is not walked, pictured or compared, so a count kept
+    there goes on through a repeat: measured, a `collections.UserString` and a UTF-8 incremental
+    decoder, each held in `__annotations__`, carry a first-call selector this probe passes, and the
+    same `UserString` under an ordinary name is caught."""
     return not (space is vars(module) and isinstance(name, str) and name[:2] == name[-2:] == "__"
                 and not (isinstance(value, types.FunctionType) and value.__code__ in mine))
 
@@ -2645,9 +2655,10 @@ def fields(one):
 def ref(value):
     """VALUE AS A COMPARISON HOLDS IT: an atom with its type, and anything else by its identity.
     `False` and `0` are one value to `==` and two to a reader that asks which of them it has --
-    `is False`, `type(one) is int`, `isinstance(one, bool)` -- and so are `1` and `True`. What a
-    reader can tell apart, a comparison that decides whether a reader would run again must tell
-    apart too."""
+    `is False`, `type(one) is int`, `isinstance(one, bool)` -- and so are `1` and `True`. AN ATOM IS
+    NOT HELD BY ITS IDENTITY, so what a reader tells apart only by identity or sign, this does not:
+    `0.0` and `-0.0` are one atom here and two to `math.copysign`, and so are two equal strings to a
+    reader asking `is`. Measured, a first-call marker kept either way is passed over."""
     return (type(value), value) if atom(value) else (AT, id(value))
 
 
@@ -2682,10 +2693,11 @@ PLACING = ("__hash__", "__eq__")   # what a mapping and a set run to place what 
 def placed(one):
     """Whether placing ONE in a mapping or a set would run code of MODULE's: both find it BY ITS HASH,
     and fall back on comparing it where two hashes meet in one slot, so both are MODULE's to write where
-    ONE is of a class MODULE wrote. Reading gets round this -- `contents` walks the table the class keeps
-    and asks no key anything -- and writing cannot: nothing written in C places a key without asking the
-    key. The same restriction `foreign` puts on the copy protocol, for the one pair of methods a
-    mapping and a set cannot be written back without running."""
+    ONE is of a class MODULE wrote. Reading a `dict` or a `set` gets round this -- `contents` walks the
+    table the class keeps -- and writing cannot: nothing written in C places a key without asking the
+    key. Nor does reading an `OrderedDict`, which finds each of its keys by its hash (`contents`). The
+    same restriction `foreign` puts on the copy protocol, for the one pair of methods a mapping and a
+    set cannot be written back without running."""
     kind = type(one)
     for name in PLACING:
         found = inspect.getattr_static(kind, name, None)
@@ -2728,9 +2740,11 @@ def described(value, depth=0, twin=EMPTY):
 
 
 def reduction(one, depth=0):
-    """ONE as the standard library's copy protocol reads it, or None where that would run code of MODULE's
-    or the protocol has no reading of it. It is read twice, the first reading held while the second is
-    made, so that an object the reading makes is told from one ONE holds (`described`). A READING THAT
+    """ONE as the standard library's copy protocol reads it, or None where that would call a method of
+    MODULE's (`foreign`) or the protocol has no reading of it -- though its reading of an `OrderedDict`'s
+    iterator still asks each key for its hash (`contents`). It is read twice, the first reading held
+    while the second is made, so that an object the reading makes is told from one ONE holds
+    (`described`). A READING THAT
     FAILS IS NOT A READING: where memory or depth runs out, what comes back is UNREAD, which no comparison
     takes for the value being back (`alike`), and never None, which would say there was nothing to read."""
     if foreign(one):
@@ -2786,9 +2800,10 @@ def picture(one):
     dictionary, a list, a set or a deque holds in the order its own class keeps it. A CONTAINER IS READ
     LIKE ANYTHING ELSE, because what it holds is not all it is: a set keeps where its next `pop` starts
     among its own bytes, and an `OrderedDict` an order its dictionary does not. This names no kind: a
-    value of a kind nobody has thought of is read the same way, and nothing MODULE declares runs to read
-    it. WHAT A SET HOLDS IS READ AS A SET. Every other kind the walk reads whole hands its items out in an
-    order the language guarantees -- a list, a tuple, a deque, and since 3.7 a dictionary and its
+    value of a kind nobody has thought of is read the same way. What MODULE declares can still run to
+    read it: an `OrderedDict`'s keys are asked for their hash (`contents`). WHAT A SET HOLDS IS READ AS
+    A SET. Every other kind the walk reads whole hands its items out in an order the language guarantees
+    -- a list, a tuple, a deque, and since 3.7 a dictionary and its
     subclasses, by insertion -- so a caller may depend on that order and a reader may choose on it. A set
     and a frozenset guarantee none: what a reader sees is which items are there, and where the next `pop`
     starts, which is among the own bytes below. So their items are pictured as a set, and the copy
@@ -2842,8 +2857,9 @@ def alike(now, then, noise, stands):
 def copied(one):
     """ONE copied through the standard library's copy protocol, with each member ONE's classes declare and
     each attribute its own dictionary holds set on the copy as ONE holds them -- or None where that
-    protocol would run code of MODULE's, ONE finalises itself (a copy would finalise what ONE still
-    uses), the protocol raises, or it hands back ONE itself or a value of another class."""
+    protocol would call a method of MODULE's (`foreign`), ONE finalises itself (a copy would finalise
+    what ONE still uses), the protocol raises, or it hands back ONE itself or a value of another class.
+    Copying an `OrderedDict` asks each of its keys for its hash (`contents`)."""
     if foreign(one) or inspect.getattr_static(type(one), "__del__", None) is not None:
         return None
     try:
@@ -2988,7 +3004,8 @@ def put(one, held, memo):
 def native(kind, name):
     """NAME, for a value of KIND, as the nearest of KIND's classes that wrote it in C has it: the
     implementation that keeps in step whatever a class written in C adds -- an `OrderedDict`'s order --
-    and that runs no code of MODULE's."""
+    and that passes over any NAME a class of MODULE's defines. What it runs may still ask what the value
+    holds: an `OrderedDict`'s `items` asks each key for its hash (`contents`)."""
     for klass in kind.__mro__:
         found = vars(klass).get(name)
         if isinstance(found, (types.WrapperDescriptorType, types.MethodDescriptorType)):
@@ -3004,10 +3021,16 @@ def contents(one):
     AND IT IS READ THROUGH THAT IMPLEMENTATION AND NO OTHER. A mapping's values are read by walking the
     table its own class keeps (`items`), never by asking the mapping for each key in turn:
     `dict.__getitem__` finds a key BY ITS HASH, and a key's `__hash__` is MODULE's to write -- it can
-    refuse, and it can block, and either is MODULE's code running inside a reading that promises to run
-    none. A class's own `items` hands the pairs out in the order that class keeps them, which is the order
-    its `__iter__` hands the names out: an `OrderedDict`'s is its own, and keeps the order it moves entries
-    into."""
+    refuse, and it can block. A class's own `items` hands the pairs out in the order that class keeps
+    them, which is the order its `__iter__` hands the names out: an `OrderedDict`'s is its own, and keeps
+    the order it moves entries into.
+
+    AND AN `OrderedDict` ASKS ITS KEYS ANYWAY. Its own `items` finds each key by its hash, so every key's
+    `__hash__` runs, and its `__eq__` where two hashes meet -- measured, and so do its copy and the copy
+    protocol's reading of its iterator (`copied`, `reduction`); a `dict`'s runs neither. So reading an
+    `OrderedDict` keyed by a class MODULE wrote runs MODULE's code, and a key that waits on a lock the
+    module holds stops the reading there, which the bound ends in the snapshot `perform` takes and
+    nowhere else."""
     if isinstance(one, bytearray):
         return bytes(one)
     if isinstance(one, dict):
@@ -3067,23 +3090,26 @@ def state(copies=True):
     defaults nor its own dictionary reach -- the attributes of each class MODULE wrote, and the process
     environment -- the one input outside MODULE the probe varies, read underneath `os.environ` so that
     reading it is not a read of MODULE's -- are held by reference, in the order their own class hands them out (`contents`), and
-    `restore` writes them back. EVERY VALUE THE WALK REACHES IS ALSO PICTURED -- a tuple and what it holds,
-    a counter, a lock, an instance, and a container too, which keeps among its own bytes what no reading of
-    its items shows: where a set's next `pop` starts, and the order an `OrderedDict` holds its own -- by
-    `picture`, which reads a value of any kind the same way. Where COPIES, a copy of each is kept wherever
+    `restore` writes them back. EVERY VALUE THE WALK REACHES BUT A FUNCTION, A CLASS AND A CELL IS ALSO
+    PICTURED -- a tuple and what it holds, a counter, a lock, an instance, and a container too, which
+    keeps among its own bytes what no reading of its items shows: where a set's next `pop` starts, and
+    the order an `OrderedDict` holds its own -- by `picture`, which reads a value of any kind the same
+    way. Where COPIES, a copy of each is kept wherever
     the copy protocol reproduces it, and the words writing back what a container holds moves are measured
     on copies of it (`churn`). Each value is placed by the path the walk first reached it at, so that one that is not back can
     be named. Nothing here decides that a value needs no reading, or that it is back: that is asked of the
     value, by reading it again, in `restore`. All values are read through the base types' own methods and
     descriptors, and their contents through the implementation their class inherits from C (`contents`,
-    `written`): the walk asks no value how many it holds and no key what it hashes to, and a reading it
-    cannot make that way it does not make. ONE READING IS NOT LIKE THAT AND IS BOUNDED INSTEAD: deciding
-    whether a value is somebody else's asks it for its `__code__` (`elsewhere`), which a class of
-    MODULE's may answer with a `__getattr__` of its own -- measured, a holder that fills itself under a
-    lock the module holds stops the walk there. So the bound is armed BEFORE the snapshot (`perform`),
-    and a snapshot the bound cuts is a state the probe could not read rather than no report at all.
+    `written`): the walk asks no value how many it holds. READING STILL RUNS MODULE'S CODE, measured in
+    two places: an `OrderedDict` asks each of its keys for its hash, and for `__eq__` where two hashes
+    meet (`contents`), and deciding whether a value is somebody else's asks it for its `__code__`
+    (`elsewhere`), which a class of MODULE's may answer with a `__getattr__` of its own. A key or a holder
+    that waits on a lock the module holds stops the walk there, and THE BOUND REACHES ONE SNAPSHOT: the
+    one `perform` takes, where it is armed first and a cut snapshot is a state the probe could not read.
+    Anywhere else a walk that waits never returns, and the probe writes no report (`perform`).
     Code, frames, modules, classes written elsewhere and the probe's own
-    functions are not MODULE's state, and are not walked."""
+    functions are not MODULE's state, and are not walked; nor is what a module-level `__dunder__` name
+    holds (`kept`), nor a function's name or code."""
     saved, stack, seen, table, places = [(os.environ, dict(os.environ._data))], [(vars(module), "")], set(), {}, {}
     while stack:
         one, where = stack.pop()
@@ -3235,10 +3261,13 @@ def restore(saved):
     whether two of them are one object is answered as in the run it repeats -- and what holds it and
     cannot be written into, a tuple, a frozenset, an object written in C, is rebuilt around it in turn.
     Where anything moved, the state is then READ AGAIN and compared with what STATE read (`back`); where
-    reading every pictured value again found nothing moved, what was written back whole is what was read.
-    What comes back is the path of each value that moved and could not be put back, or that is not what
-    it was -- decided by reading it, never by what kind of value it is -- and nothing, where the state is
-    back."""
+    reading every pictured value again found nothing moved, what was written back whole is what was read,
+    AND THE STATE IS NOT READ AGAIN. What comes back is the path of each value that moved and could not be
+    put back, or that is not what it was -- decided by reading it, never by what kind of value it is --
+    and nothing where no picture moved, which is not the same as the state being back: a binding rebound
+    away from a value the walk pictured leaves every picture as it was. Measured, a function's
+    `__annotations__` replaced on the first call comes back as nothing here, and `back`, asked, names
+    it."""
     (table, places), memo, lost = saved[-1][1], {}, set()
     moved = [entry for entry in table.values() if picture(entry[0]) != entry[1]]
     for one, _, held, _, _, _, _ in moved:
@@ -3335,7 +3364,14 @@ def perform(label, replay):
     holds blocked the snapshot for ever, with the timer still seven lines away. A snapshot the bound cuts
     is a state the probe could not read, and a run repeated from a state it does not have answers for
     nothing -- so what that run would have answered for is unproven, which is what a question nobody
-    could ask is."""
+    could ask is.
+
+    THIS SNAPSHOT IS THE ONLY READING THE BOUND REACHES. A repeat's own snapshot and its restorations run
+    inside `recorded` (`attempt`), where `expired` never raises, and the sweep walks what MODULE holds
+    (`held`) with no timer armed. A reading that waits in either never returns: the probe writes no
+    report, and the gate does not end. Measured, each of three CORRECT readers does that -- one holding
+    an `OrderedDict` whose keys' `__eq__` waits on a lock the module holds, one whose keys' `__hash__`
+    does, and one holding a value whose `__getattr__` does."""
     signal.setitimer(signal.ITIMER_REAL, SECONDS, 1)
     try:
         now = state() if not in_attempt[0] or id(replay) not in started_from else None
@@ -3654,8 +3690,9 @@ RUNS = 2048           # the most runs the probe makes: past it, what it has not 
 def attempt(key, label, base, alteration):
     """BASE again, with ALTERATION in force for the whole of it -- AND FROM WHERE BASE STARTED:
     MODULE's state is put back to what it was when BASE first ran, and after the repeat to what it
-    was before the repeat, so the natural runs go on from where they were. A value that is not back,
-    before the repeat or after it, is named unproven (`unrestored`).
+    was before the repeat, so the natural runs go on from where they were. A value `restore` finds not
+    back, before the repeat or after it, is named unproven (`unrestored`); what it cannot see is not
+    (`restore`), and a reading of the state here that waits is never ended (`perform`).
 
     AND THE WORK IS BOUNDED. A module that makes a new callable on every call -- a weak reference it
     keeps, a bound method it hands out -- gives the sweep work it has not done at every call, and each
@@ -3901,8 +3938,10 @@ marked = {}           # a state STATE read -> (that state, what it fingerprints 
 
 def fingerprint(saved):
     """What STATE read: the identity of every object it read and of every value in each, and the
-    picture of every value it pictured. Two states with the same fingerprint are the same state -- and
-    two whose values are the same objects, but whose counter, stream or buffer has moved, are not.
+    picture of every value it pictured. Two states with the same fingerprint are the same state AS FAR
+    AS STATE READS ONE -- what it does not read, a function's name or what a module-level `__dunder__`
+    name holds, is in no mark -- and two whose values are the same objects, but whose counter, stream or
+    buffer has moved, are not.
 
     A STATE IS READ THIS WAY ONCE. What STATE read is a reading already taken: nothing of it moves
     afterwards, so its mark cannot change, and `every_state` asks for the mark of every state again on
@@ -4043,7 +4082,9 @@ DECODEPROBE
 # probe runs MODULE from inside that scratch, so a file MODULE writes to a relative path lands
 # there too. The probe's stdout and stderr go to a log and its report to a file of its own, so
 # nothing the module prints can reach an assertion; no report means the probe itself failed, which
-# no assertion below accepts.
+# no assertion below accepts. A probe that never returns writes none either, and nothing here ends
+# it: this gate has no timeout of its own, so a reading that waits where the probe's bound does not
+# reach (`perform`, in the probe) holds the gate -- in CI, until the `lint` job's timeout.
 decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one, or why none
   local module="$1" status=0
   shift
@@ -6143,7 +6184,8 @@ probe_expect arranged \
 # and `by_roomed`, which hooks unsafely only while its list has the room it was built with, is named
 # `unproven=_marks` rather than passed over as back. `by_remembered` keeps its count in a mapping
 # and always hooks: emptying that mapping and filling it again gives it the room its contents call
-# for, which is the room it had, and it is green.
+# for, which is the room it had, and it is green. What a reader tells apart only by identity or by
+# sign, the comparison still does not (`ref`).
 probe_stand_in observed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -6200,7 +6242,7 @@ def by_remembered(text, mode="strict"):
 PYSHAPE
 probe_expect observed \
   'decoded=yes unrefusing=by_annotated,by_marked,by_permitted unproven=_marks,_permit.__annotations__[return].__dict__,_tally.__annotations__[return] skipped=- | refusing=by_annotated,by_marked,by_permitted,by_remembered,by_roomed,read drive=returned:0 swept=by_annotated:raised:ValueError/returned,by_marked:raised:ValueError/returned,by_permitted:raised:ValueError/returned,by_remembered:raised:ValueError,by_roomed:raised:ValueError/returned forced=100'
-# AND NOTHING MODULE DECLARED RUNS TO READ THE STATE, WHICH IS WHAT THE WALK HAS ALWAYS SAID IT DOES.
+# AND TWO QUESTIONS A CLASS OF MODULE'S ANSWERS IN PYTHON ARE NO LONGER ASKED TO READ THE STATE.
 # Round 16 read a container through its class's own implementation and still asked two questions that
 # a class of MODULE's may answer in Python. HOW MANY A VALUE HOLDS: putting a list back in place asked
 # `len(one)`, so a list subclass whose logical length is not its slots -- `by_measured`'s `_buffer` --
@@ -6208,9 +6250,10 @@ probe_expect observed \
 # HASHES TO: a mapping's values were read by asking for each key in turn, and `dict.__getitem__` finds
 # a key BY ITS HASH, so `by_locked`, whose key hashes under a lock the module holds, held the probe for
 # ever before any timer was armed. Both are read now through the implementation the class inherits from
-# C -- `native(kind, "__len__")`, and the class's own `items`, which walks the table and asks no key
-# anything. PLACING A KEY BACK CANNOT GET ROUND THE HASH: `dict.__setitem__` and `set.update` ask the
-# key, and nothing written in C does otherwise. So a write-back that would run MODULE's code is not
+# C -- `native(kind, "__len__")`, and the class's own `items`, which for a `dict` walks the table and
+# asks no key anything (an `OrderedDict`'s still asks each key for its hash: `contents`). PLACING A
+# KEY BACK CANNOT GET ROUND THE HASH: `dict.__setitem__` and `set.update` ask the key, and nothing
+# written in C does otherwise. So a write-back that would run MODULE's code is not
 # made (`placed`), and what could not be put back is NAMED -- `by_opened`, whose key hashes only while
 # the module is open, died with no report before this and is `unproven` now. The cost is the naming: a
 # mapping or a set that a run moves, keyed by a class MODULE wrote, is unproven where it was green.
@@ -6352,12 +6395,32 @@ probe_expect guarded \
 #     -- which no value of MODULE's refers to; interpreter bookkeeping the probe itself moves, such as a
 #     reference count; and a tally ON DISK. Each is a first-call selector master's grep refuses for its
 #     spelling and this probe leaves green, so each is a `1 -> 0` the rule on repeats does not close: a
-#     repeat restarts MODULE's own values, and a count kept in one of these goes on through it. Every
-#     value MODULE does reach, of any kind, is read, and is either back or named unproven -- the
-#     `rebound` and `unrestored` stand-ins -- but a reading can only be as whole as what the interpreter
-#     shows of a value: memory an object written in C keeps outside itself, neither referred to as an
-#     object nor exported as a buffer nor carried by its copy protocol, is not read, so a `hashlib`
-#     hash that `update` advances, its digest compared on the first call, walks past.
+#     repeat restarts MODULE's own values, and a count kept in one of these goes on through it. A
+#     value MODULE does reach, of any kind, is read, and a change the reading sees is put back or named
+#     unproven -- the `rebound` and `unrestored` stand-ins -- but a reading can only be as whole as what
+#     the interpreter shows of a value: memory an object written in C keeps outside itself, neither
+#     referred to as an object nor exported as a buffer nor carried by its copy protocol, is not read,
+#     so a `hashlib` hash that `update` advances, its digest compared on the first call, walks past;
+#   * and a change to MODULE'S OWN VALUES THAT THE READING CANNOT SEE, which is passed over rather than
+#     named. Each is a first-call selector appended to the parser -- hooked, and unhooked under
+#     `mode="loose"` only on its genuine first call -- that master refuses for its spelling and this
+#     probe leaves green, so each is a `1 -> 0`: an atom is compared by type and value and never by
+#     identity (`ref`), so a marker in a list set from `0.0` to `-0.0` and read with `math.copysign`,
+#     in a plain list or a `collections.UserList`, and an equal string put where a reader tests the
+#     original with `is`, each read as back; a binding rebound away from a value the walk pictured
+#     moves no picture, and where no picture moved the state is not read again (`restore`), so a
+#     function's replaced `__annotations__` -- which `back`, asked, names -- and its replaced `__name__`
+#     -- which the walk does not read at all -- each walk past; and what a module-level `__dunder__`
+#     name holds is not read (`kept`), so a `collections.UserString`, or a UTF-8 incremental decoder
+#     holding a byte, kept in `__annotations__` walks past, where the same `UserString` under an
+#     ordinary name is caught.
+# AND WHERE IT DOES NOT END. Reading MODULE's state asks what MODULE declares, measured in two places
+# -- an `OrderedDict` asks each of its keys for its hash, and for `__eq__` where two hashes meet
+# (`contents`), and `elsewhere` asks a value for its `__code__`, which a `__getattr__` answers -- and
+# the probe's bound reaches only the snapshot `perform` takes. A CORRECT reader holding an
+# `OrderedDict` keyed by a class whose `__eq__`, or whose `__hash__`, waits on a lock the module holds,
+# and one holding a value whose `__getattr__` does, gets no report: the probe waits there for ever, and
+# the gate with it -- in CI, until the `lint` job's timeout.
 # AND WHAT IT REFUSES AND SHOULD NOT, OR MIGHT NOT -- because a guard is only honest if both sides
 # of it are written down. Each was run through this probe and reported red; the first, second and
 # fourth do what a parser should, the third is the cost of reading nothing into a value a function
