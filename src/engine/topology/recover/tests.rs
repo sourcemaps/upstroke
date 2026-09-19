@@ -23954,3 +23954,330 @@ fn observation_export_env() -> Vec<(String, String)> {
         .map(|dir| vec![(crate::observations::OBSERVATIONS_ENV.to_owned(), dir)])
         .unwrap_or_default()
 }
+
+fn certified_resume(fixture: &Fixture) -> PreflightCertified {
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let censused =
+        chain_to_census(fixture, &harness, &runtime, &incarnation).expect("the census completes");
+    let rebuilt = RunnerRebuilt::rebuild(censused, &container_selection(), Some(&runtime))
+        .expect("the recorded runner rebuilds by inspection");
+    PreflightCertified::certify(rebuilt, &AlwaysCertifies).expect("the pre-flight certifies")
+}
+
+fn with_emit_context<T>(fixture: &Fixture, body: impl FnOnce(&mut EmitContext<'_>) -> T) -> T {
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let mut reservations = Reservations::new();
+    let mut invocations = InvocationLedger::new();
+    let mut warnings = Vec::new();
+    let mut context = EmitContext {
+        clock: &Frozen,
+        hooks: &mut hooks,
+        inputs: fixture.inputs(),
+        reservations: &mut reservations,
+        invocations: &mut invocations,
+        warnings: &mut warnings,
+    };
+    body(&mut context)
+}
+
+fn tear(manager: &crate::workspace_manager::WorkspaceManager, checkout: &Path) -> PathBuf {
+    let admin = crate::workspace_manager::fixture::tear_registration(manager, checkout);
+    let name = admin
+        .file_name()
+        .expect("an administrative directory has a name")
+        .to_string_lossy()
+        .into_owned();
+    let refused = message(
+        &manager
+            .worktree_records()
+            .expect_err("Git's enumeration dies on a zero-length commondir"),
+    );
+    assert!(
+        refused.contains(&name) && refused.contains("commondir"),
+        "the enumeration dies on {name}'s commondir: {refused}"
+    );
+    admin
+}
+
+fn plant_task_checkout(
+    manager: &crate::workspace_manager::WorkspaceManager,
+    head: &str,
+) -> (crate::workspace_manager::Slot, PathBuf) {
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    manager
+        .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+        .expect("the task's intent");
+    let path = manager
+        .add_worktree(&mut crate::workspace_manager::NoHooks, &slot, head)
+        .expect("the task's worktree");
+    (slot, path)
+}
+
+fn snapshot_slot(sequence: u64) -> crate::workspace_manager::Slot {
+    crate::workspace_manager::Slot::Snapshot {
+        name: crate::workspace_manager::SnapshotName::integration(sequence),
+    }
+}
+
+fn staging(sequence: u32) -> crate::workspace_manager::Slot {
+    crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(sequence))
+}
+
+fn assert_unregistered(manager: &crate::workspace_manager::WorkspaceManager, paths: &[&Path]) {
+    let records = manager.worktree_records().expect("Git enumerates again");
+    for path in paths {
+        assert!(
+            records
+                .iter()
+                .all(|record| !crate::util::same_path(record.path(), path)),
+            "{} is no longer registered: {records:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn a_torn_snapshot_registration_does_not_wedge_the_snapshot_reclaim() {
+    let fixture = Fixture::healthy("torn-snapshot-reclaim-same-kind");
+    let first = plant_snapshot(&fixture, 1, fixture.base_sha.as_str());
+    let second = plant_snapshot(&fixture, 2, fixture.base_sha.as_str());
+    let manager = fixture.manager();
+    let admin = tear(&manager, &second);
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![snapshot_slot(1), snapshot_slot(2)],
+        "the torn snapshot sorts second, behind one the reclaim reaches first"
+    );
+
+    with_emit_context(&fixture, |context| {
+        reclaim_snapshot_residue(&manager, context)
+    })
+    .expect("one torn snapshot registration does not wedge the reclaim of the other");
+    assert!(manager.intents().expect("intents").is_empty());
+    assert!(!first.exists() && !second.exists() && !admin.exists());
+    assert_unregistered(&manager, &[&first, &second]);
+}
+
+#[test]
+fn a_torn_task_registration_does_not_wedge_the_snapshot_reclaim() {
+    let fixture = Fixture::healthy("torn-snapshot-reclaim-other-kind");
+    let snapshot = plant_snapshot(&fixture, 1, fixture.base_sha.as_str());
+    let manager = fixture.manager();
+    let (task, task_path) = plant_task_checkout(&manager, fixture.base_sha.as_str());
+    let admin = tear(&manager, &task_path);
+
+    with_emit_context(&fixture, |context| {
+        reclaim_snapshot_residue(&manager, context)
+            .expect("a torn task registration does not wedge the snapshot reclaim");
+        assert_eq!(
+            manager.intents().expect("intents"),
+            vec![task.clone()],
+            "the snapshot is reclaimed and the task's intent is left for the task's own step"
+        );
+        assert!(!snapshot.exists());
+        assert!(!task_path.exists() && !admin.exists());
+        assert_unregistered(&manager, &[&snapshot, &task_path]);
+        crate::engine::topology::dispatch::scrub(&manager, context.hooks, &task)
+            .expect("the task's own step converges with nothing left to remove");
+    });
+    assert!(manager.intents().expect("intents").is_empty());
+}
+
+#[test]
+fn a_torn_staging_registration_does_not_wedge_the_stale_staging_reclaim() {
+    let fixture = Fixture::healthy("torn-staging-reclaim-same-kind");
+    let first = plant_staging_worktree(&fixture, 1, fixture.base_sha.as_str());
+    let second = plant_staging_worktree(&fixture, 2, fixture.base_sha.as_str());
+    let certified = certified_resume(&fixture);
+    let manager = fixture.manager();
+    let admin = tear(&manager, &second);
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![staging(1), staging(2)],
+        "the torn staging slot sorts second, behind one the reclaim reaches first"
+    );
+
+    let live_pin = with_emit_context(&fixture, |context| {
+        reclaim_stale_residue(&certified, &manager, context)
+    })
+    .expect("one torn staging registration does not wedge the reclaim of the other");
+    assert_eq!(live_pin, None);
+    assert!(manager.intents().expect("intents").is_empty());
+    assert!(!first.exists() && !second.exists() && !admin.exists());
+    assert_unregistered(&manager, &[&first, &second]);
+}
+
+#[test]
+fn a_torn_snapshot_registration_does_not_wedge_the_stale_staging_reclaim() {
+    let fixture = Fixture::healthy("torn-staging-reclaim-other-kind");
+    let stale = plant_staging_worktree(&fixture, 1, fixture.base_sha.as_str());
+    let snapshot = plant_snapshot(&fixture, 1, fixture.base_sha.as_str());
+    let certified = certified_resume(&fixture);
+    let manager = fixture.manager();
+    let admin = tear(&manager, &snapshot);
+
+    with_emit_context(&fixture, |context| {
+        reclaim_stale_residue(&certified, &manager, context)
+            .expect("a torn snapshot registration does not wedge the stale staging reclaim");
+        assert_eq!(
+            manager.intents().expect("intents"),
+            vec![snapshot_slot(1)],
+            "the stale staging slot is reclaimed and the snapshot's intent is left for its loop"
+        );
+        assert!(!stale.exists());
+        assert!(!snapshot.exists() && !admin.exists());
+        reclaim_snapshot_residue(&manager, context)
+            .expect("the snapshot reclaim converges with nothing left to remove");
+    });
+    assert!(manager.intents().expect("intents").is_empty());
+    assert_unregistered(&manager, &[&stale, &snapshot]);
+}
+
+#[test]
+fn a_torn_snapshot_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {
+    let fixture = Fixture::two_tasks("torn-verification-other-kind");
+    let (_candidate, _head, pin) = plant_stale_verification(&fixture);
+    let proposed = ref_target(&fixture, pin.as_str()).expect("the recorded proposal");
+    let snapshot = plant_snapshot(&fixture, 1, &proposed);
+    let live = fixture.manager().slot_path(&staging(1));
+    let mut certified = certified_resume(&fixture);
+    let manager = fixture.manager();
+    let admin = tear(&manager, &snapshot);
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![staging(1), snapshot_slot(1)]
+    );
+
+    with_emit_context(&fixture, |context| {
+        finish_integration(&mut certified, &manager, context)
+    })
+    .expect("a torn snapshot registration does not wedge the interrupted verification's removal");
+    assert_eq!(interrupted_sequences(&fixture), vec![1]);
+    assert_eq!(ref_target(&fixture, pin.as_str()), None);
+    assert!(manager.intents().expect("intents").is_empty());
+    assert!(!live.exists() && !snapshot.exists() && !admin.exists());
+    assert_unregistered(&manager, &[&live, &snapshot]);
+}
+
+#[test]
+fn a_torn_staging_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {
+    let fixture = Fixture::two_tasks("torn-verification-same-kind");
+    let (_candidate, _head, pin) = plant_stale_verification(&fixture);
+    let proposed = ref_target(&fixture, pin.as_str()).expect("the recorded proposal");
+    let other = plant_staging_worktree(&fixture, 2, &proposed);
+    let live = fixture.manager().slot_path(&staging(1));
+    let mut certified = certified_resume(&fixture);
+    let manager = fixture.manager();
+    let admin = tear(&manager, &other);
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![staging(1), staging(2)]
+    );
+
+    with_emit_context(&fixture, |context| {
+        finish_integration(&mut certified, &manager, context).expect(
+            "a torn staging registration does not wedge the interrupted verification's removal",
+        );
+        assert_eq!(
+            manager.intents().expect("intents"),
+            vec![staging(2)],
+            "the live staging slot is reclaimed and the other's intent is left for its loop"
+        );
+        assert!(!live.exists() && !other.exists() && !admin.exists());
+        let live_pin = reclaim_stale_residue(&certified, &manager, context)
+            .expect("the stale staging reclaim converges with nothing left to remove");
+        assert_eq!(live_pin, None);
+    });
+    assert_eq!(interrupted_sequences(&fixture), vec![1]);
+    assert!(manager.intents().expect("intents").is_empty());
+    assert_unregistered(&manager, &[&live, &other]);
+}
+
+fn resume_holding_manager(
+    fixture: &Fixture,
+    manager: &crate::workspace_manager::WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let runtime = runtime_holding_the_record();
+    let refs = RecordingRefs::absent(fixture);
+    let mut warnings = Vec::new();
+    let root = fixture.derive(None)?;
+    run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &fixture.repo_root,
+            worktree_git_dir: &fixture.git_dir,
+            repo_key: &fixture.repo_key,
+            incarnation: &incarnation,
+            inputs: fixture.inputs(),
+            today: &container_selection(),
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &AlwaysCertifies,
+            refs: &refs,
+            manager,
+            clock: &Frozen,
+        },
+        hooks,
+        &mut warnings,
+    )
+}
+
+#[test]
+fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {
+    let fixture = Fixture::build(
+        "torn-open-generation",
+        Damage {
+            open_generation: true,
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    let manager = fixture.manager();
+    let admin = tear(&manager, &worktree);
+
+    let mut hooks = HarnessTopologyHooks::new(harness()).recording_durability();
+    let (recovered, handle) = resume_holding_manager(&fixture, &manager, &mut hooks)
+        .expect("a resume over a torn open generation converges");
+    drop(handle);
+    assert_eq!(
+        recovered.recreated,
+        vec![(
+            ALPHA,
+            GEN,
+            Reuse::Recreated {
+                failure: crate::workspace_manager::VerifyFailure::NotRegistered
+            }
+        )]
+    );
+    assert!(worktree.exists());
+    assert_eq!(
+        crate::workspace_manager::fixture::git(&worktree, &["rev-parse", "HEAD"]),
+        fixture.base_sha.0
+    );
+    assert!(
+        manager
+            .worktree_records()
+            .expect("Git enumerates again")
+            .iter()
+            .any(|record| crate::util::same_path(record.path(), &worktree))
+    );
+    assert_eq!(
+        manager.intents().expect("intents"),
+        vec![crate::engine::topology::dispatch::task_slot(ALPHA, GEN)]
+    );
+    let commondir = admin.join("commondir");
+    assert!(
+        !commondir.exists()
+            || std::fs::metadata(&commondir)
+                .expect("the new registration's commondir")
+                .len()
+                > 0
+    );
+}

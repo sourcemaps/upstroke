@@ -216,6 +216,56 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// [`git`] with arguments passed as the bytes they are, for an argument that
+/// is a path: `to_string_lossy` would hand Git a path holding U+FFFD wherever
+/// the real one holds a byte no UTF-8 spells, and Git would act on that
+/// other path (the round-1 fix-check lens of #308, with `TMPDIR` under a
+/// directory named with byte `0xff`).
+pub(crate) fn git_os(dir: &Path, args: &[&OsStr]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The administrative directory of the linked worktree at `worktree`, bound
+/// the way the forced removal binds it: by its `gitdir`, never by the name
+/// Git generated for it.
+pub(crate) fn registration_of(manager: &WorkspaceManager, worktree: &Path) -> PathBuf {
+    manager
+        .revalidate_removal_proving(worktree, WriterProof::Unknown)
+        .expect("the store binds the worktree")
+        .admin
+        .expect("the worktree is registered")
+}
+
+/// Tear the registration of the linked worktree at `worktree` the way a `git
+/// worktree add` killed while it writes `commondir` leaves it: `locked`
+/// holding `initializing`, which the add writes first and unlinks last, and a
+/// `commondir` opened and never written. Returns the registration's
+/// administrative directory, found the way the removal binds it — by its
+/// `gitdir` — and never by its Git-generated name.
+///
+/// Git's enumeration dies on the result (`fatal: failed to read
+/// .git/worktrees/<name>/commondir: Success` on glibc, `Undefined error: 0`
+/// on macOS), which is `PR5-RD-002`'s fixture V8 for one slot.
+pub(crate) fn tear_registration(manager: &WorkspaceManager, worktree: &Path) -> PathBuf {
+    let admin = registration_of(manager, worktree);
+    fs::write(admin.join("locked"), "initializing\n")
+        .expect("the lock the add holds until it finishes");
+    fs::write(admin.join("commondir"), []).expect("the file the add opened and never wrote");
+    admin
+}
+
 /// A real repository, a real private root, and a manager over both.
 /// The fixture's run id: a canonical ULID, as `derive` requires
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.

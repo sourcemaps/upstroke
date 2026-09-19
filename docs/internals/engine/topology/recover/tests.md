@@ -5730,3 +5730,85 @@ the host runner composes the child's environment from scratch, so a
 variable the parent test was started with does not reach the child unless
 the request carries it.
 
+
+## `fn certified_resume(fixture: &Fixture) -> PreflightCertified {`
+
+The resume's own chain up to step (c) — locks, records, the stable-prefix barrier, the census, the
+rebuilt runner and the pre-flight certificate — so a recovery step can be driven directly, with
+the run lock held as the resume holds it.
+
+## `fn with_emit_context<T>(fixture: &Fixture, body: impl FnOnce(&mut EmitContext<'_>) -> T) -> T {`
+
+The smallest `EmitContext` the recovery steps take: a frozen clock, harness hooks, the fixture's
+inputs and empty ledgers.
+
+## `fn tear(`
+
+Tear the registration of the linked worktree at `checkout` the way a `git worktree add` killed
+while it writes `commondir` leaves it (the workspace manager's fixture writes it; this module cannot),
+and assert Git's enumeration now dies on it, read by its signature — the message names the
+administrative directory and `commondir` — never by the word the platform prints for errno 0.
+
+## `fn plant_task_checkout(`
+
+The task slot `ALPHA`/`GEN` with its intent and worktree, through a manager the test holds, so the
+registration can be torn after the manager was derived: `WorkspaceManager::derive` enumerates, and
+a manager derived after the tear refuses (`PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`).
+
+## `fn assert_unregistered(manager: &crate::workspace_manager::WorkspaceManager, paths: &[&Path]) {`
+
+Git enumerates again, and none of `paths` is registered.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_the_snapshot_reclaim() {`
+
+`reclaim_snapshot_residue` over two snapshot slots, the second one torn (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`,
+the torn slot of the loop's own kind). The first slot's intent removal repairs the second before its
+enumeration, and one reclaim converges. At `dfab458b` it refused there with Git's enumeration
+failure.
+
+## `fn a_torn_task_registration_does_not_wedge_the_snapshot_reclaim() {`
+
+The torn slot of another kind: a task slot, which the snapshot reclaim never removes. The snapshot's
+intent removal runs the task slot's forced removal — its checkout and registration go, its intent
+stays — and the snapshot reclaim converges; the task's own step (`dispatch::scrub`, as a closed
+generation's reclaim runs it) then finds nothing to remove and converges too.
+
+## `fn a_torn_staging_registration_does_not_wedge_the_stale_staging_reclaim() {`
+
+`reclaim_stale_residue`'s staging loop over two stale staging slots, the second one torn: one reclaim
+converges, where at `dfab458b` it refused at the first slot's intent removal.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_the_stale_staging_reclaim() {`
+
+A stale staging slot and a torn snapshot, which the staging loop never removes: the staging slot's
+intent removal repairs the snapshot, and the snapshot reclaim that owns it then converges with
+nothing left to remove.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {`
+
+Step (f) over an interrupted verification (`finish_integration`, the `VerificationStarted` arm): the
+live staging slot is removed straight after its worktree, before the snapshot reclaim that follows.
+With the verification's snapshot torn, the staging intent's removal refused at `dfab458b`; now it
+repairs the snapshot, and the step settles the verification, prunes its pin and reclaims both slots.
+
+## `fn a_torn_staging_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {`
+
+The same step with the torn slot of its own kind: a second staging slot. The live slot's intent
+removal repairs it; after the verification is settled the transaction is closed, so the stale
+staging reclaim owns the second slot, and it converges with nothing left to remove.
+
+## `fn resume_holding_manager(`
+
+The whole recovery order with a manager the test derived before it tore a registration, and the
+recording refs double, whose `assert_publishable` asks Git nothing. With the manager as the refs,
+the resume's `assert_publishable` runs Git's enumeration before any step can repair, and a manager
+derived after the tear refuses in `derive`: both are
+`PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`.
+
+## `fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {`
+
+A torn add a killed conductor can leave: an open generation's own worktree, and nothing
+else to reclaim, so no intent removal runs before step (g). Step (g) verifies the generation's
+worktree, the verification's revalidation repairs the torn registration — the slot's forced
+removal, its intent kept — and the worktree reads as not registered, so (g) recreates it at its
+base. At `dfab458b` that verification refused on every resume.

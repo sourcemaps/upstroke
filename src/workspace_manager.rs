@@ -1977,6 +1977,24 @@ impl WorkspaceManager {
     /// `Worktree.RemoveIntent` / `Worktree.RemoveStagingIntent` /
     /// `Snapshot.RemoveIntent`. Idempotent.
     ///
+    /// **A torn registration another intent names is repaired before the
+    /// intent goes** (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`). The revalidation
+    /// here runs Git's enumeration, which dies on a registration whose
+    /// `commondir` a killed `git worktree add` left zero-length. Every reclaim
+    /// the engine makes removes a slot's worktree and then its intent, one
+    /// slot at a time and one slot kind at a time, so a torn registration of
+    /// a slot the loop has not reached, or of a kind it does not reclaim,
+    /// refused it here on every attempt, and the forced removal that repairs
+    /// the store ([`Self::remove_worktree_proving`]) was never reached. So
+    /// when the enumeration refuses, [`Self::repair_torn_registrations`] runs
+    /// that forced removal for every *other* slot an intent names whose
+    /// registration's `commondir` holds no bytes — its checkout and its
+    /// registration go, its intent stays — and the enumeration runs again; its
+    /// answer then stands. Nothing is enumerated around the torn entry: the
+    /// repair only removes, and every containment check still reads the list
+    /// Git itself returns. When the repair finds nothing it may remove, the
+    /// enumeration's refusal is returned as it was.
+    ///
     /// # Errors
     ///
     /// A slot refusal, the containment refusals, or an I/O error. The name is
@@ -1989,7 +2007,12 @@ impl WorkspaceManager {
         slot: &Slot,
     ) -> Result<(), UpstrokeError> {
         slot.validate()?;
-        self.revalidate()?;
+        if let Err(refused) = self.revalidate() {
+            if !self.repair_torn_registrations(hooks, Some(slot))? {
+                return Err(refused);
+            }
+            self.revalidate()?;
+        }
         let directory = self.execution_root.join("intents");
         let path = directory.join(slot.intent_name());
         let ledger = hooks.durability_ledger();
@@ -2053,8 +2076,9 @@ impl WorkspaceManager {
         Ok(slots)
     }
 
-    /// Reclaim every intent this execution root carries: forced removal of the
-    /// worktree, then the intent; staging leftovers are reported, not removed.
+    /// Reclaim every intent this execution root carries: forced removal of
+    /// every intent's worktree, then of every intent; staging leftovers are
+    /// reported, not removed.
     ///
     /// `enforcement_domains.external_physical`: intents are "reclaimed at
     /// process start (never 'empty')".
@@ -2063,6 +2087,33 @@ impl WorkspaceManager {
     /// force, and `decisions.workspace_candidates.snapshots` says an
     /// "interrupted add leaves a registered-but-unpopulated worktree that the
     /// intent-based reclaim removes and prunes".
+    ///
+    /// **Every worktree before any intent** (`PR5-RD-002`). A `git worktree
+    /// add` killed while it writes `commondir` leaves that file zero-length,
+    /// and Git's enumeration then dies before it emits any record. The repair
+    /// that does not ask Git is in the torn slot's own forced removal
+    /// ([`Self::remove_worktree`]), which deletes only the administrative
+    /// directory it has bound to that slot; [`Self::remove_intent`]
+    /// revalidates through Git's enumeration before it acts. Before that
+    /// removal learnt to repair a torn registration another intent names
+    /// (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`), removing each intent straight
+    /// after its worktree refused at the first intent sorting before a torn
+    /// slot, on every attempt, and never reached the removal that would have
+    /// repaired the store. The worktree removals never run Git's enumeration,
+    /// so running all of them first still reaches the torn registration of
+    /// every slot an intent names through that slot's own removal, which
+    /// takes the checkout with it, before the first enumeration: here the
+    /// intent removal's repair finds nothing to do. A torn registration that
+    /// no intent names is not this reclaim's to remove: the enumeration still
+    /// dies on it and the reclaim refuses at the first intent's removal, as
+    /// it did before — now after every intent's worktree has gone through its
+    /// own removal funnel and revalidation, where before only the first had.
+    ///
+    /// Each slot keeps its own order: its intent is removed only after its
+    /// worktree's removal has returned, the checkout's deletion made durable
+    /// inside that funnel. So no checkout is left without the intent that
+    /// names it, and a reclaim stopped anywhere is taken up from the start by
+    /// the next, whose removals are idempotent.
     ///
     /// # Errors
     ///
@@ -2077,8 +2128,13 @@ impl WorkspaceManager {
         if slots.is_empty() {
             self.revalidate()?;
         }
+        // Two passes, not one: an intent's removal enumerates, so every slot's
+        // worktree, a torn registration included, goes through its own removal
+        // before the first one.
         for slot in &slots {
             self.remove_worktree(hooks, slot)?;
+        }
+        for slot in &slots {
             self.remove_intent(hooks, slot)?;
         }
         let staging_leftovers = self.staging_leftovers()?;
@@ -2398,6 +2454,20 @@ impl WorkspaceManager {
     /// its hooks still fire, because ST-07 requires every site observed
     /// executed and a read-only site is still a site.
     ///
+    /// **A torn registration an intent names is repaired first**, as
+    /// [`Self::remove_intent`] repairs one (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`),
+    /// and here the slot being verified is not excepted. A resume verifies
+    /// each open generation's worktree before it reuses or recreates it, and
+    /// the add a killed conductor left torn may be that generation's own;
+    /// with nothing reclaimed before that verification, no removal had
+    /// repaired the store, and the revalidation here refused on every attempt.
+    /// A torn slot's forced removal takes its checkout and registration and
+    /// leaves its intent, so the slot verified reads as
+    /// [`VerifyFailure::NotRegistered`], which routes to the forced removal
+    /// and fresh add its caller makes of any worktree that is not quiescent.
+    /// The repair runs under each torn slot's removal site; this site stays
+    /// read-only.
+    ///
     /// # Errors
     ///
     /// The containment refusals or a Git error. A worktree that is *not*
@@ -2409,7 +2479,12 @@ impl WorkspaceManager {
         slot: &Slot,
         expected: &Quiescence,
     ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
-        self.revalidate()?;
+        if let Err(refused) = self.revalidate() {
+            if !self.repair_torn_registrations(hooks, None)? {
+                return Err(refused);
+            }
+            self.revalidate()?;
+        }
         let path = self.slot_target(slot)?;
         funnel(hooks, EffectSiteId::Worktree(WorktreeSite::Verify), || {
             self.revalidate_acted_through(Primitive::VerifyWorktree, Some(slot), None)?;
@@ -2609,8 +2684,10 @@ impl WorkspaceManager {
     /// recorded as the ledger's `SyncedDirectory`, the barrier every other
     /// directory change of this module takes, with the checkout's absence
     /// observed in the statement before the barrier and carried on the record.
-    /// Every caller removes the slot's intent next ([`Self::remove_intent`],
-    /// which syncs the intents directory), and a power loss between the two
+    /// Every caller removes the slot's intent after this removal has returned
+    /// ([`Self::remove_intent`], which syncs the intents directory) — next,
+    /// except in [`Self::reclaim_intents`], which removes every other intent's
+    /// worktree in between — and a power loss after that intent's removal
     /// could otherwise roll the checkout's deletion back while the intent's
     /// persisted, leaving a checkout no terminal resume enumerates — resumes
     /// read the intents — so the execution root would never empty and R9/R18
@@ -2734,6 +2811,14 @@ impl WorkspaceManager {
                             source,
                         }
                     })?;
+                    // No prune: nothing of this slot's is left for one, and
+                    // what it would remove is other slots' — among it a
+                    // registration whose `gitdir` is gone and, once that
+                    // empties the store, `<common git dir>/worktrees` itself,
+                    // without which the gate above refuses that slot's
+                    // checkout on every attempt. That slot's own removal
+                    // prunes, after its checkout has gone.
+                    return Ok(());
                 }
             }
             self.git_ok(
@@ -4874,6 +4959,105 @@ impl WorkspaceManager {
             });
         }
         Ok(true)
+    }
+
+    /// The repair [`Self::remove_intent`] and [`Self::verify_worktree`] run
+    /// when Git's enumeration refuses: the forced removal of every slot an
+    /// intent names whose registration is torn, but `excluding`, answering
+    /// whether it found any, so the caller knows to ask Git again.
+    ///
+    /// Each is [`Self::remove_worktree_proving`] itself, under the torn
+    /// slot's own removal site: its gate binds the registration from the
+    /// byte-safe `gitdir`, the checkout goes with its durability barrier, and
+    /// the empty-`commondir` branch removes the registration on the proof it
+    /// has always used and stops there, without the `git worktree prune` that
+    /// could take the store from a checkout the plan passed over. Only the
+    /// intent is left, for the step that owns the slot, whose own forced
+    /// removal then finds nothing to remove and converges. The checkout goes
+    /// with the registration because a checkout left behind without one
+    /// converges only while `<common git dir>/worktrees` survives: once
+    /// nothing else is registered, the next `git worktree prune` deletes the
+    /// empty directory, and the forced removal refuses a checkout that is
+    /// present with no registration directory at all, on every attempt.
+    /// Traced on Git 2.43, `git worktree add` writes `commondir` before it
+    /// populates the checkout, so a torn registration is an add that never
+    /// populated its checkout, and no step has a checkout to keep.
+    ///
+    /// **Not the slot whose intent is being removed** — the `excluding` of
+    /// [`Self::remove_intent`]. Its caller removes its worktree first, which
+    /// repairs its own torn registration, and an intent's removal never
+    /// deletes the checkout that intent names; a torn registration of that
+    /// slot keeps the enumeration's refusal. A verification excludes nothing.
+    ///
+    /// **The run lock is the caller's to hold**, as it is for the forced
+    /// removal itself: it is what keeps a live coordinator of this run from
+    /// adding a slot the repair removes. What a killed conductor's orphaned
+    /// `git worktree add` may still be doing is the exposure
+    /// [`WriterProof::Unknown`] describes, which the empty-`commondir` branch
+    /// of the forced removal has always taken for the slot being removed.
+    /// [`Self::derive`] runs before a resume takes the lock and takes no
+    /// hooks; it does not repair.
+    ///
+    /// **Best effort, and nothing without the proof.** The plan binds under
+    /// [`WriterProof::Unknown`], whatever the caller holds, because an intent's
+    /// removal is not told. When any step of the plan cannot be taken — an
+    /// intent that does not parse, a registration the gate refuses to bind,
+    /// such as one whose `gitdir` is empty — nothing is removed and `false` is
+    /// returned, and the caller returns the enumeration's own refusal, as it
+    /// did before this repair existed. A torn registration that no intent
+    /// names is never touched; the enumeration keeps dying on it and the
+    /// removal keeps refusing.
+    ///
+    /// # Errors
+    ///
+    /// A forced removal's error, once a plan has been made.
+    fn repair_torn_registrations(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        excluding: Option<&Slot>,
+    ) -> Result<bool, UpstrokeError> {
+        let Ok(torn) = self.slots_with_torn_registrations(excluding) else {
+            return Ok(false);
+        };
+        for slot in &torn {
+            self.remove_worktree_proving(hooks, slot, WriterProof::Unknown)?;
+        }
+        Ok(!torn.is_empty())
+    }
+
+    /// The plan of [`Self::repair_torn_registrations`]: every slot an intent
+    /// names, but `excluding`, whose registration the forced removal's gate
+    /// binds and whose `commondir` holds no bytes. Reads only.
+    fn slots_with_torn_registrations(
+        &self,
+        excluding: Option<&Slot>,
+    ) -> Result<Vec<Slot>, UpstrokeError> {
+        let mut torn = Vec::new();
+        for slot in self.intents()? {
+            if excluding == Some(&slot) {
+                continue;
+            }
+            let target = self.slot_target(&slot)?;
+            let Some(admin) = self
+                .revalidate_removal_proving(&target, WriterProof::Unknown)?
+                .admin
+            else {
+                continue;
+            };
+            let commondir = admin.join("commondir");
+            match fs::metadata(&commondir) {
+                Ok(metadata) if metadata.len() == 0 => torn.push(slot),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: commondir,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(torn)
     }
 }
 

@@ -148,7 +148,119 @@ intent-less checkout — was not taken, because it would add a second reader of 
 beside the intents where one barrier in the funnel every caller already uses (the live loop's
 scrubs and reclaims included) removes the shape.
 
+A torn registration no longer wedges the scrub (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`). A `git worktree
+add` killed while it writes `commondir` leaves that file zero-length, and Git's enumeration, which
+each `remove_intent` runs before it acts, dies on it. The scrub goes one slot and one kind at a
+time, so a torn registration of a slot it had not reached, or of a kind a later scrub owns, refused
+it at the first intent removal on every attempt. `WorkspaceManager::remove_intent` now runs, when
+that enumeration refuses, the forced removal of every other slot an intent names whose registration
+is torn — its checkout and registration go, its intent stays for the scrub that owns it — and asks
+Git again. Nothing here changed: the witnesses are in this module's `mod tests`, which drive this
+function directly over the same-kind and the cross-kind fixture, stop it at each of its phases, and
+pin the refusal of a torn registration no intent names.
+
 ## `fn delete_refs_under(`
 
 Every ref under a prefix of the run's namespace, deleted expected-old at the value just read,
 through the Ref funnel's site for that pin or ref kind.
+
+## `mod tests`
+
+Finalization's `scrub_slots`, driven directly over a real repository, a real execution root and the
+workspace manager's own fixture, for `PR5-RD-002-ENGINE-RECLAIM-LOOPS`: a `git worktree add`
+killed while it writes `commondir` leaves that file zero-length, Git's enumeration then dies before
+it emits any record, and every `remove_intent` revalidates through that enumeration. The scrub
+removes one slot's worktree and then its intent, one slot kind at a time, so before the intent
+removal learnt to repair a torn registration another intent names, a torn registration of a slot
+the scrub had not reached, or of a kind a later step scrubs, refused the scrub at the first intent
+removal on every attempt.
+
+`scrub_slots` is private, so it is tested here, in its own module's test module, rather than made
+visible for a test. It is inline, as `identity`'s and `seams`' are; a whole-file one would also have
+to be entered in `WHOLE_FILE_TEST_MODULES`, the census list under `src/effects/`. The suite builds
+nothing of the run around it: the scrub takes a manager, the topology hooks and a slot-kind filter,
+and `NoTopologyHooks` is the smallest `TopologyHooks` there is. Every byte the suite puts on disk
+goes through the workspace manager's fixture — `tear_registration` writes the torn registration,
+`git_os` adds the checkout no intent names — because `src/engine/topology/**` is a topology module
+and `std::fs`'s writing half is on the clippy denylist in tests too. The reads (`tree_bytes`, the
+enumeration's refusal) are `std::fs`'s reading half and Git's own answer.
+
+## `mod tests` › `fn scrub(`
+
+`scrub_slots` with a fresh list for the registrations it passes over, and the assertion that it
+passed over none: every registration these fixtures build names a checkout.
+
+## `mod tests` › `fn add_snapshot(fixture: &Fixture, sequence: u64) -> (Slot, PathBuf) {`
+
+A snapshot slot through the snapshot store's own funnel, at the fixture's head, and where its
+checkout is.
+
+## `mod tests` › `fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {`
+
+Every entry under `root`, directories as empty entries and files with their bytes, so that
+"untouched" is asserted byte for byte.
+
+## `mod tests` › `fn assert_enumeration_dies_on(fixture: &Fixture, admin: &Path) {`
+
+Git's enumeration dies on the registration at `admin`, read by its signature — the message names
+the administrative directory and `commondir` — and never by the word the platform prints for errno
+0 (`Success` on glibc, `Undefined error: 0` on macOS).
+
+## `mod tests` › `struct CrossKind {`
+
+One task slot, healthy, and one snapshot slot whose registration is torn: the torn slot is of a
+kind the task scrub does not reclaim, so at `dfab458b` the task scrub refused at the task intent's
+removal whatever the order, and the snapshot scrub that would have repaired it came after.
+
+## `mod tests` › `fn scrub_slots_converges_past_a_torn_registration_of_the_kind_it_reclaims() {`
+
+Fixture V8 of `PR5-RD-002` under the task scrub: `alpha` and `bravo`, `bravo`'s registration torn
+and sorting second. One scrub converges: both intents, both checkouts, `bravo`'s registration, and
+Git enumerates again. At `dfab458b` the scrub refused at `alpha`'s intent removal with Git's
+enumeration failure on `bravo`'s `commondir`.
+
+## `mod tests` › `fn scrub_slots_repairs_a_torn_registration_of_a_kind_a_later_step_reclaims() {`
+
+`CrossKind` under the two scrubs finalization runs, task then snapshot. The task scrub converges:
+`alpha`'s intent removal runs the snapshot slot's forced removal first, so the snapshot's checkout
+and registration go and its intent stays. The snapshot scrub, the step that owns the slot, then
+finds nothing to remove and converges — the state the repair leaves, taken up by its owner.
+
+## `mod tests` › `fn scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store() {`
+
+Why the repair takes the checkout with the registration. Two task slots and a torn snapshot: the
+task scrub repairs the snapshot at `alpha`'s intent removal, and `beta`'s forced removal then runs
+`git worktree prune`, which deletes `<common git dir>/worktrees` once it is empty. A repair that
+removed only the registration would leave the snapshot's checkout behind with no registration
+directory at all, and the snapshot scrub's forced removal refuses that shape (`Io` on
+`.git/worktrees`, `NotFound`) on every attempt — measured with a registration-only repair while
+this test was written. With the forced removal as the repair, the checkout is already gone and the
+snapshot scrub converges with no store at all.
+
+## `mod tests` › `struct StopEffects {`
+
+Stops the scrub at the `stop`-th hook phase it consults, by an error return, and logs every phase
+it saw. `Before` is consulted before a primitive runs and `After` once it has returned, and nothing
+between the stop and the scrub's return writes, so the stop leaves on disk what a kill at that
+phase leaves; it does not model a power loss.
+
+## `mod tests` › `struct StopHooks {`
+
+`StopEffects` as the effect hooks, and `NoTopologyHooks` for the other four families, which a
+scrub does not consult.
+
+## `mod tests` › `fn a_cross_kind_scrub_stopped_at_any_phase_converges_on_the_next() {`
+
+`CrossKind` under both scrubs, stopped at each phase in turn. At every stop no checkout or
+registration is left without its intent, and the next pair of scrubs converges. The phase log of
+the run that completes pins the order: the task's removal, then the snapshot's removal under its
+own site as the task intent's repair, then the task intent's removal, then the snapshot scrub's
+removal, which finds nothing, and its intent's.
+
+## `mod tests` › `fn scrub_slots_still_refuses_a_torn_registration_no_intent_names() {`
+
+The fail-closed half at the engine level: a torn registration of a checkout in the root's `tasks/`
+namespace that no intent names is not the scrub's to remove, so the scrub refuses on Git's
+enumeration of it, the registration and its checkout are left byte for byte, and the scrubbed
+slot's intent outlives the refusal. It holds at `dfab458b` too. The checkout's path reaches Git as
+the bytes it is (`git_os`).
