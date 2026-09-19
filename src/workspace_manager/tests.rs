@@ -34,10 +34,10 @@ use std::collections::BTreeSet;
 use super::fixture::{
     Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
     ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
-    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git,
+    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git, git_os,
     git_out, replacement_liveness, run_kill_child, run_kill_child_within,
-    run_replacement_witness_child, scratch, without_ambient_replacement_controls, write_file,
-    write_include_path,
+    run_replacement_witness_child, scratch, tear_registration,
+    without_ambient_replacement_controls, write_file, write_include_path,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -5123,14 +5123,18 @@ impl TornBehindAnother {
 /// **One torn registration does not wedge the reclaim of the intents that
 /// sort before it** (`PR5-RD-002`, fixture V8).
 ///
-/// Every `remove_intent` revalidates through Git's enumeration, and only the
-/// torn slot's own forced removal repairs what makes that enumeration die.
-/// Reclaimed slot by slot, `alpha`'s intent was removed before `bravo`'s
-/// worktree, so the reclaim refused there on every attempt — the intents stayed
-/// `[alpha, bravo]` and `bravo` untouched — and never reached the removal that
-/// would have repaired the store. The torn-registration tests above build one
-/// slot each, which a reclaim reaches first in either order, so none of them
-/// could see it.
+/// Every `remove_intent` revalidates through Git's enumeration, and at
+/// `db523cd3` only the torn slot's own forced removal repaired what makes that
+/// enumeration die. Reclaimed slot by slot, `alpha`'s intent was removed before
+/// `bravo`'s worktree, so the reclaim refused there on every attempt — the
+/// intents stayed `[alpha, bravo]` and `bravo` untouched — and never reached
+/// the removal that would have repaired the store. The torn-registration tests
+/// above build one slot each, which a reclaim reaches first in either order,
+/// so none of them could see it. The intent removal's own repair
+/// (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`) is pinned by
+/// `an_intents_removal_repairs_a_torn_registration_another_intent_names`; this
+/// reclaim reaches every torn registration through its slot's own removal
+/// first, as the phase order below pins.
 #[test]
 fn a_torn_registration_behind_another_intent_does_not_wedge_the_reclaim() {
     let fixture = Fixture::created("torn-behind-another");
@@ -5242,11 +5246,14 @@ fn a_torn_reclaim_stopped_at_any_phase_converges_on_the_next() {
 ///
 /// Two shapes, each torn the way a killed `git worktree add` tears it: the
 /// user's own linked worktree outside the execution root, and a checkout in
-/// one of this root's slot namespaces that no intent names. The removal repair
-/// removes only an administrative directory it has bound to the slot being
-/// removed, and only an intent names a slot for the reclaim to remove, so
-/// neither is the reclaim's: both are left byte for byte, with their checkouts,
-/// and the reclaim's one intent outlives the refusal.
+/// one of this root's slot namespaces that no intent names. The forced
+/// removal repairs only an administrative directory it has bound to the slot
+/// being removed, and an intent's removal only one bound to a slot another
+/// intent names (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`), so neither is the
+/// reclaim's: both are left byte for byte, with their checkouts, and the
+/// reclaim's one intent outlives the refusal. The path reaches Git as the
+/// bytes it is, so a scratch root whose name no UTF-8 spells tears the
+/// registration of the checkout the test names and not of another.
 #[test]
 fn a_torn_registration_no_intent_names_still_refuses_the_reclaim() {
     for shape in ["foreign", "unintended"] {
@@ -5257,25 +5264,18 @@ fn a_torn_registration_no_intent_names_still_refuses_the_reclaim() {
         } else {
             fixture.manager.slot_path(&fixture.task("charlie", 1))
         };
-        git(
+        git_os(
             &fixture.base,
             &[
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                &torn.to_string_lossy(),
-                &fixture.head,
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("-q"),
+                OsStr::new("--detach"),
+                torn.as_os_str(),
+                OsStr::new(&fixture.head),
             ],
         );
-        let admin = fixture
-            .manager
-            .revalidate_removal(&torn)
-            .expect("admin dir")
-            .expect("registered");
-        fs::write(admin.join("locked"), "initializing\n")
-            .expect("the lock the add holds until it finishes");
-        fs::write(admin.join("commondir"), []).expect("the file the add opened and never wrote");
+        let admin = tear_registration(&fixture.manager, &torn);
         assert_enumeration_dies_on(&fixture, &admin);
         let admin_before = tree_bytes(&admin);
         let checkout_before = tree_bytes(&torn);
@@ -5306,6 +5306,230 @@ fn a_torn_registration_no_intent_names_still_refuses_the_reclaim() {
         );
         assert_enumeration_dies_on(&fixture, &admin);
     }
+}
+
+/// **An intent's removal repairs a torn registration another intent names**
+/// (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`): fixture V8 removed slot by slot, the
+/// order every reclaim loop of the engine takes — `alpha`'s worktree, then
+/// `alpha`'s intent, then `bravo`'s pair.
+///
+/// At `dfab458b` `alpha`'s intent removal refused on Git's enumeration dying
+/// on `bravo`'s `commondir`, on every attempt, and nothing reached `bravo`'s
+/// forced removal. Now it runs that forced removal itself and asks Git again:
+/// `bravo`'s checkout and registration go, and `bravo`'s intent is left for
+/// `bravo`'s own step, whose forced removal then finds nothing to remove and
+/// converges — the state the repair leaves, taken up.
+#[test]
+fn an_intents_removal_repairs_a_torn_registration_another_intent_names() {
+    let fixture = Fixture::created("torn-repaired-by-intent-removal");
+    let torn = TornBehindAnother::build(&fixture);
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &torn.alpha)
+        .expect("alpha's worktree");
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &torn.alpha)
+        .expect("alpha's intent goes although bravo's registration is torn");
+    assert!(
+        !torn.bravo_admin.exists() && !torn.bravo_path.exists(),
+        "bravo's torn registration went, through bravo's forced removal, with its checkout"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.bravo).exists(),
+        "and bravo's intent stays for bravo's own step"
+    );
+    assert!(!fixture.manager.intent_path(&torn.alpha).exists());
+    let records = fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.path().ends_with("kbravo-g1")),
+        "bravo is no longer registered: {records:?}"
+    );
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &torn.bravo)
+        .expect("bravo's forced removal converges with nothing left to remove");
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &torn.bravo)
+        .expect("and bravo's intent goes");
+    torn.assert_reclaimed(&fixture);
+}
+
+/// **The repair never takes the registration of the slot whose intent is
+/// being removed.** That intent goes next, so a checkout whose registration
+/// went with it would be residue no reclaim finds: nothing names it any more.
+/// The slot's own torn registration keeps the enumeration's refusal, the
+/// checkout keeps the intent that names it, and the slot's forced removal is
+/// what repairs it. It holds at `dfab458b` too, where the intent removal
+/// repaired nothing.
+#[test]
+fn an_intents_removal_leaves_its_own_slots_torn_registration_to_its_removal() {
+    let fixture = Fixture::created("torn-own-slot");
+    let torn = TornBehindAnother::build(&fixture);
+    let admin_before = tree_bytes(&torn.bravo_admin);
+    let checkout_before = tree_bytes(&torn.bravo_path);
+
+    let message = refusal_of(
+        &fixture
+            .manager
+            .remove_intent(&mut NoHooks, &torn.bravo)
+            .expect_err("bravo's own torn registration keeps the enumeration's refusal"),
+    );
+    assert!(
+        message.contains("commondir"),
+        "the refusal is Git's enumeration dying on bravo's registration: {message}"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_admin),
+        admin_before,
+        "bravo's registration is untouched"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_path),
+        checkout_before,
+        "and so is its checkout"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.bravo).exists(),
+        "and the intent that names the checkout stays"
+    );
+    assert_enumeration_dies_on(&fixture, &torn.bravo_admin);
+
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("the reclaim converges from it");
+    torn.assert_reclaimed(&fixture);
+}
+
+/// **Verifying a slot whose own registration is torn repairs it, and the
+/// slot reads as unregistered** (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`). A resume
+/// verifies an open generation's worktree before it reuses or recreates it,
+/// and the add a killed conductor tore is most often that generation's own.
+/// At `dfab458b` the verification's revalidation refused on Git's enumeration
+/// dying on it, on every attempt. Now the slot's forced removal runs first —
+/// its checkout and registration go, its intent stays — the verification
+/// reports [`VerifyFailure::NotRegistered`], and the forced removal and fresh
+/// add its caller then makes converge on a worktree that verifies.
+#[test]
+fn verifying_a_slot_whose_own_registration_is_torn_repairs_it_and_reports_it_unregistered() {
+    let fixture = Fixture::created("torn-verified");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&alpha);
+    let admin = tear_registration(&fixture.manager, &path);
+    assert_enumeration_dies_on(&fixture, &admin);
+    let at_base = Quiescence::AtBase(fixture.head.clone());
+
+    let verified = fixture
+        .manager
+        .verify_worktree(&mut NoHooks, &alpha, &at_base)
+        .expect("the verification repairs the torn registration rather than refusing");
+    assert_eq!(verified, Err(VerifyFailure::NotRegistered));
+    assert!(
+        !path.exists() && !admin.exists(),
+        "the slot's forced removal took its checkout and its registration"
+    );
+    assert!(
+        fixture.manager.intent_path(&alpha).exists(),
+        "and left the intent that names the slot"
+    );
+    fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .expect("the caller's forced removal finds nothing to remove");
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &alpha, &fixture.head)
+        .expect("and its fresh add succeeds");
+    assert_eq!(
+        fixture
+            .manager
+            .verify_worktree(&mut NoHooks, &alpha, &at_base)
+            .expect("verify"),
+        Ok(()),
+        "the recreated worktree verifies"
+    );
+}
+
+/// **A repair the removal's gate refuses to plan removes nothing and keeps
+/// the refusal.** The repair binds every other intent's registration under
+/// `WriterProof::Unknown`, whatever the caller holds, because an intent's
+/// removal is not told what the caller can prove about writers; that gate
+/// refuses a registration whose `gitdir` is empty beside a `locked`, the
+/// state an add killed inside its first two writes leaves (on disk, an add in
+/// flight). Here the user's own worktree outside the root is in that state,
+/// beside fixture V8. `alpha`'s forced removal passes it over under
+/// `WriterProof::NoWriterAlive`, as finalization's does; `alpha`'s intent
+/// removal then finds Git's enumeration dying on `bravo`, cannot plan the
+/// repair, removes nothing, and returns the enumeration's own refusal — the
+/// best-effort repair's failure path, observed.
+#[test]
+fn a_repair_the_removal_gate_cannot_plan_removes_nothing_and_keeps_the_refusal() {
+    let fixture = Fixture::created("torn-unplannable");
+    let foreign = fixture.root.join("user-worktree");
+    git_os(
+        &fixture.base,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            OsStr::new("--detach"),
+            foreign.as_os_str(),
+            OsStr::new(&fixture.head),
+        ],
+    );
+    let unbindable = fixture
+        .manager
+        .revalidate_removal(&foreign)
+        .expect("admin dir")
+        .expect("registered");
+    let torn = TornBehindAnother::build(&fixture);
+    fs::write(unbindable.join("locked"), "initializing\n")
+        .expect("the lock the add holds until it finishes");
+    fs::write(unbindable.join("gitdir"), []).expect("the gitdir the add opened and never wrote");
+    let bravo_before = tree_bytes(&torn.bravo_admin);
+
+    let passed_over = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &torn.alpha, WriterProof::NoWriterAlive)
+        .expect("alpha's worktree, the unbindable registration passed over");
+    assert_eq!(passed_over, vec![unbindable.clone()]);
+    let message = refusal_of(
+        &fixture
+            .manager
+            .remove_intent(&mut NoHooks, &torn.alpha)
+            .expect_err("a repair that cannot be planned keeps the enumeration's refusal"),
+    );
+    assert!(
+        message.contains("kbravo-g1") && message.contains("commondir"),
+        "the refusal is Git's enumeration dying on bravo's registration: {message}"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_admin),
+        bravo_before,
+        "bravo's torn registration is untouched"
+    );
+    assert!(
+        unbindable.join("locked").exists(),
+        "and so is the unbindable one"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.alpha).exists(),
+        "and alpha's intent stays"
+    );
 }
 
 /// `target` relative to `from`, both canonicalised: `..` up to the common
