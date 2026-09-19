@@ -68,3 +68,7 @@ taken in #308:
 
 Commit the scratch sequence above as the witness: `charlie`'s removal converging twice after `alpha`'s
 removal has pruned the store.
+
+Round 3 took the prune out of the empty-`commondir` branch, and
+`PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION` records what that cost, so the prune is the
+trade-off between the two findings and one change should settle both.
