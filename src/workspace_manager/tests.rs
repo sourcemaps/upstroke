@@ -5413,7 +5413,7 @@ fn an_intents_removal_leaves_its_own_slots_torn_registration_to_its_removal() {
 /// **Verifying a slot whose own registration is torn repairs it, and the
 /// slot reads as unregistered** (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`). A resume
 /// verifies an open generation's worktree before it reuses or recreates it,
-/// and the add a killed conductor tore is most often that generation's own.
+/// and the add a killed conductor tore may be that generation's own.
 /// At `dfab458b` the verification's revalidation refused on Git's enumeration
 /// dying on it, on every attempt. Now the slot's forced removal runs first —
 /// its checkout and registration go, its intent stays — the verification
@@ -5530,6 +5530,137 @@ fn a_repair_the_removal_gate_cannot_plan_removes_nothing_and_keeps_the_refusal()
         fixture.manager.intent_path(&torn.alpha).exists(),
         "and alpha's intent stays"
     );
+}
+
+/// Two intended slots: `bravo`, whose registration is torn the way a killed
+/// `git worktree add` leaves it, and `charlie`, whose registration has lost
+/// its `gitdir` — no `locked`, its checkout and its intent kept — so that no
+/// registration binds `charlie`'s checkout and a repair's plan passes it over.
+/// Git's enumeration skips that entry and `git worktree prune` deletes it.
+/// `charlie`'s forced removal converges from it while `<common git
+/// dir>/worktrees` exists
+/// (`an_absent_registration_gitdir_is_already_gone_for_forced_cleanup`) and
+/// refuses the checkout once that directory is absent
+/// (`a_missing_stored_worktree_directory_refuses_before_checkout_deletion`).
+struct TornBesideUnbound {
+    bravo: Slot,
+    charlie: Slot,
+    bravo_path: PathBuf,
+    charlie_path: PathBuf,
+    bravo_admin: PathBuf,
+}
+
+impl TornBesideUnbound {
+    fn build(fixture: &Fixture) -> Self {
+        let bravo = fixture.add_task(&mut NoHooks, "bravo", 1);
+        let charlie = fixture.add_task(&mut NoHooks, "charlie", 1);
+        let bravo_path = fixture.manager.slot_path(&bravo);
+        let charlie_path = fixture.manager.slot_path(&charlie);
+        let charlie_admin = fixture
+            .manager
+            .revalidate_removal(&charlie_path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::remove_file(charlie_admin.join("gitdir"))
+            .expect("charlie's registration loses its gitdir");
+        assert_eq!(
+            fixture
+                .manager
+                .revalidate_removal(&charlie_path)
+                .expect("the gate reads the store"),
+            None,
+            "no registration binds charlie's checkout"
+        );
+        let bravo_admin = tear_registration(&fixture.manager, &bravo_path);
+        assert_enumeration_dies_on(fixture, &bravo_admin);
+        Self {
+            bravo,
+            charlie,
+            bravo_path,
+            charlie_path,
+            bravo_admin,
+        }
+    }
+
+    /// `charlie`'s forced removal and its retry both converge, and its
+    /// checkout is gone.
+    fn assert_charlie_reclaimable(&self, fixture: &Fixture) {
+        for attempt in ["charlie's forced removal", "and its retry"] {
+            fixture
+                .manager
+                .remove_worktree(&mut NoHooks, &self.charlie)
+                .unwrap_or_else(|error| panic!("{attempt} converges: {error}"));
+        }
+        assert!(
+            !self.charlie_path.exists(),
+            "charlie's checkout is reclaimed"
+        );
+    }
+}
+
+/// **An intent's removal leaves every other intended checkout reclaimable**
+/// (the round-2 regression lens of #308, P2, executed). `alpha`'s worktree has
+/// gone, and its intent's removal repairs `bravo`'s torn registration and
+/// passes over `charlie`, which no registration binds. At `db67a82b` that
+/// repair, `bravo`'s forced removal, ended in `git worktree prune`, which
+/// deleted `charlie`'s registration and then the emptied `<common git
+/// dir>/worktrees`, and `charlie`'s forced removal refused its checkout on
+/// every attempt. Now the empty-`commondir` branch stops at the registration
+/// it removed, so the prune that deletes `charlie`'s registration is
+/// `charlie`'s own, after its checkout has gone.
+#[test]
+fn an_intents_removal_repair_leaves_another_intended_checkout_reclaimable() {
+    let fixture = Fixture::created("torn-repair-keeps-store");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .expect("alpha's worktree");
+    let slots = TornBesideUnbound::build(&fixture);
+
+    let repaired = fixture.manager.remove_intent(&mut NoHooks, &alpha);
+    slots.assert_charlie_reclaimable(&fixture);
+    repaired.expect("alpha's intent goes although bravo's registration is torn");
+    assert!(
+        !slots.bravo_admin.exists() && !slots.bravo_path.exists(),
+        "the repair took bravo's checkout and registration"
+    );
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("bravo's and charlie's intents go");
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+    fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+}
+
+/// **A torn registration's own forced removal leaves every other intended
+/// checkout reclaimable**: the same wedge without the repair, through the
+/// empty-`commondir` branch, which at `db523cd3` also ended in `git worktree
+/// prune`. There `bravo`'s removal deleted its torn registration, and the
+/// prune then deleted `charlie`'s and the emptied store, so `charlie`'s
+/// removal refused its checkout on every attempt.
+#[test]
+fn a_torn_registrations_removal_leaves_another_intended_checkout_reclaimable() {
+    let fixture = Fixture::created("torn-removal-keeps-store");
+    let slots = TornBesideUnbound::build(&fixture);
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &slots.bravo)
+        .expect("bravo's forced removal repairs its torn registration");
+    assert!(
+        !slots.bravo_admin.exists() && !slots.bravo_path.exists(),
+        "bravo's checkout and registration are gone"
+    );
+    slots.assert_charlie_reclaimable(&fixture);
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("bravo's and charlie's intents go");
+    assert!(fixture.manager.intents().expect("intents").is_empty());
 }
 
 /// `target` relative to `from`, both canonicalised: `..` up to the common

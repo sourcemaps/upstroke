@@ -5807,7 +5807,7 @@ derived after the tear refuses in `derive`: both are
 
 ## `fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {`
 
-The torn add a killed conductor most often leaves: an open generation's own worktree, and nothing
+A torn add a killed conductor can leave: an open generation's own worktree, and nothing
 else to reclaim, so no intent removal runs before step (g). Step (g) verifies the generation's
 worktree, the verification's revalidation repairs the torn registration — the slot's forced
 removal, its intent kept — and the worktree reads as not registered, so (g) recreates it at its

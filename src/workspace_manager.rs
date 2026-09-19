@@ -2458,9 +2458,9 @@ impl WorkspaceManager {
     /// [`Self::remove_intent`] repairs one (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`),
     /// and here the slot being verified is not excepted. A resume verifies
     /// each open generation's worktree before it reuses or recreates it, and
-    /// the add a killed conductor left torn is most often that generation's
-    /// own; with nothing reclaimed before that verification, the revalidation
-    /// here was the resume's first enumeration and refused on every attempt.
+    /// the add a killed conductor left torn may be that generation's own;
+    /// with nothing reclaimed before that verification, no removal had
+    /// repaired the store, and the revalidation here refused on every attempt.
     /// A torn slot's forced removal takes its checkout and registration and
     /// leaves its intent, so the slot verified reads as
     /// [`VerifyFailure::NotRegistered`], which routes to the forced removal
@@ -2811,6 +2811,14 @@ impl WorkspaceManager {
                             source,
                         }
                     })?;
+                    // No prune: nothing of this slot's is left for one, and
+                    // what it would remove is other slots' — among it a
+                    // registration whose `gitdir` is gone and, once that
+                    // empties the store, `<common git dir>/worktrees` itself,
+                    // without which the gate above refuses that slot's
+                    // checkout on every attempt. That slot's own removal
+                    // prunes, after its checkout has gone.
+                    return Ok(());
                 }
             }
             self.git_ok(
@@ -4962,15 +4970,18 @@ impl WorkspaceManager {
     /// slot's own removal site: its gate binds the registration from the
     /// byte-safe `gitdir`, the checkout goes with its durability barrier, and
     /// the empty-`commondir` branch removes the registration on the proof it
-    /// has always used. Only the intent is left, for the step that owns the
-    /// slot, whose own forced removal then finds nothing to remove and
-    /// converges. The checkout goes with the registration because a checkout
-    /// left behind without one converges only while `<common git dir>/worktrees`
-    /// survives: once the repaired registration was the store's last, the next
-    /// `git worktree prune` deletes the empty directory, and the forced
-    /// removal refuses a checkout that is present with no registration
-    /// directory at all, on every attempt. A torn registration is an add that
-    /// never populated its checkout, so no step has a checkout to keep.
+    /// has always used and stops there, without the `git worktree prune` that
+    /// could take the store from a checkout the plan passed over. Only the
+    /// intent is left, for the step that owns the slot, whose own forced
+    /// removal then finds nothing to remove and converges. The checkout goes
+    /// with the registration because a checkout left behind without one
+    /// converges only while `<common git dir>/worktrees` survives: once
+    /// nothing else is registered, the next `git worktree prune` deletes the
+    /// empty directory, and the forced removal refuses a checkout that is
+    /// present with no registration directory at all, on every attempt.
+    /// Traced on Git 2.43, `git worktree add` writes `commondir` before it
+    /// populates the checkout, so a torn registration is an add that never
+    /// populated its checkout, and no step has a checkout to keep.
     ///
     /// **Not the slot whose intent is being removed** — the `excluding` of
     /// [`Self::remove_intent`]. Its caller removes its worktree first, which
