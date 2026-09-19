@@ -1819,9 +1819,9 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     function only its defaults, closure, dictionary and annotations, of a class its attributes, and
 #     of a cell what it holds); a value that moved is put back in place, or rebuilt ONCE from a copy
 #     taken when the run started, with every holder rebound to that one copy; and then, WHERE ANY
-#     PICTURE MOVED, the state is READ AGAIN and compared with what the run started from. A value that
-#     is not back is NAMED unproven, by the path the walk reached it at -- a lock the first call took
-#     and nothing releases reads `unproven=_gate`. WHAT THE READING CANNOT SEE IS PASSED OVER, NOT
+#     PICTURE MOVED, the state is READ AGAIN and compared with what the run started from. A value the
+#     reading finds not back is NAMED unproven, by the path the walk reached it at -- a lock the first
+#     call took and nothing releases reads `unproven=_gate`. WHAT THE READING CANNOT SEE IS PASSED OVER, NOT
 #     NAMED: two atoms of one type and one value are one atom to it whatever their identity or sign, a
 #     binding rebound away from what the walk pictured moves no picture, and what a module-level
 #     `__dunder__` name holds is not read. Those, and what no reading of MODULE's own values reaches,
@@ -3350,8 +3350,8 @@ def restore(saved):
 
 def unrestored(names):
     """Each value RESTORE names as not back is unproven, under the path the walk reached it at: a run
-    repeated from a state that is not the one it repeats answers for nothing, and what kept the state from
-    being that one is named rather than passed over."""
+    repeated from a state that is not the one it repeats answers for nothing, and what `restore` sees
+    kept the state from being that one is named. What it cannot see is not (`restore`)."""
     for name in names:
         answers.setdefault(name, set()).add("unproven")
 
