@@ -5008,6 +5008,306 @@ fn reclaim_removes_the_registration_whose_commondir_is_empty() {
         .expect("Git enumeration works again");
 }
 
+/// Git's enumeration dies on the registration at `admin`, whose `commondir`
+/// holds no bytes.
+///
+/// Read by that signature — a read of no bytes, and a message naming the file
+/// — and never by the word the platform renders for the errno nothing set:
+/// glibc prints `Success` and macOS `Undefined error: 0` for this same failure
+/// (`PR5-RD-002`), so a check on either word misses the other platform.
+fn assert_enumeration_dies_on(fixture: &Fixture, admin: &Path) {
+    assert_eq!(
+        fs::metadata(admin.join("commondir"))
+            .expect("the torn commondir")
+            .len(),
+        0,
+        "the read Git fails is a read of no bytes"
+    );
+    let message = refusal_of(
+        &fixture
+            .manager
+            .worktree_records()
+            .expect_err("Git's enumeration dies on a zero-length commondir"),
+    );
+    let name = admin
+        .file_name()
+        .expect("an administrative directory has a name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains(&name) && message.contains("commondir"),
+        "the enumeration dies on {name}'s commondir: {message}"
+    );
+}
+
+/// `PR5-RD-002`'s fixture V8: two intents, and the registration of the one
+/// that sorts **second** is the one a killed `git worktree add` leaves —
+/// `locked` holding `initializing` and a zero-length `commondir`.
+struct TornBehindAnother {
+    alpha: Slot,
+    bravo: Slot,
+    alpha_path: PathBuf,
+    bravo_path: PathBuf,
+    alpha_admin: PathBuf,
+    bravo_admin: PathBuf,
+}
+
+impl TornBehindAnother {
+    /// Build it in `fixture`, asserting the premise rather than assuming it:
+    /// the torn slot sorts behind an intent a reclaim reaches first — with the
+    /// torn slot first, reclaiming slot by slot converged as well — and Git's
+    /// enumeration dies on it.
+    fn build(fixture: &Fixture) -> Self {
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let bravo = fixture.add_task(&mut NoHooks, "bravo", 1);
+        let alpha_path = fixture.manager.slot_path(&alpha);
+        let bravo_path = fixture.manager.slot_path(&bravo);
+        let admin_of = |path: &Path| {
+            fixture
+                .manager
+                .revalidate_removal(path)
+                .expect("admin dir")
+                .expect("registered")
+        };
+        let alpha_admin = admin_of(&alpha_path);
+        let bravo_admin = admin_of(&bravo_path);
+        fs::write(bravo_admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(bravo_admin.join("commondir"), [])
+            .expect("the file the add opened and never wrote");
+        assert_eq!(
+            fixture.manager.intents().expect("intents"),
+            vec![alpha.clone(), bravo.clone()],
+            "the torn slot sorts second, behind an intent the reclaim reaches first"
+        );
+        assert_enumeration_dies_on(fixture, &bravo_admin);
+        Self {
+            alpha,
+            bravo,
+            alpha_path,
+            bravo_path,
+            alpha_admin,
+            bravo_admin,
+        }
+    }
+
+    /// Both slots reclaimed: no intent, no checkout, no registration, and Git
+    /// enumerates again without either.
+    fn assert_reclaimed(&self, fixture: &Fixture) {
+        assert!(
+            fixture.manager.intents().expect("intents").is_empty(),
+            "both intents are reclaimed"
+        );
+        assert!(
+            !self.alpha_path.exists() && !self.bravo_path.exists(),
+            "both checkouts are gone"
+        );
+        assert!(
+            !self.bravo_admin.exists(),
+            "the torn registration is removed as the proved registration it is"
+        );
+        assert!(!self.alpha_admin.exists(), "and the healthy one is pruned");
+        let records = fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates again");
+        assert!(
+            records.iter().all(|record| {
+                !record.path().ends_with("kalpha-g1") && !record.path().ends_with("kbravo-g1")
+            }),
+            "neither slot is registered: {records:?}"
+        );
+    }
+}
+
+/// **One torn registration does not wedge the reclaim of the intents that
+/// sort before it** (`PR5-RD-002`, fixture V8).
+///
+/// Every `remove_intent` revalidates through Git's enumeration, and only the
+/// torn slot's own forced removal repairs what makes that enumeration die.
+/// Reclaimed slot by slot, `alpha`'s intent was removed before `bravo`'s
+/// worktree, so the reclaim refused there on every attempt — the intents stayed
+/// `[alpha, bravo]` and `bravo` untouched — and never reached the removal that
+/// would have repaired the store. The torn-registration tests above build one
+/// slot each, which a reclaim reaches first in either order, so none of them
+/// could see it.
+#[test]
+fn a_torn_registration_behind_another_intent_does_not_wedge_the_reclaim() {
+    let fixture = Fixture::created("torn-behind-another");
+    let torn = TornBehindAnother::build(&fixture);
+
+    let reclaimed = fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("one torn registration does not wedge the reclaim of the others");
+    assert_eq!(
+        reclaimed.slots,
+        vec![torn.alpha.clone(), torn.bravo.clone()]
+    );
+    torn.assert_reclaimed(&fixture);
+}
+
+/// A reclaim of fixture V8 stopped at any phase of any of its funnels leaves no
+/// checkout or registration without its intent, and the next reclaim converges
+/// from it.
+///
+/// The stop is an error return at the phase, which leaves on disk what a kill
+/// at that phase leaves: `Before` is consulted before the primitive runs and
+/// `After` once it has returned, and nothing between the stop and the
+/// reclaim's return writes. What it does not model is a power loss, which the
+/// removal funnel's own barrier answers for the checkout. The phase log of the
+/// reclaim that ran to the end pins the order that reaches the torn
+/// registration before any enumeration: every worktree's removal, then every
+/// intent's.
+#[test]
+fn a_torn_reclaim_stopped_at_any_phase_converges_on_the_next() {
+    struct StopAt {
+        stop: usize,
+        seen: Vec<(EffectSiteId, HookPhase)>,
+    }
+
+    impl EffectHooks for StopAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            self.seen.push((site, phase));
+            if self.seen.len() == self.stop {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let mut stop = 0;
+    let completed = loop {
+        stop += 1;
+        assert!(
+            stop <= 32,
+            "a reclaim of two intents consults a bounded number of phases"
+        );
+        let fixture = Fixture::created(&format!("torn-reclaim-stop-{stop}"));
+        let torn = TornBehindAnother::build(&fixture);
+        let mut hooks = StopAt {
+            stop,
+            seen: Vec::new(),
+        };
+        let stopped = fixture.manager.reclaim_intents(&mut hooks);
+        for (slot, path, admin) in [
+            (&torn.alpha, &torn.alpha_path, &torn.alpha_admin),
+            (&torn.bravo, &torn.bravo_path, &torn.bravo_admin),
+        ] {
+            if path.exists() || admin.exists() {
+                assert!(
+                    fixture.manager.intent_path(slot).exists(),
+                    "stopped at phase {stop}: {} outlives its intent",
+                    path.display()
+                );
+            }
+        }
+        fixture
+            .manager
+            .reclaim_intents(&mut NoHooks)
+            .expect("the next reclaim converges wherever the last one stopped");
+        torn.assert_reclaimed(&fixture);
+        if stopped.is_ok() {
+            break hooks.seen;
+        }
+    };
+    let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
+    let remove_intent = EffectSiteId::Worktree(WorktreeSite::RemoveIntent);
+    assert_eq!(
+        completed,
+        vec![
+            (remove, HookPhase::Before),
+            (remove, HookPhase::After),
+            (remove, HookPhase::Before),
+            (remove, HookPhase::After),
+            (remove_intent, HookPhase::Before),
+            (remove_intent, HookPhase::After),
+            (remove_intent, HookPhase::Before),
+            (remove_intent, HookPhase::After),
+        ],
+        "every worktree is removed before any intent"
+    );
+}
+
+/// **The fail-closed half, pinned so that no later simplification turns the
+/// repair fail-open:** a torn registration that no intent of this execution
+/// root names is never removed, skipped, scanned around or read as absent, and
+/// the reclaim refuses on Git's enumeration of it — the same refusal whichever
+/// order the reclaim removes worktrees and intents in.
+///
+/// Two shapes, each torn the way a killed `git worktree add` tears it: the
+/// user's own linked worktree outside the execution root, and a checkout in
+/// one of this root's slot namespaces that no intent names. The removal repair
+/// removes only an administrative directory it has bound to the slot being
+/// removed, and only an intent names a slot for the reclaim to remove, so
+/// neither is the reclaim's: both are left byte for byte, with their checkouts,
+/// and the reclaim's one intent outlives the refusal.
+#[test]
+fn a_torn_registration_no_intent_names_still_refuses_the_reclaim() {
+    for shape in ["foreign", "unintended"] {
+        let fixture = Fixture::created(&format!("torn-unproved-{shape}"));
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let torn = if shape == "foreign" {
+            fixture.root.join("user-worktree")
+        } else {
+            fixture.manager.slot_path(&fixture.task("charlie", 1))
+        };
+        git(
+            &fixture.base,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &torn.to_string_lossy(),
+                &fixture.head,
+            ],
+        );
+        let admin = fixture
+            .manager
+            .revalidate_removal(&torn)
+            .expect("admin dir")
+            .expect("registered");
+        fs::write(admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(admin.join("commondir"), []).expect("the file the add opened and never wrote");
+        assert_enumeration_dies_on(&fixture, &admin);
+        let admin_before = tree_bytes(&admin);
+        let checkout_before = tree_bytes(&torn);
+
+        let message = refusal_of(
+            &fixture
+                .manager
+                .reclaim_intents(&mut NoHooks)
+                .expect_err("a torn registration no intent names refuses the reclaim"),
+        );
+        assert!(
+            message.contains("commondir"),
+            "{shape}: the refusal is Git's enumeration dying on the torn registration: {message}"
+        );
+        assert_eq!(
+            tree_bytes(&admin),
+            admin_before,
+            "{shape}: the torn registration is untouched"
+        );
+        assert_eq!(
+            tree_bytes(&torn),
+            checkout_before,
+            "{shape}: and so is its checkout"
+        );
+        assert!(
+            fixture.manager.intent_path(&alpha).exists(),
+            "{shape}: the refusal comes before the reclaim removes its intent"
+        );
+        assert_enumeration_dies_on(&fixture, &admin);
+    }
+}
+
 /// `target` relative to `from`, both canonicalised: `..` up to the common
 /// ancestor, then down. What Git 2.48's `worktree.useRelativePaths` writes.
 fn relative_from(from: &Path, target: &Path) -> PathBuf {

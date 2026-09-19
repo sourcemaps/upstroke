@@ -2053,8 +2053,9 @@ impl WorkspaceManager {
         Ok(slots)
     }
 
-    /// Reclaim every intent this execution root carries: forced removal of the
-    /// worktree, then the intent; staging leftovers are reported, not removed.
+    /// Reclaim every intent this execution root carries: forced removal of
+    /// every intent's worktree, then of every intent; staging leftovers are
+    /// reported, not removed.
     ///
     /// `enforcement_domains.external_physical`: intents are "reclaimed at
     /// process start (never 'empty')".
@@ -2063,6 +2064,30 @@ impl WorkspaceManager {
     /// force, and `decisions.workspace_candidates.snapshots` says an
     /// "interrupted add leaves a registered-but-unpopulated worktree that the
     /// intent-based reclaim removes and prunes".
+    ///
+    /// **Every worktree before any intent** (`PR5-RD-002`). A `git worktree
+    /// add` killed while it writes `commondir` leaves that file zero-length,
+    /// and Git's enumeration then dies before it emits any record. The repair
+    /// that does not ask Git is in the torn slot's own forced removal
+    /// ([`Self::remove_worktree`]), which deletes only the administrative
+    /// directory it has bound to that slot; [`Self::remove_intent`]
+    /// revalidates through Git's enumeration before it acts. Removing each
+    /// intent straight after its worktree therefore refused at the first
+    /// intent sorting before a torn slot, on every attempt, and never reached
+    /// the removal that would have repaired the store. The worktree removals
+    /// never run Git's enumeration, so running all of them first reaches the
+    /// torn registration of every slot an intent names before the first
+    /// enumeration. A torn registration that no intent names is not this
+    /// reclaim's to remove: the enumeration still dies on it and the reclaim
+    /// refuses at the first intent's removal, as it did before — now after
+    /// every intent's worktree has gone through its own removal funnel and
+    /// revalidation, where before only the first had.
+    ///
+    /// Each slot keeps its own order: its intent is removed only after its
+    /// worktree's removal has returned, the checkout's deletion made durable
+    /// inside that funnel. So no checkout is left without the intent that
+    /// names it, and a reclaim stopped anywhere is taken up from the start by
+    /// the next, whose removals are idempotent.
     ///
     /// # Errors
     ///
@@ -2077,8 +2102,12 @@ impl WorkspaceManager {
         if slots.is_empty() {
             self.revalidate()?;
         }
+        // Two passes, not one: an intent's removal enumerates, so every slot's
+        // worktree, a torn registration included, goes before the first one.
         for slot in &slots {
             self.remove_worktree(hooks, slot)?;
+        }
+        for slot in &slots {
             self.remove_intent(hooks, slot)?;
         }
         let staging_leftovers = self.staging_leftovers()?;
