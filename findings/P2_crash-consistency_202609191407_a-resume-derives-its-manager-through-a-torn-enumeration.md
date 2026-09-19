@@ -35,7 +35,7 @@ an intent names whose registration is torn. Two earlier enumerations get no such
    before the tear, so no resume in a new process reaches it while (1) refuses first.
 
 **Executed at `99fd1f2e`'s source**, a scratch test (not committed) over the recover suite's fixture
-with an open generation whose own registration was torn, the add a killed conductor most often leaves:
+with an open generation whose own registration was torn, an add a killed conductor can leave:
 `WorkspaceManager::derive` after the tear returned `Err(Git { message: "git worktree list --porcelain -z
 failed in …/repo: fatal: failed to read .git/worktrees/k0-g0/commondir: Success" })`. A whole
 `run_recovery_order` with a manager derived **before** the tear and the manager as its refs returned the
