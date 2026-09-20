@@ -191,6 +191,27 @@ disallowed-methods = [
     { path = "upstroke::engine::coordinator::run_harness_inner_on", reason = "UPSTROKE-WRAPPER: run_harness_inner_with_id with the production id draw supplied" },
     { path = "upstroke::engine::coordinator::Run::drain_and_report", reason = "UPSTROKE-WRAPPER: drains the legacy run; re-materialises answered questions through interaction::write_question" },
     { path = "upstroke::engine::resume::resume_harness_inner_on", reason = "UPSTROKE-WRAPPER: the legacy resume conductor; re-materialises open questions through interaction::write_question" },
+    # The v0.1 conductor's six public entry points and their four seams, moved
+    # out of the engine facade into the conductor modules they drive on
+    # 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`), which is what lets
+    # `src/engine/mod.rs` carry no allow: it re-exports the six and calls
+    # nothing. Each reaches its conductor without leaving its file, so
+    # `effects/wrappers.toml` classifies all ten effectful and they are denied
+    # here like the conductors above. A denial binds a DefId, not a spelling, so
+    # a call through the re-export `upstroke::engine::run` is refused as
+    # `upstroke::engine::coordinator::run`; the callers are `src/main.rs`,
+    # `src/engine/tests.rs` and `src/runner/container/resolve/tests.rs`, each
+    # under its own recorded allow of `clippy::disallowed_methods`.
+    { path = "upstroke::engine::coordinator::run", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_with with the built-in adapters supplied" },
+    { path = "upstroke::engine::coordinator::run_with", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_harness over a Harness of the given adapters" },
+    { path = "upstroke::engine::coordinator::run_harness", reason = "UPSTROKE-WRAPPER: the legacy run entry point; run_harness_on with the legacy-workspace HostRunner supplied" },
+    { path = "upstroke::engine::coordinator::run_harness_on", reason = "UPSTROKE-WRAPPER: the legacy run on an explicit Runner; run_contained with production's containment step supplied" },
+    { path = "upstroke::engine::coordinator::run_contained", reason = "UPSTROKE-WRAPPER: establishes containment, then drives run_harness_inner_on" },
+    { path = "upstroke::engine::resume::resume", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_with with the built-in adapters supplied" },
+    { path = "upstroke::engine::resume::resume_with", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_harness over a Harness of the given adapters" },
+    { path = "upstroke::engine::resume::resume_harness", reason = "UPSTROKE-WRAPPER: the legacy resume entry point; resume_harness_on with the legacy-workspace HostRunner supplied" },
+    { path = "upstroke::engine::resume::resume_harness_on", reason = "UPSTROKE-WRAPPER: the legacy resume on an explicit Runner; resume_contained with production's containment step supplied" },
+    { path = "upstroke::engine::resume::resume_contained", reason = "UPSTROKE-WRAPPER: establishes containment, then drives resume_harness_inner_on" },
 
     # -- docker invocation helpers ------------------------------------------
     # `mechanism` (1) names "docker invocation helpers" in its own enumeration,

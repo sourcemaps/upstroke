@@ -574,7 +574,6 @@ fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> boo
 }
 
 pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[
-    "src/engine/mod.rs",
     "src/engine/coordinator.rs",
     "src/engine/resume.rs",
     "src/engine/attempt.rs",
@@ -773,7 +772,12 @@ fn declares_visibility(prefix: &str) -> bool {
             rest = rest.strip_suffix(modifier).unwrap_or(rest).trim_end();
         }
     }
-    rest.ends_with("pub") || rest.ends_with("pub(crate)") || rest.ends_with("pub(super)")
+    if rest.ends_with("pub") {
+        return true;
+    }
+    rest.strip_suffix(')')
+        .and_then(|restriction| restriction.rsplit_once('('))
+        .is_some_and(|(before, _)| before.trim_end().ends_with("pub"))
 }
 
 fn find_header_brace(region: &str, from: usize) -> Option<usize> {
@@ -1307,6 +1311,23 @@ pub(crate) mod census_domain {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ScannedInlineModule {
+        pub(crate) name: String,
+        pub(crate) inline_path: Vec<String>,
+        pub(crate) guard: String,
+        pub(crate) test_only: bool,
+        pub(crate) line: usize,
+        pub(crate) outer_attributes: String,
+        pub(crate) body: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub(crate) struct ScannedModules {
+        pub(crate) declared: Vec<ScannedDeclaration>,
+        pub(crate) inline: Vec<ScannedInlineModule>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum ScanRefusal {
         UnclosedAttribute {
             line: usize,
@@ -1388,6 +1409,10 @@ pub(crate) mod census_domain {
     pub(crate) fn scan_module_declarations(
         source: &str,
     ) -> Result<Vec<ScannedDeclaration>, ScanRefusal> {
+        scan_modules(source).map(|scanned| scanned.declared)
+    }
+
+    pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {
         struct Scope {
             open_depth: usize,
             name: String,
@@ -1401,10 +1426,12 @@ pub(crate) mod census_domain {
         let line_of = |at: usize| blanked[..at].matches('\n').count() + 1;
 
         let mut found = Vec::new();
+        let mut inline = Vec::new();
         let mut scopes: Vec<Scope> = Vec::new();
         let mut top_level: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut pending: Vec<Predicate> = Vec::new();
         let mut pending_path = false;
+        let mut attributes_from: Option<usize> = None;
         let mut depth = 0_usize;
         let mut i = 0;
 
@@ -1457,6 +1484,9 @@ pub(crate) mod census_domain {
                     "cfg_attr" if raw.contains("path") => pending_path = true,
                     _ => {}
                 }
+                if !inner {
+                    attributes_from.get_or_insert(i);
+                }
                 i = close + 1;
                 continue;
             }
@@ -1471,6 +1501,7 @@ pub(crate) mod census_domain {
                 }
                 pending.clear();
                 pending_path = false;
+                attributes_from = None;
                 i = close + 1;
                 continue;
             }
@@ -1497,6 +1528,21 @@ pub(crate) mod census_domain {
                 preds.extend(pending.iter().cloned());
                 match body {
                     Some(brace) => {
+                        let effective = Predicate::all(preds);
+                        let close =
+                            super::matching(bytes, brace, b'{', b'}').unwrap_or(bytes.len());
+                        inline.push(ScannedInlineModule {
+                            name: name.clone(),
+                            inline_path: scopes.iter().map(|scope| scope.name.clone()).collect(),
+                            guard: effective.render(),
+                            test_only: entails_test(&effective),
+                            line: line_of(name_at),
+                            outer_attributes: attributes_from
+                                .and_then(|from| source.get(from..i))
+                                .unwrap_or_default()
+                                .to_owned(),
+                            body: source.get(brace + 1..close).unwrap_or_default().to_owned(),
+                        });
                         scopes.push(Scope {
                             open_depth: depth,
                             name,
@@ -1532,11 +1578,13 @@ pub(crate) mod census_domain {
                     }
                 }
                 pending_path = false;
+                attributes_from = None;
                 continue;
             }
 
             pending.clear();
             pending_path = false;
+            attributes_from = None;
             if byte == b'{' {
                 depth += 1;
                 i += 1;
@@ -1557,7 +1605,10 @@ pub(crate) mod census_domain {
             }
             i += 1;
         }
-        Ok(found)
+        Ok(ScannedModules {
+            declared: found,
+            inline,
+        })
     }
 
     struct MacroInvocation {
@@ -2013,6 +2064,32 @@ pub(crate) mod lint_levels {
             at = close + 1;
         }
         resolution
+    }
+
+    #[must_use]
+    pub(crate) fn leading_inner_attributes(source: &str) -> &str {
+        let blanked = super::blank_comments_and_strings(source);
+        let bytes = blanked.as_bytes();
+        let mut end = 0;
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at].is_ascii_whitespace() {
+                at += 1;
+                continue;
+            }
+            if bytes[at] != b'#'
+                || bytes.get(at + 1) != Some(&b'!')
+                || bytes.get(at + 2) != Some(&b'[')
+            {
+                break;
+            }
+            let Some(close) = super::matching(bytes, at + 2, b'[', b']') else {
+                break;
+            };
+            at = close + 1;
+            end = at;
+        }
+        source.get(..end).unwrap_or_default()
     }
 
     #[must_use]

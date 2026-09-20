@@ -11,23 +11,33 @@ implementation cannot return Err. The discard does not hide an I/O error.
 
 ## `#![deny(`
 
-**Fenced against the facade's allow, and behaviour-preserving.** Since #306
-`src/engine/mod.rs` carries `#![allow(clippy::disallowed_methods)]` for the
-two conductor entry points its facade calls, and a lint level inherits down
-the module tree: this file wrote no attribute, so it inherited that allow, and
-the placement scan -- which records what a file writes -- recorded nothing.
+**Fenced against an allow above it, and behaviour-preserving.** From #306
+until 2026-09-20 `src/engine/mod.rs` carried
+`#![allow(clippy::disallowed_methods)]` for the two conductor entry points its
+facade called, and a lint level inherits down the module tree: this file wrote
+no attribute, so it inherited that allow, and the placement scan -- which
+records what a file writes -- recorded nothing.
 The third review of #306 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) proved
 the consequence in `assembly.rs`, a sibling under the same parent: a `pub(super) fn` calling `std::fs::write`,
 referenced from a production body under `engine::topology`, passed clippy and
 the whole suite. This attribute restores the level the file had before the
 facade's allow existed -- the three governed lints were already errors under
 `-D warnings` -- and changes nothing else: no statement here reaches a denied
-primitive, so the deny reddens nothing today and only matters against the
+primitive, so the deny reddens nothing today and only matters against an
 inherited allow. It is the form `src/engine/topology.rs` wrote first, needs no
 row in `effects/allowlist.toml` (the scan records `allow` and `expect`, never
 `deny`), and
 `effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
 refuses its absence.
+
+**The facade's allow is gone, and the fence stays.** On 2026-09-20 the
+facade's entry points moved into `coordinator` and `resume`, the facade stopped
+calling anything denied, and its allow was removed with its row
+(`PR306-FACADE-INLINE-ESCAPE`); it denies the same three lints itself now. So
+nothing above this file allows anything today. The guard holds this attribute
+regardless, for every module the facade declares: a module that leans on its
+parent's level is exempt the day that level changes, which is exactly what #306
+did to this one.
 
 ## `Parked {`
 

@@ -9,7 +9,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::time::Duration;
 
-use crate::agent::{AdapterSource, Caps};
+use crate::agent::proc::NoHooks;
+use crate::agent::{AdapterSource, BuiltinAdapters, Caps};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -24,6 +25,7 @@ use crate::ladder::{
 use crate::review::{PassBinding, ReviewPass, ReviewPlan};
 use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::Runner;
+use crate::runner::host::{Contained, HostRunner, contain_write_command};
 use crate::topology::effects::EventSite;
 use crate::ulid;
 use crate::util;
@@ -40,6 +42,41 @@ use super::preflight::{
 use super::report::{
     ReportHeader, RunOutcome, RunReport, TaskRunStatus, build_report, last_reason,
 };
+
+pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {
+    run_with(opts, &BuiltinAdapters)
+}
+
+pub fn run_with(
+    opts: &RunOptions,
+    adapters: &dyn AdapterSource,
+) -> Result<RunReport, UpstrokeError> {
+    run_harness(opts, &Harness::new(adapters))
+}
+
+pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
+    run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
+}
+
+pub(super) fn run_harness_on(
+    opts: &RunOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+) -> Result<RunReport, UpstrokeError> {
+    run_contained(opts, harness, runner, || {
+        contain_write_command(&mut NoHooks)
+    })
+}
+
+pub(super) fn run_contained(
+    opts: &RunOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+    contain: impl FnOnce() -> Result<Contained, UpstrokeError>,
+) -> Result<RunReport, UpstrokeError> {
+    let contained = contain()?;
+    run_harness_inner_on(opts, harness, runner, &contained).map(|(report, _)| report)
+}
 
 #[cfg(test)]
 pub(super) fn run_harness_inner(

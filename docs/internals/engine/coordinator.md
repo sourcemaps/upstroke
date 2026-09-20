@@ -13,6 +13,104 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
+
+The v0.1 conductor's public entry points -- `run`, `run_with` and
+`run_harness` -- and the two seams below them, defined here and re-exported by
+[`the facade`](mod.md) as `engine::run`, `engine::run_with` and
+`engine::run_harness`, the paths they always had.
+
+**They moved here from `src/engine/mod.rs` on 2026-09-20, unchanged but for
+one path.** `run_contained` calls `run_harness_inner_on`, which is denied by
+path, so whichever module holds that call needs an allow of
+`clippy::disallowed_methods`. The facade held it, and its allow covered
+everything else anyone wrote in the facade -- an inline module, a private
+function -- all of it visible to `engine::topology` and none of it classified:
+the two routes of `PR306-FACADE-INLINE-ESCAPE`. This module already carries a
+recorded allow and is a classified module, so the five are rows of
+`effects/wrappers.toml` (`effectful`: each reaches the coordinator without
+leaving this file) and denied by path in `clippy.toml` like the conductors
+below. The bodies are what they were; the call in `run_contained` lost its
+`coordinator::` prefix and the two seams became `pub(super)`.
+
+## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())`
+
+The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
+
+`HostRunner::for_legacy_workspace` differs from `HostRunner::new` in one
+field: its children read the object graph `refs/replace/*` describes, which is
+the graph `src/workspace.rs` writes the workspace and its gate snapshots from.
+This function drives the *schema-1..3* coordinator and nothing else, so it is
+the one place that choice belongs. See
+[`ObjectGraph`](../runner/host/environment.md) for why a consumer has to read
+its own producer's graph, and `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for
+the deferred finding about that graph being the replaced one.
+
+## `pub(super) fn run_harness_on(`
+
+The same run, on an explicit [`Runner`].
+
+The boundary is a parameter rather than a `Harness` field because it is not
+an injectable stand-in for a collaborator: it is where every process of
+this run executes, and DESIGN.md:612 makes it a configured choice —
+"`[runner]` config selects `host` or `container`". PR6 passes the container
+runner here; PR4 passes [`HostRunner`] and nothing else.
+
+**`pub(super)`, no wider, and it has to be.**
+`decisions.phase_zero_modules.visibility` is "pub(super) only where a sibling
+or tests reference an item; **no new pub or pub(crate)**; public paths
+unchanged", and the module's own entry enumerates the facade without it. The
+reason is not bookkeeping: this function drives the *schema-1..3* coordinator,
+and `invariants[22]` is "schema-1..3 runs are host-only and no run changes its
+boundary or image between epochs". A `pub` re-exported by the facade lets a
+downstream crate execute a legacy run off-host, with no `RunnerPolicy` to
+record it and no refusal — and lets the same run come back on `HostRunner` at
+the next resume. It was a private item of `src/engine/mod.rs` until
+2026-09-20; it is `pub(super)` here because `engine::tests` drives it with a
+recording runner, and `pub(super)` from this module is `engine` and its
+descendants — exactly the modules the private facade item was visible to.
+`engine` is where it stops: this module is private, the facade re-exports the
+three `pub fn`s above and not this, and
+`the_engine_facade_exposes_exactly_the_items_the_packet_enumerates` refuses a
+`pub` or `pub(crate)` spelling of it and a re-export of it alike. Not being
+exported is what makes the off-host run unreachable rather than merely
+undocumented. It is denied by path with the rest of this file's conductors, so
+a topology module cannot call it either.
+
+### Errors
+
+Whatever the run refuses or fails on.
+
+## `run_contained(opts, harness, runner, || {`
+
+`NoHooks` is what production passes the process funnel, and the
+containment step is threaded the same way: the observer exists so the
+step has a drivable failure path (`runner::host::contain_write_command`),
+and production arms nothing.
+
+## `pub(super) fn run_contained(`
+
+The same run, over the containment step it must perform **first**.
+
+Every public entry point above reaches the coordinator through here, so
+this one call is what makes `run`, `run_with` and `run_harness` write
+commands in INV-18's sense: "on Windows every host child is a member of the
+coordinator's ambient kill-on-close Job Object from creation", and
+`expected_failures_refusals[1]`, "ambient job cannot be created or joined
+(Windows) → write command refuses at startup with a diagnostic". A
+downstream crate calling `engine::run_with` is a coordinator exactly as the
+CLI is; before this it established nothing, so a kill between
+`CreateProcessW` and private-job assignment left the suspended stub alive
+and a real ambient failure could not produce the required refusal.
+
+`contain` is a parameter for the same reason `src/main.rs`'s `dispatch`
+takes its join: no machine here can make the real one fail, and the
+*ordering* between containment and the first thing the coordinator does is
+then a testable fact rather than a written-down one
+(`a_facade_run_refuses_before_any_effect_when_containment_fails`). It is
+not a hole in the guarantee: `Contained` has a private field, so the only
+closure that can return one is one that establishes containment.
+
 ## `pub(super) fn run_harness_inner(`
 
 Also hands back the state the run ended with — its own fold of its own log.
@@ -22,7 +120,7 @@ same file side by side. Nothing in the engine reads state back.
 
 ## `pub(super) fn run_harness_inner_on(`
 
-The same run, on an explicit boundary. See [`super::run_harness_on`].
+The same run, on an explicit boundary. See [`run_harness_on`].
 
 `_contained` is INV-18's host portion as a capability: "on Windows every
 host child is a member of the coordinator's ambient kill-on-close Job

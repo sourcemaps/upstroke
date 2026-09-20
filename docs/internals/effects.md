@@ -533,16 +533,21 @@ test: a frozen list that lived in the file it freezes would agree with any
 edit to that file.
 
 One entry was added after PR5, by the owner's decision on #306
-(`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs`, the v0.1 conductor's
-facade, whose only denied calls are the two conductor entry points denied by
-path in that change. The list and the TOML grew in the same commit, which is
-the only way `the_legacy_section_is_frozen_and_may_only_shrink` admits an
-entry; the row in `effects/allowlist.toml` says what the allow costs and how
-every module below the facade is kept from inheriting it: `src/engine/topology.rs`
-and the five siblings that write no allow of their own deny the governed lints
-at file level, the rest record their own allows in the same section, and
-`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
-holds that boundary from the facade's own `mod` declarations.
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and removed again on 2026-09-20:
+`src/engine/mod.rs`, the v0.1 conductor's facade, whose only denied calls were
+the two conductor entry points denied by path in that change. The list and the
+TOML grew in the same commit, which is the only way
+`the_legacy_section_is_frozen_and_may_only_shrink` admits an entry, and the row
+said how every module below the facade was kept from inheriting the allow. It
+could not say the same of what the facade itself held: the fourth review of
+#306 (`PR306-FACADE-INLINE-ESCAPE`) reached `std::fs::write` from
+`engine::topology` through an inline module written in the facade and through
+a function placed in it, both under that allow, neither classified. The row's
+own `shrinks_when` was the remedy -- the entry points moved into
+`src/engine/coordinator.rs` and `src/engine/resume.rs`, the facade re-exports
+them and calls nothing denied -- so the row and this entry went together, and
+the list is again what PR5 froze. Putting the facade back needs an edit here,
+which is the point of holding the list in the code.
 
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
@@ -751,8 +756,8 @@ Three shapes, because "pubfn" in the packet's sentence has three of them in
 this tree and a classification that saw one would be complete against a
 domain nobody drew:
 
-* `pub fn` / `pub(crate) fn` / `pub(super) fn` items, free or in an inherent
-  `impl`;
+* `pub fn` / `pub(crate) fn` / `pub(super) fn` / `pub(in a::b) fn` items, free
+  or in an inherent `impl`;
 * every `fn` inside an `impl <Trait> for <Type>` block, which is reachable
   through the trait whatever its own visibility says;
 * associated `fn`s of a public trait's default bodies, which are the same
@@ -805,6 +810,19 @@ the `pub(crate)` arm of the first copy left the whole suite green, because
 the second copy still caught it. Two hand-maintained lists of three strings
 disagree eventually, and the one that disagreed silently would be this one.
 Measured, mutation `the-parser-misses-pub-crate`.
+
+**Any restriction, not a list of two.** The arm read `pub`, `pub(crate)` and
+`pub(super)`, and `pub(in crate::engine) fn` is as visible to a module under
+`engine::topology` as `pub(super) fn` written in a child of `engine` is, so a
+function spelled that way in an allowed, classified file would have stood
+outside the domain: unclassified, undenied, and reachable. Found by reading
+this function while closing `PR306-FACADE-INLINE-ESCAPE` on 2026-09-20, not by
+a witness, and widened then: a `pub` followed by a parenthesised restriction of
+any content counts, which admits `pub(self)` too and fails closed by doing so
+-- a name the domain holds needlessly costs a row, and a name it misses costs
+the guarantee. The widening added no name to any classified module at that
+head; `the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both the
+path form and a spaced one.
 
 ## `fn find_header_brace(region: &str, from: usize) -> Option<usize> {`
 
@@ -1344,6 +1362,55 @@ The effective predicate, rendered.
 
 Whether that predicate is false wherever `test` is false.
 
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedInlineModule {`
+
+One inline `mod name { … }`, at whatever depth it is written.
+
+[`ScannedDeclaration`] is a module that has a file. This is the other kind, and
+until 2026-09-20 the scan recorded nothing for it: the inline branch opened a
+scope, so that a declaration *inside* it carried the right `inline_path`, and
+moved on. No census could judge a module the scan never reported, and the
+fourth review of #306 (`PR306-FACADE-INLINE-ESCAPE`) used exactly that -- an
+attribute-free inline module in `src/engine/mod.rs`, under that file's allow,
+walked by no guard. An inline module has no file and no allowlist row; it
+inherits the level of the file it is written in and can write attributes of
+its own, outside its braces or inside them, so a census that wants to answer
+for it needs both.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) inline_path: Vec<String>,`
+
+The inline modules enclosing this one, outermost first; empty at the top level
+of the file. Its length is the depth.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) guard: String,`
+
+The effective `cfg` predicate, as [`ScannedDeclaration::guard`] renders it:
+what the module inherits from the inline modules around it and what is written
+on it.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) outer_attributes: String,`
+
+The run of outer attributes written directly above the item, verbatim from the
+raw source, comments between them included; empty when the item has none. The
+run starts at the first `#[` since the last token that was not an attribute,
+so an attribute on a neighbouring item is never handed to this one --
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`
+pins that against an attributed item and an attributed declaration directly
+above an attribute-free inline module.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) body: String,`
+
+The text between the braces, verbatim. Inner attributes are the head of it,
+which [`super::lint_levels::leading_inner_attributes`] reads. A body that never
+closes runs to the end of the file rather than refusing, so that
+[`scan_module_declarations`] refuses exactly what it refused before this
+record existed.
+
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedModules {`
+
+Both halves of one scan: the declarations that name a file, and the inline
+modules that do not.
+
 ## `pub(crate) mod census_domain` › `pub(crate) enum ScanRefusal {`
 
 Why a file's structure could not be read, and where.
@@ -1390,6 +1457,16 @@ A macro body holding a module-shaped token sequence.
 
 Every `mod` declaration in `source`, with the inline modules enclosing it
 and the effective `cfg` predicate it inherits.
+
+The out-of-line half of [`scan_modules`], and nothing else: every census that
+read declarations before the scan reported inline modules reads the same list
+to the byte, which
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`
+asserts by comparing the two entry points on one source.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {`
+
+The scan itself: one pass, both kinds of module.
 
 Pure over `&str`, which is what makes the refusals above drivable: the
 tree satisfies every one of them, so the only way to see one is to hand
@@ -1814,6 +1891,18 @@ parenthesis is what makes the prefix an exact attribute name.
 Ordered, and `forbid` is sticky. A weaker level after a
 `forbid` is `E0453`, which is the file not compiling rather
 than a level; anything else replaces what came before it.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
+
+The inner attributes a file, or an inline module's body, opens with: the raw
+text from its first byte to the end of the last `#![…]` before anything that
+is not one. Comments and blank lines between them are kept, because the text
+is handed on verbatim -- to `governed_allows`, to learn what an inline module
+writes inside its braces, and to a compiled fixture, as the header of a crate
+root that has to carry exactly what `src/engine/mod.rs` carries
+(`the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`).
+It stops where [`file_level_lint_resolution`] stops, for the same reason: an
+inner attribute after the first item is not one rustc accepts.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {`
 

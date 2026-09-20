@@ -1305,8 +1305,9 @@ supplies `ObjectGraph::AsReplaced` **itself**, so it measures what that
 value does and not whether the conductor selects it; the environment test
 beside it checks the constructor independently, and
 `production_reaches_a_spawn_through_one_host_runner_per_run` accepts either
-constructor by design. Measured at head `aa2728d`: reverting the two calls
-in `src/engine/mod.rs` to `HostRunner::new()` left all of them green at `0`,
+constructor by design. Measured at head `aa2728d`: reverting the two calls,
+then in `src/engine/mod.rs` and since 2026-09-20 in `src/engine/coordinator.rs`
+and `src/engine/resume.rs`, to `HostRunner::new()` left all of them green at `0`,
 so the whole legacy repair could have been reverted without a guard
 noticing.
 
@@ -2273,6 +2274,18 @@ unchanged", and `modules["src/engine/mod.rs"]` lists the facade item by
 item: the five `pub use` groups, `pub fn run/run_with/run_harness`, and
 `pub fn resume/resume_with/resume_harness`.
 
+**The six functions are re-exports since 2026-09-20, and the public paths are
+the packet's still.** Their definitions moved into `engine::coordinator` and
+`engine::resume`, the conductor modules they drive, so that the facade calls
+nothing denied and carries no allow (`PR306-FACADE-INLINE-ESCAPE`; the facade's
+own notes say why a file a topology module descends from cannot carry one). So
+the census reads the facade's `pub use` statements for them: the names
+re-exported from the two conductor modules are exactly the six, the facade
+declares no `pub fn` of its own, each conductor module's top-level `pub fn`s
+are exactly the ones re-exported from it -- so a seventh cannot be defined
+beside them and left unexported, waiting for a `pub use` -- and everything
+else re-exported is still the packet's five groups, eighteen names.
+
 This slice added `run_harness_on` and `resume_harness_on`, which take the
 boundary as a parameter. Inside the crate that is exactly right — it is how
 `engine::tests` drives a recording runner. Public, it is a hole in
@@ -2295,9 +2308,15 @@ in the file — so the census failed on its own explanation.
 `PR4-CENSUS-COMMENT-ORACLE`, and the same trick would have let any of the
 six widenings be smuggled past by writing it in a comment.
 
-## `let public_fns: BTreeSet<&str> = source`
+## `top_level_public_fns(source),`
 
-Every `pub fn` at the facade's top level.
+Every `pub fn` at the facade's top level, and there are none: the entry points
+are defined in the conductor modules and re-exported.
+
+## `let entry_points: BTreeSet<String> = public_facade_entry_points().into_iter().collect();`
+
+The six the packet enumerates, read from the facade's re-exports of the two
+conductor modules.
 
 ## `for widening in [`
 
@@ -2316,10 +2335,10 @@ this build's own recovery refuses — the frontier review of
 `75da796`, finding 1. A census that forbids five widenings and not
 the sixth is the shape of every fail-open needle this slice found.
 
-## `let mut reexported: BTreeSet<&str> = BTreeSet::new();`
+## `let reexported: BTreeSet<&str> = facade_reexports(source)`
 
-The re-exports, flattened. `pub use` is the other way a name reaches the
-public path, and the packet enumerates these too.
+The re-exports other than the entry points, flattened. `pub use` is the other
+way a name reaches the public path, and the packet enumerates these too.
 
 ## `"RunOptions",`
 
@@ -2341,15 +2360,33 @@ crate::events
 
 crate::ladder
 
-## `for private in ["fn run_harness_on(", "fn resume_harness_on("] {`
+## `let conductors = [`
 
-The boundary-taking helpers exist and are *not* public: this test would
-pass just as well if they had been deleted, which is not what it is for.
+The two conductor modules the entry points are re-exported from, each with its
+boundary-taking seam. The seams exist, as `pub(super)` items of their modules
+— which is `engine` and its descendants, the set the facade's private items
+were visible to — and are *not* public, by either spelling, and are not
+re-exported: this test would pass just as well if they had been deleted, which
+is not what it is for.
 
-## `fn public_facade_entry_points() -> Vec<&'static str> {`
+## `const CONDUCTOR_MODULES: [&str; 2] = ["coordinator", "resume"];`
+
+The modules whose re-exported functions are the engine's write-coordinator
+entry points.
+
+## `fn top_level_public_fns(production: &str) -> std::collections::BTreeSet<&str> {`
+
+Every `pub fn` written at the top level of a module's production code.
+
+## `fn facade_reexports(production: &str) -> Vec<(&str, Vec<&str>)> {`
+
+Each `pub use` statement of the facade as the path it re-exports from and the
+names it re-exports.
+
+## `fn public_facade_entry_points() -> Vec<String> {`
 
 The six public entry points of the facade, as the facade's own text spells
-them.
+them: the names it re-exports from the conductor modules.
 
 Read from `mod.rs` rather than written out, so a seventh public entry point
 cannot be added without appearing here — and therefore without being

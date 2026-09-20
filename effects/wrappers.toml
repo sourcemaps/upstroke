@@ -35,7 +35,11 @@
 # whose own body performs or hands out an effect. It is not the transitive
 # closure over the crate, because the transitive closure of "reaches an effect"
 # in a program whose purpose is to perform effects is the whole program -- it
-# would deny `engine::run_harness` and every CLI entry point beneath it. The
+# would deny every CLI entry point and everything between it and a wrapper.
+# (`engine::run_harness` was this sentence's example until 2026-09-20. It IS
+# denied since then, and not by that closure: it moved into
+# `src/engine/coordinator.rs`, where it reaches the conductor without leaving
+# its file, which is the walk this record applies.) The
 # residue that leaves is exactly one thing: a topology module reaching an effect
 # through a chain of undenied public functions, and that is closed from the other
 # end by `effects::tests::no_topology_module_calls_a_funnel_in_production`.
@@ -1049,10 +1053,34 @@ funnel = []
 # `engine::topology`, and denied by its path in clippy.toml. `Run` is
 # `pub(super)` too, so the inherent method is recorded with its receiver, as
 # `src/workspace.rs` records `Workspace::branch_exists`.
+#
+# The v0.1 conductor's three public run entry points and their two seams are
+# rows here since 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`), when they moved
+# out of `src/engine/mod.rs` so that the facade calls nothing denied and
+# carries no allow. `run_contained` establishes containment through the step
+# it is handed and calls `run_harness_inner_on`, the row above, without
+# leaving this file; `run_harness_on` is `run_contained` with production's
+# containment step supplied, `run_harness` is that on the legacy-workspace
+# `HostRunner`, `run_with` builds the `Harness`, and `run` supplies
+# `BuiltinAdapters` -- each reaches the coordinator through the one below it,
+# in this file, which is the module-closed walk the rule above states. The
+# three `pub fn`s are re-exported by `engine`, so `upstroke::engine::run`,
+# `::run_with` and `::run_harness` are the public paths they always were, and
+# clippy resolves a call through the re-export to the path denied here: their
+# callers are `src/main.rs`, `src/engine/tests.rs` and
+# `src/runner/container/resolve/tests.rs`, each under its own recorded allow of
+# `clippy::disallowed_methods`. The two seams are `pub(super)` because
+# `engine::tests` drives them; that is the set of modules the facade's private
+# items were visible to, no wider.
 effectful = [
     "Run::drain_and_report",
+    "run",
+    "run_contained",
+    "run_harness",
     "run_harness_inner_on",
     "run_harness_inner_with_id",
+    "run_harness_on",
+    "run_with",
 ]
 effectful_unnameable = []
 # `emit` appends through the Event funnel with `EventSite::LegacyAppend`;
@@ -1086,8 +1114,21 @@ funnel = []
 # only primitive is a read of the frozen plan. `pub(super)` in a private `mod`
 # of `engine`, reachable from every module under `engine::topology`, so denied
 # by its path.
+#
+# The three public resume entry points and their two seams are rows here since
+# 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`), moved out of `src/engine/mod.rs`
+# with the run entry points and for the same reason; `src/engine/coordinator.rs`'s
+# record states it. `resume_contained` establishes containment and calls
+# `resume_harness_inner_on` without leaving this file, and `resume_harness_on`,
+# `resume_harness`, `resume_with` and `resume` each reach it through the one
+# below, as the run entry points do.
 effectful = [
+    "resume",
+    "resume_contained",
+    "resume_harness",
     "resume_harness_inner_on",
+    "resume_harness_on",
+    "resume_with",
 ]
 effectful_unnameable = []
 effect_free = []

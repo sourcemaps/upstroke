@@ -1106,20 +1106,24 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
 
 #[test]
 fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
-    // #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs` allows
-    // `clippy::disallowed_methods` so the v0.1 conductor's facade can call the
-    // two denied entry points `coordinator::run_harness_inner_on` and
-    // `resume::resume_harness_inner_on`. A lint level is scoped by the module
-    // tree, so that allow reaches every module under `engine::topology` --
-    // forty files, none writing an attribute of its own -- and the placement
-    // scan cannot see it: `governed_allows` records what a file WRITES, and a
-    // child exempted by inheritance writes nothing. What stops the allow at
-    // the facade is `#![deny(..)]` on `src/engine/topology.rs`, the one root
-    // every topology child descends from. An attribute somebody can delete is
-    // a weaker guarantee than the absence of an allow ever was, so this test
-    // holds it twice: lexically, from the two files, and executed, by
-    // compiling the same shape -- a facade with this tree's allow, a topology
-    // root with this tree's deny, a child reaching one denied primitive per
+    // #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`) put `#![allow(clippy::disallowed_methods)]`
+    // on `src/engine/mod.rs` so the v0.1 facade could call two conductor entry
+    // points denied by path. A lint level is scoped by the module tree, so
+    // that allow reached every module under `engine::topology` -- forty files,
+    // none writing an attribute of its own -- and the placement scan could not
+    // see it: `governed_allows` records what a file WRITES, and a child
+    // exempted by inheritance writes nothing. What stopped it was
+    // `#![deny(..)]` on `src/engine/topology.rs`, the one root every topology
+    // child descends from. The facade's allow is gone since 2026-09-20
+    // (`PR306-FACADE-INLINE-ESCAPE`: its entry points moved into the conductor
+    // modules, and `the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
+    // holds that), and the root's deny stays: it is what keeps the topology
+    // closed against an allow written above it, by the facade again or by
+    // anything else, and an attribute somebody can delete is a weaker
+    // guarantee than the absence of an allow ever was. So this test holds it
+    // twice: lexically, from the two files, and executed, by compiling the
+    // same shape -- an ancestor with the allow #306 wrote, a topology root
+    // with this tree's deny, a child reaching one denied primitive per
     // governed lint -- against the real denylist, beside the shape without
     // the deny, which is what removing it would leave.
     const FACADE: &str = "src/engine/mod.rs";
@@ -1129,21 +1133,23 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
         "clippy::disallowed_types",
         "clippy::disallowed_macros",
     ];
+    const MODELLED_ANCESTOR_ALLOW: [&str; 1] = ["clippy::disallowed_methods"];
 
     let facade = fs::read_to_string(repo_root().join(FACADE)).expect(FACADE);
-    let allowed: BTreeSet<String> = governed_allows(&facade)
+    let written_by_the_facade: BTreeSet<String> = governed_allows(&facade)
         .iter()
-        .filter(|allow| allow.inner && allow.module_level && allow.keywords == ["allow"])
         .flat_map(|allow| allow.lints.iter().cloned())
         .collect();
-    let expected: BTreeSet<String> = ["clippy::disallowed_methods"]
+    let allowed: BTreeSet<String> = MODELLED_ANCESTOR_ALLOW
         .iter()
         .filter_map(|lint| normalize_lint(lint))
         .map(str::to_owned)
         .collect();
-    assert_eq!(
-        allowed, expected,
-        "{FACADE} allows a different set of governed lints than the one this test models"
+    assert!(
+        written_by_the_facade.is_subset(&allowed),
+        "{FACADE} allows {written_by_the_facade:?}, which is more than the ancestor allow this \
+         test models ({allowed:?}); the fixtures below would no longer show what the topology \
+         root's deny is held against"
     );
 
     let topology = fs::read_to_string(repo_root().join(TOPOLOGY_ROOT)).expect(TOPOLOGY_ROOT);
@@ -1155,8 +1161,9 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     assert_eq!(
         denied, GOVERNED,
         "{TOPOLOGY_ROOT} no longer denies every governed lint at file level, so every module \
-         under `engine::topology` inherits what {FACADE} allows and the placement scan cannot \
-         see it (`PR7-WRAPPERS-EMPTY-DOMAIN`, #306)"
+         under `engine::topology` inherits whatever a module above it allows -- as it inherited \
+         {FACADE}'s allow on #306 -- and the placement scan cannot see it \
+         (`PR7-WRAPPERS-EMPTY-DOMAIN`)"
     );
     let mut children = 0;
     for (path, source) in scanned_sources() {
@@ -1196,10 +1203,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
         ),
     )
     .expect("the denying topology fixture");
-    let facade_allow = format!(
-        "#![allow({})]\n",
-        allowed.iter().cloned().collect::<Vec<_>>().join(", ")
-    );
+    let facade_allow = format!("#![allow({})]\n", MODELLED_ANCESTOR_ALLOW.join(", "));
     let root = |allow: &str, topology_file: &str| {
         format!(
             "{allow}#[path = \"{topology_file}\"]\npub mod topology;\n\
@@ -1252,7 +1256,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
         "{control:#?}"
     );
 
-    // The facade's allow with nothing below it: the child's reach into a
+    // An ancestor's allow with nothing below it: the child's reach into a
     // denied wrapper goes unrefused, and no file wrote the allow that let it.
     let (ok, inherited) = lint_fixture(
         &scratch,
@@ -1266,7 +1270,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     assert_eq!(
         codes(&inherited),
         vec!["clippy::disallowed_macros", "clippy::disallowed_types"],
-        "a module-level allow on the facade did not reach the topology child, so the deny \
+        "a module-level allow on an ancestor did not reach the topology child, so the deny \
          this test holds guards nothing: {inherited:#?}"
     );
     assert_eq!(
@@ -1275,8 +1279,9 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
         "{inherited:#?}"
     );
 
-    // This tree's shape: the root's deny makes the child's three reaches build
-    // errors again, and the facade keeps the allow it exists for.
+    // This tree's root under that ancestor: the root's deny makes the child's
+    // three reaches build errors again, and the ancestor's own call stays
+    // under the allow it wrote.
     let (ok, tree) = lint_fixture(
         &scratch,
         "facade_tree",
@@ -1298,62 +1303,54 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     assert_eq!(
         naming(&tree, "upstroke::util::write_text"),
         1,
-        "the topology child reached a denied wrapper under the facade's allow and was not \
+        "the topology child reached a denied wrapper under an ancestor's allow and was not \
          refused: {tree:#?}"
     );
     assert_eq!(
         naming(&tree, "upstroke::util::write_json"),
         0,
-        "the facade's own call is what its allow is for: {tree:#?}"
+        "the ancestor's own call is what its allow is for: {tree:#?}"
     );
 }
 
-#[test]
-fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {
-    // #306, round 3 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`): the guard
-    // above holds the deny on `src/engine/topology.rs` and walks only the
-    // files under it. `src/engine/mod.rs` declares nine other children, and a
-    // lint level inherits into each of them just the same: `assembly`,
-    // `classify`, `options`, `preflight` and `report` wrote no attribute, so
-    // they inherited the facade's allow, the placement scan recorded nothing,
-    // and the third review proved it -- a `pub(super) fn` in
-    // `engine/assembly.rs` calling `std::fs::write`, referenced from a
-    // production body of `engine::topology::integrate`, passed clippy and the
-    // whole suite. So the boundary is walked from the facade's own `mod`
-    // declarations, recursively, never from a list: every module carries
-    // forward the allows in effect at its parent, and for each lint it
-    // inherits it must deny that lint at file level or write its own
-    // module-level allow that `effects/allowlist.toml` records; a module that
-    // inherits something and writes no allow at all carries the whole
-    // three-lint fence the topology root wrote first. Then the review's
-    // witness is compiled: a facade with this tree's allow, a sibling
-    // reaching `std::fs::write`, a denying topology module referencing the
-    // sibling -- open, the reach is unreported and the crate builds; fenced
-    // with the attribute the children write, it is a build error again.
-    use crate::effects::census_domain::{candidates_for, scan_module_declarations, sole_present};
+const ENGINE_FACADE: &str = "src/engine/mod.rs";
 
-    const FACADE: &str = "src/engine/mod.rs";
-    const GOVERNED: [&str; 3] = [
-        "clippy::disallowed_methods",
-        "clippy::disallowed_types",
-        "clippy::disallowed_macros",
-    ];
-    const SIBLING: &str = "pub(crate) fn r2_unrecorded_inherited_effect(\n\
-         \x20   p: &std::path::Path,\n\
-         ) -> std::io::Result<()> {\n\
-         \x20   std::fs::write(p, b\"r2 effect\")\n\
-         }\n";
+// What `src/engine/mod.rs` wrote from #306 (`94c21c45`) until 2026-09-20. The
+// facade writes nothing now, so the fixtures that show what an allow above a
+// module does to it state the allow they model instead of reading it.
+const FACADE_ALLOW_OF_306: &str = "#![allow(clippy::disallowed_methods)]\n";
 
-    let governed: BTreeSet<String> = GOVERNED
+struct EngineModule {
+    path: String,
+    parent: String,
+    test_only: bool,
+    inherited: BTreeSet<String>,
+    own: BTreeSet<String>,
+    denied: BTreeSet<String>,
+    source: String,
+    inline: Vec<crate::effects::census_domain::ScannedInlineModule>,
+}
+
+impl EngineModule {
+    fn in_effect(&self) -> BTreeSet<String> {
+        self.inherited
+            .difference(&self.denied)
+            .cloned()
+            .chain(self.own.iter().cloned())
+            .collect()
+    }
+}
+
+fn governed_lints_in_use() -> BTreeSet<String> {
+    USED_GOVERNED_LINTS
         .iter()
         .filter_map(|lint| normalize_lint(lint))
         .map(str::to_owned)
-        .collect();
-    let root = repo_root();
-    let roots = crate_roots();
-    let list = allowlist();
-    let recorded: BTreeMap<&str, BTreeSet<String>> = list
-        .funnel
+        .collect()
+}
+
+fn recorded_allows(list: &Allowlist) -> BTreeMap<&str, BTreeSet<String>> {
+    list.funnel
         .iter()
         .chain(list.legacy.iter())
         .map(|entry| {
@@ -1365,78 +1362,59 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
                 .collect();
             (entry.path.as_str(), allows)
         })
-        .collect();
-    let written_allows = |source: &str| -> BTreeSet<String> {
-        governed_allows(source)
+        .collect()
+}
+
+// Every module the engine facade declares, recursively, read from the `mod`
+// declarations themselves and never from a list: each entry carries the
+// governed lints allowed in effect at its parent, what it writes and denies at
+// file level, whether it is compiled only under `cfg(test)`, and the inline
+// modules its file holds at every depth. An out-of-line module declared inside
+// an inline one is resolved through the inline path, and inherits what is in
+// effect at the file that holds the declaration.
+fn engine_module_tree() -> Vec<EngineModule> {
+    use crate::effects::census_domain::{candidates_for, scan_modules, sole_present};
+
+    let root = repo_root();
+    let roots = crate_roots();
+    let mut pending: Vec<(String, String, bool, BTreeSet<String>)> = vec![(
+        ENGINE_FACADE.to_owned(),
+        String::new(),
+        false,
+        BTreeSet::new(),
+    )];
+    let mut walked: Vec<EngineModule> = Vec::new();
+    while let Some((path, parent, test_only, inherited)) = pending.pop() {
+        assert!(
+            walked.iter().all(|module| module.path != path),
+            "{path} is declared twice under {ENGINE_FACADE}"
+        );
+        let source = fs::read_to_string(root.join(&path)).expect("a module the walk resolved");
+        let own: BTreeSet<String> = governed_allows(&source)
             .iter()
             .filter(|allow| allow.inner && allow.module_level)
             .flat_map(|allow| allow.lints.iter().cloned())
-            .collect()
-    };
-
-    let facade = fs::read_to_string(root.join(FACADE)).expect(FACADE);
-    let allowed = written_allows(&facade);
-    let allowed_as_written: Vec<String> = governed_allows(&facade)
-        .iter()
-        .filter(|allow| allow.inner && allow.module_level)
-        .flat_map(|allow| allow.written.iter().cloned())
-        .collect();
-    assert!(
-        !allowed.is_empty(),
-        "{FACADE} allows no governed lint at module level, so nothing below it inherits one and \
-         this guard measures nothing; if the facade's allow is gone, retire this test with it"
-    );
-
-    // Each entry: a module's path relative to the root, what it inherits from
-    // its parent, and that parent.
-    let mut pending: Vec<(String, BTreeSet<String>, String)> =
-        vec![(FACADE.to_owned(), BTreeSet::new(), String::new())];
-    let mut visited: Vec<String> = Vec::new();
-    let mut fenced: Vec<String> = Vec::new();
-    let mut recording: Vec<String> = Vec::new();
-    while let Some((path, inherited, parent)) = pending.pop() {
-        let source = fs::read_to_string(root.join(&path)).expect("a module the walk resolved");
-        let own = written_allows(&source);
-        let denied: BTreeSet<String> = GOVERNED
+            .collect();
+        let denied: BTreeSet<String> = USED_GOVERNED_LINTS
             .iter()
             .filter(|lint| file_level_denies(&source, lint))
             .filter_map(|lint| normalize_lint(lint))
             .map(str::to_owned)
             .collect();
-        let rows = recorded.get(path.as_str());
-        for lint in &inherited {
-            let records = own.contains(lint) && rows.is_some_and(|allows| allows.contains(lint));
-            assert!(
-                denied.contains(lint) || records,
-                "{path}, declared by {parent}, neither denies `{lint}` at file level nor records its \
-                 own allow of it in {ALLOWLIST_TOML}, so it is exempt by inheritance from {parent}'s \
-                 allow and the placement scan cannot see it -- the third review's sibling witness \
-                 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`, #306); it writes {own:?} and the \
-                 allowlist records {rows:?}"
-            );
-        }
-        if !inherited.is_empty() {
-            if own.is_empty() {
-                assert_eq!(
-                    denied, governed,
-                    "{path} inherits {inherited:?} from {parent} and writes no allow of its own, so \
-                     it must carry the whole fence `src/engine/topology.rs` wrote first: every \
-                     governed lint denied at file level"
-                );
-                fenced.push(path.clone());
-            } else {
-                recording.push(path.clone());
-            }
-        }
-        let in_effect: BTreeSet<String> = inherited
-            .difference(&denied)
-            .cloned()
-            .chain(own.iter().cloned())
-            .collect();
+        let scanned = scan_modules(&source).unwrap_or_else(|refusal| panic!("{path}: {refusal}"));
+        let module = EngineModule {
+            path: path.clone(),
+            parent,
+            test_only,
+            inherited,
+            own,
+            denied,
+            source,
+            inline: scanned.inline,
+        };
+        let in_effect = module.in_effect();
         let declared_in = root.join(&path);
-        let declarations =
-            scan_module_declarations(&source).unwrap_or_else(|refusal| panic!("{path}: {refusal}"));
-        for declaration in declarations {
+        for declaration in scanned.declared {
             let candidates = candidates_for(
                 roots,
                 &declared_in,
@@ -1457,14 +1435,111 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
                 .expect("under the manifest")
                 .to_string_lossy()
                 .replace('\\', "/");
-            pending.push((child, in_effect.clone(), path.clone()));
+            pending.push((
+                child,
+                path.clone(),
+                test_only || declaration.test_only,
+                in_effect.clone(),
+            ));
         }
-        visited.push(path);
+        walked.push(module);
+    }
+    walked
+}
+
+#[test]
+fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {
+    // #306, round 3 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`): the guard
+    // above holds the deny on `src/engine/topology.rs` and walks only the
+    // files under it. `src/engine/mod.rs` declares nine other children, and a
+    // lint level inherits into each of them just the same: when the facade
+    // allowed `disallowed_methods`, `assembly`, `classify`, `options`,
+    // `preflight` and `report` wrote no attribute, so they inherited the
+    // allow, the placement scan recorded nothing, and the third review proved
+    // it -- a `pub(super) fn` in `engine/assembly.rs` calling `std::fs::write`,
+    // referenced from a production body of `engine::topology::integrate`,
+    // passed clippy and the whole suite. So the boundary is walked from the
+    // facade's own `mod` declarations, recursively, never from a list
+    // (`engine_module_tree`): every module carries forward the allows in
+    // effect at its parent, and for each lint it inherits it must deny that
+    // lint at file level or write its own module-level allow that
+    // `effects/allowlist.toml` records. The facade's allow is gone since
+    // 2026-09-20, and the fences #306 wrote are held anyway, whatever the
+    // facade writes: a module the facade declares itself states its own level
+    // -- the whole three-lint fence the topology root wrote first, or a
+    // recorded allow of its own -- so that the day an allow is written above
+    // them again, by anyone, it reaches nothing. Then the review's witness is
+    // compiled: an ancestor with the allow #306 wrote, a sibling reaching
+    // `std::fs::write`, a denying topology module referencing the sibling --
+    // open, the reach is unreported and the crate builds; fenced with the
+    // attribute the children write, it is a build error again.
+    const FACADE: &str = ENGINE_FACADE;
+    const GOVERNED: [&str; 3] = [
+        "clippy::disallowed_methods",
+        "clippy::disallowed_types",
+        "clippy::disallowed_macros",
+    ];
+    const SIBLING: &str = "pub(crate) fn r2_unrecorded_inherited_effect(\n\
+         \x20   p: &std::path::Path,\n\
+         ) -> std::io::Result<()> {\n\
+         \x20   std::fs::write(p, b\"r2 effect\")\n\
+         }\n";
+
+    let governed = governed_lints_in_use();
+    let list = allowlist();
+    let recorded = recorded_allows(&list);
+
+    let tree = engine_module_tree();
+    let mut fenced: Vec<&str> = Vec::new();
+    let mut recording: Vec<&str> = Vec::new();
+    for module in &tree {
+        let EngineModule {
+            path,
+            parent,
+            inherited,
+            own,
+            denied,
+            ..
+        } = module;
+        let rows = recorded.get(path.as_str());
+        for lint in inherited {
+            let records = own.contains(lint) && rows.is_some_and(|allows| allows.contains(lint));
+            assert!(
+                denied.contains(lint) || records,
+                "{path}, declared by {parent}, neither denies `{lint}` at file level nor records its \
+                 own allow of it in {ALLOWLIST_TOML}, so it is exempt by inheritance from {parent}'s \
+                 allow and the placement scan cannot see it -- the third review's sibling witness \
+                 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`, #306); it writes {own:?} and the \
+                 allowlist records {rows:?}"
+            );
+        }
+        let declared_by_the_facade = parent == FACADE;
+        if inherited.is_empty() && !declared_by_the_facade {
+            continue;
+        }
+        if own.is_empty() {
+            assert_eq!(
+                denied, &governed,
+                "{path}, declared by {parent}, writes no allow of its own, so it must carry the \
+                 whole fence `src/engine/topology.rs` wrote first -- every governed lint denied at \
+                 file level -- whether or not {parent} allows anything today: it inherits \
+                 {inherited:?}, and a module that leans on its parent's level is exempt the day \
+                 that level changes, which is what #306 did to it"
+            );
+            fenced.push(path);
+        } else {
+            assert!(
+                rows.is_some_and(|allows| own.is_subset(allows)),
+                "{path}, declared by {parent}, writes {own:?} and {ALLOWLIST_TOML} records {rows:?}"
+            );
+            recording.push(path);
+        }
     }
     assert!(
-        visited.len() > 40,
-        "only {} modules walked from {FACADE}: {visited:?}",
-        visited.len()
+        tree.len() > 40,
+        "only {} modules walked from {FACADE}: {:?}",
+        tree.len(),
+        tree.iter().map(|module| &module.path).collect::<Vec<_>>()
     );
     assert!(
         fenced.len() > 1 && recording.len() > 1,
@@ -1474,7 +1549,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
 
     // The review's witness, compiled: a sibling reaching `std::fs::write`, a
     // topology module carrying the root's deny and referencing the sibling,
-    // and a facade allowing what this tree's facade allows.
+    // and an ancestor allowing what this tree's facade allowed on #306.
     let scratch = scratch_dir("siblings");
     let fence = format!("#![deny({})]\n", GOVERNED.join(", "));
     fs::write(scratch.join("sibling-open.rs"), SIBLING).expect("the open sibling fixture");
@@ -1492,7 +1567,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
         ),
     )
     .expect("the topology fixture");
-    let facade_allow = format!("#![allow({})]\n", allowed_as_written.join(", "));
+    let facade_allow = FACADE_ALLOW_OF_306;
     let root_of = |allow: &str, sibling: &str| {
         format!(
             "{allow}#[path = \"{sibling}\"]\nmod sibling;\n\
@@ -1537,13 +1612,13 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
         "{control:#?}"
     );
 
-    // The facade's allow over an open sibling, the topology root denying: the
+    // The allow #306 wrote over an open sibling, the topology root denying: the
     // sibling's reach goes unreported, the crate builds, and no file wrote the
     // allow that let it -- the hole the third review executed.
     let (ok, hole) = lint_fixture(
         &scratch,
         "siblings_inherited",
-        &root_of(&facade_allow, "sibling-open.rs"),
+        &root_of(facade_allow, "sibling-open.rs"),
     );
     assert!(
         ok,
@@ -1551,16 +1626,17 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     );
     assert!(
         hole.is_empty(),
-        "the facade's allow did not reach the open sibling, so the fence this test holds guards \
+        "an allow above the open sibling did not reach it, so the fence this test holds guards \
          nothing: {hole:#?}"
     );
 
-    // This tree's shape: the sibling carries the fence the children write, its
-    // reach is a build error again, and the facade keeps the allow it exists for.
+    // The same ancestor over this tree's sibling: it carries the fence the
+    // children write, its reach is a build error again, and the ancestor's own
+    // call stays under the allow it wrote.
     let (ok, tree) = lint_fixture(
         &scratch,
         "siblings_fenced",
-        &root_of(&facade_allow, "sibling-fenced.rs"),
+        &root_of(facade_allow, "sibling-fenced.rs"),
     );
     assert!(
         !ok,
@@ -1574,13 +1650,362 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     assert_eq!(
         naming(&tree, "std::fs::write"),
         1,
-        "the sibling reached a denied primitive under the facade's allow and was not refused: \
+        "the sibling reached a denied primitive under an ancestor's allow and was not refused: \
          {tree:#?}"
     );
     assert_eq!(
         naming(&tree, "upstroke::util::write_json"),
         0,
-        "the facade's own call is what its allow is for: {tree:#?}"
+        "the ancestor's own call is what its allow is for: {tree:#?}"
+    );
+}
+
+#[test]
+fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
+    // `PR306-FACADE-INLINE-ESCAPE`, the fourth review of #306. The two guards
+    // above fence what the facade DECLARES out of line. They said nothing of
+    // what it HOLDS, and under the allow #306 wrote on it two routes from
+    // `engine::topology` to a raw effect stayed green: an attribute-free
+    // inline `mod x { .. }` written in the facade, which no guard walked
+    // because the module scan emitted nothing for an inline module, and a
+    // function placed directly in the facade, which nothing classifies --
+    // `src/engine/mod.rs` is in neither `CLASSIFIED_MODULES` nor
+    // `effects/wrappers.toml`, and a PRIVATE item there is visible to every
+    // module under `engine::topology` all the same, so the classification
+    // domain, which reads `pub`, `pub(crate)` and `pub(super)`, could not have
+    // answered for it either. What closes both at once is that the facade
+    // allows nothing: its six entry points are defined in the conductor
+    // modules they drive and re-exported, so the file calls nothing denied.
+    //
+    // Held lexically, over a set derived from the walk rather than typed:
+    // every module that a topology module descends from writes no `allow` or
+    // `expect` of a governed lint in ANY form -- file level, on an inline
+    // module, on a `mod` declaration, on an item -- and has nothing allowed in
+    // effect; and the facade, the root no walked module stands above, denies
+    // all three governed lints at file level, so its level does not depend on
+    // what the crate root or the command line says. Held by execution: each
+    // route is compiled through `lint_fixture` against the real denylist under
+    // no attribute (the reach is reported), under the allow #306 wrote (it is
+    // not, and the crate builds -- the hole as the review executed it), and
+    // under THIS tree's facade header, read from the file, where it is a build
+    // error.
+    use crate::effects::lint_levels::leading_inner_attributes;
+
+    const INLINE_ROUTE: &str = "mod r3_inline_child {\n\
+         \x20   pub(super) fn r3_inline_inherited_effect(\n\
+         \x20       p: &std::path::Path,\n\
+         \x20   ) -> std::io::Result<()> {\n\
+         \x20       std::fs::write(p, b\"r3 inline effect\")\n\
+         \x20   }\n\
+         }\n";
+    const DIRECT_ROUTE: &str = "fn r3_unclassified_facade_effect(\n\
+         \x20   p: &std::path::Path,\n\
+         ) -> std::io::Result<()> {\n\
+         \x20   std::fs::write(p, b\"r3 facade effect\")\n\
+         }\n";
+
+    let governed = governed_lints_in_use();
+    let tree = engine_module_tree();
+    let by_path: BTreeMap<&str, &EngineModule> = tree
+        .iter()
+        .map(|module| (module.path.as_str(), module))
+        .collect();
+
+    let mut above_topology: BTreeSet<&str> = BTreeSet::new();
+    let mut topology_modules = 0;
+    for module in &tree {
+        if topology_modules_among(&[module.path.as_str()]).is_empty() {
+            continue;
+        }
+        topology_modules += 1;
+        let mut at = module.parent.as_str();
+        while let Some(parent) = by_path.get(at) {
+            above_topology.insert(at);
+            at = parent.parent.as_str();
+        }
+    }
+    assert!(
+        topology_modules > 30,
+        "only {topology_modules} topology modules were walked from {ENGINE_FACADE}"
+    );
+    assert!(
+        above_topology.contains(ENGINE_FACADE)
+            && above_topology
+                .iter()
+                .any(|path| topology_modules_among(&[*path]).is_empty()),
+        "the walk found no module outside the topology that a topology module descends from, \
+         which is the one thing this test exists to hold: {above_topology:?}"
+    );
+    for path in &above_topology {
+        let module = by_path.get(path).expect("a walked module");
+        let written = governed_allows(&module.source);
+        assert!(
+            written.is_empty(),
+            "{path} writes an allow of a governed lint, and a topology module descends from it. \
+             Everything in that file -- a private fn, an inline `mod x {{ .. }}` at any depth -- is \
+             visible to that topology module and covered by the allow, and nothing classifies \
+             it: the two routes the fourth review of #306 executed \
+             (`PR306-FACADE-INLINE-ESCAPE`). Move what needs the allow into a module that may \
+             carry one; found {written:#?}"
+        );
+        assert!(
+            module.in_effect().is_empty(),
+            "{path} has {:?} allowed in effect by inheritance from {}, and a topology module \
+             descends from it",
+            module.in_effect(),
+            module.parent
+        );
+    }
+    let facade = by_path
+        .get(ENGINE_FACADE)
+        .expect("the walk starts at the facade");
+    assert_eq!(
+        facade.denied, governed,
+        "{ENGINE_FACADE} no longer denies every governed lint at file level. No walked module \
+         stands above it, so without that deny its level -- and the level of every inline module \
+         and item in it -- is whatever the crate root and the command line say"
+    );
+
+    let scratch = scratch_dir("routes");
+    let fence = format!("#![deny({})]\n", USED_GOVERNED_LINTS.join(", "));
+    let header = leading_inner_attributes(&facade.source);
+    assert!(
+        header.contains("#![deny("),
+        "the facade's leading attributes were read as {header:?}, which carries no deny; the \
+         compiled shape below would not be this tree's"
+    );
+    let routes = [
+        (
+            "inline",
+            INLINE_ROUTE,
+            "crate::r3_inline_child::r3_inline_inherited_effect",
+        ),
+        (
+            "direct",
+            DIRECT_ROUTE,
+            "crate::r3_unclassified_facade_effect",
+        ),
+    ];
+    for (route, held_by_the_facade, reach) in routes {
+        fs::write(
+            scratch.join(format!("routes-topology-{route}.rs")),
+            format!(
+                "{fence}pub fn park(p: &std::path::Path) -> bool {{\n\
+                 \x20   {reach}(p).is_ok()\n\
+                 }}\n"
+            ),
+        )
+        .expect("the topology fixture");
+        let facade_of = |attributes: &str| {
+            format!(
+                "{attributes}\n{held_by_the_facade}\
+                 #[path = \"routes-topology-{route}.rs\"]\npub mod topology;\n"
+            )
+        };
+        let naming = |diagnostics: &[(String, String)]| -> usize {
+            diagnostics
+                .iter()
+                .filter(|(code, message)| {
+                    code == "clippy::disallowed_methods" && message.contains("std::fs::write")
+                })
+                .count()
+        };
+
+        // No attribute anywhere: the reach is reported, so the fixture sees
+        // what the next shape hides.
+        let (ok, control) =
+            lint_fixture(&scratch, &format!("routes_{route}_control"), &facade_of(""));
+        assert!(
+            ok,
+            "{route}: the control shape must compile with warnings only: {control:#?}"
+        );
+        assert_eq!(
+            (control.len(), naming(&control)),
+            (1, 1),
+            "{route}: {control:#?}"
+        );
+
+        // The allow #306 wrote: the reach goes unreported and the crate
+        // builds, with a denying topology module calling it -- the route as
+        // the fourth review executed it.
+        let (ok, hole) = lint_fixture(
+            &scratch,
+            &format!("routes_{route}_under_the_allow_of_306"),
+            &facade_of(FACADE_ALLOW_OF_306),
+        );
+        assert!(
+            ok && hole.is_empty(),
+            "{route}: the allow #306 wrote on the facade did not cover what the facade holds, so \
+             the refusal below proves nothing: ok={ok} {hole:#?}"
+        );
+
+        // This tree's facade, by its own leading attributes: a build error.
+        let (ok, tree_shape) = lint_fixture(
+            &scratch,
+            &format!("routes_{route}_this_tree"),
+            &facade_of(header),
+        );
+        assert!(
+            !ok,
+            "{route}: under {ENGINE_FACADE}'s own attributes the reach must be a build error, and \
+             the fixture built: {tree_shape:#?}"
+        );
+        assert_eq!(
+            (tree_shape.len(), naming(&tree_shape)),
+            (1, 1),
+            "{route}: a topology module reached `std::fs::write` through what the facade holds \
+             and was not refused for exactly that: {tree_shape:#?}"
+        );
+    }
+}
+
+fn inline_module_openers(source: &str) -> usize {
+    let blanked = blank_comments_and_strings(source);
+    let bytes = blanked.as_bytes();
+    let word = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'_';
+    let mut found = 0;
+    for (at, _) in blanked.match_indices("mod") {
+        let glued = at
+            .checked_sub(1)
+            .and_then(|before| bytes.get(before))
+            .is_some_and(|byte| word(byte) || *byte == b'#');
+        if glued {
+            continue;
+        }
+        let mut cursor = at + "mod".len();
+        let spaced = bytes.get(cursor).is_some_and(u8::is_ascii_whitespace);
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let name_from = cursor;
+        while bytes.get(cursor).is_some_and(word) {
+            cursor += 1;
+        }
+        if !spaced || cursor == name_from {
+            continue;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'{') {
+            found += 1;
+        }
+    }
+    found
+}
+
+#[test]
+fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {
+    // The half of `PR306-FACADE-INLINE-ESCAPE` that was a hole in the guards
+    // themselves. `every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+    // walked `mod x;` and nothing else, because `scan_module_declarations`
+    // emits a declaration only for the out-of-line form: its `mod x { .. }`
+    // branch opened a scope and recorded nothing, so an inline module was
+    // never a module to any guard. An inline module has no file and no row. It
+    // inherits the level of the file it is written in, and it can write
+    // attributes of its own, outside or inside its braces. So it is answered
+    // for by its FILE, and this test makes that an assertion instead of an
+    // assumption: `scan_modules` reports every inline module at every depth,
+    // the count is checked per file against a second, cruder reading of the
+    // text so a scan that goes quiet fails here, and for each one every
+    // governed lint allowed in effect -- by the file or by the module's own
+    // attributes -- must be recorded by the file's row in
+    // `effects/allowlist.toml`; and wherever anything is allowed in effect in
+    // production code, in a file or in an inline module of it, that file must
+    // be in `CLASSIFIED_MODULES`, whose census reads a file whole, inline
+    // modules included. A row with no classification behind it is what the
+    // facade had.
+    use crate::effects::lint_levels::leading_inner_attributes;
+
+    let list = allowlist();
+    let recorded = recorded_allows(&list);
+    let classified: BTreeSet<&str> = super::CLASSIFIED_MODULES.iter().copied().collect();
+
+    let tree = engine_module_tree();
+    let mut visited = 0;
+    let mut deepest = 0;
+    let mut files_holding_one = 0;
+    let mut exempt_in_production: Vec<&str> = Vec::new();
+    for module in &tree {
+        let path = module.path.as_str();
+        assert_eq!(
+            module.inline.len(),
+            inline_module_openers(&module.source),
+            "{path}: `scan_modules` reports {} inline modules and the text opens {} -- one of the \
+             two readings has gone quiet, and an inline module nobody reports is one nobody \
+             judges: {:?}",
+            module.inline.len(),
+            inline_module_openers(&module.source),
+            module
+                .inline
+                .iter()
+                .map(|inline| (inline.line, inline.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+        let rows = recorded.get(path);
+        let in_the_file = module.in_effect();
+        if !in_the_file.is_empty() && !module.test_only {
+            exempt_in_production.push(path);
+            assert!(
+                classified.contains(path),
+                "{path} has {in_the_file:?} allowed in effect in production code and is not in \
+                 `CLASSIFIED_MODULES`, so no census classifies what it holds and nothing denies \
+                 it to a topology module: the direct-facade route of `PR306-FACADE-INLINE-ESCAPE`"
+            );
+        }
+        if !module.inline.is_empty() {
+            files_holding_one += 1;
+        }
+        for inline in &module.inline {
+            visited += 1;
+            deepest = deepest.max(inline.inline_path.len() + 1);
+            let own_attributes = format!(
+                "{}\n{}\n",
+                inline.outer_attributes,
+                leading_inner_attributes(&inline.body)
+            );
+            let written: BTreeSet<String> = governed_allows(&own_attributes)
+                .iter()
+                .flat_map(|allow| allow.lints.iter().cloned())
+                .collect();
+            let named = if inline.inline_path.is_empty() {
+                inline.name.clone()
+            } else {
+                format!("{}::{}", inline.inline_path.join("::"), inline.name)
+            };
+            for lint in in_the_file.iter().chain(&written) {
+                assert!(
+                    rows.is_some_and(|allows| allows.contains(lint)),
+                    "{path}:{}: the inline module `{named}` has `{lint}` allowed in effect (the \
+                     file has {in_the_file:?} in effect and the module writes {written:?}) and \
+                     {ALLOWLIST_TOML} records {rows:?} for {path}; an inline module is answered \
+                     for by its file's row or by nothing",
+                    inline.line
+                );
+            }
+            let exempt = !in_the_file.is_empty() || !written.is_empty();
+            if exempt && !(module.test_only || inline.test_only) {
+                assert!(
+                    classified.contains(path),
+                    "{path}:{}: the inline module `{named}` is production code with a governed \
+                     lint allowed in effect, and {path} is not in `CLASSIFIED_MODULES`, so nothing \
+                     classifies the fns it holds: the inline route of \
+                     `PR306-FACADE-INLINE-ESCAPE`",
+                    inline.line
+                );
+            }
+        }
+    }
+    assert!(
+        visited > 10 && files_holding_one > 4 && deepest > 1,
+        "the walk from {ENGINE_FACADE} visited {visited} inline modules in {files_holding_one} \
+         files, the deepest at depth {deepest}; this tree holds more than that, nested ones \
+         included, so the derivation has stopped finding them"
+    );
+    assert!(
+        exempt_in_production.len() > 2,
+        "only {exempt_in_production:?} were found with a governed lint allowed in effect in \
+         production, so the classification half of this test judged nothing"
     );
 }
 
@@ -3121,6 +3546,159 @@ fn the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attri
         );
         assert!(scan_module_declarations(refused).is_err());
     }
+}
+
+#[test]
+fn the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write() {
+    use crate::effects::census_domain::{scan_module_declarations, scan_modules};
+    use crate::effects::lint_levels::leading_inner_attributes;
+
+    let source = concat!(
+        "//! docs\n",
+        "#![deny(clippy::disallowed_methods)]\n",
+        "\n",
+        "mod plain;\n",
+        "\n",
+        "#[cfg(test)]\n",
+        "#[allow(clippy::disallowed_methods)]\n",
+        "pub(crate) mod outer {\n",
+        "    #![allow(clippy::disallowed_types)]\n",
+        "    // prose that says mod fake { } is not a module\n",
+        "    const TEXT: &str = \"mod also_fake { }\";\n",
+        "\n",
+        "    pub mod inner {\n",
+        "        mod leaf;\n",
+        "        pub(super) mod deepest {}\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "#[derive(Debug)]\n",
+        "struct Carrier;\n",
+        "mod after_an_attributed_item {}\n",
+        "\n",
+        "#[allow(clippy::disallowed_macros)]\n",
+        "mod declared;\n",
+        "mod after_an_attributed_declaration {}\n",
+    );
+    let scanned = scan_modules(source).expect("the fixture scans");
+
+    // The out-of-line half is, to the byte, what the older entry point answers,
+    // so no census that reads declarations sees a different list.
+    assert_eq!(
+        scanned.declared,
+        scan_module_declarations(source).expect("the fixture scans")
+    );
+    let declared: Vec<(&str, Vec<&str>)> = scanned
+        .declared
+        .iter()
+        .map(|declaration| {
+            (
+                declaration.name.as_str(),
+                declaration.inline_path.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        vec![
+            ("plain", vec![]),
+            ("leaf", vec!["outer", "inner"]),
+            ("declared", vec![]),
+        ]
+    );
+
+    let inline: Vec<(&str, Vec<&str>, usize, bool)> = scanned
+        .inline
+        .iter()
+        .map(|module| {
+            (
+                module.name.as_str(),
+                module.inline_path.iter().map(String::as_str).collect(),
+                module.line,
+                module.test_only,
+            )
+        })
+        .collect();
+    assert_eq!(
+        inline,
+        vec![
+            ("outer", vec![], 8, true),
+            ("inner", vec!["outer"], 13, true),
+            ("deepest", vec!["outer", "inner"], 15, true),
+            ("after_an_attributed_item", vec![], 21, false),
+            ("after_an_attributed_declaration", vec![], 25, false),
+        ],
+        "every inline module, at every depth, in source order, and nothing a comment or a \
+         string spells"
+    );
+    assert_eq!(
+        inline_module_openers(source),
+        scanned.inline.len(),
+        "the cruder reading the engine guard checks the scan against disagrees with it on the \
+         fixture that pins both"
+    );
+
+    let written = |module: &crate::effects::census_domain::ScannedInlineModule| -> Vec<String> {
+        let own = format!(
+            "{}\n{}\n",
+            module.outer_attributes,
+            leading_inner_attributes(&module.body)
+        );
+        governed_allows(&own)
+            .iter()
+            .flat_map(|allow| allow.lints.iter().cloned())
+            .collect()
+    };
+    let by_name = |name: &str| {
+        scanned
+            .inline
+            .iter()
+            .find(|module| module.name == name)
+            .expect("an inline module the fixture writes")
+    };
+    assert_eq!(
+        written(by_name("outer")),
+        vec![
+            "disallowed_methods".to_owned(),
+            "disallowed_types".to_owned()
+        ],
+        "an inline module's own attributes are the ones outside its braces and the ones inside"
+    );
+    assert!(
+        by_name("outer").outer_attributes.contains("#[cfg(test)]"),
+        "{:?}",
+        by_name("outer").outer_attributes
+    );
+    for unattributed in [
+        "inner",
+        "deepest",
+        "after_an_attributed_item",
+        "after_an_attributed_declaration",
+    ] {
+        assert_eq!(
+            (
+                by_name(unattributed).outer_attributes.as_str(),
+                written(by_name(unattributed)),
+            ),
+            ("", Vec::new()),
+            "`{unattributed}` writes no attribute, and was handed one that belongs to a \
+             neighbour"
+        );
+    }
+
+    assert_eq!(
+        leading_inner_attributes(source),
+        "//! docs\n#![deny(clippy::disallowed_methods)]",
+        "the leading attributes of a file are read up to its first item and no further"
+    );
+    assert_eq!(
+        leading_inner_attributes("fn first() {}\n#![allow(x)]\n"),
+        ""
+    );
+    assert_eq!(
+        leading_inner_attributes("#![a]\r\n#![b(\r\n  c\r\n)]\r\nmod m;\r\n"),
+        "#![a]\r\n#![b(\r\n  c\r\n)]"
+    );
 }
 
 fn is_the_literal_mod_tests_form(name: &str, inline_path: &[String], guard: &str) -> bool {
