@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/effects.md`
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLIPPY_TOML: &str = "clippy.toml";
 
@@ -735,17 +735,7 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    for (index, _) in region.match_indices("fn ") {
-        if index > 0 && is_ident_byte(bytes[index - 1]) {
-            continue;
-        }
-        let Some(name) = region[index + 3..]
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .next()
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
+    for (index, name) in declared_fns(&region) {
         let visible = declares_visibility(&region[..index]);
         let in_trait_impl = trait_impl_spans
             .iter()
@@ -761,13 +751,47 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
+#[must_use]
+pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = BTreeMap::new();
+    for (_, name) in declared_fns(&region) {
+        if reachable.contains(name) {
+            *bearers.entry(name.to_owned()).or_insert(0) += 1;
+        }
+    }
+    bearers
+}
+
+fn declared_fns(region: &str) -> Vec<(usize, &str)> {
+    let bytes = region.as_bytes();
+    region
+        .match_indices("fn ")
+        .filter(|(index, _)| {
+            index
+                .checked_sub(1)
+                .and_then(|before| bytes.get(before))
+                .is_none_or(|byte| !is_ident_byte(*byte))
+        })
+        .filter_map(|(index, _)| {
+            region
+                .get(index + 3..)?
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(|name| (index, name))
+        })
+        .collect()
+}
+
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn declares_visibility(prefix: &str) -> bool {
     let mut rest = prefix.trim_end();
-    for modifier in ["unsafe", "const", "async"] {
+    for modifier in ["extern", "unsafe", "const", "async"] {
         for _ in 0..3 {
             rest = rest.strip_suffix(modifier).unwrap_or(rest).trim_end();
         }

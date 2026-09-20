@@ -824,6 +824,38 @@ the guarantee. The widening added no name to any classified module at that
 head; `the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both the
 path form and a spaced one.
 
+**`extern` is a modifier too.** The review of `409a6138` handed the widened
+recogniser `pub(in crate::engine) extern "Rust" fn probe() {}` and got no
+name: the ABI string is blanked with every other literal, which leaves
+`extern` as the word before `fn`, and the list of modifiers stripped from the
+end of the prefix did not hold it. It is stripped first now, being the last
+modifier Rust's grammar admits before `fn`, and the shape test pins the path
+form and `pub unsafe extern "C" fn`. This is a recogniser of the shapes the
+tree and its reviews have produced, not of Rust's item grammar, and nothing
+here should be read as saying otherwise.
+
+## `pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {`
+
+For each name [`externally_reachable_fns`] derives, how many `fn` declarations
+of the file's production code bear it -- every one, whatever its own
+visibility, wherever in the file it is written.
+
+The record classifies by bare name, so a name is the whole of a callable's
+identity there, and a denial names one path. One name borne by two callables
+is one row answering for both. That is ordinary -- two `Display` impls, a
+`#[cfg(unix)]` and a `#[cfg(windows)]` twin, a trait's declaration and its
+impl -- and it is also how a function is added to a classified module without
+the record changing: give it a name that is already classified
+(`PR309-INLINE-WRAPPER-NAME-COLLISION`). The census pins every count above one
+in the record's `shared` table, so the second bearer of a name is a
+disagreement like a new name is.
+
+## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
+
+Every `fn name` a region declares, with its offset: the one reading both the
+domain and its multiplicity are made from, so they cannot disagree about what
+a declaration is.
+
 ## `fn find_header_brace(region: &str, from: usize) -> Option<usize> {`
 
 The `{` that opens an `impl` block's body, skipping generics and where-clauses.
@@ -1458,11 +1490,12 @@ A macro body holding a module-shaped token sequence.
 Every `mod` declaration in `source`, with the inline modules enclosing it
 and the effective `cfg` predicate it inherits.
 
-The out-of-line half of [`scan_modules`], and nothing else: every census that
-read declarations before the scan reported inline modules reads the same list
-to the byte, which
-`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`
-asserts by comparing the two entry points on one source.
+The out-of-line half of [`scan_modules`], and nothing else. The branch that
+emits a declaration is the one it always was; what holds that is the scan
+tests written before inline modules were reported, which pass unedited -- not
+the comparison of this entry point with [`scan_modules`] in
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`,
+which compares a function with its own delegate and pins only the adapter.
 
 ## `pub(crate) mod census_domain` › `pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {`
 

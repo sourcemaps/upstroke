@@ -45,7 +45,20 @@ names, so every public path is what it was. The allow, its row and its entry in
 `FROZEN_LEGACY_ALLOWLIST` are gone, and this file carries the fence its
 children carry instead: all three governed lints denied at file level, so that
 its level is stated here rather than left to the crate root and the command
-line. `effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
+line.
+
+**And it holds no code.** Its leading attributes, `mod x;` declarations and
+`use` re-exports are all this file may contain. The same guard refuses
+anything else, however it is spelled -- an inline module, a function, a
+constant, a macro definition or invocation, `include!`, an attribute on a
+declaration -- because an allow does not have to be written in the text it
+takes effect in: the review of `409a6138` (`PR309-FACADE-EXPANSION-ESCAPE`)
+brought an allowed inline module in here through `include!` and again through
+a macro that substitutes `mod` and `allow`, with every reading of this file's
+text green. A file that holds no code cannot hide any. Something that needs a
+home goes in a module this one declares.
+
+`effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
 refuses an allow written anywhere in this file again, in any form, refuses a
 missing deny, and compiles both of the review's routes under this file's own
 leading attributes, read from it, where each is a build error;

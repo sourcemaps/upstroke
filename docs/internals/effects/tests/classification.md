@@ -97,6 +97,75 @@ a review — and it is the half that omission attacks.
 A row may carry its receiver (`Workspace::branch_exists`) so the
 denied path can name it; the domain is over bare fn names.
 
+## `pub(super) mod checks` › `fn classification_disagreement(`
+
+One module's record against one source text: the names the domain derives that
+no class holds, the names a class holds that the domain does not derive, and
+how many were derived. Pure over the text, so that the census above and the
+regression test below judge a mutated source exactly as they judge the file.
+
+## `pub(super) mod checks` › `fn unpinned_shared_names(module: &ModuleClassification, source: &str) -> Vec<String> {`
+
+**A name is not a callable.** The record classifies by bare name -- the
+comparison above strips every row to its last path component, and
+`externally_reachable_fns` returns a set -- so two callables that share a name
+are one row, whatever each of them does, and a denial in `clippy.toml` names
+one path. The review of `409a6138` (`PR309-INLINE-WRAPPER-NAME-COLLISION`) used
+it: a `pub(crate) fn run` calling `std::fs::write`, in an attribute-free inline
+module of `src/engine/coordinator.rs`, referenced from a production body under
+`engine::topology`, passed clippy and the whole effects suite, because `run`
+was already an `effectful` row -- the entry point -- denied as
+`upstroke::engine::coordinator::run`, which is not the path of the second one.
+Renamed to a name nothing else bore, the same function failed the census as
+unclassified. The exemption was the collision.
+
+What the census promises is that a callable cannot be added to a classified
+module without the record changing. A new name changes it. A second bearer of
+an old name did not, and now does: for every derived name,
+`effects::reachable_fn_multiplicity` counts the `fn` declarations in the
+file's production code that bear it, and every count above one must be pinned
+in the module's `shared` table, exactly. The pins are not a list of
+suspicions: 69 names in 22 modules are shared today, all of them ordinary --
+`fmt` and `drop` for several types, `#[cfg(unix)]` and `#[cfg(windows)]`
+twins, a trait's declaration and its impls -- and the table says how many
+callables each row was written for. A pin that outlives its callables is
+refused too, so a count cannot be left high for the next arrival.
+
+**Chosen over carrying full identity through the record**, which is the other
+way out the review named. Identity would mean deriving an owner for every
+function -- its `impl`, its trait, its inline module -- and rewriting some 760
+rows and their denial check to carry it: a rebuild of shared enforcement
+machinery whose blast radius is every classified module, to buy one thing the
+count does not. What the count does not see is a swap -- one bearer removed
+and another added under the same name in the same change -- and a swap is an
+edit to a callable the record already answers for, which is reviewed like any
+other change to a classified body; no census reads bodies. What neither
+reading sees is a callable that is not written as `fn name`, which
+`PR7-CLASSIFICATION-DOMAIN-READS-FNS-ONLY` and
+`PR309-AN-ALLOW-THAT-ARRIVES-BY-EXPANSION-IS-UNREAD` record.
+
+**Bumping a pin is a decision, and the message says what it decides**: every
+bearer is what the row says, and every effectful one is denied by its own
+path. Nothing mechanical checks the second half -- a `cfg` twin shares its
+twin's path, a trait method is denied through the trait -- so it is a review
+duty, stated at the point of refusal.
+
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn shared_names_are_pinned() {`
+
+`unpinned_shared_names` over every recorded module, with a floor of forty
+pinned names so that a multiplicity reading that finds nothing cannot pass.
+
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn the_collision_witness_and_its_renamed_control() {`
+
+The review's witness and its control, held against the real
+`src/engine/coordinator.rs` and its real record, in memory. The head is clean
+and `run` is an `effectful` name borne once. With the witness appended -- the
+review's module, verbatim -- the name census finds nothing, which is the
+defect, and the multiplicity census refuses exactly one thing: two callables
+bear `run`. With the same function renamed `rf_unique_effect`, the name census
+finds exactly that name unclassified and the multiplicity census is silent. So
+either spelling of the function is refused, each by the check that owns it.
+
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn effectful_wrappers_are_denied() {`
 
 "effectful wrappers are added to the disallowed list themselves".

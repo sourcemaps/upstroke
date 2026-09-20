@@ -642,6 +642,8 @@ pub(super) mod oracles {
             "pub(super) fn super_visible() {}\n",
             "pub(in crate::engine) fn path_visible() {}\n",
             "pub (in crate::engine) async fn spaced_path_visible() {}\n",
+            "pub(in crate::engine) extern \"Rust\" fn abi_visible() {}\n",
+            "pub unsafe extern \"C\" fn unsafe_abi_visible() {}\n",
             "fn private() {}\n",
             "pub const fn constant() -> u8 { 1 }\n",
             "pub unsafe fn unsafely() {}\n",
@@ -655,6 +657,7 @@ pub(super) mod oracles {
         assert_eq!(
             found,
             vec![
+                "abi_visible".to_owned(),
                 "constant".to_owned(),
                 "crate_visible".to_owned(),
                 "defaulted".to_owned(),
@@ -664,6 +667,7 @@ pub(super) mod oracles {
                 "spaced_path_visible".to_owned(),
                 "super_visible".to_owned(),
                 "through_the_trait".to_owned(),
+                "unsafe_abi_visible".to_owned(),
                 "unsafely".to_owned(),
             ],
             "the parser's answer moved"

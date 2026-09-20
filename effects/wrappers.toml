@@ -44,12 +44,27 @@
 # through a chain of undenied public functions, and that is closed from the other
 # end by `effects::tests::no_topology_module_calls_a_funnel_in_production`.
 #
+# A NAME IS NOT A CALLABLE, SO A SHARED NAME IS PINNED. Rows are bare names (or
+# `Type::name`, compared by its last component), and a denial names one path. A
+# second callable under a classified name was therefore answered for by a row
+# nobody wrote for it: the review of 409a6138 put a `pub(crate) fn run` calling
+# `std::fs::write` in an inline module of `src/engine/coordinator.rs`, beside the
+# effectful entry point `run`, and the census and clippy stayed green
+# (`PR309-INLINE-WRAPPER-NAME-COLLISION`). `shared = { name = n }` says that `n`
+# callables of the file's production code bear `name`, for every name more than
+# one bears; `effects::tests::every_name_more_than_one_callable_bears_is_pinned_by_its_count`
+# derives the counts and asserts the table exactly, both ways. A module with no
+# `shared` table has no shared name. Raising a count says that every bearer is
+# what the row says and that every effectful one is denied by its own path --
+# the second half is a review duty, which no check here can make for you.
+#
 # Regenerate the membership (never the classification) with
 # UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1 cargo test -p upstroke effects::
 
 [[module]]
 path = "src/workspace_manager.rs"
 crate_path = "upstroke::workspace_manager"
+shared = { common_git_dir = 2, object_exists = 2 }
 funnel = [
     "add_site",
     "add_worktree",
@@ -240,6 +255,7 @@ effect_free = []
 [[module]]
 path = "src/workspace_manager/containment.rs"
 crate_path = "upstroke::workspace_manager::containment"
+shared = { is_reparse_point = 2, strip_verbatim = 2 }
 funnel = [
 ]
 effectful = []
@@ -257,6 +273,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/hooks.rs"
 crate_path = "upstroke::workspace_manager::hooks"
+shared = { durability_ledger = 2, phase = 3, refusal_cause = 3 }
 funnel = [
 ]
 effectful = []
@@ -280,6 +297,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/naming.rs"
 crate_path = "upstroke::workspace_manager::naming"
+shared = { as_str = 3, deserialize = 3, expecting = 3, fmt = 3, kind = 3, serialize = 2, try_from = 2, visit_str = 2 }
 funnel = [
 ]
 effectful = []
@@ -331,6 +349,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/parsers.rs"
 crate_path = "upstroke::workspace_manager::parsers"
+shared = { decode_path = 2 }
 funnel = [
 ]
 effectful = []
@@ -375,6 +394,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/snapshot_ref.rs"
 crate_path = "upstroke::workspace_manager::snapshot_ref"
+shared = { fmt = 2, new = 2 }
 funnel = [
 ]
 effectful = []
@@ -426,6 +446,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/worktree.rs"
 crate_path = "upstroke::workspace_manager::worktree"
+shared = { branch = 2, head = 2 }
 funnel = [
 ]
 effectful = []
@@ -451,6 +472,7 @@ effect_free = [
 [[module]]
 path = "src/rundir.rs"
 crate_path = "upstroke::rundir"
+shared = { acquire = 2, drop = 4, durability_ledger = 2, enter = 2, hold_cleanup_lease_for_child = 2, holder = 2, hook = 3, is_held = 2, lock_file = 2, new = 2, take = 4 }
 funnel = [
     "acquire_hooked",
     "acquire_in_hooked",
@@ -551,6 +573,7 @@ effect_free = [
 [[module]]
 path = "src/interaction.rs"
 crate_path = "upstroke::interaction"
+shared = { ask = 2, id = 6, poll = 2, resolve = 4, sleep = 2 }
 funnel = []
 effectful = [
     "write_question",
@@ -646,6 +669,7 @@ effect_free = [
 [[module]]
 path = "src/events/log.rs"
 crate_path = "upstroke::events::log"
+shared = { durability_ledger = 2, fmt = 2, new = 2, phase = 2, point = 2, synced = 2, written_kill_shape = 2 }
 funnel = [
     "append",
     "append_hooked",
@@ -711,6 +735,7 @@ effect_free = [
 [[module]]
 path = "src/runner/host.rs"
 crate_path = "upstroke::runner::host"
+shared = { new = 2, start_write_command = 2 }
 funnel = []
 effectful = [
 ]
@@ -852,6 +877,7 @@ effect_free = [
 [[module]]
 path = "src/runner/container.rs"
 crate_path = "upstroke::runner::container"
+shared = { discard = 2, materialize = 2, new = 3, phase = 3, trace = 2 }
 funnel = [
     "write_intent",
     "create_container",
@@ -927,6 +953,7 @@ effect_free = [
 [[module]]
 path = "src/runner/invocation.rs"
 crate_path = "upstroke::runner::invocation"
+shared = { parse = 3, render = 3 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1199,6 +1226,7 @@ effect_free = [
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
+shared = { drop = 3 }
 funnel = []
 effectful = [
     "Workspace::run_git_with_private_hooks",
@@ -1247,6 +1275,7 @@ effect_free = [
 [[module]]
 path = "src/gates.rs"
 crate_path = "upstroke::gates"
+shared = { check = 2, name = 2 }
 funnel = []
 effectful = [
     "run_all",
@@ -1272,6 +1301,7 @@ effect_free = [
 [[module]]
 path = "src/review.rs"
 crate_path = "upstroke::review"
+shared = { passes_for = 2 }
 funnel = []
 effectful = [
     "run_review",
@@ -1302,6 +1332,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
+shared = { deref = 2, drop = 5, fmt = 2 }
 funnel = [
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
@@ -1412,6 +1443,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc/hooks.rs"
 crate_path = "upstroke::agent::proc::hooks"
+shared = { point = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1446,6 +1478,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc/ambient.rs"
 crate_path = "upstroke::agent::proc::ambient"
+shared = { join_ambient_job = 2, set_container_reclaim_scope = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1515,6 +1548,7 @@ effect_free = ["collect", "drop", "failure_report"]
 [[module]]
 path = "src/agent/proc/pipe_io.rs"
 crate_path = "upstroke::agent::proc::pipe_io"
+shared = { try_read = 3, try_write = 3 }
 funnel = []
 effectful = []
 # These private operations create/transfer writable pipe handles or write the
@@ -1622,6 +1656,7 @@ effect_free = [
 [[module]]
 path = "src/capacity.rs"
 crate_path = "upstroke::capacity"
+shared = { describe = 2, fmt = 5, parse = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1769,6 +1804,7 @@ effect_free = [
 [[module]]
 path = "src/events/mod.rs"
 crate_path = "upstroke::events"
+shared = { fmt = 2, task = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []

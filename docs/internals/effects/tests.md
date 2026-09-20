@@ -742,19 +742,80 @@ leading inner attributes of `src/engine/mod.rs` read from the file and pasted
 verbatim, it is a build error naming `std::fs::write`. The direct route is
 compiled with a private function, the spelling no visibility census can see.
 
+**And the facade holds no code at all** (`items_beyond_declarations`). Every
+reading above is of source text, and an allow does not have to be written in
+the text it takes effect in. The review of `409a6138`
+(`PR309-FACADE-EXPANSION-ESCAPE`) brought an allowed inline module into the
+facade twice with every guard green: through `include!` of a `.inc` file,
+which no scan reads, and through a macro taking `$kind:ident` and
+`$level:ident`, expanding `#[$level(clippy::disallowed_methods)] $kind x { .. }`
+and invoked with `(mod, allow)`, which spells neither `mod x {` nor `allow(`
+anywhere. A scan cannot expand Rust, so the boundary refuses what it cannot
+read: a module outside the topology that a topology module descends from holds
+its leading attributes, `mod x;` declarations (under `#[cfg(test)]` or not)
+and `use` re-exports, and nothing else -- no inline module, no function, no
+constant, no macro definition or invocation, no `include!`, no attribute on a
+declaration. That is a whitelist and not a list of spellings, so it does not
+depend on recognising the next one; and it costs the facade nothing, because
+declaring and re-exporting is all it does since its entry points moved. The
+harmless inline child the round before allowed is refused now too, on purpose:
+a file that holds no code cannot hide any.
+
 What it catches: an allow or expect of a governed lint written anywhere in the
-facade or in any other module the topology descends from; the facade's deny
-deleted or narrowed; and a toolchain under which an inline module or a private
-item stops inheriting its file's level. What it would still miss: a route that
-needs no allow at all -- a chain of undenied functions from a topology module
-to an effectful one, which `effects/wrappers.toml`'s header names as the
-residue the classification boundary leaves and
-`no_topology_module_calls_a_funnel_in_production` closes only from the funnel
-end; an allow applied through `cfg_attr`, which `governed_allows` reads only
-where the word `allow(` or `expect(` is written in the attribute it scans
-(`an-applied-cfg-attr-is-invisible-to-the-scan` is the filed finding); and
-everything in an allowed, classified file that the classification domain does
-not read, which the test below states.
+facade or in any other module the topology descends from; anything in the
+facade that is not a declaration or a re-export, however it is spelled; the
+facade's deny deleted or narrowed; and a toolchain under which an inline
+module or a private item stops inheriting its file's level. What it would
+still miss: a route that needs no allow at all -- a chain of undenied
+functions from a topology module to an effectful one, which
+`effects/wrappers.toml`'s header names as the residue the classification
+boundary leaves and `no_topology_module_calls_a_funnel_in_production` closes
+only from the funnel end; **an allow that arrives by expansion anywhere the
+whitelist does not reach** -- a fenced sibling, a topology file, any other
+module of the crate -- where a substituted `#[$level(..)]` or a `cfg_attr` is
+as unread by `governed_allows`, and so by the placement scan and by every
+fence here, as it was in the facade (the facade forms are executed, by the
+review; the others are reasoned, and filed as
+`PR309-AN-ALLOW-THAT-ARRIVES-BY-EXPANSION-IS-UNREAD` beside
+`an-applied-cfg-attr-is-invisible-to-the-scan`); and everything in an allowed,
+classified file that the classification domain does not read, which the test
+below states.
+
+## `fn items_beyond_declarations(source: &str) -> Vec<(usize, String)> {`
+
+What a file holds besides its leading inner attributes, `mod x;` declarations
+and `use` items, as (line, item) pairs. Read from the text with comments and
+strings blanked, one `;`-terminated item at a time: an item passes only if,
+after an optional `#[cfg(test)]`, it is `mod name` or `<pub..> mod name`, or a
+`use` whose every byte belongs to a path, a group or a visibility. Everything
+else is returned, so the reader does not have to know what it is looking at to
+refuse it. `a_declaring_module_holds_declarations_and_re_exports_and_nothing_else`
+pins it on the facade itself and on twelve additions, the review's `include!`
+and substituting macro among them.
+
+## `fn includes_a_file(source: &str) -> bool {`
+
+Whether a source invokes `include!` -- the identifier `include`, then `!` --
+with comments and strings blanked, so `include_str!`, `include_bytes!` and
+prose do not count.
+
+## `fn no_scanned_source_includes_a_file_no_scan_reads() {`
+
+No source the placement scan reads uses `include!`. What it includes is Rust
+that nothing here reads: the placement scan, the module walk and the
+classification census each read `.rs` sources. The tree has none, so the
+refusal is total and free; it is the first of the review's two expansion forms
+(`PR309-FACADE-EXPANSION-ESCAPE`) closed for every file rather than for the
+facade alone.
+
+## `fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {`
+
+`items_beyond_declarations` on the real facade, which must hold nothing beyond
+its declarations, and on the facade with one addition at a time: four
+legitimate ones that pass, and eight that are refused -- an inline module
+empty and not, a function, a constant, `include!`, an allow on a declaration,
+a `path` attribute, and the review's macro, whose definition and invocation
+are two items and both refused.
 
 ## `fn inline_module_openers(source: &str) -> usize {`
 
@@ -763,9 +824,18 @@ name, a `{`, in the text with comments and strings blanked. It is deliberately
 not the scanner. `scan_modules` is checked against it per file, so the day the
 scanner's inline branch goes quiet again -- which is how an inline module came
 to be walked by no guard in the first place -- the two disagree and the guard
-below fails, rather than both agreeing that a file holds none. It does not
-read raw identifiers or macro bodies; on a file that has either it disagrees
-with the scanner and fails closed.
+below fails, rather than both agreeing that a file holds none. It reads the
+same text the scanner reads, so it is a check on the scanner and not on the
+text: **a module that is not written as `mod name {` is invisible to both, and
+they agree.** The round before this sentence claimed the opposite -- that a
+macro body made the two disagree and fail closed -- and the review of
+`409a6138` disproved it with a macro that substitutes the `mod` keyword:
+neither reading finds a module, both count zero, and the guard passed over a
+production child. A literal `mod x {` inside a macro body is refused by the
+scanner (`ModuleShapedMacroBody`); a substituted one is not seen by anything.
+That is why the facade is held by a whitelist instead
+(`items_beyond_declarations`), and why this guard claims the modules a file
+WRITES and nothing about what it expands to.
 
 ## `fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {`
 
@@ -775,8 +845,10 @@ so an inline module was never a module to any census. An inline module has no
 file and no row; it inherits the level of the file it is written in and can
 write attributes of its own, outside or inside its braces. So it is answered
 for by its file, and this test makes that an assertion. For every file under
-the facade, `scan_modules` reports every inline module at every depth and the
-count must equal what `inline_module_openers` counts; for each one, every governed lint
+the facade, `scan_modules` reports every inline module the source writes as
+`mod name { .. }`, at every depth -- not one a macro or an `include!` expands
+to, which no reading of the text finds -- and the count must equal what
+`inline_module_openers` counts; for each one, every governed lint
 allowed in effect -- by the file, or by the module's own outer and leading
 inner attributes -- must be recorded by the file's row in
 `effects/allowlist.toml`; and wherever anything is allowed in effect in
@@ -791,10 +863,23 @@ than four files, at least one nested inside another (this tree nests seven
 under `recover::chain`), and more than two production files found with
 something allowed in effect, so the classification half judged something.
 
-What it catches: an inline module the scanner stops reporting; an inline
-module that writes an allow its file's row does not record; an allowed
+**Being a classified module answers for a name, and a name is not a
+callable.** This guard's last step rests on the classification census, and the
+review of `409a6138` showed what that was worth
+(`PR309-INLINE-WRAPPER-NAME-COLLISION`): the census compares bare names, so a
+`pub(crate) fn run` calling `std::fs::write`, written in an inline module of
+`src/engine/coordinator.rs`, was answered for by the row of the entry point
+`run` this same change had classified, denied under a path that is not its
+own, and reachable from `engine::topology` with clippy at exit 0 and this
+guard green. It is closed in the census, for every classified module and not
+for `engine` alone: `every_name_more_than_one_callable_bears_is_pinned_by_its_count`
+(`docs/internals/effects/tests/classification.md`).
+
+What it catches: a written inline module the scanner stops reporting; an
+inline module that writes an allow its file's row does not record; an allowed
 production file, or an inline module of one, outside the classification
-domain. What it would still miss, stated rather than implied: being in
+domain. What it would still miss, stated rather than implied: a module that
+arrives by expansion, above; and being in
 `CLASSIFIED_MODULES` answers for a file's FUNCTIONS and not for everything a
 file can hold. The domain (`externally_reachable_fns`) reads `fn` items that
 declare a visibility, trait-impl methods and public traits' default bodies. A
@@ -1732,8 +1817,13 @@ inline path, its line, whether it is test-only by inheritance, the outer
 attributes written on it and the body whose leading inner attributes are the
 rest of what it writes -- and must not report what a comment or a string
 spells. Its out-of-line half must equal what `scan_module_declarations`
-answers for the same source, so that no census reading declarations sees a
-different list than it did before inline modules were reported. An
+answers for the same source; since that entry point is now the declared half
+of this one, the equality pins the adapter and proves nothing about the
+scanner before the change. What holds the older behaviour is the literal
+expectation beside it and the scan tests that predate the change
+(`the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute`,
+`the_module_resolver_refuses_every_shape_it_cannot_resolve` and the rest),
+which pass unedited. An
 attribute-free inline module directly below an attributed item, and one
 directly below an attributed `mod x;` declaration, must be handed neither
 neighbour's attributes. `inline_module_openers`, the cruder reading the engine

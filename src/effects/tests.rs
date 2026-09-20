@@ -228,6 +228,8 @@ struct ModuleClassification {
     effectful_unnameable: Vec<String>,
     #[serde(default)]
     effect_free: Vec<String>,
+    #[serde(default)]
+    shared: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1315,9 +1317,6 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
 
 const ENGINE_FACADE: &str = "src/engine/mod.rs";
 
-// What `src/engine/mod.rs` wrote from #306 (`94c21c45`) until 2026-09-20. The
-// facade writes nothing now, so the fixtures that show what an allow above a
-// module does to it state the allow they model instead of reading it.
 const FACADE_ALLOW_OF_306: &str = "#![allow(clippy::disallowed_methods)]\n";
 
 struct EngineModule {
@@ -1365,13 +1364,6 @@ fn recorded_allows(list: &Allowlist) -> BTreeMap<&str, BTreeSet<String>> {
         .collect()
 }
 
-// Every module the engine facade declares, recursively, read from the `mod`
-// declarations themselves and never from a list: each entry carries the
-// governed lints allowed in effect at its parent, what it writes and denies at
-// file level, whether it is compiled only under `cfg(test)`, and the inline
-// modules its file holds at every depth. An out-of-line module declared inside
-// an inline one is resolved through the inline path, and inherits what is in
-// effect at the file that holds the declaration.
 fn engine_module_tree() -> Vec<EngineModule> {
     use crate::effects::census_domain::{candidates_for, scan_modules, sole_present};
 
@@ -1662,33 +1654,6 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
 
 #[test]
 fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
-    // `PR306-FACADE-INLINE-ESCAPE`, the fourth review of #306. The two guards
-    // above fence what the facade DECLARES out of line. They said nothing of
-    // what it HOLDS, and under the allow #306 wrote on it two routes from
-    // `engine::topology` to a raw effect stayed green: an attribute-free
-    // inline `mod x { .. }` written in the facade, which no guard walked
-    // because the module scan emitted nothing for an inline module, and a
-    // function placed directly in the facade, which nothing classifies --
-    // `src/engine/mod.rs` is in neither `CLASSIFIED_MODULES` nor
-    // `effects/wrappers.toml`, and a PRIVATE item there is visible to every
-    // module under `engine::topology` all the same, so the classification
-    // domain, which reads `pub`, `pub(crate)` and `pub(super)`, could not have
-    // answered for it either. What closes both at once is that the facade
-    // allows nothing: its six entry points are defined in the conductor
-    // modules they drive and re-exported, so the file calls nothing denied.
-    //
-    // Held lexically, over a set derived from the walk rather than typed:
-    // every module that a topology module descends from writes no `allow` or
-    // `expect` of a governed lint in ANY form -- file level, on an inline
-    // module, on a `mod` declaration, on an item -- and has nothing allowed in
-    // effect; and the facade, the root no walked module stands above, denies
-    // all three governed lints at file level, so its level does not depend on
-    // what the crate root or the command line says. Held by execution: each
-    // route is compiled through `lint_fixture` against the real denylist under
-    // no attribute (the reach is reported), under the allow #306 wrote (it is
-    // not, and the crate builds -- the hole as the review executed it), and
-    // under THIS tree's facade header, read from the file, where it is a build
-    // error.
     use crate::effects::lint_levels::leading_inner_attributes;
 
     const INLINE_ROUTE: &str = "mod r3_inline_child {\n\
@@ -1754,6 +1719,23 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
              descends from it",
             module.in_effect(),
             module.parent
+        );
+    }
+    for path in &above_topology {
+        if !topology_modules_among(&[*path]).is_empty() {
+            continue;
+        }
+        let module = by_path.get(path).expect("a walked module");
+        let beyond = items_beyond_declarations(&module.source);
+        assert!(
+            beyond.is_empty(),
+            "{path} holds something other than its leading attributes, `mod x;` declarations and \
+             `use` re-exports, and a topology module descends from it. Whatever it holds is \
+             visible to that topology module; an inline module, a function, a macro or an \
+             `include!` can carry an allow that no scan of this file reads -- the review of \
+             409a6138 brought one in through `include!` and one through a macro that substitutes \
+             `mod` and `allow` (`PR309-FACADE-EXPANSION-ESCAPE`). Put it in a module this one \
+             declares; found (line, item): {beyond:#?}"
         );
     }
     let facade = by_path
@@ -1859,6 +1841,105 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
     }
 }
 
+fn items_beyond_declarations(source: &str) -> Vec<(usize, String)> {
+    use crate::effects::lint_levels::leading_inner_attributes;
+
+    let blanked = blank_comments_and_strings(source);
+    let is_ident = |word: &str| {
+        !word.is_empty()
+            && word
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    let mut beyond = Vec::new();
+    let mut at = leading_inner_attributes(source).len();
+    while let Some(rest) = blanked.get(at..) {
+        let from = at + (rest.len() - rest.trim_start().len());
+        let Some(text) = blanked.get(from..).filter(|text| !text.is_empty()) else {
+            break;
+        };
+        let length = text.find(';').map_or(text.len(), |semicolon| semicolon + 1);
+        let item = text.get(..length).unwrap_or(text);
+        let written = item.trim_end_matches(';').trim();
+        let written = written
+            .strip_prefix("#[cfg(test)]")
+            .map_or(written, str::trim_start);
+        let words: Vec<&str> = written.split_whitespace().collect();
+        let declares_a_module = match words.as_slice() {
+            ["mod", name] => is_ident(name),
+            [visibility, "mod", name] => {
+                visibility.starts_with("pub") && !visibility.contains('!') && is_ident(name)
+            }
+            _ => false,
+        };
+        let re_exports = match words.as_slice() {
+            ["use", ..] => true,
+            [visibility, "use", ..] => visibility.starts_with("pub"),
+            _ => false,
+        } && written.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || byte.is_ascii_whitespace()
+                || matches!(byte, b'_' | b':' | b'{' | b'}' | b',' | b'*' | b'(' | b')')
+        });
+        if !(declares_a_module || re_exports) {
+            let line = blanked
+                .get(..from)
+                .map_or(0, |before| before.matches('\n').count())
+                + 1;
+            let shown: String = written.split_whitespace().collect::<Vec<_>>().join(" ");
+            beyond.push((line, shown.chars().take(96).collect()));
+        }
+        at = from + length;
+    }
+    beyond
+}
+
+fn includes_a_file(source: &str) -> bool {
+    let blanked = blank_comments_and_strings(source);
+    let bytes = blanked.as_bytes();
+    blanked.match_indices("include").any(|(at, word)| {
+        let glued = at
+            .checked_sub(1)
+            .and_then(|before| bytes.get(before))
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+        let after = blanked
+            .get(at + word.len()..)
+            .unwrap_or_default()
+            .trim_start();
+        !glued && after.starts_with('!')
+    })
+}
+
+#[test]
+fn no_scanned_source_includes_a_file_no_scan_reads() {
+    let mut scanned = 0;
+    for (path, source) in scanned_sources() {
+        scanned += 1;
+        assert!(
+            !includes_a_file(&source),
+            "{path} uses `include!`. What it includes is Rust that no scan here reads -- not the \
+             placement scan, not the module walk, not the classification census, each of which \
+             reads `.rs` sources -- so an allow, a module or a function arrives unread; the \
+             review of 409a6138 brought an allowed inline module into the engine facade that way \
+             (`PR309-FACADE-EXPANSION-ESCAPE`)"
+        );
+    }
+    assert!(scanned > 150, "only {scanned} sources were scanned");
+    for (text, includes) in [
+        ("include!(\"x.inc\");\n", true),
+        ("include ! { \"x.inc\" }\n", true),
+        ("const TEXT: &str = include_str!(\"x.txt\");\n", false),
+        ("const BYTES: &[u8] = include_bytes!(\"x.bin\");\n", false),
+        (
+            "// include!(\"prose.inc\");\nconst S: &str = \"include!(quoted)\";\n",
+            false,
+        ),
+        ("fn preinclude() {}\n", false),
+    ] {
+        assert_eq!(includes_a_file(text), includes, "{text:?}");
+    }
+}
+
 fn inline_module_openers(source: &str) -> usize {
     let blanked = blank_comments_and_strings(source);
     let bytes = blanked.as_bytes();
@@ -1895,26 +1976,56 @@ fn inline_module_openers(source: &str) -> usize {
 }
 
 #[test]
+fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {
+    let facade = fs::read_to_string(repo_root().join(ENGINE_FACADE)).expect(ENGINE_FACADE);
+    assert_eq!(items_beyond_declarations(&facade), Vec::new());
+    assert!(
+        facade.matches("mod ").count() > 8 && facade.contains("pub use "),
+        "the facade no longer declares and re-exports, so the empty answer above says nothing"
+    );
+
+    let holds = |addition: &str| -> Vec<String> {
+        items_beyond_declarations(&format!("{facade}\n{addition}\n"))
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect()
+    };
+    for (addition, refused) in [
+        ("mod plain;", 0),
+        ("pub(crate) mod visible;", 0),
+        ("#[cfg(test)]\nmod more_tests;", 0),
+        (
+            "pub use report::{one, two};\nuse crate::error::UpstrokeError;",
+            0,
+        ),
+        ("mod inline_child {}", 1),
+        ("mod inline_child { pub(super) fn f() -> u8 { 1 } }", 1),
+        ("fn private() {}", 1),
+        ("const LIMIT: usize = 3;", 1),
+        ("include!(\"rf_review_include.inc\");", 1),
+        (
+            "#[allow(clippy::disallowed_methods)]\nmod assembly_again;",
+            1,
+        ),
+        ("#[path = \"elsewhere.rs\"]\nmod elsewhere;", 1),
+        (
+            "macro_rules! rf_generate { ($kind:ident, $level:ident) => { \
+             #[$level(clippy::disallowed_methods)] $kind rf_generated {} }; }\n\
+             rf_generate!(mod, allow);",
+            2,
+        ),
+    ] {
+        assert_eq!(
+            holds(addition).len(),
+            refused,
+            "{addition:?}: {:#?}",
+            holds(addition)
+        );
+    }
+}
+
+#[test]
 fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {
-    // The half of `PR306-FACADE-INLINE-ESCAPE` that was a hole in the guards
-    // themselves. `every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
-    // walked `mod x;` and nothing else, because `scan_module_declarations`
-    // emits a declaration only for the out-of-line form: its `mod x { .. }`
-    // branch opened a scope and recorded nothing, so an inline module was
-    // never a module to any guard. An inline module has no file and no row. It
-    // inherits the level of the file it is written in, and it can write
-    // attributes of its own, outside or inside its braces. So it is answered
-    // for by its FILE, and this test makes that an assertion instead of an
-    // assumption: `scan_modules` reports every inline module at every depth,
-    // the count is checked per file against a second, cruder reading of the
-    // text so a scan that goes quiet fails here, and for each one every
-    // governed lint allowed in effect -- by the file or by the module's own
-    // attributes -- must be recorded by the file's row in
-    // `effects/allowlist.toml`; and wherever anything is allowed in effect in
-    // production code, in a file or in an inline module of it, that file must
-    // be in `CLASSIFIED_MODULES`, whose census reads a file whole, inline
-    // modules included. A row with no classification behind it is what the
-    // facade had.
     use crate::effects::lint_levels::leading_inner_attributes;
 
     let list = allowlist();
@@ -2794,6 +2905,16 @@ fn every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified() {
 }
 
 #[test]
+fn every_name_more_than_one_callable_bears_is_pinned_by_its_count() {
+    checks::shared_names_are_pinned();
+}
+
+#[test]
+fn a_second_callable_under_a_classified_name_is_refused_and_a_renamed_one_is_unclassified() {
+    checks::the_collision_witness_and_its_renamed_control();
+}
+
+#[test]
 fn every_effectful_wrapper_is_on_the_disallowed_list() {
     checks::effectful_wrappers_are_denied();
 }
@@ -3582,8 +3703,6 @@ fn the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write() 
     );
     let scanned = scan_modules(source).expect("the fixture scans");
 
-    // The out-of-line half is, to the byte, what the older entry point answers,
-    // so no census that reads declarations sees a different list.
     assert_eq!(
         scanned.declared,
         scan_module_declarations(source).expect("the fixture scans")

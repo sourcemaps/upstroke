@@ -16,7 +16,7 @@ pub(super) mod checks {
     };
     use crate::effects::{
         CLASSIFIED_MODULES, CLIPPY_TOML, WRAPPERS_TOML, blank_comments_and_strings,
-        externally_reachable_fns, production_code,
+        externally_reachable_fns, production_code, reachable_fn_multiplicity,
     };
 
     pub(in crate::effects::tests) fn reachable_fns_are_classified() {
@@ -42,31 +42,14 @@ pub(super) mod checks {
         for path in CLASSIFIED_MODULES {
             let source = fs::read_to_string(repo_root().join(path))
                 .unwrap_or_else(|_| panic!("{path} is in CLASSIFIED_MODULES and not in the tree"));
-            let derived: BTreeSet<String> = externally_reachable_fns(&source).into_iter().collect();
             let module = recorded[path];
-            let classified: Vec<&str> = module
-                .funnel
-                .iter()
-                .chain(&module.effectful)
-                .chain(&module.effectful_unnameable)
-                .chain(&module.effect_free)
-                .map(|name| name.rsplit("::").next().expect("a name"))
-                .collect();
-            let unique: BTreeSet<&str> = classified.iter().copied().collect();
-            assert_eq!(
-                unique.len(),
-                classified.len(),
-                "{path}: a name is in two classes"
-            );
-            let derived_refs: BTreeSet<&str> = derived.iter().map(String::as_str).collect();
-            if unique != derived_refs {
+            let (unclassified, invented, derived) = classification_disagreement(module, &source);
+            if !unclassified.is_empty() || !invented.is_empty() {
                 disagreements.push(format!(
-                    "{path}\n    unclassified: {:?}\n    invented:     {:?}",
-                    derived_refs.difference(&unique).collect::<Vec<_>>(),
-                    unique.difference(&derived_refs).collect::<Vec<_>>()
+                    "{path}\n    unclassified: {unclassified:?}\n    invented:     {invented:?}"
                 ));
             }
-            total += derived.len();
+            total += derived;
         }
         assert!(
             disagreements.is_empty(),
@@ -77,6 +60,152 @@ pub(super) mod checks {
             total > 300,
             "only {total} functions were classified; the derivation is finding nothing"
         );
+    }
+
+    fn classification_disagreement(
+        module: &ModuleClassification,
+        source: &str,
+    ) -> (Vec<String>, Vec<String>, usize) {
+        let path = &module.path;
+        let derived: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+        let classified: Vec<&str> = module
+            .funnel
+            .iter()
+            .chain(&module.effectful)
+            .chain(&module.effectful_unnameable)
+            .chain(&module.effect_free)
+            .map(|name| name.rsplit("::").next().expect("a name"))
+            .collect();
+        let unique: BTreeSet<&str> = classified.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            classified.len(),
+            "{path}: a name is in two classes"
+        );
+        let derived_refs: BTreeSet<&str> = derived.iter().map(String::as_str).collect();
+        (
+            derived_refs
+                .difference(&unique)
+                .map(|name| (*name).to_owned())
+                .collect(),
+            unique
+                .difference(&derived_refs)
+                .map(|name| (*name).to_owned())
+                .collect(),
+            derived.len(),
+        )
+    }
+
+    fn unpinned_shared_names(module: &ModuleClassification, source: &str) -> Vec<String> {
+        let path = &module.path;
+        let borne: BTreeMap<String, usize> = reachable_fn_multiplicity(source)
+            .into_iter()
+            .filter(|(_, bearers)| *bearers > 1)
+            .collect();
+        let mut complaints = Vec::new();
+        for (name, bearers) in &borne {
+            if module.shared.get(name) != Some(bearers) {
+                complaints.push(format!(
+                    "{path}: {bearers} callables bear the name `{name}` and the record pins {}. The \
+                     record classifies by bare name and a denial names one path, so a second \
+                     callable under a classified name is answered for by a row that was never \
+                     written for it (`PR309-INLINE-WRAPPER-NAME-COLLISION`). Give it a name of \
+                     its own, or pin the count in `shared` once every bearer is what the row says \
+                     and every effectful one is denied by its own path",
+                    module
+                        .shared
+                        .get(name)
+                        .map_or("nothing, which means one".to_owned(), usize::to_string)
+                ));
+            }
+        }
+        for (name, pinned) in &module.shared {
+            if !borne.contains_key(name) {
+                complaints.push(format!(
+                    "{path}: the record pins {pinned} callables named `{name}` and the file holds \
+                     fewer than two; a pin that outlives its callables admits the next one unseen"
+                ));
+            }
+        }
+        complaints
+    }
+
+    pub(in crate::effects::tests) fn shared_names_are_pinned() {
+        let record = wrappers();
+        let mut complaints = Vec::new();
+        let mut pinned = 0;
+        for module in &record.module {
+            let source = fs::read_to_string(repo_root().join(&module.path))
+                .unwrap_or_else(|_| panic!("{} is recorded and not in the tree", module.path));
+            complaints.extend(unpinned_shared_names(module, &source));
+            pinned += module.shared.len();
+        }
+        assert!(
+            complaints.is_empty(),
+            "a bare name does not say which callable it classifies:\n{}",
+            complaints.join("\n")
+        );
+        assert!(
+            pinned > 40,
+            "only {pinned} shared names are pinned; the multiplicity reading is finding nothing"
+        );
+    }
+
+    pub(in crate::effects::tests) fn the_collision_witness_and_its_renamed_control() {
+        const COORDINATOR: &str = "src/engine/coordinator.rs";
+        const WITNESS: &str = "\npub(super) mod rf_inline_collision {\n\
+             \x20   pub(crate) fn run(path: &std::path::Path) -> std::io::Result<()> {\n\
+             \x20       std::fs::write(path, b\"rf duplicate-name effect\")\n\
+             \x20   }\n\
+             }\n";
+        let record = wrappers();
+        let module = record
+            .module
+            .iter()
+            .find(|module| module.path == COORDINATOR)
+            .expect("the coordinator is a classified module");
+        let source = fs::read_to_string(repo_root().join(COORDINATOR)).expect(COORDINATOR);
+
+        let (unclassified, invented, _) = classification_disagreement(module, &source);
+        assert!(
+            unclassified.is_empty()
+                && invented.is_empty()
+                && unpinned_shared_names(module, &source).is_empty(),
+            "{COORDINATOR} is not clean at this head, so nothing below is evidence of anything"
+        );
+        assert!(
+            module.effectful.iter().any(|name| name == "run") && !module.shared.contains_key("run"),
+            "`run` is the classified name the witness hides behind, borne by one callable"
+        );
+
+        let collided = format!("{source}{WITNESS}");
+        let (unclassified, _, _) = classification_disagreement(module, &collided);
+        assert!(
+            unclassified.is_empty(),
+            "the witness is meant to be invisible to the name census, and it found {unclassified:?}"
+        );
+        let complaints = unpinned_shared_names(module, &collided);
+        assert!(
+            complaints.len() == 1
+                && complaints
+                    .iter()
+                    .all(|complaint| complaint.contains("2 callables bear the name `run`")),
+            "a second `run`, in an inline module of {COORDINATOR}, calling `std::fs::write` and \
+             visible to every module under `engine::topology`, was not refused: {complaints:#?}"
+        );
+
+        let renamed = format!(
+            "{source}{}",
+            WITNESS.replace("fn run(", "fn rf_unique_effect(")
+        );
+        let (unclassified, _, _) = classification_disagreement(module, &renamed);
+        assert_eq!(
+            unclassified,
+            vec!["rf_unique_effect".to_owned()],
+            "under a name nothing else bears, the same function is what the name census exists \
+             to find"
+        );
+        assert!(unpinned_shared_names(module, &renamed).is_empty());
     }
 
     pub(in crate::effects::tests) fn effectful_wrappers_are_denied() {
