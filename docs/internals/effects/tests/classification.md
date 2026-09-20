@@ -160,21 +160,51 @@ The bare names a record holds more than once, across its four classes. The
 census refuses any; it is a value so that the regression test below can show
 that a row for a second path is one.
 
-## `pub(super) mod checks` › `fn bearers_of_one_path(owners: &[String]) -> bool {`
+## `pub(super) mod checks` › `fn bearers_of_one_path(borne: usize, owners: &[Vec<OwnerScope>]) -> bool {`
 
-Whether every bearer of a name is reached by one path: all declared at the
-same place (`#[cfg(unix)]` and `#[cfg(not(unix))]` twins are -- two items of
-one name in one module cannot otherwise coexist), or all the declaration and
-impls of one trait under one enclosing path, which a call reaches through the
-trait and a denial names through the trait. Owners come from
-`effects::reachable_fn_owners`.
+Whether where the bearers of a name are declared shows them to be one path. It
+is a whitelist of two shapes, and everything else is refused. The places read
+have to be as many as the callables `reachable_fn_multiplicity` counted: an
+empty list is a reading that went quiet and not a name with no second path,
+and one place for two callables would otherwise be, trivially, one scope.
+
+First, every bearer has to be reached through inline `mod`s alone: each scope
+above the one it is written in must have been read as `mod name`. That refuses
+anything inside a block, a function body, or the braces, parentheses or
+brackets of a macro, whose contents can end up anywhere, without having to
+recognise which of those it is. Then:
+
+1. **One scope.** Every bearer is written directly in the same braces -- the
+   same opening byte, or all of them at the file's top level -- and those
+   braces were read as a module, a trait or an impl. Two items of one name in
+   one scope can only be `cfg` twins, and twins in one `impl` block share its
+   receiver whatever it is called, so this shape needs no name at all.
+2. **One trait, declared beside its impls.** Every bearer is directly inside a
+   `trait Name` declaration or an `impl Name for ..`, all of them written in
+   one and the same enclosing scope, under one `Name`, and at least one of
+   them the declaration. A call reaches each through the trait and a denial
+   names it through the trait. The declaration is required because it is what
+   makes `Name` mean something here without resolving it: an item declared in
+   a scope cannot share its name with an import in that scope, so beside
+   `trait Name` the word `Name` is that trait. That holds where the declaration
+   is compiled, which a reading that does not evaluate `cfg` takes on trust.
+
+**Same is a position, never a spelling.** The first form of this function took
+the owners as label strings and accepted them when they were equal; the review
+of `993f080d` made two different receivers spell alike twice over (the notes
+of `effects::reachable_fn_owners` have both). So a false refusal is accepted
+as the price: two `#[cfg]`-exclusive `impl A` blocks each holding a twin are
+one path and are refused, and the author writes the `cfg` on the functions
+inside one block instead. What this is not is callable identity. It judges
+the declarations the source writes, and it is the caller that decides which
+names are judged at all.
 
 ## `pub(super) mod checks` › `fn effectful_names_shared_across_paths(`
 
-**An effectful name is shared only by bearers of one path.** Round 1 offered
-the pin as the way to admit a second bearer of a classified name, and said
-that raising it asserted "every effectful one is denied by its own path" -- a
-review duty. The second review of #309
+**An effectful name is shared in two shapes only.** Round 1 offered the pin as
+the way to admit a second bearer of a classified name, and said that raising
+it asserted "every effectful one is denied by its own path" -- a review duty.
+The second review of #309
 (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) showed the duty cannot
 be discharged: a second `run_with`, in an inline module of the coordinator,
 writing a file, is refused unpinned; with `shared = { run_with = 2 }` added,
@@ -182,12 +212,21 @@ clippy exits 0 and 185 tests pass, the second path undenied; and the honest
 record cannot be written, because a denial for the second path is a denial no
 row classifies, and a row for it strips to `run_with`, a name in two classes.
 So the pin is refused where no honest record exists: for every `effectful`
-row borne more than once, the bearers must be one path. The three the tree
-shares today are: `rundir::hold_cleanup_lease_for_child` is a `cfg` pair, and
-`GitView::materialize` and `GitView::discard` are a trait's declaration and
-its impl. `effect_free`, `funnel` and `effectful_unnameable` names may still be
-shared across paths, because one row is an honest record for them: none of
-them is denied by path.
+row borne more than once, `bearers_of_one_path` has to hold of where its
+bearers are declared. The count comes from `reachable_fn_multiplicity` and the
+places from `reachable_fn_owners`, and the rule is handed both, so an owner
+reading that goes quiet is a complaint and not a pass. The
+three the tree shares today are: `rundir::hold_cleanup_lease_for_child` is a
+`cfg` pair at its file's top level, and `GitView::materialize` and
+`GitView::discard` are a trait's declaration and its impl, written beside each
+other at theirs. `effect_free`, `funnel` and `effectful_unnameable` names may
+still be shared across paths, because one row is an honest record for them:
+none of them is denied by path.
+
+**Refusing every shared effectful pin was measured and is not available.**
+Those three rows are the cost: two of them are a trait method, whose
+declaration and impl cannot bear different names, and all three are in files
+this pull request does not touch.
 
 ## `pub(super) mod checks` › `fn denials_no_row_classifies(record: &Wrappers, denied: &ClippyToml) -> Vec<String> {`
 
@@ -204,15 +243,75 @@ record edit -- the count is satisfied, which is the witness, and the one-path
 rule refuses it, which is the repair. Then the two record controls: with a
 denial for the second path added, that denial is one no row classifies; with
 a row for it added too, the denial is accounted for and `run_with` is a name
-in two classes. Last, the legitimate shapes: every module of the real record
-passes the one-path rule, more than two effectful names are in fact shared,
-and `bearers_of_one_path` answers five owner lists as stated.
+in two classes. Last, the tree itself: every module of the real record passes
+the rule, and more than two effectful names are in fact shared, so it judged
+something.
 
 The three texts it edits are read with their line endings normalised to LF.
 The anchors it inserts after end in a newline, and a Windows checkout holds
 CRLF: the first push of this test failed on the Windows guest at the first
 anchor, `left: 0, right: 1`, and nowhere else, which is the platform the
 hosted matrix only links for.
+
+## `pub(super) mod checks` › `fn one_path(source: &str, name: &str) -> bool {`
+
+The reading and the rule together over one source text, for the shape tables
+below. It asserts first that the name is borne more than once, so a fixture
+the reading finds nothing in fails as a broken fixture and not as a refusal.
+
+## `pub(super) mod checks` › `fn headers(chain: &[OwnerScope]) -> Vec<OwnerHeader> {`
+
+What a chain's headers were read as, without where they open.
+
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn the_spelling_defeats_and_their_controls() {`
+
+The third review's two defeats and the control of each, against the real
+`src/engine/resume.rs` and its real record, in memory; the shapes are the
+reviews' own text. For all four the record is the one the reviews wrote -- the
+name pinned at two, the first receiver's method an `effectful` row, both set
+on the parsed record so that no anchor in its text has to hold -- and it
+satisfies the name census and the count, which is what made it a witness.
+Then two things are asserted of each, and the pair is the point. **What the
+headers spell is the same for both bearers**: `Unread` and `Unread` under the
+const-generic braces, `Unread`, inherent impl under the two `const _` blocks,
+and the same again for each control, since an inherent impl no longer carries
+a name to differ by. **And the pin is refused all four times**, because the
+two bearers open at different bytes. Before the repair the defeats passed and
+the controls failed, which is the verdict following the spelling.
+
+The rest holds each decision of `bearers_of_one_path` from both sides. Seven
+legitimate sharings pass -- twins at the top level, in an inline module and in
+one `impl`; a trait with generics, supertraits and a `where` clause beside two
+impls; an `unsafe` trait behind a `pub(in ..)`; a trait and its impl inside
+one inline module; a trait beside its impl for `[u8; 4]`. Fifteen shapes are
+refused, each chosen so that one decision alone refuses it: two impls (position, not header); two blocks of one
+spelling (the same, and the false refusal the rule accepts); one impl inside a
+block (the way down is modules alone); twins directly inside braces whose
+header is unread (the scope has to be placed); an impl written away from its
+trait's declaration (one enclosing scope); impls with no declaration beside
+them; a declaration beside another trait's impl; a trait named by a path; a
+free function and a method; a trait's method and an inherent one; a bearer in
+a macro's body; twins in a macro invocation's braces, and in its parentheses;
+a bearer in one's square brackets beside a free function; a bearer nested in a
+method of the impl. An empty owner list is refused, and so is a list shorter
+or longer than the count it is judged against.
+
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn the_owner_reading_places_each_header_or_leaves_it_unread() {`
+
+`effects::reachable_fn_owners` on nineteen one-bearer sources, by the headers
+it reads: nested inline modules behind three visibilities, inherent impls with
+and without an `->` in their generics, a trait's impl under two attributes, an
+`unsafe` and a `where` clause, a trait's impl for `[u8; 4]` (the `;` is inside
+brackets and ends nothing), a trait with a supertrait written against its name
+and an `unsafe` one with generics -- and the ones it must leave `Unread`: a
+trait named by a path, an `impl const` whose `for` is not its second word, a
+const argument's braces, a `const _` block, a function whose parameter is
+`impl Sized` (the reading at `993f080d` answered `impl Sized)` for it,
+measured), a macro's body, the parentheses and the square brackets of a macro
+invocation, an `extern` block. The file's top level is the empty chain, and a
+closer with no opener of its own -- not Rust, but a reading that lost its
+place would look like it -- closes nothing: the function after a stray `)` and
+`]` inside `mod a` is still in `mod a`.
 
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn shared_names_are_pinned() {`
 

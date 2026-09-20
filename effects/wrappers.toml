@@ -55,17 +55,30 @@
 # one bears; `effects::tests::every_name_more_than_one_callable_bears_is_pinned_by_its_count`
 # derives the counts and asserts the table exactly, both ways. A module with no
 # `shared` table has no shared name. Raising a count says that every bearer is
-# what the row says. AN EFFECTFUL NAME IS SHARED ONLY BY BEARERS OF ONE PATH --
-# `cfg` twins, or a trait's declaration and its impls -- because no record can
-# be written for a second path: a denial for it needs a row, and a row for it
-# is a name in two classes. The review of 1ff88a78 pinned `run_with = 2` over a
-# second, undenied `run_with` and everything stayed green
-# (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`);
-# `effects::tests::an_effectful_name_is_shared_only_by_bearers_of_one_path`
-# refuses that pin. ALL OF THIS READS THE NAMES THE SOURCE WRITES: a function a
-# macro names by substitution, or one an aliased `include!` brings in, is in no
-# count and no class (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project
-# owner).
+# what the row says. AN EFFECTFUL NAME IS SHARED IN TWO SHAPES ONLY, because no
+# record can be written for a second path -- a denial for it needs a row, and a
+# row for it is a name in two classes: every bearer written directly in ONE AND
+# THE SAME BRACES, reached through inline `mod`s alone (`cfg` twins), or ONE
+# TRAIT'S DECLARATION AND THE IMPLS WRITTEN UNDER ITS OWN NAME BESIDE IT. Which
+# braces hold a bearer is read by position. What a header spells decides only
+# whether a scope is one of those shapes, never whether two scopes are the
+# same one; a header the reading cannot place refuses the pin, and so do a
+# macro's parentheses or brackets, and two `impl` blocks of one spelling. The
+# review of 1ff88a78 pinned `run_with = 2` over a second, undenied `run_with`
+# and everything stayed green
+# (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`); the repair compared
+# what the owners' headers spelled, and the review of 993f080d passed two
+# receivers as one twice over -- const-generic braces that lost both `impl`
+# headers, and one alias for two types in two `const _` blocks.
+# `effects::tests::an_effectful_name_is_shared_only_by_bearers_of_one_path` and
+# `effects::tests::a_shared_effectful_name_is_placed_by_its_braces_and_not_by_what_a_header_spells`
+# hold all three pins refused. The reading is of the text and resolves no
+# name: the first shape needs none, and in the second the impl's trait is the
+# one declared in the same braces PROVIDED THAT DECLARATION IS COMPILED, which
+# a reading that does not evaluate `cfg` cannot know. ALL OF THIS READS THE
+# NAMES THE SOURCE WRITES: a function a macro names by substitution, or one an
+# aliased `include!` brings in, is in no count and no class
+# (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project owner).
 #
 # Regenerate the membership (never the classification) with
 # UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1 cargo test -p upstroke effects::

@@ -764,80 +764,164 @@ pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {
     bearers
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerHeader {
+    Module(String),
+    Trait(String),
+    TraitImpl(String),
+    InherentImpl,
+    Unread,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub opened_at: usize,
+    pub header: OwnerHeader,
+}
+
 #[must_use]
-pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<String>> {
+pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {
     let region = production_code(source);
     let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
     let mut bearers = declared_fns(&region).into_iter().peekable();
-    let mut open: Vec<String> = Vec::new();
+    let mut open: Vec<(u8, OwnerScope)> = Vec::new();
     let mut header_from = 0;
-    let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut owners: BTreeMap<String, Vec<Vec<OwnerScope>>> = BTreeMap::new();
     for (at, byte) in region.bytes().enumerate() {
         while let Some((_, name)) = bearers.next_if(|(index, _)| *index <= at) {
             if reachable.contains(name) {
                 owners
                     .entry(name.to_owned())
                     .or_default()
-                    .push(open.join(" > "));
+                    .push(open.iter().map(|(_, scope)| scope.clone()).collect());
             }
         }
+        let in_braces = open.last().is_none_or(|(opener, _)| *opener == b'{');
         match byte {
             b'{' => {
-                open.push(owner_label(region.get(header_from..at).unwrap_or_default()));
+                let header = owner_header(region.get(header_from..at).unwrap_or_default());
+                open.push((
+                    byte,
+                    OwnerScope {
+                        opened_at: at,
+                        header,
+                    },
+                ));
                 header_from = at + 1;
             }
-            b'}' => {
-                open.pop();
-                header_from = at + 1;
+            b'(' | b'[' => open.push((
+                byte,
+                OwnerScope {
+                    opened_at: at,
+                    header: OwnerHeader::Unread,
+                },
+            )),
+            b'}' | b')' | b']' => {
+                let opener = match byte {
+                    b'}' => b'{',
+                    b')' => b'(',
+                    _ => b'[',
+                };
+                if open.last().is_some_and(|(opened, _)| *opened == opener) {
+                    open.pop();
+                }
+                if byte == b'}' {
+                    header_from = at + 1;
+                }
             }
-            b';' => header_from = at + 1,
+            b';' if in_braces => header_from = at + 1,
             _ => {}
         }
     }
     owners
 }
 
-fn owner_label(header: &str) -> String {
+fn owner_header(header: &str) -> OwnerHeader {
+    let mut item = header.trim_start();
+    while let Some(attribute) = item.strip_prefix('#') {
+        let attribute = attribute.strip_prefix('!').unwrap_or(attribute);
+        let close = attribute
+            .starts_with('[')
+            .then(|| matching(attribute.as_bytes(), 0, b'[', b']'))
+            .flatten();
+        let Some(close) = close else {
+            return OwnerHeader::Unread;
+        };
+        item = attribute.get(close + 1..).unwrap_or_default().trim_start();
+    }
+
     let mut depth = 0usize;
-    let mut plain = String::with_capacity(header.len());
+    let mut plain = String::with_capacity(item.len());
     let mut previous = ' ';
-    for character in header.chars() {
+    for character in without_visibility(item).chars() {
         match character {
-            '<' => depth += 1,
+            '<' => {
+                if depth == 0 {
+                    plain.push(' ');
+                }
+                depth += 1;
+            }
             '>' if depth > 0 && previous != '-' => depth -= 1,
             _ if depth == 0 => plain.push(character),
             _ => {}
         }
         previous = character;
     }
-    let words: Vec<&str> = plain.split_whitespace().collect();
-    let after = |keyword: &str| {
-        words
-            .iter()
-            .position(|word| *word == keyword)
-            .and_then(|at| words.get(at + 1..))
+
+    let mut words = plain.split_whitespace().peekable();
+    words.next_if_eq(&"unsafe");
+    match words.next() {
+        Some("mod") => match words.next() {
+            Some(name) if is_identifier(name) => OwnerHeader::Module(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("trait") => match words.next().map(|name| name.trim_end_matches(':')) {
+            Some(name) if is_identifier(name) => OwnerHeader::Trait(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("impl") => {
+            let written: Vec<&str> = words.take_while(|word| *word != "where").collect();
+            match written.iter().position(|word| *word == "for") {
+                None => OwnerHeader::InherentImpl,
+                Some(1) => written
+                    .first()
+                    .filter(|name| is_identifier(name))
+                    .map_or(OwnerHeader::Unread, |name| {
+                        OwnerHeader::TraitImpl((*name).to_owned())
+                    }),
+                _ => OwnerHeader::Unread,
+            }
+        }
+        _ => OwnerHeader::Unread,
+    }
+}
+
+fn without_visibility(item: &str) -> &str {
+    let Some(after) = item.strip_prefix("pub") else {
+        return item;
     };
-    if let Some(name) = after("trait").and_then(|rest| rest.first()) {
-        return format!("trait {}", name.trim_end_matches(':'));
+    if let Some(restriction) = after.trim_start().strip_prefix('(') {
+        return restriction.split_once(')').map_or(item, |(_, rest)| rest);
     }
-    if let Some(rest) = after("impl") {
-        let rest: Vec<&str> = rest
-            .iter()
-            .copied()
-            .take_while(|word| *word != "where")
-            .collect();
-        return format!("impl {}", rest.join(" "));
+    if after.starts_with(char::is_whitespace) {
+        after
+    } else {
+        item
     }
-    if let Some(name) = after("mod").and_then(|rest| rest.first()) {
-        return format!("mod {name}");
-    }
-    "block".to_owned()
+}
+
+fn is_identifier(word: &str) -> bool {
+    word.bytes().all(is_ident_byte)
+        && word
+            .bytes()
+            .next()
+            .is_some_and(|first| !first.is_ascii_digit())
 }
 
 fn declared_fns(region: &str) -> Vec<(usize, &str)> {
     let bytes = region.as_bytes();
     region
-        .match_indices("fn ")
+        .match_indices("fn")
         .filter(|(index, _)| {
             index
                 .checked_sub(1)
@@ -845,12 +929,14 @@ fn declared_fns(region: &str) -> Vec<(usize, &str)> {
                 .is_none_or(|byte| !is_ident_byte(*byte))
         })
         .filter_map(|(index, _)| {
-            region
-                .get(index + 3..)?
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .next()
-                .filter(|name| !name.is_empty())
-                .map(|name| (index, name))
+            let written = region
+                .get(index + 2..)?
+                .strip_prefix(char::is_whitespace)?
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || matches!(c, '(' | '<'))
+                .next()?;
+            let name = written.strip_prefix("r#").unwrap_or(written);
+            (!name.is_empty() && !name.starts_with('$')).then_some((index, name))
         })
         .collect()
 }
@@ -878,14 +964,17 @@ fn find_header_brace(region: &str, from: usize) -> Option<usize> {
     let bytes = region.as_bytes();
     let mut angle = 0i32;
     let mut paren = 0i32;
+    let mut bracket = 0i32;
     for (index, byte) in bytes.iter().enumerate().skip(from) {
         match byte {
             b'<' => angle += 1,
             b'>' => angle -= 1,
             b'(' => paren += 1,
             b')' => paren -= 1,
-            b';' if angle <= 0 && paren <= 0 => return None,
-            b'{' if angle <= 0 && paren <= 0 => return Some(index),
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b';' if angle <= 0 && paren <= 0 && bracket <= 0 => return None,
+            b'{' if angle <= 0 && paren <= 0 && bracket <= 0 => return Some(index),
             _ => {}
         }
     }

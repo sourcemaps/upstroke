@@ -651,6 +651,13 @@ pub(super) mod oracles {
             "impl Trait for Thing { fn through_the_trait(&self) {} }\n",
             "pub trait Public { fn declared(&self) -> u8; fn defaulted(&self) -> u8 { 1 } }\n",
             "trait Private { fn private_default(&self) -> u8 { 1 } }\n",
+            "impl Trait for [u8; 4] { fn through_an_array_impl(&self) {} }\n",
+            "pub trait Wide { fn default_returning_an_array(&self) -> [u8; 4] { [0; 4] } }\n",
+            "pub fn /* between */ after_a_comment() {}\n",
+            "pub fn\n    after_a_line_break() {}\n",
+            "pub fn r#raw_identifier() {}\n",
+            "pub fn \u{fc}n\u{ef}_non_ascii() {}\n",
+            "macro_rules! named { ($name:ident) => { pub fn $name() {} }; }\n",
             "#[cfg(test)]\nmod tests { pub fn in_the_test_region() {} }\n",
         );
         let found = externally_reachable_fns(source);
@@ -658,19 +665,30 @@ pub(super) mod oracles {
             found,
             vec![
                 "abi_visible".to_owned(),
+                "after_a_comment".to_owned(),
+                "after_a_line_break".to_owned(),
                 "constant".to_owned(),
                 "crate_visible".to_owned(),
+                "default_returning_an_array".to_owned(),
                 "defaulted".to_owned(),
                 "free".to_owned(),
                 "inherent".to_owned(),
                 "path_visible".to_owned(),
+                "raw_identifier".to_owned(),
                 "spaced_path_visible".to_owned(),
                 "super_visible".to_owned(),
+                "through_an_array_impl".to_owned(),
                 "through_the_trait".to_owned(),
                 "unsafe_abi_visible".to_owned(),
                 "unsafely".to_owned(),
+                "\u{fc}n\u{ef}_non_ascii".to_owned(),
             ],
             "the parser's answer moved"
+        );
+        assert!(
+            !found.iter().any(|name| name.contains('$')),
+            "a macro's metavariable is not a name; what expansion names is outside this reading \
+             (`PR7-WRAPPERS-EMPTY-DOMAIN`), and it must not look as if it were inside"
         );
         assert!(!found.contains(&"private".to_owned()));
         assert!(!found.contains(&"hidden".to_owned()));

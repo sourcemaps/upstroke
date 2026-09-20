@@ -2922,6 +2922,16 @@ fn an_effectful_name_is_shared_only_by_bearers_of_one_path() {
 }
 
 #[test]
+fn a_shared_effectful_name_is_placed_by_its_braces_and_not_by_what_a_header_spells() {
+    checks::the_spelling_defeats_and_their_controls();
+}
+
+#[test]
+fn the_owner_reading_places_each_header_or_leaves_it_unread() {
+    checks::the_owner_reading_places_each_header_or_leaves_it_unread();
+}
+
+#[test]
 fn every_effectful_wrapper_is_on_the_disallowed_list() {
     checks::effectful_wrappers_are_denied();
 }

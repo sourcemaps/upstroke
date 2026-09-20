@@ -777,11 +777,21 @@ reconciliation table exists for, one level down.
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `assert!(!found.contains(&"private".to_owned()));`
 
-Eight shapes accepted, five refused, and the five are refused for five
-different reasons: private, private-in-an-inherent-impl, test region, a
+Eighteen shapes accepted, six refused, and five of the six are refused for
+five different reasons: private, private-in-an-inherent-impl, test region, a
 trait method DECLARATION (no body to classify — its implementations are
 reached by the `impl … for …` shape), and a default body in a trait that
 is not itself visible.
+
+Six of the eighteen were outside the domain, or in it under another name,
+until round 3 of #309. A method of `impl Trait for [u8; 4]` and a public
+trait's default body returning `[u8; 4]`: `find_header_brace` stopped at the
+`;` inside the brackets, so the impl gave no span and the body was taken for a
+declaration. A name after a comment, after a line break, a non-ASCII name and
+a raw identifier: `declared_fns` read `fn`, one space and ASCII, so the first
+three were unread and `r#raw_identifier` was `r`. The sixth refusal is the one
+that must stay one: a macro's `fn $name` is not a name
+(`docs/internals/effects.md` has each measurement: no name moved at that head).
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `let exploit = concat!(`
 

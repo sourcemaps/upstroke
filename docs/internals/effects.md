@@ -851,34 +851,150 @@ classified
 in the record's `shared` table, so the second bearer of a name is a
 disagreement like a new name is.
 
-## `pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<String>> {`
+## `pub enum OwnerHeader {`
+
+What the header of one pair of braces was read as, for
+[`reachable_fn_owners`]: an inline `mod`, a `trait` declaration, a trait's
+impl with the trait's name as the header writes it, an inherent impl, or
+`Unread` -- everything else, which is most braces: a function body, a `const`
+block, a `match`, a macro's definition or invocation, an `extern` block, and
+any header the reading below cannot place. An inherent impl carries no type
+name on purpose. Nothing downstream may compare two impls by what their
+headers spell, and the way to be sure nothing does is for the spelling not to
+be there.
+
+## `pub struct OwnerScope {`
+
+One pair of braces open at a declaration: the byte its `{` sits at in the
+file's production code, and what its header was read as. **The offset is the
+scope's identity.** Two scopes are the same scope when they open at the same
+byte and at no other time, whatever their headers say, because a header is
+text and text is what an alias, a `use` inside a block or a generic argument
+changes without changing the path -- or changes the path without changing the
+text.
+
+## `pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {`
 
 For each name [`externally_reachable_fns`] derives, where each of its bearers
-is declared: the chain of blocks open at the declaration, outermost first,
-joined by ` > `, the file's top level being the empty chain. It exists for one
-question -- whether the bearers of an effectful name are one path or several
+is declared: the chain of braces open at the `fn`, outermost first, the file's
+top level being the empty chain. It exists for one question -- whether the
+bearers of an effectful name are one path or several
 (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) -- and answers no
-other: it labels a block by the last of `trait`, `impl` or `mod` its header
-holds and calls everything else `block`, which is enough to tell a `cfg` twin
-(the same chain) and a trait's declaration from its impl (`trait T` against
-`impl T for X`) from a second path (`mod x`, `impl X`), and is not a resolver.
-Like every reading here it sees the declarations the source writes.
+other. Each bearer owns its chain, so the open stack is cloned once per
+reachable declaration; a chain is a handful of small values.
 
-## `fn owner_label(header: &str) -> String {`
+**What it returned before, and why it does not now.** Until the review of
+`993f080d` a chain was a string of labels (`block > impl Rf3Target`) and the
+caller compared strings. Both lenses of that review passed two receivers as
+one with ordinary source-written Rust and no expansion. `impl RfFirst<{ 1 + 1 }>`
+and `impl RfSecond<{ 1 + 1 }>`: the braces of the const argument are braces,
+closing them restarted the header, what was left of each `impl` header was
+`>`, and both owners read `block`. Two `const _: () = { .. }` blocks each
+importing a different receiver as `Rf3Target`: both owners read
+`block > impl Rf3Target`. In each case the record classified and denied the
+first path, a production body under `engine::topology` called the second, and
+clippy exited 0 with 186 tests passing. Writing `2` for `{ 1 + 1 }`, or
+renaming one alias, made the same check fail -- so the verdict followed the
+spelling and not the path. Every `{` still opens a scope here, a const
+argument's included; what changed is that a scope is known by where it opens,
+and a header that does not read as an item is `Unread` rather than something
+two blocks can have in common.
 
-A block header as `trait Name`, `impl Trait for Type`, `impl Type`, `mod name`
-or `block`, with generic arguments and any `where` clause dropped so that two
-spellings of one owner compare equal.
+**Parentheses and square brackets open scopes too, always `Unread`.** No item
+is declared inside either in ordinary Rust, and the one thing that does put a
+`fn` there is a macro invocation, `place!( pub fn held() {} );`, which can set
+its tokens down anywhere. Found by attacking the first draft of this repair,
+which tracked braces alone: twins inside one invocation's parentheses were
+two bearers at the file's top level, one scope, admitted. A closer leaves only
+the scope its own opener made, so a stray one cannot close an `impl`; and a
+`;` ends a header only when the innermost thing open is a brace, which is what
+lets `impl View for [u8; 4]` be read as the impl it is.
+
+It is a lexical reading like every other in this file. It sees the
+declarations the source writes, it does not evaluate `cfg`, and it resolves no
+name.
+
+## `fn owner_header(header: &str) -> OwnerHeader {`
+
+The text between the last `;`, `{` or `}` and an opening brace, read as an
+item header or not at all. Leading attributes are stepped over by matching
+their brackets, a visibility is dropped, generic argument lists are dropped
+(an `->` inside one does not close it), and then **the first word has to be
+the keyword**, after at most one `unsafe`: `mod name`, `trait Name`, or
+`impl`. An `impl` header is a trait's impl when the word
+`for` is its second word after `impl` and the first is a plain identifier --
+`impl View for A`, not `impl fmt::Display for A`, whose trait this reading
+would have to resolve -- and an inherent impl when it holds no `for` at all.
+Anything else is `Unread`.
+
+The keyword has to lead because the earlier reading took the last of `trait`,
+`impl` or `mod` found *anywhere* in the header, and answered `impl Sized)` for
+`fn host(value: impl Sized) {` (measured at `993f080d`). That direction -- a
+scope read as an item it is not -- is the one that could admit something, so
+it is the strict one. The other direction is deliberately loose: a header this
+cannot place is refused by the caller, so a brace inside the header
+(`impl Wide<{ 1 + 1 }>`), a trait named by a path, an `impl const`, a
+non-ASCII name and a negative impl all come back `Unread`, and the cost is
+that the author of such a header gives the other callable its own name.
+
+## `fn without_visibility(item: &str) -> &str {`
+
+An item header with its `pub`, `pub(crate)` or `pub(in path)` removed. `pub`
+has to end at whitespace or a parenthesis, so an item whose first word merely
+begins with those letters keeps it and is read as what it is.
+
+## `fn is_identifier(word: &str) -> bool {`
+
+An ASCII identifier: the name a `mod`, a `trait` or the trait of an impl has
+to be for the header to be placed. A raw or non-ASCII identifier is not one,
+which leaves its header `Unread`.
 
 ## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
 
-Every `fn name` a region declares, with its offset: the one reading both the
-domain and its multiplicity are made from, so they cannot disagree about what
-a declaration is.
+Every `fn name` a region declares, with its offset: the one reading the
+domain, its multiplicity and its owners are all made from, so they cannot
+disagree about what a declaration is.
+
+**A name is read by what ends it, not by what it is made of.** After `fn` and
+any run of whitespace, the name is the text up to the first `(`, `<` or
+whitespace, less a leading `r#`. It used to be `fn`, exactly one space, and a
+run of ASCII letters, digits and underscores, and round 3 of #309 measured
+what that left out at `993f080d`, each with the control `pub fn plain() {}`
+read beside it: `pub fn /* between */ commented() {}` was unread, because the
+blanker turns the comment into spaces and the first piece after `fn ` is then
+empty; so was a name after a line break; so was a non-ASCII name; and
+`pub fn r#raw() {}` was read as `r`. Each is a function the source writes and
+the record never asked about, or asked about under another name, and the
+count this file's sharing rule rests on was short by it. Executed as parser
+omissions; the bypass each would allow is reasoned. The tree writes none of
+them, and the fix moves nothing at that head: 759 names in the 54 classified
+modules, 2267 across all 186 source files, byte-identical, and the 69 pins
+still exact.
+
+One thing that follows `fn` is deliberately not a name: a macro metavariable.
+`pub fn $name() {}` names nothing the text holds, reading it as `$name` would
+make expansion look covered when it is not
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and `$` cannot begin an identifier, so the
+exclusion costs no real name. `the_reachable_fn_parser_finds_each_shape_this_tree_uses`
+pins all five.
 
 ## `fn find_header_brace(region: &str, from: usize) -> Option<usize> {`
 
 The `{` that opens an `impl` block's body, skipping generics and where-clauses.
+
+**A `;` or a `{` inside square brackets is not the header's end.** It used to
+be: the scan counted angle brackets and parentheses and stopped at the first
+`;` outside them, so `impl Trait for [u8; 4] { fn f(&self) {} }` gave no span,
+`f` declares no visibility, and the method was outside the classification
+domain; a public trait's default body returning `[u8; 4]` went the same way.
+Found in round 3 of #309 while pinning what [`reachable_fn_owners`] reads, by
+a shape test that came back empty: executed as a parser omission, the bypass
+it would allow reasoned. Brackets are counted now. It adds no name at that
+head -- 759 names in the 54 classified modules and 2267 across all 186 source
+files, byte-identical with the hunk reverted -- and
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both shapes.
+Like `declares_visibility` above, this is a recogniser of the shapes the tree
+and its reviews have produced, not of Rust's item grammar.
 
 ## `pub struct DenialFixture {`
 
