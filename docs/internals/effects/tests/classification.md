@@ -329,6 +329,38 @@ bear `run`. With the same function renamed `rf_unique_effect`, the name census
 finds exactly that name unclassified and the multiplicity census is silent. So
 either spelling of the function is refused, each by the check that owns it.
 
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn the_separator_and_escape_witnesses_and_their_controls() {`
+
+The two executed escapes of #309's fourth review that are readings of a
+file's text, held against this tree's real files and real record, in memory.
+
+**The main lens's escape (b).** `src/engine/coordinator.rs` is clean at the
+head. With `#[rustfmt::skip]` and a `pub(crate) fn` calling `std::fs::write`
+appended -- `fn`, one of the eleven separators rustc reads, then the name --
+the name census must find exactly `rf4_coord_write` unclassified, and the
+count must hold it once, **for every separator**. U+0020 is the review's
+control. At `84123789` the rows for U+200E and U+200F are the two that fail:
+the name reader split on `char::is_whitespace`, the function was in no count
+and no class, and nothing else had to change for it to be reachable -- the
+module was classified and its allow recorded already.
+
+**The regression lens's balanced witness.** Two inherent impls in
+`src/engine/resume.rs`, each bearing an effectful `rf4_write`, each holding
+`stringify! {'\u{7b____________________}','}'}` before it and the same with
+`'{'` after it; the record pins the name at 2 and classifies one path, which
+satisfies the name census and the count, as the review's did. Each bearer must
+be placed in its own `impl` (two chains of one `InherentImpl`, not equal), and
+the sharing must be refused once, naming `rf4_write`. At `84123789` the char
+reader stopped short of the legal escape, a brace survived as code, and both
+chains were empty -- file-scope twins, admitted. The control writes the escape
+without its underscores and is refused the same way, as it was then. See
+`char_literal_end` in `docs/internals/effects.md`.
+
+Not held here, because they are not readings of a text: the compiled halves
+of the reviews' witnesses -- clippy at exit 0, the topology caller writing its
+bytes, and the deny control that turns clippy to 101. Those are in the round's
+evidence.
+
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn effectful_wrappers_are_denied() {`
 
 "effectful wrappers are added to the disallowed list themselves".

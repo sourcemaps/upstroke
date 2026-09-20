@@ -2024,6 +2024,26 @@ fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {
             holds(addition)
         );
     }
+    for separator in super::RUSTC_WHITESPACE {
+        let declaration = format!("pub(crate) mod{separator}rf4_facade_child;");
+        let walked = crate::effects::census_domain::scan_modules(&declaration)
+            .expect("one declaration scans")
+            .declared;
+        assert_eq!(
+            (holds(&declaration).len(), walked.len()),
+            (0, 1),
+            "U+{:04X}: the whitelist admits a declaration and the walk has to read the same one, \
+             or the facade declares a child nobody judges -- with U+000B, U+0085, U+2028 and \
+             U+2029 the whitelist admitted it and the walk did not (the review of 84123789)",
+            u32::from(separator)
+        );
+        assert_eq!(
+            holds(&format!("#[rustfmt::skip]\n{declaration}")).len(),
+            1,
+            "U+{:04X}: the attribute that silences `cargo fmt --check` is not a declaration",
+            u32::from(separator)
+        );
+    }
 }
 
 #[test]
@@ -2120,6 +2140,94 @@ fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {
         "only {exempt_in_production:?} were found with a governed lint allowed in effect in \
          production, so the classification half of this test judged nothing"
     );
+}
+
+#[test]
+fn every_separator_rustc_reads_is_one_every_reader_here_reads() {
+    use crate::effects::census_domain::{ScanRefusal, scan_modules};
+    use crate::effects::lint_levels::file_level_lint_state;
+
+    const ATTEMPT: &str = "src/engine/attempt.rs";
+    let hex = |separator: char| format!("U+{:04X}", u32::from(separator));
+
+    assert_eq!(
+        super::RUSTC_WHITESPACE.map(u32::from),
+        [
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0x200E, 0x200F, 0x2028, 0x2029
+        ],
+        "the one definition is rustc's eleven, by value: compiled once, outside the suite, in the \
+         round's evidence, because a fixture compiled here is a long-lived child of the test \
+         process"
+    );
+
+    let attempt = fs::read_to_string(repo_root().join(ATTEMPT)).expect(ATTEMPT);
+    for separator in super::RUSTC_WHITESPACE {
+        let at = hex(separator);
+
+        let source =
+            format!("mod{separator}a; // c{separator}\nconst S: &str = \"{separator}\";\n");
+        let blanked = blank_comments_and_strings(&source);
+        assert_eq!(blanked.len(), source.len(), "{at}: byte offsets moved");
+        assert_eq!(
+            blanked.matches('\n').count(),
+            source.matches('\n').count(),
+            "{at}: line numbers moved"
+        );
+        assert!(
+            blanked
+                .chars()
+                .all(|read| !super::is_rustc_whitespace(read) || read.is_ascii_whitespace()),
+            "{at}: the tokenizer hands its readers a separator they do not read: {blanked:?}"
+        );
+
+        let declaring =
+            format!("{attempt}\n#[rustfmt::skip]\npub(super) mod{separator}rf4_child;\n");
+        let declared = scan_modules(&declaring)
+            .unwrap_or_else(|refusal| panic!("{at}: {ATTEMPT}: {refusal}"))
+            .declared;
+        assert_eq!(
+            declared
+                .iter()
+                .filter(|declaration| declaration.name == "rf4_child")
+                .count(),
+            1,
+            "{at}: `mod`, the separator, `rf4_child;` in {ATTEMPT} is a child rustc compiles \
+             under that file's recorded allow, and the walk from the facade did not read it"
+        );
+
+        assert!(
+            includes_a_file(&format!("include{separator}!(\"x.inc\");\n")),
+            "{at}: `include`, the separator, `!` includes a file"
+        );
+        assert_eq!(
+            file_level_lint_state(
+                &format!("{separator}#![deny({separator}clippy::disallowed_methods)]\n"),
+                "clippy::disallowed_methods"
+            ),
+            Some("deny"),
+            "{at}: a file-level deny behind the separator is a deny"
+        );
+        assert!(
+            matches!(
+                scan_modules(&format!(
+                    "#[{separator}path = \"elsewhere.rs\"]\nmod{separator}elsewhere;\n"
+                )),
+                Err(ScanRefusal::UnsupportedPathAttribute { .. })
+            ),
+            "{at}: a `path` attribute behind the separator sends the walk to the wrong file"
+        );
+        let allowed = governed_allows(&format!(
+            "#![allow({separator}clippy::disallowed_methods)]\n"
+        ));
+        assert_eq!(
+            allowed
+                .iter()
+                .flat_map(|allow| allow.lints.iter().map(String::as_str))
+                .collect::<Vec<_>>(),
+            vec!["disallowed_methods"],
+            "{at}: an allow whose lint follows the separator is an allow of that lint"
+        );
+    }
 }
 
 fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {
@@ -2914,6 +3022,11 @@ fn every_name_more_than_one_callable_bears_is_pinned_by_its_count() {
 #[test]
 fn a_second_callable_under_a_classified_name_is_refused_and_a_renamed_one_is_unclassified() {
     checks::the_collision_witness_and_its_renamed_control();
+}
+
+#[test]
+fn a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace() {
+    checks::the_separator_and_escape_witnesses_and_their_controls();
 }
 
 #[test]
@@ -3773,6 +3886,23 @@ fn the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write() 
         "the cruder reading the engine guard checks the scan against disagrees with it on the \
          fixture that pins both"
     );
+    for separator in super::RUSTC_WHITESPACE {
+        let written = format!(
+            "#[rustfmt::skip]\npub(super) mod{separator}declared_child{separator};\n\
+             mod{separator}inline_child{separator}{{}}\n"
+        );
+        let read = scan_modules(&written).expect("the separator fixture scans");
+        let declared: Vec<&str> = read.declared.iter().map(|d| d.name.as_str()).collect();
+        let inline: Vec<&str> = read.inline.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            (declared, inline, inline_module_openers(&written)),
+            (vec!["declared_child"], vec!["inline_child"], 1),
+            "U+{:04X} separates tokens for rustc, so `mod`, it, and a name is a module rustc \
+             compiles; the review of 84123789 executed `mod`, U+200E, a child of \
+             `src/engine/attempt.rs` that no walk judged: {written:?}",
+            u32::from(separator)
+        );
+    }
 
     let written = |module: &crate::effects::census_domain::ScannedInlineModule| -> Vec<String> {
         let own = format!(

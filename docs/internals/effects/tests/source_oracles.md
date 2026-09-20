@@ -777,13 +777,13 @@ reconciliation table exists for, one level down.
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `assert!(!found.contains(&"private".to_owned()));`
 
-Eighteen shapes accepted, six refused, and five of the six are refused for
+Twenty-two shapes accepted, six refused, and five of the six are refused for
 five different reasons: private, private-in-an-inherent-impl, test region, a
 trait method DECLARATION (no body to classify — its implementations are
 reached by the `impl … for …` shape), and a default body in a trait that
 is not itself visible.
 
-Six of the eighteen were outside the domain, or in it under another name,
+Six of the twenty-two were outside the domain, or in it under another name,
 until round 3 of #309. A method of `impl Trait for [u8; 4]` and a public
 trait's default body returning `[u8; 4]`: `find_header_brace` stopped at the
 `;` inside the brackets, so the impl gave no span and the body was taken for a
@@ -792,6 +792,32 @@ a raw identifier: `declared_fns` read `fn`, one space and ASCII, so the first
 three were unread and `r#raw_identifier` was `r`. The sixth refusal is the one
 that must stay one: a macro's `fn $name` is not a name
 (`docs/internals/effects.md` has each measurement: no name moved at that head).
+
+Four of the twenty-two are round 4's, and they are about a keyword that
+touches what follows it, which rustc allows wherever the next token is not
+part of a word: `impl<T> Glued<T>for Thing<T>`, `impl::path::Trait for Thing`
+and `impl Trait for&'static str` are trait impls, and until then the `impl`
+reader wanted a separator or `<` after `impl` and the `for` reader a separator
+on each side, so their methods were outside the domain. The fourth is the
+price, pinned so that it is a decision: `impl<F: for<'a> Fn(&'a u8)> Holder<F>`
+is an inherent impl whose header holds the word `for`, it reads as a trait
+impl, and its private `behind_a_bound` is in the domain. That costs a row and
+fails closed; telling a bound's `for` from the impl's cannot be done by the
+next token (`impl Tr for <X as Y>::Out` is a trait impl), and the tree holds
+no such header -- no name moved.
+
+## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `for separator in RUSTC_WHITESPACE {`
+
+The eleven separators rustc reads, each written after `fn`, after `trait`,
+after `impl` and on both sides of `for`: the free function, the default body
+and the trait impl's method are all in the domain, each counted once. Before
+round 4 of #309 the name reader read nine of the eleven (not U+200E, not
+U+200F) and the `trait`, `impl` and `for` readers read exactly one, U+0020;
+they read a keyword as a whole word now and ask nothing of what follows it.
+The last assertion hands the name reader a text no tokenizer has rewritten,
+because through `externally_reachable_fns` the tokenizer has already written
+the six separators a library predicate can miss as spaces, and a reader that
+went back to `char::is_whitespace` would pass every other row.
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `let exploit = concat!(`
 

@@ -69,16 +69,38 @@
 # (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`); the repair compared
 # what the owners' headers spelled, and the review of 993f080d passed two
 # receivers as one twice over -- const-generic braces that lost both `impl`
-# headers, and one alias for two types in two `const _` blocks.
+# headers, and one alias for two types in two `const _` blocks. The repair
+# reads a scope by the byte its brace opens at, and the review of 84123789
+# passed two receivers as one a third time, through the tokenizer under that
+# reading: a legal Unicode escape made long by underscores was longer than the
+# char-literal reader's window, a brace survived as code, both `impl` blocks
+# closed early and both bearers read as file-scope twins. A position is only
+# as good as the tokenization under it; an escape ends where rustc's lexer
+# ends it now, and
+# `effects::tests::a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+# holds that witness and its control refused.
 # `effects::tests::an_effectful_name_is_shared_only_by_bearers_of_one_path` and
 # `effects::tests::a_shared_effectful_name_is_placed_by_its_braces_and_not_by_what_a_header_spells`
 # hold all three pins refused. The reading is of the text and resolves no
 # name: the first shape needs none, and in the second the impl's trait is the
 # one declared in the same braces PROVIDED THAT DECLARATION IS COMPILED, which
 # a reading that does not evaluate `cfg` cannot know. ALL OF THIS READS THE
-# NAMES THE SOURCE WRITES: a function a macro names by substitution, or one an
-# aliased `include!` brings in, is in no count and no class
-# (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project owner).
+# NAMES THE SOURCE WRITES, AS FAR AS THESE RECOGNISERS READ THEM. Two things are
+# in no count and no class. What expansion writes: a function a macro names by
+# substitution, or one an aliased `include!` brings in. And what the text
+# writes and a recogniser misreads: the review of 84123789 wrote `pub(crate)
+# fn`, U+200E, a name in `src/engine/coordinator.rs` -- a name the source
+# writes -- and it was in no count and no class, because the name reader split
+# on `char::is_whitespace` and rustc separates tokens on eleven code points
+# that predicate does not all hold. That spelling is read now: the tokenizer
+# every reader starts from writes rustc's separators as ones every reader
+# reads (`RUSTC_WHITESPACE` in `src/effects.rs`), and
+# `effects::tests::a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+# holds all eleven against the real coordinator. The class is not closed by
+# closing a spelling: these are recognisers of the shapes this tree and its
+# reviews have produced, not rustc's lexer and parser
+# (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project owner, records both
+# halves).
 #
 # Regenerate the membership (never the classification) with
 # UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1 cargo test -p upstroke effects::

@@ -52,6 +52,16 @@ pub struct GovernedAllow {
     pub reasoned: bool,
 }
 
+pub const RUSTC_WHITESPACE: [char; 11] = [
+    '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}', '\u{200E}',
+    '\u{200F}', '\u{2028}', '\u{2029}',
+];
+
+#[must_use]
+pub fn is_rustc_whitespace(character: char) -> bool {
+    RUSTC_WHITESPACE.contains(&character)
+}
+
 #[must_use]
 pub fn blank_comments(source: &str) -> String {
     let bytes = source.as_bytes();
@@ -123,11 +133,14 @@ fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {
     let mut at = from + 1;
     if bytes.get(at) == Some(&b'\\') {
         at += 2;
-        let limit = (from + 13).min(bytes.len());
-        while at < limit && bytes[at] != b'\'' {
-            at += 1;
+        loop {
+            match *bytes.get(at)? {
+                b'\'' => return Some(at + 1),
+                b'\n' => return None,
+                b'\\' => at += 2,
+                _ => at += 1,
+            }
         }
-        return (bytes.get(at) == Some(&b'\'')).then_some(at + 1);
     }
     let width = match *bytes.get(at)? {
         0x00..=0x7F => 1,
@@ -174,8 +187,26 @@ fn literal_end(bytes: &[u8], from: usize) -> Option<usize> {
 }
 
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn blank_comments_and_strings(source: &str) -> String {
+    let code = code_bytes_only(source);
+    let unread =
+        |character: char| is_rustc_whitespace(character) && !character.is_ascii_whitespace();
+    if !code.contains(unread) {
+        return code;
+    }
+    let mut spaced = String::with_capacity(code.len());
+    for character in code.chars() {
+        if unread(character) {
+            spaced.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        } else {
+            spaced.push(character);
+        }
+    }
+    spaced
+}
+
+#[allow(clippy::too_many_lines)]
+fn code_bytes_only(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = vec![b' '; bytes.len()];
     for (index, byte) in bytes.iter().enumerate() {
@@ -697,17 +728,11 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     let mut trait_impl_spans = Vec::new();
     let mut public_trait_spans = Vec::new();
 
-    let mut t = 0;
-    while let Some(hit) = region[t..].find("trait ") {
-        let start = t + hit;
-        t = start + "trait ".len();
-        if start > 0 && is_ident_byte(bytes[start - 1]) {
+    for (start, after) in keyword_sites(&region, "trait") {
+        if !declares_visibility(region.get(..start).unwrap_or_default()) {
             continue;
         }
-        if !declares_visibility(&region[..start]) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, t) else {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -715,19 +740,12 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    let mut i = 0;
-    while let Some(hit) = region[i..].find("impl") {
-        let start = i + hit;
-        i = start + 4;
-        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
-        if !before_ok || !region[i..].starts_with([' ', '<']) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, i) else {
+    for (_, after) in keyword_sites(&region, "impl") {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
-        let header = &region[i..brace];
-        if !header.contains(" for ") {
+        let header = region.get(after..brace).unwrap_or_default();
+        if keyword_sites(header, "for").next().is_none() {
             continue;
         }
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -736,7 +754,7 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     }
 
     for (index, name) in declared_fns(&region) {
-        let visible = declares_visibility(&region[..index]);
+        let visible = declares_visibility(region.get(..index).unwrap_or_default());
         let in_trait_impl = trait_impl_spans
             .iter()
             .any(|(open, close)| index > *open && index < *close);
@@ -918,22 +936,30 @@ fn is_identifier(word: &str) -> bool {
             .is_some_and(|first| !first.is_ascii_digit())
 }
 
-fn declared_fns(region: &str) -> Vec<(usize, &str)> {
-    let bytes = region.as_bytes();
-    region
-        .match_indices("fn")
-        .filter(|(index, _)| {
-            index
+fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let bytes = text.as_bytes();
+    text.match_indices(keyword)
+        .map(|(start, word)| (start, start + word.len()))
+        .filter(move |(start, end)| {
+            let glued_before = start
                 .checked_sub(1)
                 .and_then(|before| bytes.get(before))
-                .is_none_or(|byte| !is_ident_byte(*byte))
+                .is_some_and(|byte| is_ident_byte(*byte));
+            let glued_after = text.get(*end..).is_some_and(|rest| {
+                rest.starts_with(|next: char| next.is_alphanumeric() || next == '_')
+            });
+            !glued_before && !glued_after
         })
-        .filter_map(|(index, _)| {
+}
+
+fn declared_fns(region: &str) -> Vec<(usize, &str)> {
+    keyword_sites(region, "fn")
+        .filter_map(|(index, after)| {
             let written = region
-                .get(index + 2..)?
-                .strip_prefix(char::is_whitespace)?
-                .trim_start()
-                .split(|c: char| c.is_whitespace() || matches!(c, '(' | '<'))
+                .get(after..)?
+                .strip_prefix(is_rustc_whitespace)?
+                .trim_start_matches(is_rustc_whitespace)
+                .split(|c: char| is_rustc_whitespace(c) || matches!(c, '(' | '<'))
                 .next()?;
             let name = written.strip_prefix("r#").unwrap_or(written);
             (!name.is_empty() && !name.starts_with('$')).then_some((index, name))
@@ -1636,7 +1662,9 @@ pub(crate) mod census_domain {
                     return Err(ScanRefusal::UnclosedAttribute { line: line_of(i) });
                 };
                 let raw = &source[open + 1..close];
-                let name = raw
+                let name = blanked
+                    .get(open + 1..close)
+                    .unwrap_or_default()
                     .trim_start()
                     .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
                     .next()

@@ -229,6 +229,61 @@ build owns rather than a claim a reviewer has to re-check.
 
 Whether it carries a `reason = "…"`.
 
+## `pub const RUSTC_WHITESPACE: [char; 11] = [`
+
+The eleven code points rustc's lexer reads as whitespace between tokens:
+U+0009 TAB, U+000A LF, U+000B VT, U+000C FF, U+000D CR, U+0020 SPACE,
+U+0085 NEL, U+200E LRM, U+200F RLM, U+2028 LS and U+2029 PS. **This is the one
+definition of a token separator here**, and it is rustc's rather than a
+library's: `u8::is_ascii_whitespace` leaves out U+000B and cannot see the five
+that are not ASCII, and `char::is_whitespace` leaves out U+200E and U+200F and
+adds code points rustc refuses between tokens, U+00A0 among them.
+`every_separator_rustc_reads_is_one_every_reader_here_reads` pins the eleven by
+value; that rustc builds each of them with nothing reported, and refuses
+U+00A0 and U+200B (whitespace to the eye and to no predicate) as unknown
+tokens, was compiled once for round 4 of #309 and is in that round's evidence,
+not in the suite.
+
+The fourth review of #309 measured the difference at `84123789`. Three
+readers took three sets -- the module walk `u8::is_ascii_whitespace`, the name
+reader `char::is_whitespace`, the facade whitelist `str::split_whitespace` --
+and two ordinary declarations, written with `#[rustfmt::skip]` and no macro,
+passed every gate while a topology caller wrote through them: `mod`, U+200E, a
+child of `src/engine/attempt.rs` that no walk judged, and `fn`, U+200E, a name
+in `src/engine/coordinator.rs` that was no classification obligation and no
+count. In the facade the whitelist admitted `mod`, U+000B, a name, and the walk
+did not read it; only the facade's own deny kept an effect from following.
+rustc reports none of this: its text-direction lints cover literals and
+comments, not the space between tokens.
+
+**It is applied once, where every reader gets its text.** The module walk, the
+name reader, the whitelist and the other readers in this module and its tests
+each decide where a token ends, with a byte test, a `trim` or a
+`split_whitespace`, and they read [`blank_comments_and_strings`] or
+[`production_code`], which is made from it. So that function writes each of
+the six separators those predicates do not all read -- U+000B, U+0085, U+200E,
+U+200F, U+2028, U+2029 -- as spaces of the same byte length, and on its output
+the three library predicates and rustc's agree. A reader added later inherits
+that; a predicate repaired reader by reader is what rounds 1 to 3 did, each
+leaving the next reader's blind spot. [`declared_fns`], which matches text
+rather than testing bytes, names this definition itself; the `trait`, `impl`
+and `for` readers of [`externally_reachable_fns`] read a keyword as a whole
+word and ask nothing of what follows it ([`keyword_sites`]). The byte readers
+([`census_domain`]'s `whitespace` among them) keep `u8::is_ascii_whitespace`,
+which on that text is the whole set.
+
+**What it does not reach.** A reader that reads the raw source instead of the
+tokenizer's text is outside it; the module walk read an attribute's name that
+way and now reads it from the tokenizer's text (see `scan_modules`).
+[`blank_comments`] keeps literals and is not rewritten: its callers look for a
+string's contents, not for where a token ends. And a separator is one thing a
+recogniser can misread, not the only one: see `PR7-WRAPPERS-EMPTY-DOMAIN`.
+
+## `pub fn is_rustc_whitespace(character: char) -> bool {`
+
+Whether rustc reads `character` as whitespace between tokens:
+[`RUSTC_WHITESPACE`] as a predicate.
+
 ## `pub fn blank_comments(source: &str) -> String {`
 
 `source` with every comment **removed** and every string literal **kept**
@@ -354,9 +409,30 @@ scalar is not a quote — rather than by a list.
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `at += 2;`
 
-An escape. The longest Rust spells is `\u{10FFFF}`, which closes at
-`from + 11`, so the window is bounded and a runaway scan over the rest
-of the file cannot happen.
+An escape, read the way rustc's lexer reads one: past the escaped character,
+then to the next quote that is not itself escaped. A line break before that
+quote means this was no char literal, so a scan cannot run past its own line.
+
+**It used to be a window, and the window was wrong.** This note said the
+longest escape Rust spells is `\u{10FFFF}`, closing at `from + 11`, and the
+reader stopped looking at `from + 13`. A Unicode escape is one to six hex
+digits and **any number of underscores**, so `'\u{7b____________________}'` is
+legal and longer than any window. The regression lens of #309's fourth review
+executed what follows from that at `84123789`: the reader gave up on the
+literal, took the `','` after it for a char literal, and the `}` of a
+following `'}'` survived as code. Written twice in each of two `impl` blocks
+inside `stringify! { .. }` -- once with `'}'` and once with `'{'`, which keeps
+the braces balanced for the module walk -- it closed both impls early, so two
+effectful `rf4_write`s read as file-scope twins and the sharing rule admitted
+two paths under one denial; fmt, clippy and 188 tests passed while a topology
+caller wrote through the undenied one. The same text with the underscores
+removed was refused. **A structural reading is only as good as the
+tokenization under it**: every brace position [`reachable_fn_owners`] compares
+comes from this function. Pinned by
+`a_multi_byte_char_literal_does_not_desync_the_blanker` (each legal escape
+form beside a brace) and by
+`a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+(the review's witness and its control, both refused).
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `let width = match *bytes.get(at)? {`
 
@@ -375,8 +451,19 @@ literal ends at end of input — a file that does not compile.
 ## `pub fn blank_comments_and_strings(source: &str) -> String {`
 
 `source` with every comment and string literal replaced by spaces of the same
-length, newlines preserved. The output is exactly as long as the input, so an
-offset, a line and a column measured in it are `source`'s own.
+length, newlines preserved, **and every token separator rustc reads that is
+not ASCII whitespace written as spaces of its own byte length**
+([`RUSTC_WHITESPACE`]: U+000B, U+0085, U+200E, U+200F, U+2028, U+2029). The
+output is exactly as long as the input, so an offset, a line and a column
+measured in it are `source`'s own.
+
+This is the tokenizer every structural reader here starts from, which is why
+the separators are settled here and not in each reader: after it, a byte test
+for ASCII whitespace, `char::is_whitespace` and `split_whitespace` all read
+exactly what rustc reads between tokens. A source that writes none of the six
+comes back byte for byte as `code_bytes_only` made it. LF stays LF, and the
+other four ASCII separators stay what they are, so a CRLF checkout reads as it
+did.
 
 ```text
 in: /*why*/let x = "docker";
@@ -396,15 +483,20 @@ can no longer contain. [`blank_comments`] is the half that keeps it, and
 `the_notes_give_each_blanker_its_own_contract` runs both worked examples
 above against the functions themselves.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
+## `fn code_bytes_only(source: &str) -> String {`
+
+The blanking itself, unchanged since before the separators were settled above
+it: comments and literals to spaces, code bytes kept, newlines kept.
+
+## `fn code_bytes_only(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
 
 Newlines survive so line numbers do.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `let mut j = i;`
+## `fn code_bytes_only(source: &str) -> String` › `let mut j = i;`
 
 `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `match char_literal_end(bytes, i) {`
+## `fn code_bytes_only(source: &str) -> String` › `match char_literal_end(bytes, i) {`
 
 [`char_literal_end`] decides, so this and its sibling in
 [`blank_comments`] cannot drift apart.
@@ -783,15 +875,40 @@ A trait method **declaration** (no body) is deliberately still excluded: it
 performs nothing, and every implementation of it is reached by the
 `impl … for …` shape above.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut t = 0;`
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (start, after) in keyword_sites(&region, "trait") {`
 
 `pub trait X: Y { … }` — the bodies inside are reachable through the
 trait, exactly as a trait impl's are.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut i = 0;`
+**`trait` as a whole word, whatever follows it.** This was the text `trait` and
+one U+0020, and the `impl` reader below wanted one U+0020 or `<` after `impl`
+and one U+0020 on each side of `for`. A tab or a line break is enough to miss
+all three, no Unicode needed: `pub trait`, a tab, a name left every default
+body of that trait outside the domain, and `impl`, a tab, a trait, `for` left
+every fn of that impl outside it. Found while settling the separators in round
+4 of #309, by reading; the tree writes none of them and the domain did not
+move (759 names in the 54 classified modules).
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` holds all eleven
+separators after `fn`, `trait` and `impl` and around `for`.
+
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (_, after) in keyword_sites(&region, "impl") {`
 
 `impl <something> for <something> {` — the `for` is what makes it a trait
 impl; an inherent `impl Type {` has none before the brace.
+
+**Both keywords are whole words and nothing more is asked of their
+neighbours**, because rustc asks nothing more: `impl::path::Trait for Thing`,
+`impl<T> Glued<T>for Thing<T>` and `impl Trait for&'static str` are trait
+impls, and a reader that wants a separator after `impl`, or on each side of
+`for`, leaves their methods outside the domain (found by attacking round 4's
+own first draft, which had widened "one U+0020" to "a separator" and no
+further; executed as parser omissions only). The price is an over-reading,
+and it is pinned: an inherent impl whose header holds a higher-ranked bound,
+`impl<F: for<'a> Fn(&'a u8)> Holder<F>`, reads as a trait impl, so its
+private fns are in the domain. That costs a row and fails closed. The next
+token cannot tell the two apart -- `impl Tr for <X as Y>::Out` is a trait impl
+whose `for` is followed by `<` too -- and the tree holds no such header: no
+name moved.
 
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let is_default_body = public_trait_spans`
 
@@ -949,6 +1066,17 @@ An ASCII identifier: the name a `mod`, a `trait` or the trait of an impl has
 to be for the header to be placed. A raw or non-ASCII identifier is not one,
 which leaves its header `Unread`.
 
+## `fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {`
+
+Where `keyword` is written in `text` as a whole word -- no identifier byte
+before it, no identifier character after it -- as `(start, end)`. That is all
+rustc asks of a keyword, so it is all the `trait`, `impl` and `for` readers
+ask; [`declared_fns`] goes on to want a separator after `fn`, because a name
+has to follow and `fn(` is a type. One reading of "a keyword is written here"
+for the four, where there were three and each wanted its own neighbour. A
+non-ASCII character before the keyword is taken for a boundary, which
+over-reads.
+
 ## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
 
 Every `fn name` a region declares, with its offset: the one reading the
@@ -956,8 +1084,13 @@ domain, its multiplicity and its owners are all made from, so they cannot
 disagree about what a declaration is.
 
 **A name is read by what ends it, not by what it is made of.** After `fn` and
-any run of whitespace, the name is the text up to the first `(`, `<` or
-whitespace, less a leading `r#`. It used to be `fn`, exactly one space, and a
+any run of separators, the name is the text up to the first `(`, `<` or
+separator, less a leading `r#` -- a separator being one of
+[`RUSTC_WHITESPACE`], which this reader names itself, so it reads `fn`, U+200E,
+a name on text no tokenizer has rewritten as well (round 3 had widened it to
+`char::is_whitespace`, which reads neither U+200E nor U+200F, and the review
+of `84123789` executed that: see [`RUSTC_WHITESPACE`]). It used to be `fn`,
+exactly one space, and a
 run of ASCII letters, digits and underscores, and round 3 of #309 measured
 what that left out at `993f080d`, each with the control `pub fn plain() {}`
 read beside it: `pub fn /* between */ commented() {}` was unread, because the
@@ -1666,6 +1799,17 @@ The brace depth *outside* the module's body.
 conditionally. Both are refused where they could reach a
 module, which is decided when the item is read.
 
+The attribute's **name** is read from the tokenizer's text and its `cfg`
+predicate from the source, which still holds the string values the tokenizer
+blanks. The name used to come from the source too, through `trim_start`, which
+does not read U+200E or U+200F: `#[`, U+200E, `path = ".."]` was then an
+attribute with no name, the refusal never fired, and the walk went on to the
+file the declaration's own name resolves to while rustc compiled the one the
+attribute names. Found by reading in round 4 of #309 while settling the
+separators ([`RUSTC_WHITESPACE`]), not by a compiled witness;
+`every_separator_rustc_reads_is_one_every_reader_here_reads` holds the refusal
+for all eleven.
+
 ## `pub(crate) mod census_domain` › `if let Some(invocation) = macro_at(bytes, i) {`
 
 -- a macro, whose body is token trees and not items ------------
@@ -1836,7 +1980,12 @@ Whether `text` is a Rust keyword written plainly.
 
 ## `pub(crate) mod census_domain` › `fn whitespace(bytes: &[u8], from: usize) -> usize {`
 
-The first non-whitespace index at or after `from`.
+The first non-whitespace index at or after `from`. ASCII whitespace is the
+whole of it **because `bytes` is the tokenizer's text**, where every other
+separator rustc reads is already spaces ([`RUSTC_WHITESPACE`]). At `84123789`
+the tokenizer's text still held them as written, this stopped at U+000B and
+at the five that are not ASCII, and that is how `mod`, U+200E, a name went
+unread.
 
 ## `pub(crate) mod census_domain` › `struct ModuleShape {`
 

@@ -16,7 +16,7 @@ pub(super) mod checks {
         scanned_sources, wrappers, wrappers_from,
     };
     use crate::effects::{
-        CLASSIFIED_MODULES, CLIPPY_TOML, OwnerHeader, OwnerScope, WRAPPERS_TOML,
+        CLASSIFIED_MODULES, CLIPPY_TOML, OwnerHeader, OwnerScope, RUSTC_WHITESPACE, WRAPPERS_TOML,
         blank_comments_and_strings, externally_reachable_fns, production_code,
         reachable_fn_multiplicity, reachable_fn_owners,
     };
@@ -310,6 +310,111 @@ pub(super) mod checks {
              to find"
         );
         assert!(unpinned_shared_names(module, &renamed).is_empty());
+    }
+
+    pub(in crate::effects::tests) fn the_separator_and_escape_witnesses_and_their_controls() {
+        const COORDINATOR: &str = "src/engine/coordinator.rs";
+        const RESUME: &str = "src/engine/resume.rs";
+        const LONG_ESCAPE: &str = "'\\u{7b____________________}'";
+        const BALANCED: &str = "\npub(super) struct Rf4First;\n\
+             pub(super) struct Rf4Second;\n\
+             impl Rf4First {\n\
+             \x20   const NOISE: &str = stringify! {'\\u{7b____________________}','}'};\n\
+             \x20   pub(super) fn rf4_write(path: &std::path::Path) -> std::io::Result<()> {\n\
+             \x20       std::fs::write(path, b\"rf4 unicode owner first\")\n\
+             \x20   }\n\
+             \x20   const RESTORE: &str = stringify! {'\\u{7b____________________}','{'};\n\
+             }\n\
+             impl Rf4Second {\n\
+             \x20   const NOISE: &str = stringify! {'\\u{7b____________________}','}'};\n\
+             \x20   pub(super) fn rf4_write(path: &std::path::Path) -> std::io::Result<()> {\n\
+             \x20       std::fs::write(path, b\"rf4 unicode owner second\")\n\
+             \x20   }\n\
+             \x20   const RESTORE: &str = stringify! {'\\u{7b____________________}','{'};\n\
+             }\n";
+
+        let record = wrappers();
+        let module = record
+            .module
+            .iter()
+            .find(|module| module.path == COORDINATOR)
+            .expect("the coordinator is a classified module");
+        let source = fs::read_to_string(repo_root().join(COORDINATOR)).expect(COORDINATOR);
+        let (unclassified, invented, _) = classification_disagreement(module, &source);
+        assert!(
+            unclassified.is_empty() && invented.is_empty(),
+            "{COORDINATOR} is not clean at this head, so nothing below is evidence of anything"
+        );
+        for separator in RUSTC_WHITESPACE {
+            let hidden = format!(
+                "{source}\n#[rustfmt::skip]\n\
+                 pub(crate) fn{separator}rf4_coord_write(path: &std::path::Path) -> std::io::Result<()> {{\n\
+                 \x20   std::fs::write(path, b\"rf4 effect\")\n\
+                 }}\n"
+            );
+            let (unclassified, _, _) = classification_disagreement(module, &hidden);
+            assert_eq!(
+                unclassified,
+                vec!["rf4_coord_write".to_owned()],
+                "U+{:04X} separates `fn` from a name for rustc, and a `pub(crate) fn` written so \
+                 in {COORDINATOR} -- calling `std::fs::write`, visible to every module under \
+                 `engine::topology`, under an allow that is already recorded -- was no \
+                 classification obligation and no count (the review of 84123789)",
+                u32::from(separator)
+            );
+            assert_eq!(
+                reachable_fn_multiplicity(&hidden).get("rf4_coord_write"),
+                Some(&1)
+            );
+        }
+
+        let source = fs::read_to_string(repo_root().join(RESUME)).expect(RESUME);
+        assert_eq!(BALANCED.matches(LONG_ESCAPE).count(), 4);
+        for (what, shape) in [
+            ("the balanced witness", BALANCED.to_owned()),
+            (
+                "its control, the escape without its underscores",
+                BALANCED.replace(LONG_ESCAPE, "'\\u{7b}'"),
+            ),
+        ] {
+            let collided = format!("{source}{shape}");
+            let mut pinned = wrappers();
+            let module = pinned
+                .module
+                .iter_mut()
+                .find(|module| module.path == RESUME)
+                .expect("the resume conductor is a classified module");
+            module.shared.insert("rf4_write".to_owned(), 2);
+            module.effectful.push("Rf4First::rf4_write".to_owned());
+            let module = &*module;
+            let (unclassified, invented, _) = classification_disagreement(module, &collided);
+            assert!(
+                unclassified.is_empty()
+                    && invented.is_empty()
+                    && unpinned_shared_names(module, &collided).is_empty(),
+                "{what}: the record is meant to satisfy the name census and the count, which is \
+                 what made it silent: {unclassified:?} {invented:?}"
+            );
+            let owners = reachable_fn_owners(&collided);
+            let chains = owners.get("rf4_write").map_or(&[][..], Vec::as_slice);
+            assert!(
+                matches!(chains, [first, second]
+                    if headers(first) == vec![OwnerHeader::InherentImpl]
+                        && headers(second) == vec![OwnerHeader::InherentImpl]
+                        && first != second),
+                "{what}: each `rf4_write` is declared in its own `impl`, and the reading placed \
+                 them at {chains:?}"
+            );
+            let complaints = effectful_names_shared_across_paths(module, &collided);
+            assert!(
+                complaints.len() == 1
+                    && complaints
+                        .iter()
+                        .all(|complaint| complaint.contains("`rf4_write` is classified effectful")),
+                "{what}: two inherent impls bear an effectful `rf4_write`, the record can deny \
+                 one path, and the sharing was not refused: {complaints:#?}"
+            );
+        }
     }
 
     fn denials_no_row_classifies(record: &Wrappers, denied: &ClippyToml) -> Vec<String> {

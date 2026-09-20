@@ -825,6 +825,39 @@ empty and not, a function, a constant, `include!`, an allow on a declaration,
 a `path` attribute, and the review's macro, whose definition and invocation
 are two items and both refused.
 
+Then the eleven separators rustc reads (`RUSTC_WHITESPACE`), one at a time
+between `mod` and a name: the whitelist admits the declaration **and
+`scan_modules` reads the same one**, and with `#[rustfmt::skip]` in front it
+is refused. The pair is the point. At `84123789` the whitelist split words
+with `split_whitespace` and the walk wanted ASCII whitespace, so for U+000B,
+U+0085, U+2028 and U+2029 the facade could declare a child the whitelist
+admitted and no walk judged; the review executed it with U+000B, and only the
+facade's own deny kept an effect from following.
+
+## `fn every_separator_rustc_reads_is_one_every_reader_here_reads() {`
+
+The one definition of a token separator, held two ways. **By value**: the
+eleven code points, written out. The compiler's own answer is in the round's
+evidence and not in the suite -- rustc builds a `fn` whose name follows each
+of the eleven with nothing reported, and refuses U+00A0 and U+200B as unknown
+tokens -- because a fixture compiled here is one more child process of the
+test binary, and this test's first draft compiled three. **By the readers**,
+for each of the eleven: the tokenizer keeps every byte offset and line and
+leaves no separator that a byte test or `char::is_whitespace` would not read;
+the review's escape (a) is read on this tree's own `src/engine/attempt.rs` --
+`#[rustfmt::skip]`, `pub(super) mod`, the separator, `rf4_child;` is one
+declared child, U+0020 being the control that always was; and the other
+readers of the same text answer as they do for a space -- `include`, the
+separator, `!` includes a file, a file-level deny behind the separator is a
+deny, a `path` attribute whose name follows the separator is refused, and an
+allow whose lint follows it is an allow of that lint.
+
+What it does not hold: that the walk then *judges* the child. That is
+`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`,
+which walks the tree on disk from what `scan_modules` reports; the compiled
+witness, with the child file and a topology caller, is in the round's
+evidence and not in the suite.
+
 ## `fn inline_module_openers(source: &str) -> usize {`
 
 How many inline modules a file's text opens, read the crude way: `mod`, a
@@ -844,6 +877,20 @@ scanner (`ModuleShapedMacroBody`); a substituted one is not seen by anything.
 That is why the facade is held by a whitelist instead
 (`items_beyond_declarations`), and why this guard claims the modules a file
 WRITES and nothing about what it expands to.
+
+**The two readings are not independent, and the fourth review of #309 showed
+how far that goes.** Both wanted `u8::is_ascii_whitespace` after `mod`, so for
+U+000B, U+0085, U+200E, U+200F, U+2028 and U+2029 both counted zero and
+agreed. Both are right for all eleven separators now, and for one reason, not
+two: the tokenizer they share writes those six as spaces (`RUSTC_WHITESPACE`).
+This is what their agreement is worth: it catches a defect in the scanner's
+own walk -- a branch that stops reporting, a macro or an attribute skipped too
+far, a depth miscounted, which is how inline modules came to be unread in the
+first place -- and it catches nothing they share: a defect in the tokenizer, or
+a spelling of a module neither recognises (`mod`, a separator, an ASCII name,
+`{`). What holds the shared part is
+`every_separator_rustc_reads_is_one_every_reader_here_reads` and the scan's own
+shape test, not this comparison.
 
 ## `fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {`
 
@@ -1839,6 +1886,13 @@ neighbour's attributes. `inline_module_openers`, the cruder reading the engine
 guard checks the scanner against, is held to the same fixture, and
 `leading_inner_attributes` to three: a file's head, a file whose inner
 attribute comes after an item, and CRLF.
+
+Then the eleven separators rustc reads (`RUSTC_WHITESPACE`), one at a time
+after `mod` and again before the `;` or the `{`: one declared child, one
+inline module, and one opener by the cruder reading, for each. At `84123789`
+the scanner and the cruder reading both wanted ASCII whitespace there and read
+five of the eleven; the review executed one of the six they did not, `mod`,
+U+200E, a child of `src/engine/attempt.rs`, with every gate green.
 
 ## `fn is_the_literal_mod_tests_form(name: &str, inline_path: &[String], guard: &str) -> bool {`
 
