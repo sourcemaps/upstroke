@@ -844,11 +844,31 @@ The record classifies by bare name, so a name is the whole of a callable's
 identity there, and a denial names one path. One name borne by two callables
 is one row answering for both. That is ordinary -- two `Display` impls, a
 `#[cfg(unix)]` and a `#[cfg(windows)]` twin, a trait's declaration and its
-impl -- and it is also how a function is added to a classified module without
-the record changing: give it a name that is already classified
+impl -- and it is also how a function the source writes is added to a
+classified module without the record changing: give it a name that is already
+classified
 (`PR309-INLINE-WRAPPER-NAME-COLLISION`). The census pins every count above one
 in the record's `shared` table, so the second bearer of a name is a
 disagreement like a new name is.
+
+## `pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<String>> {`
+
+For each name [`externally_reachable_fns`] derives, where each of its bearers
+is declared: the chain of blocks open at the declaration, outermost first,
+joined by ` > `, the file's top level being the empty chain. It exists for one
+question -- whether the bearers of an effectful name are one path or several
+(`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) -- and answers no
+other: it labels a block by the last of `trait`, `impl` or `mod` its header
+holds and calls everything else `block`, which is enough to tell a `cfg` twin
+(the same chain) and a trait's declaration from its impl (`trait T` against
+`impl T for X`) from a second path (`mod x`, `impl X`), and is not a resolver.
+Like every reading here it sees the declarations the source writes.
+
+## `fn owner_label(header: &str) -> String {`
+
+A block header as `trait Name`, `impl Trait for Type`, `impl Type`, `mod name`
+or `block`, with generic arguments and any `where` clause dropped so that two
+spellings of one owner compare equal.
 
 ## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
 

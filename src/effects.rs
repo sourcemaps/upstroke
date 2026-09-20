@@ -764,6 +764,76 @@ pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {
     bearers
 }
 
+#[must_use]
+pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<String>> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = declared_fns(&region).into_iter().peekable();
+    let mut open: Vec<String> = Vec::new();
+    let mut header_from = 0;
+    let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (at, byte) in region.bytes().enumerate() {
+        while let Some((_, name)) = bearers.next_if(|(index, _)| *index <= at) {
+            if reachable.contains(name) {
+                owners
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(open.join(" > "));
+            }
+        }
+        match byte {
+            b'{' => {
+                open.push(owner_label(region.get(header_from..at).unwrap_or_default()));
+                header_from = at + 1;
+            }
+            b'}' => {
+                open.pop();
+                header_from = at + 1;
+            }
+            b';' => header_from = at + 1,
+            _ => {}
+        }
+    }
+    owners
+}
+
+fn owner_label(header: &str) -> String {
+    let mut depth = 0usize;
+    let mut plain = String::with_capacity(header.len());
+    let mut previous = ' ';
+    for character in header.chars() {
+        match character {
+            '<' => depth += 1,
+            '>' if depth > 0 && previous != '-' => depth -= 1,
+            _ if depth == 0 => plain.push(character),
+            _ => {}
+        }
+        previous = character;
+    }
+    let words: Vec<&str> = plain.split_whitespace().collect();
+    let after = |keyword: &str| {
+        words
+            .iter()
+            .position(|word| *word == keyword)
+            .and_then(|at| words.get(at + 1..))
+    };
+    if let Some(name) = after("trait").and_then(|rest| rest.first()) {
+        return format!("trait {}", name.trim_end_matches(':'));
+    }
+    if let Some(rest) = after("impl") {
+        let rest: Vec<&str> = rest
+            .iter()
+            .copied()
+            .take_while(|word| *word != "where")
+            .collect();
+        return format!("impl {}", rest.join(" "));
+    }
+    if let Some(name) = after("mod").and_then(|rest| rest.first()) {
+        return format!("mod {name}");
+    }
+    "block".to_owned()
+}
+
 fn declared_fns(region: &str) -> Vec<(usize, &str)> {
     let bytes = region.as_bytes();
     region

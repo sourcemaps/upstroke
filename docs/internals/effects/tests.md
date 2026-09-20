@@ -775,8 +775,10 @@ whitelist does not reach** -- a fenced sibling, a topology file, any other
 module of the crate -- where a substituted `#[$level(..)]` or a `cfg_attr` is
 as unread by `governed_allows`, and so by the placement scan and by every
 fence here, as it was in the facade (the facade forms are executed, by the
-review; the others are reasoned, and filed as
-`PR309-AN-ALLOW-THAT-ARRIVES-BY-EXPANSION-IS-UNREAD` beside
+first review of #309; the form in a file that carries a deny is reasoned; and
+the form that needs no allow at all -- a macro-named function under an allowed
+legacy module's existing allow -- is executed, by the second review, and is
+what `PR7-WRAPPERS-EMPTY-DOMAIN` is restored for, beside
 `an-applied-cfg-attr-is-invisible-to-the-scan`); and everything in an allowed,
 classified file that the classification domain does not read, which the test
 below states.
@@ -801,12 +803,18 @@ prose do not count.
 
 ## `fn no_scanned_source_includes_a_file_no_scan_reads() {`
 
-No source the placement scan reads uses `include!`. What it includes is Rust
+No source the placement scan reads SPELLS `include!`. What it includes is Rust
 that nothing here reads: the placement scan, the module walk and the
-classification census each read `.rs` sources. The tree has none, so the
-refusal is total and free; it is the first of the review's two expansion forms
-(`PR309-FACADE-EXPANSION-ESCAPE`) closed for every file rather than for the
-facade alone.
+classification census each read `.rs` sources. The tree has none. **It refuses
+the spelling, not the macro**: the second review of #309 wrote
+`use std::include as rf2_read; rf2_read!("rf2_review.inc");` in
+`src/engine/coordinator.rs` and this test stayed green, with clippy at exit 0
+and 185 tests passing, where the literal spelling fails it. The round before
+claimed this closed the review's `include!` form "for every file"; it does
+not, and resolving a macro's name is not something a reading of the text can
+do. In the engine facade the alias is refused all the same, by the whitelist:
+the invocation is not a declaration or a re-export whatever it is called.
+Elsewhere it is part of what `PR7-WRAPPERS-EMPTY-DOMAIN` records.
 
 ## `fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {`
 
@@ -853,7 +861,8 @@ allowed in effect -- by the file, or by the module's own outer and leading
 inner attributes -- must be recorded by the file's row in
 `effects/allowlist.toml`; and wherever anything is allowed in effect in
 production code, in a file or in an inline module of it, the file must be in
-`CLASSIFIED_MODULES`, whose census reads a file whole, inline modules included.
+`CLASSIFIED_MODULES`, whose census reads every function the file writes as
+`fn name`, inline modules included -- and not one a macro names.
 A recorded allow with no classification behind it is exactly what the facade
 had: its row recorded its allow, and this test refuses that state all the
 same -- an allowed production file outside the classification domain.
@@ -1812,7 +1821,7 @@ each fixture rather than by trusting that nothing here reads a line.
 ## `fn the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write() {`
 
 The scanner's inline half, pinned on one fixture. `scan_modules` must report
-every inline module at every depth in source order -- with its enclosing
+every inline module the fixture writes, at every depth, in source order -- with its enclosing
 inline path, its line, whether it is test-only by inheritance, the outer
 attributes written on it and the body whose leading inner attributes are the
 rest of what it writes -- and must not report what a comment or a string

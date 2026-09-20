@@ -63,7 +63,8 @@ refuses an allow written anywhere in this file again, in any form, refuses a
 missing deny, and compiles both of the review's routes under this file's own
 leading attributes, read from it, where each is a build error;
 `effects::tests::every_inline_module_under_the_engine_facade_is_walked_and_answered_for`
-derives every inline module under this file at every depth; and the two #306
+derives every inline module the source writes under this file, at every depth;
+and the two #306
 guards still hold the topology root and every out-of-line child.
 
 ## Module

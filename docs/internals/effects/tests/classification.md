@@ -119,9 +119,10 @@ was already an `effectful` row -- the entry point -- denied as
 Renamed to a name nothing else bore, the same function failed the census as
 unclassified. The exemption was the collision.
 
-What the census promises is that a callable cannot be added to a classified
-module without the record changing. A new name changes it. A second bearer of
-an old name did not, and now does: for every derived name,
+What the census promises is that a callable **the source writes as
+`fn name`** cannot be added to a classified module without the record
+changing. A new name changes it. A second bearer of an old name did not, and
+now does: for every derived name,
 `effects::reachable_fn_multiplicity` counts the `fn` declarations in the
 file's production code that bear it, and every count above one must be pinned
 in the module's `shared` table, exactly. The pins are not a list of
@@ -139,16 +140,73 @@ machinery whose blast radius is every classified module, to buy one thing the
 count does not. What the count does not see is a swap -- one bearer removed
 and another added under the same name in the same change -- and a swap is an
 edit to a callable the record already answers for, which is reviewed like any
-other change to a classified body; no census reads bodies. What neither
-reading sees is a callable that is not written as `fn name`, which
-`PR7-CLASSIFICATION-DOMAIN-READS-FNS-ONLY` and
-`PR309-AN-ALLOW-THAT-ARRIVES-BY-EXPANSION-IS-UNREAD` record.
+other change to a classified body; no census reads bodies.
 
-**Bumping a pin is a decision, and the message says what it decides**: every
-bearer is what the row says, and every effectful one is denied by its own
-path. Nothing mechanical checks the second half -- a `cfg` twin shares its
-twin's path, a trait method is denied through the trait -- so it is a review
-duty, stated at the point of refusal.
+**What neither reading sees is a callable the text does not spell, and that is
+executed, not hypothetical.** The second review of #309 put a macro in
+`src/engine/coordinator.rs` that emits `pub(super) fn $name(..)` calling
+`std::fs::write`, invoked with a fresh name: the text holds `fn $name`, so the
+function is no classification obligation and no multiplicity increment, it
+compiles under the coordinator's existing allow, and a topology caller reached
+it with clippy at exit 0 and 185 tests passing; with the name written
+literally the census fails. An aliased `include!` does the same from a file no
+scan reads. This census does not close that and does not claim to:
+`PR7-WRAPPERS-EMPTY-DOMAIN` is restored, deferred, with the project owner, and
+`PR7-CLASSIFICATION-DOMAIN-READS-FNS-ONLY` records the `const`/`static` form.
+
+## `pub(super) mod checks` › `fn names_in_two_classes(module: &ModuleClassification) -> Vec<String> {`
+
+The bare names a record holds more than once, across its four classes. The
+census refuses any; it is a value so that the regression test below can show
+that a row for a second path is one.
+
+## `pub(super) mod checks` › `fn bearers_of_one_path(owners: &[String]) -> bool {`
+
+Whether every bearer of a name is reached by one path: all declared at the
+same place (`#[cfg(unix)]` and `#[cfg(not(unix))]` twins are -- two items of
+one name in one module cannot otherwise coexist), or all the declaration and
+impls of one trait under one enclosing path, which a call reaches through the
+trait and a denial names through the trait. Owners come from
+`effects::reachable_fn_owners`.
+
+## `pub(super) mod checks` › `fn effectful_names_shared_across_paths(`
+
+**An effectful name is shared only by bearers of one path.** Round 1 offered
+the pin as the way to admit a second bearer of a classified name, and said
+that raising it asserted "every effectful one is denied by its own path" -- a
+review duty. The second review of #309
+(`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) showed the duty cannot
+be discharged: a second `run_with`, in an inline module of the coordinator,
+writing a file, is refused unpinned; with `shared = { run_with = 2 }` added,
+clippy exits 0 and 185 tests pass, the second path undenied; and the honest
+record cannot be written, because a denial for the second path is a denial no
+row classifies, and a row for it strips to `run_with`, a name in two classes.
+So the pin is refused where no honest record exists: for every `effectful`
+row borne more than once, the bearers must be one path. The three the tree
+shares today are: `rundir::hold_cleanup_lease_for_child` is a `cfg` pair, and
+`GitView::materialize` and `GitView::discard` are a trait's declaration and
+its impl. `effect_free`, `funnel` and `effectful_unnameable` names may still be
+shared across paths, because one row is an honest record for them: none of
+them is denied by path.
+
+## `pub(super) mod checks` › `fn denials_no_row_classifies(record: &Wrappers, denied: &ClippyToml) -> Vec<String> {`
+
+The `upstroke::` denials that no `effectful` row accounts for, as a value:
+the reverse half of `effectful_wrappers_are_denied`, which asserts it empty,
+and the first of the two record controls below.
+
+## `pub(super) mod checks` › `pub(in crate::effects::tests) fn the_shared_effectful_pin_witness_and_its_controls() {`
+
+The second review's witness and its three controls, against the real
+coordinator, the real record and the real denylist, in memory. Unpinned, the
+second `run_with` is refused by the count. Pinned -- the review's one-line
+record edit -- the count is satisfied, which is the witness, and the one-path
+rule refuses it, which is the repair. Then the two record controls: with a
+denial for the second path added, that denial is one no row classifies; with
+a row for it added too, the denial is accounted for and `run_with` is a name
+in two classes. Last, the legitimate shapes: every module of the real record
+passes the one-path rule, more than two effectful names are in fact shared,
+and `bearers_of_one_path` answers five owner lists as stated.
 
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn shared_names_are_pinned() {`
 

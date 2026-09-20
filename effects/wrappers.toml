@@ -55,8 +55,17 @@
 # one bears; `effects::tests::every_name_more_than_one_callable_bears_is_pinned_by_its_count`
 # derives the counts and asserts the table exactly, both ways. A module with no
 # `shared` table has no shared name. Raising a count says that every bearer is
-# what the row says and that every effectful one is denied by its own path --
-# the second half is a review duty, which no check here can make for you.
+# what the row says. AN EFFECTFUL NAME IS SHARED ONLY BY BEARERS OF ONE PATH --
+# `cfg` twins, or a trait's declaration and its impls -- because no record can
+# be written for a second path: a denial for it needs a row, and a row for it
+# is a name in two classes. The review of 1ff88a78 pinned `run_with = 2` over a
+# second, undenied `run_with` and everything stayed green
+# (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`);
+# `effects::tests::an_effectful_name_is_shared_only_by_bearers_of_one_path`
+# refuses that pin. ALL OF THIS READS THE NAMES THE SOURCE WRITES: a function a
+# macro names by substitution, or one an aliased `include!` brings in, is in no
+# count and no class (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project
+# owner).
 #
 # Regenerate the membership (never the classification) with
 # UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1 cargo test -p upstroke effects::

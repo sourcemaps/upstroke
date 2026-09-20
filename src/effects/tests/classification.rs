@@ -12,11 +12,12 @@ pub(super) mod checks {
     use std::fs;
 
     use crate::effects::tests::{
-        ModuleClassification, denylist, repo_root, scanned_sources, wrappers,
+        ClippyToml, ModuleClassification, Wrappers, denylist, denylist_from, repo_root,
+        scanned_sources, wrappers, wrappers_from,
     };
     use crate::effects::{
         CLASSIFIED_MODULES, CLIPPY_TOML, WRAPPERS_TOML, blank_comments_and_strings,
-        externally_reachable_fns, production_code, reachable_fn_multiplicity,
+        externally_reachable_fns, production_code, reachable_fn_multiplicity, reachable_fn_owners,
     };
 
     pub(in crate::effects::tests) fn reachable_fns_are_classified() {
@@ -78,8 +79,8 @@ pub(super) mod checks {
             .collect();
         let unique: BTreeSet<&str> = classified.iter().copied().collect();
         assert_eq!(
-            unique.len(),
-            classified.len(),
+            names_in_two_classes(module),
+            Vec::<String>::new(),
             "{path}: a name is in two classes"
         );
         let derived_refs: BTreeSet<&str> = derived.iter().map(String::as_str).collect();
@@ -96,6 +97,71 @@ pub(super) mod checks {
         )
     }
 
+    fn names_in_two_classes(module: &ModuleClassification) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        module
+            .funnel
+            .iter()
+            .chain(&module.effectful)
+            .chain(&module.effectful_unnameable)
+            .chain(&module.effect_free)
+            .map(|name| name.rsplit("::").next().expect("a name"))
+            .filter(|name| !seen.insert(*name))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn bearers_of_one_path(owners: &[String]) -> bool {
+        let dispatched_through = |owner: &str| -> Option<(String, String)> {
+            let (above, last) = owner
+                .rsplit_once(" > ")
+                .map_or(("", owner), |(above, last)| (above, last));
+            let of_trait = match last.strip_prefix("trait ") {
+                Some(name) => name,
+                None => last.strip_prefix("impl ")?.split_once(" for ")?.0,
+            };
+            Some((above.to_owned(), of_trait.to_owned()))
+        };
+        let Some(first) = owners.first() else {
+            return true;
+        };
+        owners.iter().all(|owner| owner == first)
+            || dispatched_through(first).is_some_and(|through| {
+                owners
+                    .iter()
+                    .all(|owner| dispatched_through(owner).as_ref() == Some(&through))
+            })
+    }
+
+    fn effectful_names_shared_across_paths(
+        module: &ModuleClassification,
+        source: &str,
+    ) -> Vec<String> {
+        let owners = reachable_fn_owners(source);
+        let mut complaints = Vec::new();
+        for row in &module.effectful {
+            let name = row.rsplit("::").next().expect("a name");
+            let Some(bearers) = owners.get(name).filter(|bearers| bearers.len() > 1) else {
+                continue;
+            };
+            if !bearers_of_one_path(bearers) {
+                complaints.push(format!(
+                    "{}: `{name}` is classified effectful and its {} bearers are declared at \
+                     different paths ({bearers:?}, the file's top level being the empty one). A \
+                     denial names one path and a row is a bare name, so no record can classify \
+                     and deny the second one: a denial for it needs a row, and a row for it is \
+                     a name in two classes (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`). \
+                     An effectful name is shared only by bearers of one path -- `cfg` twins, or a \
+                     trait's declaration and its impls -- so give the other callable a name of \
+                     its own",
+                    module.path,
+                    bearers.len()
+                ));
+            }
+        }
+        complaints
+    }
+
     fn unpinned_shared_names(module: &ModuleClassification, source: &str) -> Vec<String> {
         let path = &module.path;
         let borne: BTreeMap<String, usize> = reachable_fn_multiplicity(source)
@@ -110,8 +176,8 @@ pub(super) mod checks {
                      record classifies by bare name and a denial names one path, so a second \
                      callable under a classified name is answered for by a row that was never \
                      written for it (`PR309-INLINE-WRAPPER-NAME-COLLISION`). Give it a name of \
-                     its own, or pin the count in `shared` once every bearer is what the row says \
-                     and every effectful one is denied by its own path",
+                     its own, or pin the count in `shared` once every bearer is what the row says; \
+                     an effectful name cannot be shared across paths at all",
                     module
                         .shared
                         .get(name)
@@ -138,6 +204,7 @@ pub(super) mod checks {
             let source = fs::read_to_string(repo_root().join(&module.path))
                 .unwrap_or_else(|_| panic!("{} is recorded and not in the tree", module.path));
             complaints.extend(unpinned_shared_names(module, &source));
+            complaints.extend(effectful_names_shared_across_paths(module, &source));
             pinned += module.shared.len();
         }
         assert!(
@@ -208,6 +275,137 @@ pub(super) mod checks {
         assert!(unpinned_shared_names(module, &renamed).is_empty());
     }
 
+    fn denials_no_row_classifies(record: &Wrappers, denied: &ClippyToml) -> Vec<String> {
+        let classified: BTreeSet<String> = record
+            .module
+            .iter()
+            .flat_map(|module| {
+                module
+                    .effectful
+                    .iter()
+                    .map(move |name| format!("{}::{name}", module.crate_path))
+            })
+            .collect();
+        denied
+            .all()
+            .filter(|entry| entry.path.starts_with("upstroke::"))
+            .filter(|entry| !classified.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    pub(in crate::effects::tests) fn the_shared_effectful_pin_witness_and_its_controls() {
+        const COORDINATOR: &str = "src/engine/coordinator.rs";
+        const WITNESS: &str = "\npub(super) mod rf2_shared {\n\
+             \x20   pub(crate) fn run_with(path: &std::path::Path) -> std::io::Result<()> {\n\
+             \x20       std::fs::write(path, b\"rf2 shared effectful name\")\n\
+             \x20   }\n\
+             }\n";
+        const SECOND_PATH: &str = "upstroke::engine::coordinator::rf2_shared::run_with";
+        let of = |record: &Wrappers| -> usize {
+            record
+                .module
+                .iter()
+                .position(|module| module.path == COORDINATOR)
+                .expect("the coordinator is a classified module")
+        };
+        let record_text =
+            fs::read_to_string(repo_root().join(WRAPPERS_TOML)).expect("effects/wrappers.toml");
+        let denied_text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
+        let source = fs::read_to_string(repo_root().join(COORDINATOR)).expect(COORDINATOR);
+        let collided = format!("{source}{WITNESS}");
+
+        let record = wrappers_from(&record_text);
+        let module = &record.module[of(&record)];
+        assert!(
+            effectful_names_shared_across_paths(module, &source).is_empty()
+                && unpinned_shared_names(module, &source).is_empty(),
+            "{COORDINATOR} is not clean at this head, so nothing below is evidence of anything"
+        );
+
+        let unpinned = unpinned_shared_names(module, &collided);
+        assert!(
+            unpinned.len() == 1 && unpinned[0].contains("2 callables bear the name `run_with`"),
+            "{unpinned:#?}"
+        );
+
+        let anchor = "crate_path = \"upstroke::engine::coordinator\"\n";
+        assert_eq!(record_text.matches(anchor).count(), 1);
+        let pinned_text =
+            record_text.replace(anchor, &format!("{anchor}shared = {{ run_with = 2 }}\n"));
+        let pinned = wrappers_from(&pinned_text);
+        let module = &pinned.module[of(&pinned)];
+        assert!(
+            unpinned_shared_names(module, &collided).is_empty(),
+            "the pin is meant to satisfy the count; that is the witness"
+        );
+        let across = effectful_names_shared_across_paths(module, &collided);
+        assert!(
+            across.len() == 1 && across[0].contains("`run_with` is classified effectful"),
+            "an effectful name pinned across two paths was admitted: {across:#?}"
+        );
+
+        let denial = format!(
+            "disallowed-methods = [\n    {{ path = \"{SECOND_PATH}\", reason = \"UPSTROKE-WRAPPER: control\" }},"
+        );
+        assert_eq!(denied_text.matches("disallowed-methods = [").count(), 1);
+        let with_denial = denylist_from(&denied_text.replace("disallowed-methods = [", &denial));
+        assert_eq!(
+            denials_no_row_classifies(&pinned, &with_denial),
+            vec![SECOND_PATH.to_owned()]
+        );
+        let rows = "    \"run_harness_on\",\n    \"run_with\",\n]";
+        assert_eq!(pinned_text.matches(rows).count(), 1);
+        let with_row = wrappers_from(&pinned_text.replace(
+            rows,
+            "    \"run_harness_on\",\n    \"rf2_shared::run_with\",\n    \"run_with\",\n]",
+        ));
+        assert!(denials_no_row_classifies(&with_row, &with_denial).is_empty());
+        assert_eq!(
+            names_in_two_classes(&with_row.module[of(&with_row)]),
+            vec!["run_with".to_owned()]
+        );
+
+        let mut shared_effectful = Vec::new();
+        for module in &record.module {
+            let source = fs::read_to_string(repo_root().join(&module.path)).expect("a module");
+            assert_eq!(
+                effectful_names_shared_across_paths(module, &source),
+                Vec::<String>::new()
+            );
+            shared_effectful.extend(
+                module
+                    .effectful
+                    .iter()
+                    .map(|row| row.rsplit("::").next().expect("a name"))
+                    .filter(|name| module.shared.contains_key(*name))
+                    .map(|name| format!("{}::{name}", module.path)),
+            );
+        }
+        assert!(
+            shared_effectful.len() > 2,
+            "only {shared_effectful:?} are effectful and shared, so the one-path rule judged \
+             nothing the tree holds"
+        );
+        assert!(bearers_of_one_path(&[String::new(), String::new()]));
+        assert!(bearers_of_one_path(&[
+            "trait GitView".to_owned(),
+            "impl GitView for HostView".to_owned(),
+        ]));
+        assert!(!bearers_of_one_path(&[
+            String::new(),
+            "mod rf2_shared".to_owned()
+        ]));
+        assert!(!bearers_of_one_path(&[
+            String::new(),
+            "impl Hatch".to_owned()
+        ]));
+        assert!(!bearers_of_one_path(&[
+            "trait GitView".to_owned(),
+            "impl Other for HostView".to_owned(),
+        ]));
+    }
+
     pub(in crate::effects::tests) fn effectful_wrappers_are_denied() {
         let record = wrappers();
         let denied = denylist()
@@ -238,26 +436,11 @@ pub(super) mod checks {
         }
         assert!(named >= 10, "only {named} wrappers were checked");
 
-        let classified: BTreeSet<String> = record
-            .module
-            .iter()
-            .flat_map(|module| {
-                module
-                    .effectful
-                    .iter()
-                    .map(move |name| format!("{}::{name}", module.crate_path))
-            })
-            .collect();
-        for entry in denylist().all() {
-            if !entry.path.starts_with("upstroke::") {
-                continue;
-            }
-            assert!(
-                classified.contains(&entry.path),
-                "{CLIPPY_TOML} denies `{}` and no module classifies it effectful",
-                entry.path
-            );
-        }
+        let unclassified = denials_no_row_classifies(&record, &denylist());
+        assert!(
+            unclassified.is_empty(),
+            "{CLIPPY_TOML} denies {unclassified:?} and no module classifies them effectful"
+        );
     }
 
     pub(in crate::effects::tests) fn crate_paths_name_the_modules() {

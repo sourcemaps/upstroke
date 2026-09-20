@@ -205,7 +205,11 @@ impl ClippyToml {
 
 fn denylist() -> ClippyToml {
     let text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
-    toml::from_str(&text).expect("clippy.toml parses")
+    denylist_from(&text)
+}
+
+fn denylist_from(text: &str) -> ClippyToml {
+    toml::from_str(text).expect("clippy.toml parses")
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +245,11 @@ struct LibcClassification {
 
 fn wrappers() -> Wrappers {
     let text = fs::read_to_string(repo_root().join(WRAPPERS_TOML)).expect("effects/wrappers.toml");
-    toml::from_str(&text).expect("the wrapper classification parses")
+    wrappers_from(&text)
+}
+
+fn wrappers_from(text: &str) -> Wrappers {
+    toml::from_str(text).expect("the wrapper classification parses")
 }
 
 #[test]
@@ -1793,8 +1801,6 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
                 .count()
         };
 
-        // No attribute anywhere: the reach is reported, so the fixture sees
-        // what the next shape hides.
         let (ok, control) =
             lint_fixture(&scratch, &format!("routes_{route}_control"), &facade_of(""));
         assert!(
@@ -1807,9 +1813,6 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
             "{route}: {control:#?}"
         );
 
-        // The allow #306 wrote: the reach goes unreported and the crate
-        // builds, with a denying topology module calling it -- the route as
-        // the fourth review executed it.
         let (ok, hole) = lint_fixture(
             &scratch,
             &format!("routes_{route}_under_the_allow_of_306"),
@@ -1821,7 +1824,6 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
              the refusal below proves nothing: ok={ok} {hole:#?}"
         );
 
-        // This tree's facade, by its own leading attributes: a build error.
         let (ok, tree_shape) = lint_fixture(
             &scratch,
             &format!("routes_{route}_this_tree"),
@@ -2912,6 +2914,11 @@ fn every_name_more_than_one_callable_bears_is_pinned_by_its_count() {
 #[test]
 fn a_second_callable_under_a_classified_name_is_refused_and_a_renamed_one_is_unclassified() {
     checks::the_collision_witness_and_its_renamed_control();
+}
+
+#[test]
+fn an_effectful_name_is_shared_only_by_bearers_of_one_path() {
+    checks::the_shared_effectful_pin_witness_and_its_controls();
 }
 
 #[test]
