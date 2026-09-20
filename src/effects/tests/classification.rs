@@ -309,10 +309,14 @@ pub(super) mod checks {
                 .position(|module| module.path == COORDINATOR)
                 .expect("the coordinator is a classified module")
         };
-        let record_text =
-            fs::read_to_string(repo_root().join(WRAPPERS_TOML)).expect("effects/wrappers.toml");
-        let denied_text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
-        let source = fs::read_to_string(repo_root().join(COORDINATOR)).expect(COORDINATOR);
+        let read = |path: &str| -> String {
+            fs::read_to_string(repo_root().join(path))
+                .unwrap_or_else(|_| panic!("{path} is read by this test and not in the tree"))
+                .replace("\r\n", "\n")
+        };
+        let record_text = read(WRAPPERS_TOML);
+        let denied_text = read(CLIPPY_TOML);
+        let source = read(COORDINATOR);
         let collided = format!("{source}{WITNESS}");
 
         let record = wrappers_from(&record_text);

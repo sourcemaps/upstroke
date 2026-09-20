@@ -208,6 +208,12 @@ in two classes. Last, the legitimate shapes: every module of the real record
 passes the one-path rule, more than two effectful names are in fact shared,
 and `bearers_of_one_path` answers five owner lists as stated.
 
+The three texts it edits are read with their line endings normalised to LF.
+The anchors it inserts after end in a newline, and a Windows checkout holds
+CRLF: the first push of this test failed on the Windows guest at the first
+anchor, `left: 0, right: 1`, and nowhere else, which is the platform the
+hosted matrix only links for.
+
 ## `pub(super) mod checks` › `pub(in crate::effects::tests) fn shared_names_are_pinned() {`
 
 `unpinned_shared_names` over every recorded module, with a floor of forty
