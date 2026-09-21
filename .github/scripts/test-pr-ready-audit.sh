@@ -6591,6 +6591,42 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
   printf 'A label that never closes: [label][unclosed\n\n'
   printf 'And a correction a reader sees that this comment does not write: **VERDICT**: see below.\n\n'
   printf '[label]: https://example.invalid/l\n\n[wrapped]:\n  https://example.invalid/w\n\n'
+  # AND ROUND FIVE'S THREE RULES, by the same rule again: a block prefix, a raw HTML tag and a
+  # definition's own grammar are each entered only by a comment that HAS one. With the material
+  # above and none of this, the line below read `unproven=block_prefix,definition_label,
+  # html_attribute_value,html_bang_extent,html_tag_extent,link_labels`. So: a quoted line, a twice
+  # quoted one, a bracket inside a quoted code span, a bracket pair nested inside another and a
+  # collapsed pair naming it; each of the five list markers; an open tag with an unquoted and a
+  # quoted attribute, one with a bracket in an attribute, a self-closing one, an attribute with no
+  # value, an attribute name that is not one, a tag name that is not one, a closing tag that is
+  # not one, a processing instruction, a declaration, an empty comment, one whose content may not
+  # begin as it does, a dashed one, a CDATA section, an unterminated comment, a bare `<` and a
+  # paragraph that ends in one; and a definition with no colon, an empty label, a destination that
+  # never balances, one whose protocol a renderer refuses, one it accepts, a titled one, a titled
+  # one with rubbish after it, one with trailing spaces and an angled one.
+  printf '> A quoted line, a quoted span `a[b]c`, and a quoted [pair][label] of brackets.\n'
+  printf '> > Twice quoted, and a nested [a[b] c] pair, and a collapsed [a[b] c][] one.\n\n'
+  printf -- '- A bullet item, and an ordered one below it.\n'
+  printf -- '* A star bullet, and a plus one below that.\n'
+  printf -- '+ A plus bullet.\n'
+  printf '1. An ordered item.\n'
+  printf '2) One with the other marker.\n\n'
+  printf 'Raw HTML: <strong>bold</strong>, <code>a span</code>, a <span data-x="[y]">tag with a\n'
+  printf 'bracket</span>, <a href=plain title=%s>unquoted and quoted</a>, a self-closing <br/>, a\n' "'q'"
+  printf 'malformed <a b= > one, a <a =b> one, a <1nottag>, a </ nottag>, a <?php echo 1; ?>\n'
+  printf 'instruction, a <!DOCTYPE html> declaration, an empty <!----> comment, a <!--> that is\n'
+  printf 'not one, a <!--- dashed --> one, a <![CDATA[bracketed]]> section, an unterminated\n'
+  printf '<!--comment and a bare < and a <x that never closes, and a paragraph ending in <\n\n'
+  printf 'Definitions of every shape follow this paragraph.\n\n'
+  printf '[nocolon] is no definition at all.\n\n'
+  printf '[ ]: https://example.invalid/empty\n\n'
+  printf '[unbalanced]:\n  (never closes\n\n'
+  printf '[refused]: javascript:alert(1)\n\n'
+  printf '[allowed]: data:image/png;base64,AA\n\n'
+  printf '[titled]: https://example.invalid/t "a title"\n\n'
+  printf '[garbage]: https://example.invalid/g "a title" and rubbish\n\n'
+  printf '[trailing]: https://example.invalid/s   \n\n'
+  printf '[angled]: <https://example.invalid/a>\n\n'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-reader.md"
 
@@ -7601,11 +7637,17 @@ oneline_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review be
 # own comment explains: lowering alone leaves 125 code points unnormalised and uppering alone
 # leaves six. `casefold()` agrees with it on every code point but ONE -- U+0131 DOTLESS I, which
 # that renderer merges with `I` and `i` and `casefold` keeps apart -- so a definition spelling its
-# label `i` and a use spelling it `%s` was a link there and no link here, brackets and all.
+# label `i` and a use spelling it dotless was a link there and no link here, brackets and all.
 # Measured at `3fe68c37` through the whole audit in both forms: exit 0, PASS, no stray, READY and
-# ONE merge call, where the same correction using `[i]` was MANUAL with none. This file stays
-# ASCII, so the character is built rather than written.
-dotless_verdict="$(printf '[VERDICT][ı]: CHANGES_REQUIRED -- correcting the review below.')
+# ONE merge call, where the same correction using `[i]` was MANUAL with none.
+#
+# THE CHARACTER IS BUILT FROM ITS BYTES AND NOT WRITTEN, so what this row asserts cannot be changed
+# by a re-encoding of this file. ROUND FOUR SAID "THIS FILE STAYS ASCII" HERE AND WROTE THE
+# CHARACTER ITSELF ON THE NEXT LINE, which is a claim about the file contradicted by the line under
+# it; `LC_ALL=C grep -c '[^ -~<tab>]'` over this file answers 7, in prose comments and in two
+# fixture bodies that hold an em dash on purpose. The sentence that is true is the narrow one: the
+# bytes of this row are written as bytes.
+dotless_verdict="$(printf '[VERDICT][\xc4\xb1]: CHANGES_REQUIRED -- correcting the review below.')
 $(printf '\n[i]: https://example.invalid/review-policy')"
 dotless_control='[VERDICT][i]: CHANGES_REQUIRED -- correcting the review below.
 
@@ -7693,30 +7735,424 @@ got="$(filtered_run eventloops "$tmp/prose-exempt-crossed.md")"
 expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a line ending]" \
   "${got##*|}" 1
 
+# --- a block prefix comes off first, a raw HTML tag is markup, and a definition is a grammar -----
+# MUT-STRAY-BLOCK-PREFIX-STRIPPED, MUT-STRAY-HTML-TAG-IS-MARKUP and
+# MUT-STRAY-DEFINITION-IS-THE-RENDERERS.
+#
+# THE SAME SENTENCE AS THE SECTION ABOVE, and these are the three ways the code that closed the
+# link left it false. Each row below was measured through the WHOLE AUDIT at `196ecd1a` -- exit 0,
+# PASS, no stray, READY and ONE `gh pr merge` call -- and each renders as the correction it is to
+# `markdown-it-py` 3.0.0, checked on 2026-09-21.
+#
+# 1. A RENDERER PARSES BLOCK STRUCTURE FIRST AND ITS INLINE RULES SEE THE BLOCK'S CONTENT. Inside
+#    a blockquote they never see the `>` that opens each line; inside a list item they never see
+#    the indentation. This reading is run over the comment AS GITHUB STORES IT, so every rule that
+#    spans a line ending answered differently: a citation wrapped across two lines inside a quote
+#    met the second line's `>` where a title had to stand, and a QUOTED reference definition failed
+#    `LINK_DEFINITION`'s own `^ {0,3}` anchor. `prefix_stripped_reading` is four more readings over
+#    the comment with each line's prefix taken off; a token in ANY reading is reported, so it finds
+#    more and never different.
+# 2. INLINE RAW HTML IS MARKUP AND THE TEXT BETWEEN TWO TAGS IS TEXT. `<strong>VERDICT</strong>:`
+#    and `<code>VERDICT</code>:` render to the same characters as `**VERDICT**:` and
+#    `` `VERDICT`: `` -- asserted below by rendering BOTH spellings of one correction and reading
+#    the same stray out of each -- and were READY with one merge call where the Markdown spellings
+#    were MANUAL with none. `html_tag_extent` is that renderer's `html_inline` rule.
+# 3. WHETHER A REFERENCE PAIR IS A LINK IS SCANNED BOTH WAYS, because the two renderers that could
+#    answer DISAGREE and neither answer is safe on its own. Round four let a definition's
+#    destination wrap onto the next line by asking only that SOMETHING follow the colon, which
+#    INVENTED definitions `markdown-it-py` refuses -- an unbalanced `(unfinished`, a `javascript:`
+#    URL, rubbish after the destination -- and a pair naming an invented label has its brackets
+#    consumed, which JOINS the words either side and loses the severity between them. Round five
+#    first answered that by transcribing that renderer's `reference` rule, `parseLinkDestination`
+#    and `validateLink` included, AND THEN PUT EACH SHAPE TO GITHUB, which is the renderer that
+#    renders these comments. Executed against `POST /markdown` (`mode: gfm`) on 2026-09-21, over
+#    `[VERDICT][policy]:` beside `[policy]:` and each destination:
+#
+#        destination                     GitHub shows          markdown-it-py shows
+#        https://example.invalid/x       VERDICT:              VERDICT:
+#        <>                              VERDICT:              VERDICT:
+#        a title after it                VERDICT:              VERDICT:
+#        wrapped onto the next line      VERDICT:              VERDICT:
+#        (unfinished                     VERDICT:              [VERDICT][policy]:
+#        javascript:alert(1)             VERDICT:              [VERDICT][policy]:
+#        rubbish after the destination   [VERDICT][policy]:    [VERDICT][policy]:
+#        two blank lines before it       [VERDICT][policy]:    [VERDICT][policy]:
+#
+#    TWO OF THE EIGHT, AND THE TRANSCRIPTION MISSED THE CORRECTION GITHUB SHOWS IN BOTH. A
+#    destination `parseLinkDestination` refuses and a protocol `validateLink` refuses are both
+#    definitions to GitHub: it strips the `href` and shows the label's text all the same. So
+#    `definition_label` now reads only what the two agree on -- a label, a colon, and something
+#    that is not whitespace before the block ends -- and `markup_regions` is asked BOTH with
+#    reference pairs linked and with every one of them left written, the way the delimiter runs are
+#    asked both ways. A pair either renderer LINKS carries its token in the first reading and a
+#    pair either renderer SHOWS carries it in the second, so being wrong about a definition costs a
+#    `manual:` line in one reading and nothing in the other.
+#
+# THE CONTROLS ARE THE SAME CORRECTIONS THE HEAD BEFORE THIS ONE ALREADY CAUGHT, which is what says
+# the difference is the Markdown and not the words.
+
+quoted_wrap='> [VERDICT](https://example.invalid/policy
+> "Review"): CHANGES_REQUIRED -- correcting the review below.'
+quoted_defn='> [VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+>
+> [policy]: https://example.invalid/review-policy'
+quoted_severity='> The blocker is P[1][policy] and it is not in the object.
+>
+> [policy]: https://example.invalid/review-policy'
+listed_defn='- [VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+- [policy]: https://example.invalid/review-policy'
+unquoted_wrap='[VERDICT](https://example.invalid/policy
+"Review"): CHANGES_REQUIRED -- correcting the review below.'
+malformed_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]:
+  (unfinished'
+unbalanced_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]:
+  (unfinished'
+refused_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: javascript:alert(1)'
+rubbish_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: https://example.invalid/x and rubbish'
+refused_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]: javascript:alert(1)'
+garbage_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]: https://example.invalid/x and rubbish'
+
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+round5_closed=(
+  "quoted wrapped citation|$quoted_wrap|VERDICT:"
+  "quoted definition verdict|$quoted_defn|VERDICT:"
+  "quoted definition severity|$quoted_severity|P1"
+  "listed definition verdict|$listed_defn|VERDICT:"
+  'quoted bold verdict|> **VERDICT**: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html bold verdict|<strong>VERDICT</strong>: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html code verdict|<code>VERDICT</code>: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html emphasis severity|The blocker is P<em>1</em> and it is not in the object.|P1'
+  'html split verdict|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|VERDICT:'
+  'html attributed verdict|<span data-x="[a](b)">VERDICT</span>: CHANGES_REQUIRED here.|VERDICT:'
+  'html quoted bold verdict|> <strong>VERDICT</strong>: CHANGES_REQUIRED here.|VERDICT:'
+  "invented definition, unbalanced|$malformed_defn|P1"
+  "invented definition, refused protocol|$refused_defn|P1"
+  "invented definition, rubbish after it|$garbage_defn|P1"
+  "unquoted wrapped citation|$unquoted_wrap|VERDICT:"
+  'markdown bold verdict|**VERDICT**: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'markdown code verdict|`VERDICT`: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+)
+for row in "${round5_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  # The workflow form: the correction in front of a generated `PASS` object.
+  reader_comment "$reader_prose" > "$tmp/round5-closed.md"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case]" \
+    "$(review_rows "$tmp/round5-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round5-closed.md")"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit status [$reader_case]" "${got%%|*}" 0
+  # And the frontier form, where the same correction stands in a review that writes its own
+  # verdict line -- the form every review in this repository is posted in.
+  prose_review "$reader_prose
+" > "$tmp/round5-closed-prose.md"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case] prose" \
+    "$(review_rows "$tmp/round5-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round5-closed-prose.md")"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case] prose" "$got" \
+    "manual:$reader_want-outside-the-numbered-findings"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [$reader_case] prose" "${got##*|}" 0
+done
+# THE TWO SPELLINGS OF ONE CORRECTION READ THE SAME, which is the whole claim behind reading a tag
+# as markup rather than as writing: `<strong>VERDICT</strong>:` and `**VERDICT**:` are the same
+# eight characters to a reader, so a rule that catches one and not the other catches a SPELLING and
+# not a correction. Asserted as an equality between two rows of the table above rather than as two
+# separate expectations, so neither can drift away from the other.
+reader_comment '<strong>VERDICT</strong>: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-html.md"
+reader_comment '**VERDICT**: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-markdown.md"
+expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike]" \
+  "$(review_rows "$tmp/round5-html.md")" "$(review_rows "$tmp/round5-markdown.md")"
+reader_comment '<code>VERDICT</code>: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-html.md"
+reader_comment '`VERDICT`: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-markdown.md"
+expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike, code]" \
+  "$(review_rows "$tmp/round5-html.md")" "$(review_rows "$tmp/round5-markdown.md")"
+# AND THE OTHER DIRECTION IS PINNED AGAINST ROUND FIVE'S OWN INTERMEDIATE STATE, which is where
+# it was found. These three were `stray=VERDICT:` and MANUAL at `196ecd1a`, went SILENT under the
+# `reference`-rule transcription round five wrote first -- exit 0, PASS, no stray, READY, ONE
+# `gh pr merge` call -- and are MANUAL again here. Two of them are corrections GitHub SHOWS and
+# `markdown-it-py` does not; the third is one NEITHER shows, and it is reported because the loose
+# rule reads it as a link. That third row is the over-read this design pays for the other two, and
+# it is here so the price is asserted rather than described.
+intermediate_rows=(
+  "GitHub links an unbalanced destination|$unbalanced_verdict|VERDICT:"
+  "GitHub links a refused protocol|$refused_verdict|VERDICT:"
+  "neither renderer links rubbish after it|$rubbish_verdict|VERDICT:"
+)
+for row in "${intermediate_rows[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-intermediate.md"
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
+    "$(review_rows "$tmp/round5-intermediate.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round5-intermediate.md")"
+  contains "MUT-STRAY-DEFINITION-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS merge calls [$reader_case]" "${got##*|}" 0
+done
+# AND A DEFINITION A RENDERER DOES ACCEPT IS STILL ACCEPTED, which is the half a stricter rule
+# breaks and the half round four bought with the two it lost: the wrapped destination, the titled
+# one and the angled one each still make their pair a link, so the correction between the brackets
+# still reaches a person.
+accepted_defn=(
+  'wrapped destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]:
+  https://example.invalid/review-policy'
+  'titled destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: https://example.invalid/review-policy "the policy"'
+  'angled destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: <https://example.invalid/review policy>'
+  'image data destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: data:image/png;base64,AA'
+)
+for row in "${accepted_defn[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-accepted.md"
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
+    "$(review_rows "$tmp/round5-accepted.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/VERDICT:"
+done
+# THE FALSE-POSITIVE GUARD, WHICH IS WHAT THIS WHOLE FAMILY IS PAID FOR IN. A review citing a
+# finding file by name -- `findings/P1_security-trust_...md` -- writes `P1` between underscores and
+# is not a severity outside the object. It was quiet at every head this family has had and it is
+# quiet here, through the whole audit: READY, and ONE merge call.
+reader_comment 'See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
+  > "$tmp/round5-citation.md"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [finding citation stays quiet]" \
+  "$(review_rows "$tmp/round5-citation.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+got="$(filtered_run eventloops "$tmp/round5-citation.md")"
+contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [finding citation stays quiet]" "$got" "enqueued #999"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [finding citation stays quiet]" "${got##*|}" 1
+# AND A QUOTED ONE, because the reading that takes the `>` off is the one this round added and it
+# must not turn an ordinary citation into a blocker either.
+reader_comment '> See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
+  > "$tmp/round5-citation.md"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [quoted finding citation stays quiet]" \
+  "$(review_rows "$tmp/round5-citation.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+got="$(filtered_run eventloops "$tmp/round5-citation.md")"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [quoted finding citation stays quiet]" \
+  "${got##*|}" 1
+
+# --- and the two GitHub reads differently from CommonMark ----------------------------------------
+# MUT-STRAY-GITHUB-STRIKETHROUGH and MUT-STRAY-CRLF-BLANK-LINE.
+#
+# EVERY RULE ABOVE IS `markdown-it-py` 3.0.0's, AND THE COMMENT IS RENDERED BY GITHUB. Two places
+# where that difference is the whole answer, both found by asking what this repository's comments
+# are actually made of rather than by a lens:
+#
+# 1. `~~VERDICT~~: CHANGES_REQUIRED` IS A CORRECTION STRUCK THROUGH, and striking a line out is
+#    ordinary writing. Strikethrough is a GFM extension: cmark-gfm has it, GitHub renders it, and
+#    CommonMark does not, so a reading that takes `*` and `_` runs and not `~` runs showed the token
+#    to a reader and none of it to this scan. At `196ecd1a`: stray none, READY and ONE `gh pr merge`
+#    call, where `**VERDICT**:` in its place was MANUAL with none.
+# 2. GITHUB'S OWN EDITOR STORES `\r\n` -- 7 of the 684 comments this repository held on
+#    2026-09-21. `BLANK_LINE` asked for `\n[ \t]*\n`, which no such comment holds, so one had NO
+#    BLANK LINE AT ALL to this reading and every rule that stops at one ran to the end of it. THAT
+#    WAS HARMLESS AT `196ecd1a`, WHOSE DEFINITION PATTERN COULD CROSS ONE LINE ENDING AND NO MORE,
+#    AND ROUND 5 MADE IT COST A SEVERITY: `definition_label` skips whitespace up to this boundary,
+#    so with no boundary a `[policy]:` whose destination stands TWO blank lines below it became a
+#    definition, ``P`1`[policy]`` became the link `P1policy`, and the severity went. Executed
+#    mid-round, before the push: the same words were `stray=P1` with `\n` endings and none with
+#    `\r\n` ones. The row below is therefore a regression test against ROUND 5's own intermediate
+#    state and not against `196ecd1a`, where both spellings already answered `P1` -- six shapes
+#    chosen to cross a blank line were executed at `3fe68c37`, at `196ecd1a` and here with both
+#    endings without finding one that differs at either of those two heads.
+strike_rows=(
+  'struck verdict|~~VERDICT~~: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'struck severity|The blocker is P~~1~~ and it is not in the object.|P1'
+  'single tilde verdict|~VERDICT~: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'struck quoted verdict|> ~~VERDICT~~: CHANGES_REQUIRED here.|VERDICT:'
+)
+for row in "${strike_rows[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-strike.md"
+  expect "MUT-STRAY-GITHUB-STRIKETHROUGH [$reader_case]" \
+    "$(review_rows "$tmp/round5-strike.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round5-strike.md")"
+  contains "MUT-STRAY-GITHUB-STRIKETHROUGH audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-GITHUB-STRIKETHROUGH merge calls [$reader_case]" "${got##*|}" 0
+done
+# AND A `~` THAT IS NOT A DELIMITER STAYS WRITTEN, which is the other half: a home directory and an
+# approximation are what `~` is in this repository's reviews, and neither makes a token.
+reader_comment 'Run it from ~/bin, it takes ~5 seconds, and nothing here is a severity.' \
+  > "$tmp/round5-strike.md"
+expect "MUT-STRAY-GITHUB-STRIKETHROUGH [an ordinary tilde stays quiet]" \
+  "$(review_rows "$tmp/round5-strike.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
+# THE SAME WORDS WITH EACH LINE ENDING, and the assertion is that they read ALIKE. A comment whose
+# severity survives only because it was typed in an editor that writes `\n` is a comment the merge
+# path reads by accident.
+crlf_prose='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]:
+
+https://example.invalid/review-policy'
+reader_comment "$crlf_prose" > "$tmp/round5-lf.md"
+"$parser_python" - "$tmp/round5-lf.md" "$tmp/round5-crlf.md" <<'CRLF' || error "MUT-STRAY-CRLF-BLANK-LINE: could not build the CRLF copy"
+import sys
+with open(sys.argv[1], encoding="utf-8", newline="") as handle:
+    body = handle.read()
+with open(sys.argv[2], "w", encoding="utf-8", newline="") as handle:
+    handle.write(body.replace("\r\n", "\n").replace("\n", "\r\n"))
+CRLF
+expect "MUT-STRAY-CRLF-BLANK-LINE [line feeds]" \
+  "$(review_rows "$tmp/round5-lf.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+expect "MUT-STRAY-CRLF-BLANK-LINE [carriage returns read alike]" \
+  "$(review_rows "$tmp/round5-crlf.md")" "$(review_rows "$tmp/round5-lf.md")"
+got="$(filtered_run eventloops "$tmp/round5-crlf.md")"
+contains "MUT-STRAY-CRLF-BLANK-LINE audit" "$got" MANUAL
+expect "MUT-STRAY-CRLF-BLANK-LINE merge calls" "${got##*|}" 0
+
+# --- a raw HTML tag's extent is that renderer's own, shape for shape -----------------------------
+# MUT-HTML-TAG-EQUALS-RENDERER.
+#
+# `html_tag_extent` is `markdown-it-py` 3.0.0's `html_inline` rule -- its two preconditions and
+# then its `HTML_TAG_RE` -- WRITTEN OUT AS A SCAN rather than compiled, because that pattern is
+# `attribute*` around `\s*=\s*` and its repetitions partition the same run of whitespace when a
+# value does not follow. A scan that walks forward once cannot do that, and cannot be made to.
+#
+# WRITING A PATTERN OUT IS WHERE A TRANSCRIPTION GOES WRONG, so the two were compared rather than
+# believed: on 2026-09-21, against that renderer's own `HTML_TAG_RE` driven through its rule's two
+# preconditions, they agreed on 56 fixed shapes and on 200,000 random tag-shaped strings built from
+# its own vocabulary -- 0 differences either way. `markdown-it-py` is not installed in CI and this
+# needs none of it: what stands here is the fixed half of that comparison with THE RENDERER'S
+# ANSWER as the want column -- a number is the length of the tag it reads there, `-` is "no tag
+# here" -- so a change that reads any of these differently from that renderer fails this table.
+html_extent_rows=(
+  '<strong>|8' '</strong>|9' '<code>|6' '<em>x|4' '</span >|8'
+  "<a href='x'>|12" '<a href="[a](b)">|17' '<a href=x>|10' '<a/>|4' '<a />|5' '<a b c d>|9'
+  '<a b= >|-' '<a =b>|-' '<1a>|-' '<a-b>|5'
+  '<!---->|7' '<!--->|-' '<!-->|-' '<!--a-->|8' '<!--a--b-->|-' '<!---a-->|9'
+  '<![CDATA[x]]>|13' '<!DOCTYPE html>|15' '<!Ab>|-' '<?php x ?>|10' '<?>|-'
+  '<>|-' '<a|-' '<a>|3' '< a>|-' '<https://e.invalid/u>|-' "<a b='>'>|9" '<a b=`x>|-' '<x [y] z>|-'
+)
+html_extent_want=""
+: > "$tmp/html-extent.in"
+for row in "${html_extent_rows[@]}"; do
+  printf '%s\n' "${row%|*}" >> "$tmp/html-extent.in"
+  html_extent_want+="${row##*|}"$'\n'
+done
+# `|| html_extent_status=$?` and not `set -e`, for the reason `MUT-STRAY-FLANKING-SUPERSET` gives:
+# a probe that cannot even import the module is a REPORT here, not the end of this file.
+html_extent_status=0
+"$parser_python" - scripts/pr-review-parse.py "$tmp/html-extent.in" \
+  > "$tmp/html-extent.out" 2>&1 <<'HTMLEXTENT' || html_extent_status=$?
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("upstroke_parse_html_extent", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+# Each line of the file is one shape, and the answer is read at offset 0 with the whole line as the
+# block -- which is where that renderer reads it, its `state.posMax` being the block's own end.
+with open(sys.argv[2], encoding="utf-8") as handle:
+    for line in handle.read().splitlines():
+        found = module.html_tag_extent(line, 0, len(line))
+        print("-" if found is None else found)
+HTMLEXTENT
+expect "MUT-HTML-TAG-EQUALS-RENDERER probe status" "$html_extent_status" 0
+expect "MUT-HTML-TAG-EQUALS-RENDERER" "$(cat "$tmp/html-extent.out")" "$(printf '%s' "$html_extent_want")"
+
+# --- the structure pass is bounded, and a comment cannot make it run for seconds ------------------
+# MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED.
+#
+# THE AUDIT PARSES THE REVIEW SYNCHRONOUSLY ON THE MERGE PATH, so a comment that makes this parser
+# run for half a minute is a denial of service against the queue and not a slow test. Two shapes did:
+#
+#   * `'[' * n + 'x' + ']' * n` -- every closing bracket folded a prospective SHORTCUT label a
+#     little longer than the last, with no definitions anywhere. 0.364s at 32 KB at `3fe68c37`,
+#     0.460s at `196ecd1a`, and **29.33 seconds** over the 256 KB document built below. Closed by
+#     `link_extent`'s NAMEABLE: a label holding an unescaped bracket names nothing a definition can
+#     define, and `markup_regions` decides that off the last bracket it walked past.
+#   * `[policy]:` followed by a long run of spaces and then a blank line -- `LINK_DEFINITION`'s two
+#     whitespace repetitions either side of an optional line ending partitioned that run again and
+#     again. 0.012s at 32 KB at `3fe68c37` and **85.85 seconds** at `196ecd1a` over the 128 KB
+#     document below, which round four introduced. Closed by parsing the definition instead of
+#     matching it.
+#
+# Both are **0.10 and 0.05 seconds** here, measured on 2026-09-21. THE BOUND BELOW IS A CEILING ON A
+# QUADRATIC AND NOT A BENCHMARK: fifteen seconds is 150 and 300 times what this head takes and less
+# than half and a sixth of what `196ecd1a` took, so a machine several times slower than this one
+# still separates them. A row that starts failing here has changed the SHAPE of the pass.
+bounded_document() {  # bounded_document FILE PROSE
+  { printf 'Reviewed head: %s\n\n' "$enqueue_head"; printf '%s\n\n' "$2"
+    printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$1"
+}
+bounded_case() {  # bounded_case NAME FILE
+  local started elapsed status=0
+  started="$(date +%s)"
+  "$parser_python" scripts/pr-review-parse.py review --out "$tmp/bounded.json" "$2" \
+    > /dev/null 2>&1 || status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect "MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED status [$1]" "$status" 0
+  ((elapsed <= 15)) || error \
+    "MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED [$1]: $(wc -c < "$2") bytes took ${elapsed}s, want 15s or less"
+}
+bounded_brackets="$(printf '%0.s[' $(seq 1 128000))x$(printf '%0.s]' $(seq 1 128000))"
+bounded_document "$tmp/bounded-brackets.md" "$bounded_brackets"
+bounded_case 'a nest of brackets' "$tmp/bounded-brackets.md"
+bounded_document "$tmp/bounded-definition.md" \
+  "[policy]:$(printf '%0.s ' $(seq 1 128000))
+and nothing that could be a destination follows it."
+bounded_case 'a definition with no destination' "$tmp/bounded-definition.md"
+# AND THE TWO ROUND FOUR CLOSED, kept here because a repair of one shape has twice re-opened
+# another. Over the 128 KB documents built below, measured on 2026-09-21: `'[x](' * 32000` took
+# 144.20 seconds at `3fe68c37`, 0.53 at `196ecd1a` and 0.52 here, and `'[a][' * 32000` took 157.23
+# seconds at `3fe68c37`, 0.06 at `196ecd1a` and 0.06 here.
+bounded_document "$tmp/bounded-opens.md" "$(printf '%0.s[x](' $(seq 1 32000))"
+bounded_case 'destinations that never close' "$tmp/bounded-opens.md"
+bounded_document "$tmp/bounded-labels.md" "$(printf '%0.s[a][' $(seq 1 32000))"
+bounded_case 'labels that never close' "$tmp/bounded-labels.md"
+
 # --- what this head still does not read, pinned rather than claimed closed -----------------------
 # PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is now the finding for what is LEFT. Each
 # row is a comment whose rendering and whose reading still disagree, and each is here so that the
 # next change starts from a measurement rather than a guess. Rendered with `markdown-it-py` 3.0.0
 # on 2026-09-21; the rendering is in the comment beside each row.
 #
-# TWO ROWS ARE UNDER-READ and they are the two that can still cost a merge: INLINE RAW HTML, which
-# no reading parses, and the one where a renderer answers TWO delimiter runs in one sentence
-# differently. The first is left open because splitting a word with a tag is not ordinary writing
-# the way bold, a correction, a code span and a link are. The second is the residue of not pairing
-# delimiters: `stray_summary` scans the text with every run dropped AND with every run kept, which
-# is every answer a renderer can give when it answers them all the same way, and
-# `Deferred: __&#80;1**and__ the rest of it.` is one it does not. Differential-tested against
-# `markdown-it-py` 3.0.0 over 400,000 random strings on 2026-09-21: 19 under-reads, every one of
-# them holding a `*` or `_` run, against 45 at `d599216`; with every such run taken out of the
-# generator, 0 here and 40 there.
+# ONE ROW IS UNDER-READ and it is the only one here that can still cost a merge: the one where a
+# renderer answers TWO delimiter runs in one sentence DIFFERENTLY. It is the residue of not pairing
+# delimiters at all: `stray_summary` scans the text with every run dropped AND with every run kept,
+# which is every answer a renderer can give when it answers them all the same way, and
+# `Deferred: __&#80;1**and__ the rest of it.` is one it does not. INLINE RAW HTML WAS THE SECOND
+# ROW HERE AND IS NOW CLOSED, in the section above. Differential-tested against `markdown-it-py`
+# 3.0.0 over 100,000 random strings per alphabet on 2026-09-21, with the generator carrying
+# blockquote markers, list markers and raw HTML tags: 1 under-read against 59 at `196ecd1a`, and
+# the one is this row's shape.
 #
 # THE REST ARE OVER-READ and cost a `manual:` line and never the review: the readings that leave a
 # code span's delimiters written resolve inside it and inside a code block, where a renderer
 # resolves nothing; an unpaired run is dropped; a LINK REFERENCE DEFINITION is read as the text it
-# is not shown as; and a bracket pair NESTED inside a link's text is read as a link of its own
-# where a renderer, which does not nest links, leaves the outer pair written.
+# is not shown as; a bracket pair NESTED inside a link's text is read as a link of its own where a
+# renderer, which does not nest links, leaves the outer pair written; and the reading that takes a
+# block prefix off each line takes one off a line inside an indented code block, where a renderer
+# takes none.
 reader_open=(
-  'inline raw html|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|-'
   'two runs answered differently|Deferred: __&#80;1**and__ the rest of it.|-'
   'code span reference|The blocker is `&#80;1` here.|P1'
   'code span underscore|The blocker is `_P1_` here.|P1'
@@ -7741,9 +8177,9 @@ done
 expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [code block underscore]" \
   "$(review_rows "$tmp/reader-open-fence.md")" \
   "0|json/$enqueue_head/PASS/$enqueue_base/P1"
-# THE TWO UNDER-READ ROWS GO THROUGH THE WHOLE AUDIT, because those are the ones that can still
-# cost a merge and a `stray` field of `-` is not that claim: READY, and one call, each.
-for reader_case in 'inline raw html' 'two runs answered differently'; do
+# THE UNDER-READ ROW GOES THROUGH THE WHOLE AUDIT, because that is the one that can still cost a
+# merge and a `stray` field of `-` is not that claim: READY, and one call.
+for reader_case in 'two runs answered differently'; do
   got="$(filtered_run eventloops "$tmp/reader-open-$reader_case.md")"
   contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [$reader_case]" \
     "$got" "enqueued #999"
@@ -7781,7 +8217,7 @@ spec.loader.exec_module(module)
 # NEITHER -- so "a" is where the two readings can differ, and replacing it with "." is what this
 # file's wider class does to such a character.
 checked = 0
-for marker in "*_":
+for marker in "*_~":
     for last, nxt in itertools.product(" .a", repeat=2):
         if not module.emphasis_delimiter(marker, last, nxt):
             continue
@@ -7794,15 +8230,16 @@ for marker in "*_":
                     sys.exit(1)
 print("ok %d" % checked)
 FLANK
-# TWENTY-SIX, AND THE NUMBER IS THE ASSERTION AS MUCH AS THE WORD IS: eighteen (marker, before,
-# after) combinations, fifteen of which drop the run -- eight for `*` and seven for `_`, the one
-# `_` does not being the intraword pair -- and each of those widened in every position that can be
-# widened, which is 15 + 11. A rule that stopped dropping runs would report a SMALLER number here
+# FORTY-ONE, AND THE NUMBER IS THE ASSERTION AS MUCH AS THE WORD IS: twenty-seven (marker, before,
+# after) combinations, twenty-three of which drop the run -- eight for `*`, seven for `_`, the one
+# `_` does not being the intraword pair, and eight for `~`, which takes the `*` arm because GFM's
+# strikethrough has no intraword clause -- and each of those widened in every position that can be
+# widened, which is 23 + 18. A rule that stopped dropping runs would report a SMALLER number here
 # and `ok` all the same, and one that dropped more would report a larger one: deleting the
-# intraword clause, so `_` splits a word the way `*` does, reports `ok 30`, and that is the only
-# case in this file it moves.
+# intraword clause, so `_` splits a word the way `*` does, reports `ok 45`, and that is the only
+# case in this file it moves. It read `ok 26` over `*` and `_` alone before `~` was added.
 expect "MUT-STRAY-FLANKING-SUPERSET probe status" "$flanking_status" 0
-expect MUT-STRAY-FLANKING-SUPERSET "$(cat "$tmp/flanking.out")" "ok 26"
+expect MUT-STRAY-FLANKING-SUPERSET "$(cat "$tmp/flanking.out")" "ok 41"
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
