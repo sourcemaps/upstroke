@@ -14457,6 +14457,14 @@ fn candidate_sequence_kill_child() {
             EffectSiteId::Ref(RefSite::PinCandidatePrepared),
             HookPhase::After,
         ),
+        "before-candidate-pin-delete" => (
+            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            HookPhase::Before,
+        ),
+        "after-candidate-pin-delete" => (
+            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            HookPhase::After,
+        ),
         "after-candidate-stage" => (
             EffectSiteId::Object(ObjectSite::CandidateStage),
             HookPhase::After,
@@ -15740,6 +15748,219 @@ fn a_kill_before_the_candidates_ref_is_created_is_finished_by_the_next_resume_wh
         "{tag}: one queue position across the kill and the recovery"
     );
     assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
+}
+
+fn a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(phase: HookPhase) {
+    use crate::engine::topology::candidate::recovery_for;
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+    use crate::topology::fold::GenerationClass;
+
+    let pin_stands = phase == HookPhase::Before;
+    let (tag, coordinate) = if pin_stands {
+        (
+            "kill-before-candidate-pin-delete",
+            "before-candidate-pin-delete",
+        )
+    } else {
+        (
+            "kill-after-candidate-pin-delete",
+            "after-candidate-pin-delete",
+        )
+    };
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, coordinate, tag);
+
+    let site = EffectSiteId::Ref(RefSite::DeleteCandidatePin);
+    let semantics = site.semantics(if pin_stands {
+        EntryPhase::Before
+    } else {
+        EntryPhase::After
+    });
+    assert_eq!(
+        (semantics.rows, semantics.action),
+        if pin_stands {
+            (vec![ResourceRow::R23], ResumeAction::ResumeUnperformed)
+        } else {
+            (vec![ResourceRow::R27], ResumeAction::ReclaimReleased)
+        },
+        "{tag}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the candidate is created and queued, and nothing follows its queue position"
+    );
+    let prepared = prepared_candidates_of(&fixture);
+    let candidate = prepared.first().expect("the prepared candidate").clone();
+    let commit = candidate.commit_sha.0.clone();
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(candidate.candidate_ref.0.clone(), commit.clone())],
+        "{tag}: R11: the candidates ref stands at the recorded commit"
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate.prepared_ref.as_str()),
+        pin_stands.then(|| commit.clone()),
+        "{tag}: R23: the pin stands at the recorded commit before its deletion and is gone after"
+    );
+    assert_eq!(
+        candidate_pins_on_disk(&fixture).len(),
+        usize::from(pin_stands),
+        "{tag}: and Git lists no other candidate-prepared pin"
+    );
+    assert!(
+        !crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&commit),
+        "{tag}: the candidates ref keeps the commit reachable with or without the pin"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: the deletion comes before the reclaim: the generation's worktree and intent stand"
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task(ALPHA)
+            .and_then(|task| task.generations.last())
+            .map(|generation| generation.class.clone()),
+        Some(GenerationClass::Closed),
+        "{tag}: `task_candidate_created` closed the generation"
+    );
+    let recovery = recovery_for(&manager, RUN_ID, &fold, ALPHA).expect("classify");
+    assert!(
+        !recovery.settles_interrupted && recovery.orphan_pin.is_none(),
+        "{tag}: {recovery:?}"
+    );
+    assert_eq!(
+        recovery.promotion.is_some(),
+        pin_stands,
+        "{tag}: a standing pin is an unfinished promotion, and a deleted one owes nothing: \
+         {recovery:?}"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.finished,
+        if pin_stands { vec![ALPHA] } else { Vec::new() },
+        "{tag}: step (f) finishes the promotion a standing pin leaves unfinished"
+    );
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for entered in [HookPhase::Before, HookPhase::After] {
+            assert_eq!(
+                seen.count(site, entered),
+                u32::from(pin_stands),
+                "{tag}: the resume deletes the pin once from the prefix in which it stands, and \
+                 adopts the deletion the dead incarnation completed ({entered})"
+            );
+        }
+        assert_eq!(
+            seen.count(
+                EffectSiteId::Ref(RefSite::CreateCandidates),
+                HookPhase::Before
+            ),
+            0,
+            "{tag}: and creates no candidates ref: the one that stands is adopted"
+        );
+    }
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+            "run_resumed",
+        ],
+        "{tag}: the recovery appends its `run_resumed` and no second queue position"
+    );
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(candidate.candidate_ref.0.clone(), commit.clone())],
+        "{tag}: R11 is not moved"
+    );
+    assert!(pins_of(&fixture).is_empty(), "{tag}: no pin stands");
+    assert!(
+        !worktree.exists()
+            && !registered_with_git(&manager, &worktree)
+            && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree is reclaimed, its Git registration and intent \
+         gone"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: a finished promotion owes nothing"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated { key: ALPHA, .. }))
+        ),
+        "{tag}: the queued candidate integrates: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()),
+        Some(commit),
+        "{tag}: the integration ref is at the candidate the dead incarnation created"
+    );
+    assert_eq!(
+        durable_kinds(&fixture)
+            .iter()
+            .filter(|kind| *kind == "task_candidate_created")
+            .count(),
+        1,
+        "{tag}: one queue position across the kill and the recovery"
+    );
+    assert_replays_twice_equal(&fixture, &format!("{tag}: after the next step"));
+}
+
+#[test]
+fn a_kill_before_the_candidate_pin_is_deleted_is_finished_by_the_next_resume_which_deletes_it_once()
+{
+    a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
+}
+
+#[test]
+fn a_kill_after_the_candidate_pin_is_deleted_is_adopted_by_the_next_resume_which_deletes_nothing() {
+    a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::After);
 }
 
 #[test]
