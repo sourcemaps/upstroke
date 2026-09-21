@@ -92,10 +92,11 @@ refusal:
     accounted for, and let a `PASS` appended after it stand as the only candidate. What such a
     block holds is material, on the same terms as what lies outside one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
-    stands outside it. Not "nothing this program recognises as a block" -- nothing; and the
-    verdict line is matched AS THE COMMENT SPELLS IT, which makes it a check on the trusted
-    reviewer's comment contradicting itself rather than a trust boundary -- `PROSE_VERDICT` says
-    what a reader of the comment sees that this does not read;
+    stands outside it. Not "nothing this program recognises as a block" -- nothing. That line is
+    matched AS THE COMMENT SPELLS IT, and a reviewer correcting a generated review writes
+    `**VERDICT**: CHANGES_REQUIRED` as readily as the plain form: the spellings only a READER of
+    the comment sees are found by `reader_spelling` and reported as a stray token, so the comment
+    reaches a person rather than a merge. Two outcomes, and the exact match gets the harder one;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
     the LAST occurrence of a repeated name, so an object carrying a `findings` array with a P1 in
     it and then a second `"findings":[]` deserialises to a clean PASS with no findings -- one
@@ -142,6 +143,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 
 # ---- what a field may be ------------------------------------------------------------------------
 
@@ -232,6 +234,48 @@ DECIMAL_REFERENCE = re.compile(r"#([0-9]{1,8})")
 HEX_REFERENCE = re.compile(r"#x([a-f0-9]{1,8})", re.IGNORECASE)
 NAMED_REFERENCE = {name.rstrip(";"): chars for name, chars in html.entities.html5.items()}
 
+# AND THE SPELLING A READER OF THE COMMENT'S PROSE SEES, which is a THIRD text and the one the two
+# prose scans below exist to read. `decoded_spelling` is what `json.loads` reads and
+# `rendered_language` is what a renderer reads out of an info string; this is what a renderer
+# renders out of INLINE PROSE, and it is the reading a reviewer's own eyes use. A rule that asks
+# its question of the characters a comment is stored as, when the person writing it is looking at
+# what they resolve to, is comparing two different documents -- and that is not a theory here: the
+# trusted reviewer prepending `**VERDICT**: CHANGES_REQUIRED` to a generated `PASS` object, which
+# is bold and a correction and nothing else, was READY and one merge call where the same words
+# written plainly were a refusal and none.
+#
+# THREE TRANSFORMATIONS, AND THEY ARE THE ONES ORDINARY WRITING PRODUCES: a backslash escape, a
+# character reference, and an emphasis delimiter run around or inside the token. `markdown-it-py`
+# 3.0.0's own inline rules, transcribed the way `rendered_language` transcribes its `unescapeAll`:
+# `escape`'s ASCII-punctuation set, `entity`'s two patterns and their bounds (SEVEN decimal digits
+# and six hex, which is NOT `unescapeAll`'s eight, and an unreferable code point becoming U+FFFD
+# rather than staying written), and `scanDelims`. One left-to-right pass, so `\&#58;` starts no
+# reference and `\*` is no delimiter, and nothing a reference resolves to is read again.
+#
+# WHAT IS NOT HERE IS INLINE RAW HTML: `VER<span>DICT:</span>` renders as the token and is no token
+# here. It is left open deliberately, with a fixture, because splitting a word with a tag is not
+# ordinary writing the way bold and a correction are -- PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-
+# SEES under `findings/` states what this leaves and what it closes.
+INLINE_MARKUP = re.compile(
+    r'\\(?P<escape>[!"#$%&\'()*+,\-./:;<=>?@\[\\\]^_`{|}~])'
+    r"|&(?P<reference>#[0-9]{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});"
+    r"|(?P<run>\*+|_+)",
+    re.IGNORECASE,
+)
+# The two character classes CommonMark's flanking rule asks about, and they are `markdown-it-py`
+# 3.0.0's. `isWhiteSpace` is transcribed exactly -- tab, line feed, VERTICAL TAB, form feed,
+# carriage return, space and every Zs -- and measured equal to it on every code point.
+# `isMdAsciiPunct` is the ASCII punctuation set, transcribed exactly; `isPunctChar` is a generated
+# table of the Unicode P categories at the version that renderer was built against, and what is
+# here is `unicodedata`'s P AND S categories instead, because a table is not something to copy 3 KB
+# of into a gate script. Measured over every code point on 2026-09-21: this is a STRICT SUPERSET --
+# 7,994 code points are punctuation here and not there, NONE the other way, and NOT ONE of them is
+# ASCII. A superset only ever drops a run this keeps, never keeps one it drops, which is the
+# direction that finds more tokens; `MUT-STRAY-FLANKING-SUPERSET` asserts that over the whole
+# classification rather than over a sample.
+ASCII_PUNCTUATION = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+MARKUP_WHITESPACE = frozenset("\t\n\x0b\x0c\r ")
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -256,34 +300,41 @@ PROSE_MARKER = re.compile(r"<!-- upstroke-frontier-review")
 # choosing between them. THE VERDICT OBJECT IS THE AUTHORITY for what a workflow-form review says;
 # this scan adds nothing to it and decides no verdict of its own.
 #
+# THE ORDINARY WAY THAT HAPPENS IS A CORRECTION, and that is why this is not a hypothetical rule.
+# A review is generated and posted; the reviewer then reads it, disagrees, and prepends a line
+# saying so, leaving the object underneath. Written plainly this scan finds it and the parse
+# refuses, which is right: the comment says two things.
+#
+# AND IT IS MATCHED AS THE COMMENT SPELLS IT, WHICH IS HALF OF THE ANSWER. `**VERDICT**:` is how
+# the same correction gets written by anyone who reaches for bold, and it carries no `VERDICT:` at
+# all in the stored characters. That was exit 0, PASS, READY and one `gh pr merge` call, measured
+# through the whole audit at `a5bcc998`, where the plain spelling was exit 1 and no call --
+# ordinary Markdown, the trusted reviewer's own account, and a merge the same words would have
+# blocked. The other half is in `stray_summary`: the spellings only a READER sees are looked for in
+# `reader_spelling` and REPORTED AS A STRAY TOKEN, so the comment goes in front of a person.
+#
+# THE TWO OUTCOMES ARE DIFFERENT ON PURPOSE. This pattern is exact, so what it finds is exactly a
+# contradiction and a refusal is right. `reader_spelling` drops a delimiter run wherever one could
+# open or close emphasis, without pairing it, so it reads a token out of `P*1` where a renderer
+# shows `P*1` -- an approximation, in the direction of finding more. A refusal costs the reviewer
+# the review; a `manual:` blocker costs a person a look. The approximate reading gets the outcome
+# that can be paid.
+#
 # IT IS NOT A TRUST BOUNDARY, and nothing here should be read as one. `scripts/pr-ready-audit.sh`
 # parses exactly one comment and it is one the account named as the trusted reviewer wrote --
 # `review_comment_filter`'s login predicate, which .github/scripts/test-pr-ready-audit.sh asserts
 # on the filter program itself (MUT-REVIEWER-JQ-INJECTION, MUT-REVIEWER-CASE-MISMATCH) and through
 # the whole audit (MUT-REVIEWER-ANY-AUTHOR-READ). An account that can write this line can write
-# the object instead and put anything in it, so a spelling of the line that this misses buys
-# nothing that writing the object does not already give.
+# the object instead and put anything in it. THAT IS WHY THE FIX IS NOT AN ENUMERATION OF
+# SPELLINGS: what was wrong was not that an attacker could hide a line, it was that the reviewer's
+# own ordinary writing did.
 #
-# THE KNOWN LIMIT, STATED AND NOT ENFORCED. This compares the characters the comment is STORED as.
-# A reader sees what GitHub's renderer resolves them to, and in the comment's INLINE PROSE -- not
-# inside a code span or a code block, where a renderer resolves nothing and the two readings agree
-# -- those are two documents. Four spellings render as `VERDICT:` to a reader and carry none of it
-# here. Measured with `markdown-it-py` 3.0.0 on 2026-09-21, and each read by this program as a
-# comment with no verdict line outside its block at all:
-#
-#     VERDICT&#58;            a character reference
-#     VERDICT\:              a backslash escape
-#     V*ERDICT:*             emphasis
-#     VER<span>DICT:</span>  inline raw HTML
-#
-# ADDING A SPELLING IS THE DEFECT, not the repair: this rule's history is an enumeration that read
-# as a closure while the next shape stood. Resolving them all means rendering the comment, because
-# the consumer here is THE WHOLE INLINE RENDERER -- where `rendered_language` and
-# `decoded_spelling` each answer to one complete, small transformation that can be implemented in
-# full -- and this program is stdlib-only, with CI installing nothing for it. So the divergence is
-# written down rather than claimed closed. The finding that owns it is
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`, and the change that takes it
-# up is the change that decides how this program reads comment prose at all.
+# WHAT IS STILL NOT READ, AND IT IS ONE CLASS: INLINE RAW HTML. `VER<span>DICT:</span>` renders as
+# `VERDICT:` and is no token in any of the three readings, measured with `markdown-it-py` 3.0.0 on
+# 2026-09-21 and pinned as a fixture in .github/scripts/test-pr-ready-audit.sh. It is left open
+# because splitting a word with a tag is not something ordinary writing does, which is exactly what
+# bold and a character reference are. PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under
+# `findings/` owns that class and the three places this reading is wider than a renderer.
 PROSE_VERDICT = re.compile(r"VERDICT:")
 
 # The older bare form's object opener, with whatever a writer left between the brace and the key.
@@ -520,35 +571,160 @@ def rendered_language(info):
     return words[0] if words else ""
 
 
-def stray_summary(outside):
-    """The severity and MUST tokens found outside the findings, as one field, or None.
+def markup_whitespace(ch):
+    """Whether CH is whitespace to CommonMark's flanking rule: `markdown-it-py` 3.0.0's own set."""
+    return ch in MARKUP_WHITESPACE or unicodedata.category(ch) == "Zs"
+
+
+def markup_punctuation(ch):
+    """Whether CH is punctuation to that rule. A superset of the renderer's, measured and stated
+    where `ASCII_PUNCTUATION` is defined: wider only outside ASCII, and wider is the direction that
+    drops a delimiter run rather than keeping one."""
+    return ch in ASCII_PUNCTUATION or unicodedata.category(ch)[0] in "PS"
+
+
+def emphasis_delimiter(marker, before, after):
+    """Whether a run of MARKER between BEFORE and AFTER can open or close emphasis.
+
+    `markdown-it-py` 3.0.0's `scanDelims`, transcribed: left-flanking and right-flanking as
+    CommonMark defines them, `*` opening on the first and closing on the second, and `_` carrying
+    the extra clause that makes it INTRAWORD-SAFE -- an underscore between two word characters can
+    neither open nor close, which is the whole reason this file can read `_P1_` as the severity a
+    reader sees and still read `findings/P1_security-trust_...md` as the citation a reader sees.
+    That single rule is what separates the two, and it is the reason the boundary in `STRAY_TOKEN`
+    is NOT the thing that changed: the token's boundary is a rule about tokens, and which
+    underscores a reader sees is a rule about emphasis.
+
+    A RUN THIS CAN OPEN OR CLOSE IS DROPPED WHEREVER IT STANDS, without pairing it with another --
+    which is the one place `reader_spelling` is deliberately not a renderer. Pairing is the whole
+    of CommonMark's emphasis algorithm, and an unpaired run a renderer leaves written is dropped
+    here: `a*b` reads `ab`. That direction finds tokens a reader does not see, every one of which
+    costs a `manual:` line and a person's attention and none of which can cost a merge, and it is
+    the direction this file is wrong in everywhere else it is wrong.
+    """
+    last_ws, next_ws = markup_whitespace(before), markup_whitespace(after)
+    last_punct, next_punct = markup_punctuation(before), markup_punctuation(after)
+    left = not (next_ws or (next_punct and not (last_ws or last_punct)))
+    right = not (last_ws or (last_punct and not (next_ws or next_punct)))
+    if marker == "*":
+        return left or right
+    return ((left and (not right or last_punct))
+            or (right and (not left or next_punct)))
+
+
+def reader_spelling(text):
+    """TEXT as a reader of the comment's inline prose sees it, for the markup that can hide a token.
+
+    THE THIRD READING, AND THE SIBLING OF `decoded_spelling` AND `rendered_language`. Each of the
+    three answers one consumer's question with that consumer's own function: `json.loads` reads a
+    verdict object, a renderer reads an info string, and A PERSON READS THE PROSE. The two scans
+    below are about what the reviewer wrote for a person to read, so this is the text they are run
+    over as well as the one the comment stores.
+
+    Three transformations, in ONE LEFT-TO-RIGHT PASS over the comment, which is what makes them
+    compose the way the renderer composes them rather than in some order chosen here:
+
+      * a backslash before ASCII punctuation is dropped -- `markdown-it-py` 3.0.0's `escape` rule
+        and its set. `VERDICT\\: CHANGES_REQUIRED` is `VERDICT:` to a reader;
+      * a character reference is resolved -- that renderer's `entity` rule, WHICH IS NOT
+        `unescapeAll`: up to seven decimal digits or six hex, a named reference looked up in the
+        table exactly as it is written, and a code point `referable` refuses rendered as U+FFFD
+        rather than left written. `&#80;1` is `P1` to a reader;
+      * a `*` or `_` run that can open or close emphasis is dropped -- that renderer's
+        `scanDelims`. `**VERDICT**:` is `VERDICT:` and `_P1_` is `P1` to a reader.
+
+    One pass is not a tidiness point. `\\&#58;` renders as the four characters `&#58;` because the
+    escape consumes the ampersand before the entity rule can start a reference there, and `\\*` is
+    a literal asterisk and no delimiter at all. A pass per transformation resolves both, and would
+    read a token out of a comment that shows none.
+
+    WHAT THIS IS NOT. It is not a renderer and it is not a Markdown parse, and the three ways it is
+    not are each fixtured rather than described. TWO OF THEM READ A TOKEN THE COMMENT DOES NOT
+    SHOW, which costs a person a look and cannot cost a merge: it does not pair emphasis
+    delimiters, so `P*1` reads `P1` where a renderer leaves the asterisk written; and it does not
+    know a code span or a code block from prose, where a renderer resolves nothing at all.
+    THE THIRD IS THE OTHER DIRECTION and it is the one that matters: an inline construct standing
+    BETWEEN two characters of the token -- raw HTML (`VER<span>DICT:</span>`) or link syntax
+    (`VER[DICT:](url)`) -- leaves the token in the rendering and none of it in any reading here.
+    Reading those means reading the comment's inline STRUCTURE rather than its characters, which is
+    a CommonMark parse; they are left open deliberately, because splitting a word with a tag or a
+    link is not what writing a sentence produces, and that is exactly what bold and a correction
+    are. PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/` carries all three,
+    measured at this head and at the head before it.
+    """
+    def resolved(match):
+        escape = match.group("escape")
+        if escape is not None:
+            return escape
+        reference = match.group("reference")
+        if reference is not None:
+            if reference[0] != "#":
+                # Looked up AS WRITTEN. That renderer's pattern is case-insensitive and its table
+                # is not, so `&AMP;` is no reference and stays the five characters a reader sees.
+                return NAMED_REFERENCE.get(reference, match.group(0))
+            body = reference[1:]
+            point = int(body[1:], 16) if body[0] in "xX" else int(body)
+            return chr(point) if referable(point) else "\ufffd"
+        run = match.group("run")
+        # The characters either side IN THE COMMENT, which is where `scanDelims` reads them, and a
+        # space for each end of the text -- that renderer treats the start of the run's line as
+        # whitespace, and every line but the first is preceded by the newline that ends the one
+        # before it.
+        before = text[match.start() - 1] if match.start() else " "
+        after = text[match.end()] if match.end() < len(text) else " "
+        return "" if emphasis_delimiter(run[0], before, after) else run
+    return INLINE_MARKUP.sub(resolved, text)
+
+
+def stray_summary(outside, contradicting_verdict=False):
+    """The tokens found outside the findings, as one field, or None.
 
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
 
-    BOTH SPELLINGS ARE SCANNED -- what the comment writes and what a decoder reads -- and the two
-    are not the same text. Reading both is the safe direction for this scan, the same direction
-    `re.ASCII` is chosen for above: every token it finds sends the review to a person, so one
-    found in both spellings costs nothing.
+    THREE SPELLINGS ARE SCANNED -- what the comment writes, what a JSON decoder reads, and WHAT A
+    READER OF THE PROSE SEES -- and the three are not the same text. Reading all of them is the
+    safe direction for this scan, the same direction `re.ASCII` is chosen for above: every token it
+    finds sends the review to a person, so one found in three spellings costs what one found in one
+    costs, and one found in none is the defect. `reader_spelling` is the third, and it is why
+    `_P1_`, `&#80;1` and `P**1**` -- each `P1` to the person who wrote the comment and to the
+    person reading it -- are `P1` here.
 
     THIS IS A NET, AND WHAT IT CATCHES GOES TO A PERSON. A token found here is reported, and
     `scripts/pr-ready-audit.sh` turns it into a `manual:` blocker; it decides no verdict. THE
     VERDICT OBJECT IS THE AUTHORITY, and a severity written outside it is read by nothing else in
-    this program. SO THIS IS NOT A TRUST BOUNDARY EITHER: the audit parses one comment and the
-    trusted reviewer wrote it (`review_comment_filter`, asserted through the whole audit by
-    MUT-REVIEWER-ANY-AUTHOR-READ), and an account that can write a severity into the prose can
-    write the verdict object instead.
+    this program.
 
-    THE KNOWN LIMIT IS `PROSE_VERDICT`'S, STATED THERE IN FULL AND NOT ENFORCED HERE. This reads
-    the characters the comment is stored as, and in the comment's inline prose a reader sees what a
-    renderer resolves them to: `&#80;1` and `P**1**` are `P1` to that reader and are no token at
-    all here, measured with `markdown-it-py` 3.0.0 on 2026-09-21. A MISS IS THAT LIMIT RATHER THAN
-    A DEFECT TO BE PATCHED SPELLING BY SPELLING; PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES
-    under `findings/` owns it.
+    AND THE NET IS WHERE THE CONTRADICTING VERDICT LINE IS CAUGHT TOO, which is the whole of
+    CONTRADICTING_VERDICT. `the_verdict_block` refuses a comment whose prose carries a literal
+    `VERDICT:` line outside the block its verdict is read from, because such a comment says two
+    things. A reader sees that same line in spellings the literal pattern carries none of -- the
+    four fixtured in .github/scripts/test-pr-ready-audit.sh are `**VERDICT**:`, `VERDICT&#58;`,
+    `VERDICT\\:` and `V*ERDICT:*` -- and the first of them is the trusted reviewer prepending an
+    ordinary bold correction to a generated `PASS`. Those reach A PERSON rather than a refusal: the
+    refusal is exact because the literal line is exact, and this reading drops a delimiter run a
+    renderer would sometimes have left written, so a spelling it reads and the comment does not
+    show must cost attention and never the review. REPORTED IN THIS FIELD AND NOT AS A NEW ONE, so
+    the shell's field count and its "whole result or nothing" reading of this program are
+    untouched.
+
+    WHAT NEITHER READING REACHES is a token cut in half by raw HTML or by link syntax, and what
+    both read wider than a renderer does is an unpaired delimiter run and the inside of a code span
+    or a code block. `reader_spelling` says which is which; PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-
+    READER-SEES under `findings/` measures all three and owns them.
     """
-    tokens = sorted(set(STRAY_TOKEN.findall(outside))
-                    | set(STRAY_TOKEN.findall(decoded_spelling(outside))))
-    return "/".join(tokens) if tokens else None
+    read_as = reader_spelling(outside)
+    tokens = set()
+    for reading in (outside, decoded_spelling(outside), read_as):
+        tokens |= set(STRAY_TOKEN.findall(reading))
+    # THE READER'S SPELLING ONLY, for this one. A `VERDICT:` the comment spells literally is
+    # already a refusal by the time this runs, and a JSON escape of one of its letters is not a
+    # spelling of it anywhere a person reads: `json.loads` resolves that inside the verdict object,
+    # and nothing resolves it in prose, where a reader sees the backslash. Scanning
+    # `decoded_spelling` for this would report a line no reader of either ever sees.
+    if contradicting_verdict and PROSE_VERDICT.search(read_as) is not None:
+        tokens.add("VERDICT:")
+    return "/".join(sorted(tokens)) if tokens else None
 
 
 # ---- the review ---------------------------------------------------------------------------------
@@ -853,8 +1029,10 @@ def the_verdict_block(text, candidates):
     follow the block -- not "nothing this program recognises as a block", which is the enumeration
     that failed; and no `VERDICT:` may stand outside it, because a comment carrying a verdict object
     and a verdict line says two things and this program would be choosing between them. That second
-    check reads the line as the comment spells it, and `PROSE_VERDICT` states what it does and does
-    not reach: it is a self-contradiction check, not a trust boundary.
+    check reads the line AS THE COMMENT SPELLS IT, and it is deliberately the only one of the two
+    readings that refuses: the spellings only a reader of the comment sees -- `**VERDICT**:` among
+    them, which is what an ordinary correction looks like -- are found by `reader_spelling` and
+    sent to a person as a stray token instead. `PROSE_VERDICT` states why the two outcomes differ.
     """
     if len(candidates) != 1:
         raise Unparsed(
@@ -956,7 +1134,12 @@ def parse_json_review(text, candidates):
         "reviewed_sha": matching(verdict.get("reviewed_sha"), SHA),
         "verdict": matching(verdict.get("verdict"), VERDICT_WORD),
         "base_sha": matching(verdict.get("base_sha"), SHA),
-        "stray": stray_summary(outside),
+        # AND THE CONTRADICTING VERDICT LINE IS ASKED FOR HERE AND NOWHERE ELSE. This form's
+        # verdict is its object's, so a `VERDICT:` line anywhere outside that object is a comment
+        # saying two things and belongs in front of a person. The prose form's verdict IS such a
+        # line, so the same question asked of a prose review would send every one of them to a
+        # person for carrying the thing that makes it readable.
+        "stray": stray_summary(outside, contradicting_verdict=True),
         "findings": [finding(one) for one in verdict["findings"]],
     }
 

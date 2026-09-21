@@ -78,15 +78,29 @@
 #                                review the audit judges it by. The unit cases above run the
 #                                comment filter on a fixture; this one runs the WHOLE AUDIT with
 #                                the stub answering the listing by running the filter program the
-#                                audit itself hands it, and the comment is one the finding
-#                                PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES measured: the two
-#                                prose scans read what it is stored as, a reader sees the tokens,
-#                                and both scans are silent. Written by the trusted reviewer it is
-#                                READY with one merge call -- that limit, stated and not enforced;
-#                                written by anyone else it must be `no-review` and no call, and
-#                                THAT is the property those scans not being trust boundaries rests
-#                                on. Drop the login predicate from the filter and this row reaches
-#                                READY and calls merge
+#                                audit itself hands it. Written by anyone but the trusted reviewer
+#                                the comment must be `no-review` and no merge call; written by the
+#                                trusted reviewer it must be READ. Drop the login predicate from
+#                                the filter and this row reaches READY and calls merge
+#   MUT-STRAY-READS-THE-WRITTEN-SPELLING  the two scans over a review's prose compared the
+#                                characters the comment is STORED as, where the reviewer writing it
+#                                and the person reading it both see what a renderer resolves them
+#                                to. Measured: the trusted reviewer prepending
+#                                `**VERDICT**: CHANGES_REQUIRED` to a generated `PASS` object -- an
+#                                ordinary bold correction -- was READY WITH ONE MERGE CALL, where
+#                                the same words written plainly were a refusal and none; `_P1_` was
+#                                READY where `P1` is MANUAL. Nine rows, each through the parser and
+#                                through the whole audit
+#   MUT-STRAY-INTRAWORD-UNDERSCORE  the underscore rule was read as the stray token's BOUNDARY
+#                                rather than as the renderer's emphasis rule, so every review
+#                                citing a `findings/P1_...md` path went to a person. Seven rows
+#                                that must stay READY, and they are what decides whether the rule
+#                                above can ship at all
+#   MUT-STRAY-FLANKING-SUPERSET  the punctuation class this file calls the flanking rule with is
+#                                wider than the renderer's, by 7,994 non-ASCII code points, and the
+#                                property that makes that safe -- widening never keeps a delimiter
+#                                run it would have dropped -- was asserted over the whole
+#                                classification rather than over a sample
 #   MUT-REVIEW-LOOKUP-SUPPRESSED a failed comment lookup was reported as "no review", so the audit
 #                                judged whatever survived the failure and an older PASS could win
 #   MUT-TIMELINE-LOOKUP-SUPPRESSED  a failed timeline lookup was reported as "the base did not
@@ -6857,9 +6871,12 @@ contains MUT-GUARD-READS-THE-WRITTEN-SPELLING "$(parse_why "$tmp/enc-two-candida
 # key is NOT `role_understanding` and whose content holds no `json` fence line is material to
 # neither new rule, so the stray scan is the only thing left that reports this comment at all.
 # WHAT IT REPORTS IS `manual:`, a review put in front of a person -- and what it reports it of is
-# the two spellings it reads. This comment's severity sits inside a fenced block, where a renderer
-# resolves nothing and a reader sees the characters the scan reads; in the comment's inline prose
-# the two part company, and `stray_summary` states that limit rather than claiming to close it.
+# every spelling it reads. This comment's severity sits inside a FENCED BLOCK, where a renderer
+# resolves nothing at all, so what a reader of this one sees is `P\u0031` and what this scan
+# reports is `P1`: the scan is WIDER than the reader here, in the direction that costs a person a
+# look and cannot cost a merge. A round of #310 wrote the opposite -- that reader and scan agree
+# inside a code block -- and it was false when it was written, at this head and at every head
+# before it. PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES carries the measurement.
 { printf 'Reviewed head: %s\n\n```text\n' "$revived_head"; swallow_blocking
   printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-escaped.md"
 expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-escaped.md")" \
@@ -7167,17 +7184,14 @@ for bytes in '\013' '\302\205' '\034' '\035' '\036' '\037'; do
 done
 
 # --- one comment is read, and the trusted reviewer wrote it -------------------------------------
-# MUT-REVIEWER-ANY-AUTHOR-READ, and the limit it is the answer to.
+# MUT-REVIEWER-ANY-AUTHOR-READ, which is the boundary the section after it is NOT.
 #
-# `PROSE_VERDICT` and `stray_summary` read the characters a comment is STORED as; a reader of the
-# comment sees what GitHub's renderer resolves them to, and in inline prose those are two
-# documents. Four spellings render as the token and carry none of it in the stored text --
-# `scripts/pr-review-parse.py` names them where each scan is defined, with the finding
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES. NEITHER SCAN IS A TRUST BOUNDARY, and the
-# reading this audit does rest on is a different one: THE ONLY COMMENT IT EVER PARSES IS ONE THE
-# TRUSTED REVIEWER WROTE. Someone who can write that comment can write the verdict object and put
-# anything in it, so a spelling either scan misses buys nothing; someone who cannot is not read at
-# all. That is the sentence this section executes.
+# NEITHER PROSE SCAN IS A TRUST BOUNDARY, and the reading this audit rests on is a different one:
+# THE ONLY COMMENT IT EVER PARSES IS ONE THE TRUSTED REVIEWER WROTE. Someone who can write that
+# comment can write the verdict object and put anything in it; someone who cannot is not read at
+# all. That is the sentence this section executes, and it is why the section after it is about
+# what the reviewer's OWN ORDINARY WRITING does to those scans rather than about an attacker: an
+# author check cannot catch a comment contradicting itself, because the author is the same person.
 #
 # The unit cases near the top of this file run `review_comment_filter` on a fixture. These run THE
 # WHOLE AUDIT, against a stub whose comment listing answers by running the jq program the audit
@@ -7251,9 +7265,10 @@ got="$(filtered_run eventloops "$tmp/enqueue-clean.md")"
 contains "MUT-REVIEWER-ANY-AUTHOR-READ control" "$got" "enqueued #999"
 expect "MUT-REVIEWER-ANY-AUTHOR-READ control calls" "${got##*|}" 1
 expect "MUT-REVIEWER-ANY-AUTHOR-READ control status" "${got%%|*}" 0
-# The finding's two witnesses, in one comment: a `VERDICT:` line and a blocking severity, each
-# spelled as a character reference, over a clean `PASS` object. A reader of this comment sees
-# `VERDICT: CHANGES_REQUIRED` and `P1`; both scans read the stored characters and are silent.
+# One comment carrying both of the shapes the section after this one is about: a `VERDICT:` line
+# and a blocking severity, each spelled as a character reference, over a clean `PASS` object. A
+# reader of this comment sees `VERDICT: CHANGES_REQUIRED` and `P1`. At `a5bcc998` both scans read
+# the stored characters and were silent about both, and it reached READY with one merge call.
 prose_witness() {  # prose_witness VERDICT-SPELLING SEVERITY-SPELLING: one comment, both witnesses
   printf 'Reviewed head: %s\n\n' "$enqueue_head"
   printf '%s CHANGES_REQUIRED -- the blocker is %s and it is not in the object.\n\n' "$1" "$2"
@@ -7283,21 +7298,198 @@ expect "MUT-REVIEWER-ANY-AUTHOR-READ merge calls" "${got##*|}" 0
 got="$(filtered_run eventloops "$tmp/prose-witness.md")"
 [[ "$got" == *"blockers=no-review"* ]] \
   && error "MUT-REVIEWER-ANY-AUTHOR-READ: the trusted reviewer's own comment was not read: [$got]"
-# --- the limit itself, recorded rather than enforced ---------------------------------------------
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES. These three rows are the finding's measurement
-# and they are here so that the change that decides how this program reads comment prose has to
-# move them. Neither scan sees the reference spelling; each sees the literal one. Rendered by
-# `markdown-it-py` 3.0.0, all three comments read `VERDICT: CHANGES_REQUIRED` and `P1`.
-expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [both encoded]" \
-  "$(review_rows "$tmp/prose-witness.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
-expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [verdict literal]" \
+# --- the spelling a reader sees is the spelling both scans read ---------------------------------
+# MUT-STRAY-READS-THE-WRITTEN-SPELLING.
+#
+# Both scans over a review's prose compared THE CHARACTERS THE COMMENT IS STORED AS. The reviewer
+# writing the comment and the person reading it both see WHAT GITHUB'S RENDERER RESOLVES THEM TO,
+# and in inline prose those are two documents. Measured at `a5bcc998`, through this file's own
+# `filtered_run`: the trusted reviewer posting the generated `PASS` object and then prepending
+# `**VERDICT**: CHANGES_REQUIRED` -- bold, and a correction, and nothing else -- was exit 0, PASS,
+# NO STRAY, READY AND ONE `gh pr merge` CALL, where the same words written plainly were exit 1 and
+# no call at all. `_P1_` did the same to the other scan: READY and one call, where `P1` is MANUAL
+# and none. THAT IS THE DEFECT, and it is an ordinary reviewer writing ordinary Markdown.
+#
+# `reader_spelling` is the reading that closes it, and these are its witnesses. EACH ROW IS DRIVEN
+# THROUGH BOTH the parser and THE WHOLE AUDIT, because the parser's `stray` field is only half the
+# claim: what must not happen is the MERGE, and `filtered_run` is what counts the calls.
+#
+# THE TWO DIRECTIONS ARE DELIBERATELY NOT THE SAME. A literal `VERDICT:` outside the block is still
+# a REFUSAL and that is unchanged; a spelling only the reader sees is a `manual:` blocker, and the
+# review still parses. MANUAL costs a person's attention and a wrong READY costs a merge, and this
+# reading drops a delimiter run a renderer would sometimes have left written -- so what it adds
+# must be able to cost attention and must not be able to cost the review.
+reader_comment() {  # reader_comment PROSE: one comment carrying PROSE, then a clean PASS object
+  printf 'Reviewed head: %s\n\n%s\n\n' "$enqueue_head" "$1"
+  printf '```json\n'; enqueue_pass; printf '\n```\n'
+}
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+reader_closed=(
+  'bold verdict|**VERDICT**: CHANGES_REQUIRED -- correcting the generated review below.|VERDICT:'
+  'reference verdict|VERDICT&#58; CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'escaped verdict|VERDICT\: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'split verdict|V*ERDICT:* CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'underscore severity|The remaining issue is _P1_ and it is out of scope.|P1'
+  'underscore must|A _MUST_ deviation in touched code is out of scope.|MUST'
+  'reference severity|The blocker is &#80;1 and it is not in the object.|P1'
+  'split severity|The blocker is P**1** and it is not in the object.|P1'
+  'both encoded|VERDICT&#58; CHANGES_REQUIRED -- the blocker is &#80;1.|P1/VERDICT:'
+)
+for row in "${reader_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/reader-closed.md"
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [$reader_case]" \
+    "$(review_rows "$tmp/reader-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(filtered_run eventloops "$tmp/reader-closed.md")"
+  contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit status [$reader_case]" "${got%%|*}" 0
+done
+# AND THE LITERAL LINE IS STILL A REFUSAL, which is the outcome this round must not have changed.
+expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
   "$(review_rows "$tmp/prose-witness-verdict-literal.md")" '1|'
-contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [verdict literal]" \
+contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
   "$(parse_why "$tmp/prose-witness-verdict-literal.md")" \
   "a VERDICT: line outside the block its verdict is read from"
-expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [severity literal]" \
-  "$(review_rows "$tmp/prose-witness-stray-literal.md")" \
+
+# --- and an ordinary citation is still not a blocker --------------------------------------------
+# MUT-STRAY-INTRAWORD-UNDERSCORE, and it is the row that decides whether the rule above ships.
+#
+# `_P1_` and `findings/P1_security-trust_...md` differ in ONE renderer rule and nothing else:
+# CommonMark does not let an underscore between two word characters open or close emphasis, so a
+# reader sees the first as the severity and the second as the path it is part of. A rule that read
+# the token's boundary instead -- widening `STRAY_TOKEN`'s `\b` to stop at `_` -- catches `_P1_`
+# AND EVERY FINDING FILENAME ANY REVIEW EVER CITES, which is a `manual:` line on a large share of
+# ordinary reviews and is worse than the defect it closes.
+#
+# So these rows are the guard, they are asserted through the WHOLE AUDIT as READY WITH ONE MERGE
+# CALL rather than only as a quiet `stray` field, and every one of them is quiet at `a5bcc998` too.
+# EXECUTED, not argued: replacing `STRAY_TOKEN` with
+# `(?<![0-9A-Za-z])(?:P[0-3]|MUST)(?![0-9A-Za-z])` -- the whole of the other repair -- reds
+# `[finding citation]` and `[must filename]` here, at the parser AND at the audit, each MANUAL with
+# ZERO merge calls where one is required. No other case in this file moves.
+reader_quiet=(
+  'finding citation|See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.'
+  'must filename|See standards/07_MUST_policy.md and the MUST_NOT case in src/x.rs.'
+  'snake case prose|The helpers some_long_name_here and another_one_p1_like are unchanged.'
+  'arithmetic|The budget is 2 * 3 * 4 and no more.'
+  'emphasis elsewhere|This is *important* and so is _this_ one.'
+  'escaped reference|A literal \&#80;1 in the text, which renders as itself.'
+  'eight digit reference|The blocker is &#00000080;1 here, which renders as itself.'
+)
+for row in "${reader_quiet[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  reader_comment "$reader_prose" > "$tmp/reader-quiet.md"
+  expect "MUT-STRAY-INTRAWORD-UNDERSCORE [$reader_case]" \
+    "$(review_rows "$tmp/reader-quiet.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/-"
+  got="$(filtered_run eventloops "$tmp/reader-quiet.md")"
+  contains "MUT-STRAY-INTRAWORD-UNDERSCORE audit [$reader_case]" "$got" "enqueued #999"
+  expect "MUT-STRAY-INTRAWORD-UNDERSCORE merge calls [$reader_case]" "${got##*|}" 1
+done
+
+# --- what this head still does not read, pinned rather than claimed closed -----------------------
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is now the finding for what is LEFT. Each
+# row is a comment whose rendering and whose reading still disagree, and each is here so that the
+# next change starts from a measurement rather than a guess. Rendered with `markdown-it-py` 3.0.0
+# on 2026-09-21; the rendering is in the comment beside each row.
+#
+# ONE ROW IS UNDER-READ and the rest are OVER-READ, and that is the whole shape of what is left:
+# `reader_spelling` is not a renderer, and every way it is not one sends a review to a person
+# except inline raw HTML, which is the one class that can still hide a token. It is left open
+# because splitting a word with a tag is not ordinary writing the way bold and a correction are.
+reader_open=(
+  'inline raw html|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|-'
+  'link splits the token|VER[DICT:](https://example.invalid/x) CHANGES_REQUIRED, object says PASS.|-'
+  'code span reference|The blocker is `&#80;1` here.|P1'
+  'code span underscore|The blocker is `_P1_` here.|P1'
+  'unpaired star|The class is P*1 in the table.|P1'
+)
+for row in "${reader_open[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/reader-open.md"
+  expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [$reader_case]" \
+    "$(review_rows "$tmp/reader-open.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+done
+# The sixth row needs newlines, so it is built rather than tabulated: a `text` block is not a code
+# span and it is the same class -- a renderer resolves nothing inside either, and all three
+# readings resolve everything everywhere.
+{ printf 'Reviewed head: %s\n\n' "$enqueue_head"
+  printf '```text\nThe blocker is _P1_ here.\n```\n\n'
+  printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$tmp/reader-open-fence.md"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [code block underscore]" \
+  "$(review_rows "$tmp/reader-open-fence.md")" \
   "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+# THE TWO UNDER-READ ROWS GO THROUGH THE WHOLE AUDIT, because those are the ones that can still
+# cost a merge and a `stray` field of `-` is not that claim: READY, and one call, each.
+for reader_prose in 'VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.' \
+                    'VER[DICT:](https://example.invalid/x) CHANGES_REQUIRED, object says PASS.'; do
+  reader_comment "$reader_prose" > "$tmp/reader-open.md"
+  got="$(filtered_run eventloops "$tmp/reader-open.md")"
+  contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [$reader_prose]" \
+    "$got" "enqueued #999"
+  expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [$reader_prose]" \
+    "${got##*|}" 1
+done
+
+# --- the punctuation class is wider than the renderer's, and wider is the safe side --------------
+# MUT-STRAY-FLANKING-SUPERSET.
+#
+# `emphasis_delimiter` is `markdown-it-py` 3.0.0's `scanDelims`, and its two character predicates
+# are that renderer's -- except one: `isPunctChar` is a 3 KB generated table of the Unicode P
+# categories, and `markup_punctuation` asks `unicodedata` for P AND S instead. Measured over every
+# code point on 2026-09-21, that is a STRICT SUPERSET: 7,994 code points are punctuation to this
+# file and not to that renderer, NONE the other way, and not one of them is ASCII.
+#
+# A superset is only safe in one direction, and THIS IS THAT CLAIM, asserted over the whole
+# classification rather than over a sample. A character the renderer calls neither whitespace nor
+# punctuation, which this file calls punctuation, is the ONLY difference the measurement leaves --
+# so substituting a punctuation character for an ordinary one, in either position, models it
+# exactly. No substitution may turn a dropped run into a kept one, because a kept run is a token
+# the reader sees and this file does not. `markdown-it-py` is not installed in CI and this needs
+# none of it: the property is about this file's own function under two classifications.
+# `|| flanking_status=$?` and not `set -e`: a probe that cannot even import the module is a
+# REPORT here, not the end of this file. Run without it against a parser that has no
+# `emphasis_delimiter` at all, `set -e` ended the gate at this line and every assertion after it
+# went unrun -- silently, because the file's own FAILED line is printed at the bottom.
+flanking_status=0
+"$parser_python" - scripts/pr-review-parse.py > "$tmp/flanking.out" 2>&1 <<'FLANK' || flanking_status=$?
+import importlib.util, itertools, sys
+spec = importlib.util.spec_from_file_location("upstroke_parse_flanking", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+# " " is whitespace to both readings, "." is punctuation to both, and "a" is punctuation to
+# NEITHER -- so "a" is where the two readings can differ, and replacing it with "." is what this
+# file's wider class does to such a character.
+checked = 0
+for marker in "*_":
+    for last, nxt in itertools.product(" .a", repeat=2):
+        if not module.emphasis_delimiter(marker, last, nxt):
+            continue
+        for wide_last in ({last, "."} if last == "a" else {last}):
+            for wide_next in ({nxt, "."} if nxt == "a" else {nxt}):
+                checked += 1
+                if not module.emphasis_delimiter(marker, wide_last, wide_next):
+                    print("KEPT: %r between %r and %r is dropped as %r/%r"
+                          % (marker, last, nxt, wide_last, wide_next))
+                    sys.exit(1)
+print("ok %d" % checked)
+FLANK
+# TWENTY-SIX, AND THE NUMBER IS THE ASSERTION AS MUCH AS THE WORD IS: eighteen (marker, before,
+# after) combinations, fifteen of which drop the run -- eight for `*` and seven for `_`, the one
+# `_` does not being the intraword pair -- and each of those widened in every position that can be
+# widened, which is 15 + 11. A rule that stopped dropping runs would report a SMALLER number here
+# and `ok` all the same, and one that dropped more would report a larger one: deleting the
+# intraword clause, so `_` splits a word the way `*` does, reports `ok 30`, and that is the only
+# case in this file it moves.
+expect "MUT-STRAY-FLANKING-SUPERSET probe status" "$flanking_status" 0
+expect MUT-STRAY-FLANKING-SUPERSET "$(cat "$tmp/flanking.out")" "ok 26"
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
