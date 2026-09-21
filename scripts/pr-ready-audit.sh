@@ -188,11 +188,12 @@
 # closes that: a backslash escape, a character reference and an emphasis run around or inside the
 # token are resolved the way `markdown-it-py` 3.0.0 resolves them, and what only the reader sees
 # becomes a `manual:` blocker rather than a refusal -- MANUAL costs attention, a wrong READY costs
-# a merge. ONE CLASS IS STILL NOT READ, inline raw HTML, and TWO ARE READ WIDER than a renderer
-# reads them -- an unpaired delimiter run, and the inside of a code span or a code block -- each
-# costing a `manual:` line where a reader sees no token. All three are fixtured in
-# .github/scripts/test-pr-ready-audit.sh and owned by
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`.
+# a merge. ONE CLASS IS STILL NOT READ -- an inline construct standing between two of the token's
+# characters, raw HTML or link syntax -- TWO ARE READ WIDER than a renderer reads them, an unpaired
+# delimiter run and the inside of a code span or code block, each costing a `manual:` line where a
+# reader sees no token, and a MEASURED RESIDUE of 7 in 400,000 random strings survives from not
+# pairing delimiters at all. All of them are fixtured in .github/scripts/test-pr-ready-audit.sh and
+# owned by PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`.
 #
 # NEITHER SCAN IS A TRUST BOUNDARY AND NEITHER IS CLAIMED TO BE ONE: the verdict object is the
 # authority for what a review says, and the property this audit rests on is the one stated above --

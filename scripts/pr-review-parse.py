@@ -612,7 +612,7 @@ def emphasis_delimiter(marker, before, after):
             or (right and (not left or next_punct)))
 
 
-def reader_spelling(text):
+def reader_spelling(text, emphasis=True):
     """TEXT as a reader of the comment's inline prose sees it, for the markup that can hide a token.
 
     THE THIRD READING, AND THE SIBLING OF `decoded_spelling` AND `rendered_language`. Each of the
@@ -633,6 +633,18 @@ def reader_spelling(text):
       * a `*` or `_` run that can open or close emphasis is dropped -- that renderer's
         `scanDelims`. `**VERDICT**:` is `VERDICT:` and `_P1_` is `P1` to a reader.
 
+    EMPHASIS=FALSE ASKS FOR THE SAME TEXT WITH THE RUNS LEFT WRITTEN, and it is not an option: it
+    is THE OTHER HALF OF A PAIRING THIS DOES NOT DO. A renderer either pairs a run and removes it or
+    leaves it written, and `stray_summary` scans both answers because this cannot tell which. The
+    half that is easy to forget is the SECOND one, and it is the one that can HIDE a token: a run
+    this drops and a renderer keeps takes a word boundary with it, so `U**&#80;0` -- `U**P0` to a
+    reader, a `P0` bounded by the asterisk -- reads `UP0` here and is no token at all. Found by
+    differential test against `markdown-it-py` 3.0.0 over 400,000 random strings on 2026-09-21: 198
+    of them, every one of that shape, and SEVEN once both readings are scanned. The seven are the
+    residue of not pairing at all -- two runs in one sentence that the renderer answers
+    DIFFERENTLY, which neither reading expresses -- and `Deferred: __&#80;1**and__ the rest of it.`
+    is fixtured as one.
+
     One pass is not a tidiness point. `\\&#58;` renders as the four characters `&#58;` because the
     escape consumes the ampersand before the entity rule can start a reference there, and `\\*` is
     a literal asterisk and no delimiter at all. A pass per transformation resolves both, and would
@@ -642,7 +654,9 @@ def reader_spelling(text):
     not are each fixtured rather than described. TWO OF THEM READ A TOKEN THE COMMENT DOES NOT
     SHOW, which costs a person a look and cannot cost a merge: it does not pair emphasis
     delimiters, so `P*1` reads `P1` where a renderer leaves the asterisk written; and it does not
-    know a code span or a code block from prose, where a renderer resolves nothing at all.
+    know a code span or a code block from prose, where a renderer resolves nothing at all. Not
+    pairing also leaves a small UNDER-read that scanning both answers does not reach -- two runs in
+    one sentence answered differently -- measured at 7 in 400,000 above, and fixtured.
     THE THIRD IS THE OTHER DIRECTION and it is the one that matters: an inline construct standing
     BETWEEN two characters of the token -- raw HTML (`VER<span>DICT:</span>`) or link syntax
     (`VER[DICT:](url)`) -- leaves the token in the rendering and none of it in any reading here.
@@ -675,7 +689,9 @@ def reader_spelling(text):
         # before it.
         before = text[match.start() - 1] if match.start() else " "
         after = text[match.end()] if match.end() < len(text) else " "
-        return "" if emphasis_delimiter(run[0], before, after) else run
+        if emphasis and emphasis_delimiter(run[0], before, after):
+            return ""
+        return run
     return INLINE_MARKUP.sub(resolved, text)
 
 
@@ -685,13 +701,13 @@ def stray_summary(outside, contradicting_verdict=False):
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
 
-    THREE SPELLINGS ARE SCANNED -- what the comment writes, what a JSON decoder reads, and WHAT A
-    READER OF THE PROSE SEES -- and the three are not the same text. Reading all of them is the
-    safe direction for this scan, the same direction `re.ASCII` is chosen for above: every token it
-    finds sends the review to a person, so one found in three spellings costs what one found in one
-    costs, and one found in none is the defect. `reader_spelling` is the third, and it is why
-    `_P1_`, `&#80;1` and `P**1**` -- each `P1` to the person who wrote the comment and to the
-    person reading it -- are `P1` here.
+    FOUR SPELLINGS ARE SCANNED -- what the comment writes, what a JSON decoder reads, and WHAT A
+    READER OF THE PROSE SEES under each of the two answers a renderer can give a delimiter run --
+    and no two of them are the same text. Reading all of them is the safe direction for this scan,
+    the same direction `re.ASCII` is chosen for above: every token it finds sends the review to a
+    person, so one found in four spellings costs what one found in one costs, and one found in none
+    is the defect. `reader_spelling` is the last two, and it is why `_P1_`, `&#80;1` and `P**1**`
+    -- each `P1` to the person who wrote the comment and to the person reading it -- are `P1` here.
 
     THIS IS A NET, AND WHAT IT CATCHES GOES TO A PERSON. A token found here is reported, and
     `scripts/pr-ready-audit.sh` turns it into a `manual:` blocker; it decides no verdict. THE
@@ -716,16 +732,21 @@ def stray_summary(outside, contradicting_verdict=False):
     or a code block. `reader_spelling` says which is which; PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-
     READER-SEES under `findings/` measures all three and owns them.
     """
-    read_as = reader_spelling(outside)
+    # FOUR READINGS, and the last two are one question a renderer answers per run and this cannot:
+    # a run it pairs is removed, a run it does not is left written, and a run REMOVED HERE takes a
+    # word boundary with it. `reader_spelling`'s own docstring carries the measurement.
+    paired = reader_spelling(outside)
+    unpaired = reader_spelling(outside, emphasis=False)
     tokens = set()
-    for reading in (outside, decoded_spelling(outside), read_as):
+    for reading in (outside, decoded_spelling(outside), paired, unpaired):
         tokens |= set(STRAY_TOKEN.findall(reading))
     # THE READER'S SPELLING ONLY, for this one. A `VERDICT:` the comment spells literally is
     # already a refusal by the time this runs, and a JSON escape of one of its letters is not a
     # spelling of it anywhere a person reads: `json.loads` resolves that inside the verdict object,
     # and nothing resolves it in prose, where a reader sees the backslash. Scanning
     # `decoded_spelling` for this would report a line no reader of either ever sees.
-    if contradicting_verdict and PROSE_VERDICT.search(read_as) is not None:
+    if contradicting_verdict and any(PROSE_VERDICT.search(one) is not None
+                                     for one in (paired, unpaired)):
         tokens.add("VERDICT:")
     return "/".join(sorted(tokens)) if tokens else None
 

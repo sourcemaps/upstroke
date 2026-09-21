@@ -24,8 +24,9 @@ guard: a change that decides how this program reads a comment's inline construct
 through `reader_spelling`. That third reading resolves a backslash escape, a character reference and
 an emphasis delimiter run, by `markdown-it-py` 3.0.0's own `escape`, `entity` and `scanDelims`.
 
-**It is not a renderer**, and this finding is the three places it is not, measured. One of them can
-still hide a token from a reader's eye; two of them find a token a reader does not see.
+**It is not a renderer**, and this finding is the three places it is not, measured. Two of them can
+still hide a token from a reader's eye; two of them find a token a reader does not see; not pairing
+delimiters does both.
 
 ## Failure sequence -- the class that is still not read
 
@@ -53,10 +54,23 @@ and each was invisible at `db94a8ba`.
 
 Both cost a `manual:` blocker and a person's attention. Neither can cost a merge.
 
-**An unpaired delimiter run is dropped.** CommonMark pairs delimiters; `reader_spelling` drops any
-run that could open or close one, wherever it stands.
+**Delimiters are not paired, and `stray_summary` answers that by scanning the text with every run
+DROPPED and again with every run KEPT.** Those are the two answers a renderer gives, so a sentence
+whose runs it answers all the same way is covered in both directions:
 
-    `The class is P*1 in the table.`   stray `P1`, where a reader sees `P*1`
+    `The class is P*1 in the table.`   stray `P1`, where a reader sees `P*1`  (over-read)
+
+**A sentence whose runs a renderer answers DIFFERENTLY is not**, and that is an under-read:
+
+    `Deferred: __&#80;1**and__ the rest of it.`   stray none
+      a reader sees `Deferred: P1**and the rest of it.` -- the `__` pair removed, the `**` left
+      written, and `P1` standing between a space and an asterisk
+
+Differential-tested against `markdown-it-py` 3.0.0 over 400,000 random strings on 2026-09-21:
+**7 of them** are of that shape. **198** were missed when only the dropped reading was scanned, and
+every one of those 198 was the other half of the same gap -- a run this drops and a renderer keeps,
+taking a word boundary with it (`U**&#80;0` is `U**P0` to a reader and read `UP0` here). Scanning
+both answers closed 191 of the 198 and is why the kept reading exists.
 
 **A code span and a code block are read as prose.** A renderer resolves nothing inside either, and
 all three readings resolve everything everywhere.
@@ -87,17 +101,18 @@ taken as the text a reader sees with the tags stripped.
 | `The blocker is P<span>1</span> here.` | `The blocker is P1 here.` | none | none |
 | `The blocker is P[1](https://example.invalid/x) here.` | `The blocker is P1 here.` | none | none |
 | `The class is P*1 in the table.` | `The class is P*1 in the table.` | none | **P1** |
+| `Deferred: __&#80;1**and__ the rest of it.` | `Deferred: P1**and the rest of it.` | none | none |
 | `` The blocker is `&#80;1` here. `` | ``The blocker is `&#80;1` here.`` | none | **P1** |
 | `` The blocker is `_P1_` here. `` | ``The blocker is `_P1_` here.`` | none | **P1** |
 | `` The blocker is `P\u0031` here. `` | ``The blocker is `P\u0031` here.`` | **P1** | **P1** |
 | a `text` fence holding `_P1_` | `_P1_` | none | **P1** |
 | a `text` fence holding `P\u0031` | `P\u0031` | **P1** | **P1** |
 
-Six of these ten rows are pinned as fixtures in `.github/scripts/test-pr-ready-audit.sh` under this
-id: rows 1, 2, 5, 6, 7 and 9. The four that are not are the two that split a SEVERITY rather than
-the verdict line (rows 3 and 4), which are the same two constructs as rows 1 and 2 and add no class,
-and the two `P\u0031` rows (8 and 10), whose behaviour is `decoded_spelling`'s and is unchanged by
-this pull request. The two under-read rows are driven through the WHOLE AUDIT as READY with one
+Seven of these eleven rows are pinned as fixtures in `.github/scripts/test-pr-ready-audit.sh` under
+this id: rows 1, 2, 5, 6, 7, 8 and 10. The four that are not are the two that split a SEVERITY
+rather than the verdict line (rows 3 and 4), which are the same two constructs as rows 1 and 2 and
+add no class, and the two `P\u0031` rows (9 and 11), whose behaviour is `decoded_spelling`'s and is
+unchanged by this pull request. The two under-read rows are driven through the WHOLE AUDIT as READY with one
 merge call each, because a quiet `stray` field is not that claim. The next change starts from a
 measurement rather than a guess.
 
@@ -137,6 +152,12 @@ repository holds, fetched from `repos/sourcemaps/upstroke/issues/comments`, not 
 between the two heads; and `git grep -l 'VER<span>\|VER\[DICT'` names three tracked files at this
 head and no others -- `.github/scripts/test-pr-ready-audit.sh`, `scripts/pr-review-parse.py` and
 this file -- every hit in them a fixture or a sentence about one, and none a review that was posted.
+
+**The mixed-pairing under-read is bounded by measurement rather than by judgement**: 7 in 400,000
+random strings drawn from an alphabet deliberately loaded with `*`, `**`, `_`, `__` and `&#80;`, and
+0 in the 677 comments this repository holds. It needs a severity written encoded or split AND two
+delimiter runs in one sentence that a renderer answers differently. **It is a P2 on the same footing
+as the rest of this row and it should be raised if a shape of it turns out to be ordinary writing.**
 
 **And it is not a claim that nothing else is missed.** The class searched for was *an inline
 construct that deletes characters between the token's letters*, and the two members found by reading

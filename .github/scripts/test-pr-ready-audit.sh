@@ -7334,6 +7334,7 @@ reader_closed=(
   'reference severity|The blocker is &#80;1 and it is not in the object.|P1'
   'split severity|The blocker is P**1** and it is not in the object.|P1'
   'both encoded|VERDICT&#58; CHANGES_REQUIRED -- the blocker is &#80;1.|P1/VERDICT:'
+  'run a renderer keeps|The row is item*&#80;1 in the table and it is out of scope.|P1'
 )
 for row in "${reader_closed[@]}"; do
   reader_case="${row%%|*}"; rest="${row#*|}"
@@ -7398,16 +7399,22 @@ done
 # next change starts from a measurement rather than a guess. Rendered with `markdown-it-py` 3.0.0
 # on 2026-09-21; the rendering is in the comment beside each row.
 #
-# ONE ROW IS UNDER-READ and the rest are OVER-READ, and that is the whole shape of what is left:
-# `reader_spelling` is not a renderer, and every way it is not one sends a review to a person
-# except inline raw HTML, which is the one class that can still hide a token. It is left open
-# because splitting a word with a tag is not ordinary writing the way bold and a correction are.
+# THREE ROWS ARE UNDER-READ -- the two that split a token with a construct this does not read, and
+# the one where a renderer answers TWO delimiter runs in one sentence differently -- and the rest
+# are over-read. The first two are left open because splitting a word with a tag or a link is not
+# ordinary writing the way bold and a correction are. The third is the residue of not pairing
+# delimiters: `stray_summary` scans the text with every run dropped AND with every run kept, which
+# is every answer a renderer can give when it answers them all the same way, and
+# `Deferred: __&#80;1**and__ the rest of it.` is one it does not. Differential-tested against
+# `markdown-it-py` 3.0.0 over 400,000 random strings on 2026-09-21: 7 of that shape, against 198
+# when only the dropped reading was scanned.
 reader_open=(
   'inline raw html|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|-'
   'link splits the token|VER[DICT:](https://example.invalid/x) CHANGES_REQUIRED, object says PASS.|-'
   'code span reference|The blocker is `&#80;1` here.|P1'
   'code span underscore|The blocker is `_P1_` here.|P1'
   'unpaired star|The class is P*1 in the table.|P1'
+  'two runs answered differently|Deferred: __&#80;1**and__ the rest of it.|-'
 )
 for row in "${reader_open[@]}"; do
   reader_case="${row%%|*}"; rest="${row#*|}"
