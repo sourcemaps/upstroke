@@ -2978,7 +2978,10 @@ integration ref at the base, and the log through `task_candidate_created`.
 ## `fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {`
 
 ALPHA's queued candidate on the base — its objects, refs and events —
-leaving the integration ref wherever it is.
+leaving the integration ref wherever it is. Its refs are the candidates ref and the
+candidate-prepared pin, and the pin is left standing: the finalization witnesses take it through
+`plant_finished_run_with` as the residue their cleanup order prunes. A witness of a state a
+completed promotion left prunes it (`prune_the_planted_candidate_pins`).
 
 ## `fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {`
 
@@ -3046,14 +3049,36 @@ skeleton from its creation (a resume opens or creates the lock file and reads ne
 
 The on-disk half of the exactness claim, asserted after the plant and before the credited
 recovery: no creation marker (published or staged), the execution root a directory, the
-integration ref present. With these standing, a resume has no marker to remove, no root to
-recreate and no ref to create.
+integration ref present, and no candidate-prepared pin under the run's refs (`git for-each-ref`,
+filtered to `candidate-prepared`). With these standing, a resume has no marker to remove, no root
+to recreate, no ref to create and no pin to delete.
+
+## `fn prune_the_planted_candidate_pins(fixture: &Fixture, keys: &[TaskKey], tag: &str) {`
+
+Completes a planted candidate's promotion through its cleanup. `plant_queued_candidate_events` and
+`plant_published_beta_editing` write each candidate's candidate-prepared pin beside its candidates
+ref and leave it standing, and the finalization witnesses rely on that: `plant_finished_run_with`
+records the pin as residue for the cleanup order to prune, and the kill-at-every-cell witnesses
+kill at `Ref.DeleteCandidatePin`. A promotion `TopologyRun::promote_candidate` completed leaves no
+such pin: `reclaim_after_creation` deletes it, expected-old, before it removes the generation
+worktree and the loop continues, so a pin beside `task_candidate_created` and no generation
+worktree is a state no crash leaves. Nor is the pin inert: `candidate::recovery_for` reads it as
+an unfinished promotion and `finish_promotions` deletes it, which the frontier review of this
+change's first head (`523dac5f`) found in the five witnesses below as `Ref.DeleteCandidatePin`
+entries their coordinates' crashes would not have left. Each of the five prunes the pins its plant
+left, by name, as Git does (`update-ref -d` with the pinned commit as the old value), and asserts
+the prefix complete after. The shared plants keep writing the pin, because the finalization
+witnesses assert on it; this is the witnesses' completion of their plants, not a change to what
+those plant.
 
 ## `fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {`
 
 The executed half: the credited recovery's harness holds no entry into `RunDir.RemoveMarker`,
-`Worktree.CreateExecutionRoot` or `Ref.CreateIntegration`. These are the three repairs the gate's
-exactness listing (`audit/exactness/resumes-per-witness.py`) reads a hybrid prefix by.
+`Worktree.CreateExecutionRoot`, `Ref.CreateIntegration` or `Ref.DeleteCandidatePin`. The first
+three are the repairs the gate's exactness listing (`audit/exactness/resumes-per-witness.py`) reads
+a hybrid prefix by; the fourth is the cleanup `finish_promotions` performs for a candidate-prepared
+pin a plant left standing (`prune_the_planted_candidate_pins`), asserted so that a plant which
+leaves one again fails here rather than passing with a recovery that repaired it.
 
 ## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
 
@@ -3152,9 +3177,10 @@ bundle and writes, in order, every sync of the log file and every entry
 into the integration compare-and-swap to a report file the parent reads
 after the kill — the durability oracle carried across the process
 boundary, since the child's ledger dies with it. It also writes a `repair <site>` line for every
-entry into `RunDir.RemoveMarker` (`ReportingRunDir`), `Worktree.CreateExecutionRoot` or
-`Ref.CreateIntegration`, so the parent's comparison of the whole report also holds that the killed
-incarnation's resume repaired nothing of the creation's prefix.
+entry into `RunDir.RemoveMarker` (`ReportingRunDir`), `Worktree.CreateExecutionRoot`,
+`Ref.CreateIntegration` or `Ref.DeleteCandidatePin`, so the parent's comparison of the whole
+report also holds that the killed incarnation's resume repaired nothing of the creation's prefix
+and deleted no candidate-prepared pin.
 
 ## `struct ReportingRunDir {`
 
@@ -3184,9 +3210,11 @@ Rows 33 and 34 of Gate 5's audit (`Ref.CompareAndSwapIntegration` before and aft
 resumed once first (`the_runs_first_resume_by_an_incarnation_that_then_dies`), so the queued
 candidate and the unsynced `merge_prepared` follow a `run_resumed` and stand beside no creation
 marker and an execution root: the gate's third run graded both rows near-exact because the
-incarnation that issued the swap had first removed the marker and recreated the root. The child's
-report is compared whole, and it would carry a `repair` line for either; the third resume's
-harness is held to the same (`assert_no_repair_of_the_creation_prefix`).
+incarnation that issued the swap had first removed the marker and recreated the root. The queued
+candidate's pin is pruned after the plant (`prune_the_planted_candidate_pins`), so what the killed
+child resumes over is what a completed promotion leaves. The child's report is compared whole, and
+it would carry a `repair` line for any of the four sites; the third resume's harness is held to
+the same (`assert_no_repair_of_the_creation_prefix`).
 
 ## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
 
@@ -3218,9 +3246,11 @@ the candidate is still queued, and the next incarnation integrates it.
 Rows 98 and 133 of Gate 5's audit (`Event.OpenLog`'s `SyncPrefix` error return, and
 `Lock.ProbeCleanupExclusive`/after). The run is resumed once first, so the queued candidate and the
 unsynced line stand beside no creation marker; the gate's third run graded both rows near-exact
-because the converging resume removed the marker and recreated the root. The converging resume is
+because the converging resume removed the marker and recreated the root. The queued candidate's
+pin is pruned after the plant (`prune_the_planted_candidate_pins`). The converging resume is
 made here on a harness of its own rather than inside `drive_observing`: it enters none of the
-three creation repairs, and it is observed taking `Lock.AcquireRun` and repeating
+four repairs `assert_no_repair_of_the_creation_prefix` names, and it is observed taking
+`Lock.AcquireRun` and repeating
 `Lock.ProbeCleanupExclusive`, before and after, which row 133's reading had inferred from the
 resume's success.
 
@@ -3537,7 +3567,10 @@ removed (M4) or made blocking (M5) still passed.
 
 Publish BETA's candidate fast at sequence 0 — the candidate on the base,
 `merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
-legitimately moved past the base. Needs a two-task fixture.
+legitimately moved past the base. Needs a two-task fixture. Like
+`plant_queued_candidate_events`, it leaves BETA's candidate-prepared pin standing beside the
+candidates ref; a witness of a state a completed promotion left prunes it
+(`prune_the_planted_candidate_pins`).
 
 ## `fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {`
 
@@ -4153,9 +4186,10 @@ with their log replayed twice to the driven run's fold (`drive_observing`,
 Row 122 of Gate 5's audit (`Answer.StageWrite`/before) is the first drive: the open question with
 no answer file, resumed over, and the run parked. The gate's third run graded it near-exact because
 that drive's resume removed the creation marker standing beside the planted rejection. The run is
-now resumed once before the rejection is planted, the first drive runs on a harness of its own and
-enters none of the three creation repairs, and the log is replayed twice after it parks, where the
-pair the row had was the one made after the second drive.
+now resumed once before the rejection is planted, both candidates' pins are pruned after the plant
+(`prune_the_planted_candidate_pins`), the first drive runs on a harness of its own and enters none
+of the four repairs `assert_no_repair_of_the_creation_prefix` names, and the log is replayed twice
+after it parks, where the pair the row had was the one made after the second drive.
 
 `T-ANSWER` through the production reader: with no answer file the run
 hard-blocks; an answer staged and published into `answers/` while the
@@ -4230,9 +4264,10 @@ staging add, the pick and the pin, and the candidate integrates under sequence 1
 head; the log then replays twice to equal states. The gate's third run graded the row near-exact
 because the queue was planted on the P6 fixture and the credited resume removed the creation
 marker and recreated the execution root before the step. The run is now resumed once before the
-queue is planted (`the_runs_first_resume_by_an_incarnation_that_then_dies`), the prefix is asserted
-complete after the plant, and the credited resume and step enter none of the three creation
-repairs.
+queue is planted (`the_runs_first_resume_by_an_incarnation_that_then_dies`), both candidates' pins
+are pruned after the plant (`prune_the_planted_candidate_pins`), the prefix is asserted complete,
+and the credited resume and step enter none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names.
 
 ## `fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()`
 
@@ -4242,8 +4277,9 @@ head with nothing picked into it (`classify_object_residue` answers `None`). The
 the worktree and its intent as stale residue, creates no pin and leaves the candidate queued, and
 the next step stages again and integrates the candidate under sequence 1. Near-exact in the gate's
 third run for the P6 fixture's marker, which the credited resume removed; the run is now resumed
-once before the queue and the staging worktree are planted, and the credited resume enters none of
-the three creation repairs.
+once before the queue and the staging worktree are planted, both candidates' pins are pruned after
+the plant (`prune_the_planted_candidate_pins`), and the credited resume enters none of the four
+repairs `assert_no_repair_of_the_creation_prefix` names.
 
 ## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
 
@@ -4467,8 +4503,8 @@ barrier stops at the open. The refusal names the point and says the run is resum
 refusal leaves is the registry's residue for the point, R21 with the unterminated final line
 truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
 event: nothing derived from the log was acted on, and the refused resume's harness holds no site
-but its locks and the open. The next resume enters none of the three creation repairs and repeats
-the barrier: it opens
+but its locks and the open. The next resume enters none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names and repeats the barrier: it opens
 and proves the prefix, and has nothing left to truncate because the refused open's truncation
 stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
 states.

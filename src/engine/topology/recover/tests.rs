@@ -6985,6 +6985,33 @@ fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {
         ref_target(fixture, fixture.started.integration_ref.as_str()).is_some(),
         "{tag}: and the integration ref exists"
     );
+    let pins: Vec<String> = upstroke_refs_on_disk(fixture)
+        .into_iter()
+        .filter(|line| line.contains("/candidate-prepared/"))
+        .collect();
+    assert!(
+        pins.is_empty(),
+        "{tag}: and no candidate-prepared pin stands under the run: `reclaim_after_creation` \
+         deletes a candidate's pin before its promotion returns: {pins:?}"
+    );
+}
+
+fn prune_the_planted_candidate_pins(fixture: &Fixture, keys: &[TaskKey], tag: &str) {
+    use crate::workspace_manager::fixture::git;
+    for key in keys {
+        let pin =
+            crate::engine::topology::candidate::CandidateNames::of(RUN_ID, *key, GEN).prepared_ref;
+        let pinned = ref_target(fixture, pin.as_str()).unwrap_or_else(|| {
+            panic!(
+                "{tag}: the plant left task {}'s candidate-prepared pin standing",
+                key.index()
+            )
+        });
+        git(
+            &fixture.repo_root,
+            &["update-ref", "-d", pin.as_str(), pinned.as_str()],
+        );
+    }
 }
 
 fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {
@@ -6993,12 +7020,14 @@ fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, ta
         EffectSiteId::RunDir(RunDirSite::RemoveMarker),
         EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
         EffectSiteId::Ref(RefSite::CreateIntegration),
+        EffectSiteId::Ref(RefSite::DeleteCandidatePin),
     ] {
         assert_eq!(
             seen.count(site, HookPhase::Before),
             0,
-            "{tag}: the resume enters no `{site}`: the prefix carries no creation marker, and \
-             its execution root and its integration ref stand"
+            "{tag}: the resume enters no `{site}`: the prefix carries no creation marker, its \
+             execution root and its integration ref stand, and no candidate-prepared pin \
+             outlives its promotion"
         );
     }
 }
@@ -7414,6 +7443,7 @@ impl crate::workspace_manager::EffectHooks for ReportingEffects {
             }
             if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot)
                 || site == EffectSiteId::Ref(RefSite::CreateIntegration)
+                || site == EffectSiteId::Ref(RefSite::DeleteCandidatePin)
             {
                 report(&self.report, &format!("repair {site}"));
             }
@@ -7556,6 +7586,7 @@ fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_lo
     let fixture = Fixture::healthy("two-crash");
     the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, "two-crash");
     let planted = plant_queued_candidate(&fixture);
+    prune_the_planted_candidate_pins(&fixture, &[ALPHA], "two-crash");
     let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
     let prefix_with_prepared = u64::try_from(fixture.log_bytes().len()).expect("a small log");
     drop(first);
@@ -7630,6 +7661,7 @@ fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
     let fixture = Fixture::healthy("barrier-sync-fails");
     the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, "barrier-sync-fails");
     let planted = plant_queued_candidate(&fixture);
+    prune_the_planted_candidate_pins(&fixture, &[ALPHA], "barrier-sync-fails");
     let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
     let durable = proven_durable_len(&first, &fixture);
     drop(first);
@@ -13272,6 +13304,7 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     );
     the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (rejection, repair) = plant_over_limit_repair(&fixture);
+    prune_the_planted_candidate_pins(&fixture, &[ALPHA, BETA], tag);
     assert_the_creation_prefix_is_complete(&fixture, tag);
     let question = rejection
         .repair
@@ -14154,6 +14187,7 @@ fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_
     );
     the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    prune_the_planted_candidate_pins(&fixture, &[ALPHA, BETA], tag);
     assert_the_creation_prefix_is_complete(&fixture, tag);
     assert!(
         fixture.manager().intents().expect("intents").is_empty(),
@@ -14223,6 +14257,7 @@ fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_ca
     );
     the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    prune_the_planted_candidate_pins(&fixture, &[ALPHA, BETA], tag);
     let staging = plant_staging_worktree(&fixture, 1, head.as_str());
     assert_the_creation_prefix_is_complete(&fixture, tag);
     let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
