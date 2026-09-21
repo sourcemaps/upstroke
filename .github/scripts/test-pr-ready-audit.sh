@@ -360,7 +360,19 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$script_dir/../.." && pwd)"
 cd "$root"
 failed=0
-error() { echo "$*" >&2; failed=1; }
+# A FAILURE RECORDED INSIDE A COMMAND SUBSTITUTION IS STILL A FAILURE, and the variable cannot
+# carry it: `$( )` runs in a SUBSHELL, so `failed=1` set there is set in a copy and the parent
+# exits 0 with the error printed on stderr and nothing in the status. That is not a hypothetical
+# shape here -- `rendering_of` is reached through `$( )` by every row that asks what a reader sees,
+# 61 substitutions, and it is where a missing recorded rendering is reported. Deleting a recording
+# printed two errors and then `test-pr-ready-audit: ok`, exit 0, at `7767c71c`, executed.
+#
+# The file is the parent's, opened by the parent, and a subshell's append reaches it. Both are
+# kept: `failed` is the ordinary path and reads without a `stat`, and the file is what survives a
+# subshell. The end of the run asks both.
+errors_seen="$(mktemp)"
+trap 'rm -f "$errors_seen"' EXIT
+error() { echo "$*" >&2; failed=1; printf 'x' >> "$errors_seen"; }
 expect() {  # expect <case> <got> <want>
   [[ "$2" == "$3" ]] || error "$1: got [$2], want [$3]"
 }
@@ -368,10 +380,21 @@ contains() {  # contains <case> <got> <want-substring>
   [[ "$2" == *"$3"* ]] || error "$1: got [$2], want it to contain [$3]"
 }
 command -v jq > /dev/null || { echo "test-pr-ready-audit: needs jq to run the comment filter" >&2; exit 1; }
+# Settled here rather than beside the parser cases below, because the stub `gh` scripts need it
+# too: the audit fetches one review comment as one JSON document now, and a stub that answers that
+# call has to build one.
+command -v python3 > /dev/null || command -v python > /dev/null \
+  || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
+parser_python="$(command -v python3 || command -v python)"
+# Exported, because the stub `gh` scripts below are written with a quoted here-document -- their
+# text is fixed, not expanded -- and they run as children of this shell.
+export STUB_PYTHON="$parser_python"
 
 PR_READY_AUDIT_LIBRARY=1 source scripts/pr-ready-audit.sh
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+# One trap, both files: a second `trap ... EXIT` REPLACES the first rather than adding to it, and
+# the failure marker above must outlive this one.
+trap 'rm -rf "$tmp"; rm -f "$errors_seen"' EXIT
 
 # A rendering with no severity, MUST or VERDICT token in it, and it is GitHub's rendering of the
 # one sentence named here rather than of any comment below. EVERY CASE THAT USES IT SAYS THE SAME
@@ -898,10 +921,28 @@ case "$*" in
   *timeline*)                 ;;                                 # no base change
   *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z ${STUB_REVIEW_ID:-5001}"
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"/issues/comments/5001"*"--jq .body_html")
-                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
                               echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
@@ -1238,10 +1279,28 @@ case "$*" in
   *timeline*)                 ;;                                 # no base change
   *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z 5001"
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"/issues/comments/5001"*"--jq .body_html")
-                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            echo "no ledger" ;;
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
                                 "${STUB_BRANCH:-feature/x}" "$head" "$head"
@@ -1308,10 +1367,6 @@ contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "blockers=pr-lookup-failed"
 # Everything below runs `scripts/pr-review-parse.py`, which is what the audit runs. Two readings of
 # every case: the JSON rendering, which says what the parser decided, and the NUL rendering, which
 # is the payload the audit actually reads.
-command -v python3 > /dev/null || command -v python > /dev/null \
-  || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
-parser_python="$(command -v python3 || command -v python)"
-
 # WHAT A READER IS SHOWN, RECORDED. `pr-review-parse.py review` takes TWO documents now: the
 # comment as GitHub stores it, and GITHUB'S OWN RENDERING of it -- `body_html`, which
 # `scripts/pr-ready-audit.sh` fetches beside the body and which the two scans over a review's prose
@@ -1342,7 +1397,7 @@ parser_python="$(command -v python3 || command -v python)"
 # recordings back out as files, so what is recorded can be read without either.
 #
 # A DOCUMENT WITH NO ROW IS A FAILED CASE naming its hash, never a case run against something else.
-recorded_renderings='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'
+recorded_renderings='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'
 renderings_dir="$tmp/renderings"
 mkdir -p "$renderings_dir"
 "$parser_python" - "$recorded_renderings" "$renderings_dir" <<'UNPACK'
@@ -1426,6 +1481,49 @@ parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT] [RENDERING]: "<status>|<payload
     2>/dev/null || status=$?
   printf '%s|%s' "$status" "$(tr '\0' '|' < "$out")"
 }
+
+# --- a failure this file reports is a failure this file exits on --------------------------------
+# MUT-GATE-ERROR-IN-SUBSTITUTION, and it is a defect of THIS FILE rather than of what it tests.
+#
+# `rendering_of` reports a missing recorded rendering with `error` and then substitutes
+# `nothing_shown` so the run can go on. It is reached through `$( )` by every row that asks what a
+# reader sees -- 61 command substitutions -- and `$( )` IS A SUBSHELL: `failed=1` set in it is set
+# in a copy that exits. At `7767c71c` the whole gate printed two `no recorded rendering` errors and
+# then `test-pr-ready-audit: ok`, EXIT 0, with an arithmetic fixture edited and not re-recorded.
+# So the advertised guarantee -- a document with no row is a failed case naming its hash -- was
+# unenforceable, and any fixture could be changed without its recording.
+#
+# The two halves are asserted separately, because the shape hid behind the second: the failure is
+# recorded where the PARENT can see it, and the substitution still returns a path so that one
+# missing recording does not stop the run at the first one. The record is redirected to a scratch
+# file for the length of the case -- this run has no missing recordings, and a case that proves it
+# can report one must not leave the report standing.
+unrecorded_marker="$tmp/unrecorded-marker"
+: > "$unrecorded_marker"
+printf 'A document no rendering was ever recorded for.\n' > "$tmp/unrecorded.md"
+# `UPSTROKE_RENDER_CAPTURE=` empty, so this case is the same case during a re-record run: with it
+# set, `rendering_of` would go and fetch a rendering for this document instead of reporting it.
+unrecorded_path="$(errors_seen="$unrecorded_marker" UPSTROKE_RENDER_CAPTURE= \
+  rendering_of "$tmp/unrecorded.md" 2> "$tmp/unrecorded.err")"
+[[ -s "$unrecorded_marker" ]] \
+  || error "MUT-GATE-ERROR-IN-SUBSTITUTION: a missing recorded rendering reported from inside a command substitution left no record the parent shell can read"
+contains "MUT-GATE-ERROR-IN-SUBSTITUTION [it says which document]" \
+  "$(cat "$tmp/unrecorded.err")" "no recorded rendering for [$tmp/unrecorded.md]"
+expect "MUT-GATE-ERROR-IN-SUBSTITUTION [it still substitutes, so the run reaches every case]" \
+  "$unrecorded_path" "$nothing_shown"
+# AND THE VARIABLE ALONE DOES NOT CARRY IT, which is the sentence the fix rests on and the one
+# nothing else here would catch if `errors_seen` were deleted as belt and braces. Both shapes are
+# driven in one child bash: the assignment inside `$( )` is lost, the append to a file is not.
+cat > "$tmp/subshell-probe.sh" <<'PROBE'
+set -euo pipefail
+marker="$1"
+lost=0
+report() { lost=1; printf 'x' >> "$marker"; }
+ignored="$(report; printf 'substituted')"
+printf '%s %s %s' "$lost" "$ignored" "$([[ -s "$marker" ]] && printf kept || printf lost)"
+PROBE
+expect "MUT-GATE-ERROR-IN-SUBSTITUTION [a variable set in a substitution is set in a copy]" \
+  "$(bash "$tmp/subshell-probe.sh" "$tmp/subshell-marker")" "0 substituted kept"
 
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
@@ -6735,6 +6833,34 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
     handle.write("".join('<p dir="auto">%s</p>\n' % html.escape(line) for line in lines))
 BAREHTML
 
+# AND THE ANSWER SPLIT IS DRIVEN HERE TOO, because `comment` is a subcommand of this parser and
+# every instruction of it has to run under some drive or the census names it unproven. Six shapes,
+# which is every branch it has: a whole answer, one that is not JSON, one that is not an object,
+# one with no `created_at`, one with no `body`, and one with no `body_html` -- that last being the
+# only one of the five wrong shapes that is not a refusal. The seventh drive gives it the wrong
+# number of documents.
+"$parser_python" - "$tmp/one-findings.md" "$nothing_shown" "$tmp" <<'PROBEANSWERS'
+import json, os, sys
+body, shown, out = sys.argv[1], sys.argv[2], sys.argv[3]
+whole = {"created_at": "2026-09-01T00:00:00Z", "id": 5001,
+         "body": open(body, encoding="utf-8").read(),
+         "body_html": open(shown, encoding="utf-8").read()}
+def write(name, text):
+    with open(os.path.join(out, name), "w", encoding="utf-8") as handle:
+        handle.write(text)
+write("probe-answer-whole.json", json.dumps(whole))
+write("probe-answer-notjson.json", "not a JSON document at all\n")
+# A repeated name is two readings and is built by hand, because no encoder writes one.
+write("probe-answer-twice.json",
+      '{"created_at": "2026-09-01T00:00:00Z", "body": %s, "body_html": %s, "body": "PASS"}'
+      % (json.dumps(whole["body"]), json.dumps(whole["body_html"])))
+write("probe-answer-notobject.json", json.dumps(["a list, not an object"]))
+for field in ("created_at", "body", "body_html"):
+    short = dict(whole)
+    del short[field]
+    write("probe-answer-no-%s.json" % field, json.dumps(short))
+PROBEANSWERS
+
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
@@ -6746,6 +6872,14 @@ got="$(decode_probe scripts/pr-review-parse.py \
   "review|$tmp/probe-drive-prose.md|$nothing_shown" \
   "review|$tmp/probe-drive-quoted.md|$nothing_shown" \
   "review|$tmp/probe-drive-shown.md|$tmp/probe-drive-shown.html" \
+  "comment --nul|$tmp/probe-answer-whole.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-body_html.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-notjson.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-notobject.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-created_at.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-body.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-twice.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-whole.json" \
   "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
@@ -7204,10 +7338,28 @@ case "$*" in
   *"/pulls?state=open"*)      exit 0 ;;
   *timeline*)                 ;;
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"/issues/comments/5001"*"--jq .body_html")
-                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
@@ -7439,10 +7591,22 @@ case "$*" in
   *timeline*)                 ;;
   *"/comments?per_page=100"*) prog="$(jq_program "$@")" || { echo "GH-NO-JQ-PROGRAM $*" >&2; exit 96; }
                               jq -r "$prog" "$STUB_COMMENTS_JSON" ;;
-  *"/issues/comments/7001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/7001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"/issues/comments/7001"*"--jq .body_html")
-                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
+  # One answer for one comment, as in every other stub here: `created_at`, `body` and `body_html`
+  # arrive together under `application/vnd.github.full+json`, and the three separate `--jq`
+  # answers GitHub also serves are here beside it.
+  *"/issues/comments/7001"*)
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; exit 0 ;;
+      esac
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}" ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
@@ -7854,9 +8018,96 @@ for row in "${exempt_quiet[@]}"; do
   contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" "$got" "enqueued #999"
   expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [$reader_case]" "${got##*|}" 1
 done
+# AND THE EXEMPTION NAMES THE OCCURRENCE AND NOT ITS SPELLING. MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT,
+# round seven's second, and it is the class round four closed by identity arriving back as text.
+#
+# Round six asked whether the comment writes that LINE ANYWHERE. So a review that QUOTES the
+# protocol's blocking line while discussing it, ends `VERDICT: PASS`, and then appends its
+# correction in a spelling only a reader sees, cancelled the correction against its own earlier
+# quotation: at `7767c71c` exit 0, PASS, no stray, READY and ONE `gh pr merge` call, where the
+# same review WITHOUT the quotation was MANUAL and none. Both halves are driven, because the
+# second is what says the quotation is what did it.
+#
+# The occurrences are matched in order now: the quotation is spent on the occurrence a reader sees
+# IN it, and the correction after it has only `VERDICT\:` left to match against.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`.
+
+VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-with.md"
+prose_review 'VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-without.md"
+for quoted in with without; do
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [$quoted the quotation]" \
+    "$(reader_rows "$tmp/prose-quoted-$quoted.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+  got="$(reader_audit "$tmp/prose-quoted-$quoted.md")"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT audit [$quoted the quotation]" "$got" \
+    "manual:VERDICT:-outside-the-numbered-findings"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT audit [$quoted the quotation]" "$got" MANUAL
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [$quoted the quotation]" "${got##*|}" 0
+done
+# AND THE QUOTATION ON ITS OWN IS STILL QUIET, which is the half a stricter rule breaks: a review
+# that quotes the protocol and corrects nothing is READY and calls merge once.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`.
+' > "$tmp/prose-quoted-only.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [the quotation on its own]" \
+  "$(reader_rows "$tmp/prose-quoted-only.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-quoted-only.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [the quotation on its own]" "$got" "enqueued #999"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [the quotation on its own]" "${got##*|}" 1
+# AND THE SAME LINE TWICE IN THE READING NEEDS TWO OF THEM IN THE COMMENT, which is what "in
+# order" buys and what a match anywhere could not say. Two quotations and one correction: the
+# correction has nothing left, and it is reported.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`, and again
+`VERDICT: CHANGES_REQUIRED` for emphasis.
+
+VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-twice.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [two quotations and one correction]" \
+  "$(reader_rows "$tmp/prose-quoted-twice.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+# AND THE ONE SHAPE THIS DOES NOT CLOSE, FIXTURED AT WHAT IT DOES. It is
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES's open row and the row says which direction was
+# chosen, so a change that closes it fails here and updates this with the finding.
+#
+# An occurrence THE COMMENT WRITES AND NO READER SEES -- inside a link reference definition's
+# TITLE -- can be spent on a correction a reader does see, when its line is the correction's line
+# and it stands AFTER it. Ordering does not tell them apart: the only thing that would is knowing
+# which written characters the renderer dropped, which is a Markdown parse, which is the thing
+# this design exists not to do. Round three's COUNT could not tell them apart either, and for the
+# same reason -- one written occurrence disappears as the definition is rendered and one appears
+# as the reference is resolved, so the two cancel exactly.
+#
+# Executed at `7767c71c` AND here, and the answer is the same at both: `stray=-`, verdict PASS.
+# This is not a regression of round seven's and not a repair of it. The merge it costs is asserted
+# rather than described, because a `-` is a claim about a merge.
+prose_review 'VERDICT&#58; CHANGES_REQUIRED
+
+[ref]: https://example.invalid/x "VERDICT: CHANGES_REQUIRED"
+' > "$tmp/prose-title-after.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title after the correction]" \
+  "$(reader_rows "$tmp/prose-title-after.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-title-after.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title after the correction]" "$got" \
+  "enqueued #999"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [OPEN: a title after the correction]" \
+  "${got##*|}" 1
+# WHERE THE TITLE STANDS DOES NOT MATTER, only that it stands after the occurrence the exemption
+# last spent -- which in this form's template is anywhere after the opening verdict line. The row
+# above has it after the correction and this one has it before, and both are quiet: the sentence
+# the finding records is "an occurrence the comment writes and NO READER SEES can be spent on one
+# a reader does", not "an occurrence that follows it".
+prose_review '[ref]: https://example.invalid/x "VERDICT: CHANGES_REQUIRED"
+
+VERDICT&#58; CHANGES_REQUIRED
+' > "$tmp/prose-title-before.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title before the correction]" \
+  "$(reader_rows "$tmp/prose-title-before.md")" "0|prose/$enqueue_head/PASS/-/-"
+# And the correction with NO such occurrence anywhere IS reported, which is what says the title is
+# what does it: the same review without the definition is MANUAL and calls merge none.
 # The row that needs a newline inside the span, so it is built rather than tabulated: a code span
 # crossing a line ending shows the ending AS A SPACE, and `VERDICT: PASS` on the two sides of it
-# is still eight characters the comment wrote in one run.
+# is still eight characters the comment wrote in one run. What makes it exempt is that the
+# comparison folds every run of whitespace to one space on BOTH sides: a line ending the comment
+# stores is not a different document to a reader who sees a space.
 prose_review 'A span crossing a line `VERDICT:
 PASS` which this comment writes.
 ' > "$tmp/prose-exempt-crossed.md"
@@ -8337,11 +8588,14 @@ expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [joined]" "$
 #    which a reading of the characters alone would take for a comment showing no tokens. Both ends
 #    refuse: the audit blocks on a rendering that is blank, and the parser refuses a comment that
 #    has text and renders to nothing.
-# 2. A CODE BLOCK IS NOT PROSE. The workflow form's verdict is a fenced object, and a reader sees
-#    every character of it -- so a reduction that read `<pre>` as prose would report the review's
-#    own `"severity": "P1"` as a severity written outside the findings, on every blocking review
-#    this repository has ever had. The block's content is shown VERBATIM, so the comment's own
-#    characters are already exactly what a reader sees there and `stray_summary` scans those.
+# 2. A CODE BLOCK THE COMMENT WRITES IS READ WHERE THE COMMENT WRITES IT, AND ONE IT DOES NOT IS
+#    READ HERE. The workflow form's verdict is a fenced object, and a reader sees every character
+#    of it -- so a reading that took `<pre>` as prose without qualification would report the
+#    review's own `"severity": "P1"` as a severity written outside the findings, on every blocking
+#    review this repository has ever had. Round six answered that by skipping `<pre>` entirely, on
+#    the premise that its content is shown VERBATIM. THE PREMISE IS FALSE FOR RAW HTML, and the
+#    rows below are the two executions that say so. What is skipped is a block the comment WRITES:
+#    its characters are already scanned, and `quoted_code` is the test.
 # 3. NOR ARE THE FRONTIER FORM'S NUMBERED FINDINGS. A reader sees no `1.` and no `**`: a numbered
 #    finding is an ordered list item opening with a severity, and the scan reads the prose outside
 #    them. AT MOST AS MANY AS THE PARSE RECORDED, which is the bound `finding_spans` takes and
@@ -8371,16 +8625,44 @@ case "$*" in
   *"/pulls?state=open"*)      exit 0 ;;
   *timeline*)                 ;;
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  # THE ONE ANSWER THIS STUB EXISTS FOR. `STUB_SHOWN_MODE` says which of the three shapes the
-  # rendering fetch comes back in: the rendering itself, the ONE NEWLINE a `--jq` for a field the
-  # answer does not carry prints at exit 0, or a call that fails.
-  *"/issues/comments/5001"*"--jq .body_html")
+  # THE ONE ANSWER THIS STUB EXISTS FOR, and it is now ONE ANSWER: `created_at`, `body` and
+  # `body_html` arrive together. `STUB_SHOWN_MODE` says which shape it comes back in -- the whole
+  # document; one with NO `body_html` AT ALL, which is what the media type being dropped or the
+  # endpoint changing looks like now that the rendering is a field of the answer; one whose
+  # rendering is BLANK; an answer that is not JSON; or a call that fails.
+  #
+  # AND THE THREE SEPARATE `--jq` ANSWERS ARE STILL HERE, because GitHub still serves them and
+  # because the splice case needs them: `STUB_SPLICE_HTML` is a DIFFERENT VERSION'S rendering, so
+  # an audit that fetches the body and the rendering separately gets one of each. Every call for
+  # this comment is logged, which is how "one fetch" is asserted as a count rather than read.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "$STUB_REVIEW_BODY"; exit 0 ;;
+        *"--jq .body_html")
+            # The same five shapes, as the separate fetch produced them: a `--jq` for a field the
+            # answer does not carry prints ONE NEWLINE and exits 0.
+            case "${STUB_SHOWN_MODE:-whole}" in
+              missing|blank) printf '\n' ;;
+              notjson) printf 'not a JSON document at all\n' ;;
+              failed)  exit 22 ;;
+              *)       cat "${STUB_SPLICE_HTML:-$STUB_REVIEW_HTML}" ;;
+            esac
+            exit 0 ;;
+      esac
       case "${STUB_SHOWN_MODE:-whole}" in
-        whole)   cat "$STUB_REVIEW_HTML" ;;
-        missing) printf '\n' ;;
+        notjson) printf 'not a JSON document at all\n' ;;
         failed)  exit 22 ;;
+        *)  "$STUB_PYTHON" -c 'import json, sys
+answer = {"created_at": sys.argv[1], "body": open(sys.argv[2], encoding="utf-8").read()}
+if sys.argv[4] == "whole":
+    answer["body_html"] = open(sys.argv[3], encoding="utf-8").read()
+elif sys.argv[4] == "blank":
+    answer["body_html"] = "\n"
+print(json.dumps(answer))' \
+              2026-09-01T00:00:00Z "$STUB_REVIEW_BODY" "$STUB_REVIEW_HTML" \
+              "${STUB_SHOWN_MODE:-whole}" ;;
       esac ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
@@ -8408,11 +8690,14 @@ got="$(shown_run whole "$tmp/shown-clean.md")"
 contains "MUT-SHOWN-RENDERING-OPTIONAL control" "$got" "enqueued #999"
 expect "MUT-SHOWN-RENDERING-OPTIONAL control calls" "${got##*|}" 1
 expect "MUT-SHOWN-RENDERING-OPTIONAL control status" "${got%%|*}" 0
-# A rendering that arrives BLANK at exit 0 blocks, and does not fall back to the characters.
+# AN ANSWER THAT CARRIES NO RENDERING blocks, and does not fall back to the characters. That is
+# what the media type being dropped or the endpoint changing looks like: the call SUCCEEDS and the
+# field is not there. It was one newline at exit 0 while the rendering was fetched by a `--jq` of
+# its own; it is a missing field of the one answer now, and it is the same blocker.
 got="$(shown_run missing "$tmp/shown-clean.md")"
-contains "MUT-SHOWN-RENDERING-OPTIONAL [a blank rendering at exit 0]" "$got" "review-rendering-missing"
-contains "MUT-SHOWN-RENDERING-OPTIONAL [a blank rendering at exit 0]" "$got" "NOT-READY"
-expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [blank]" "${got##*|}" 0
+contains "MUT-SHOWN-RENDERING-OPTIONAL [an answer with no rendering at exit 0]" "$got" "review-rendering-missing"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [an answer with no rendering at exit 0]" "$got" "NOT-READY"
+expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [no rendering]" "${got##*|}" 0
 # And a fetch that FAILS is the other blocker, told apart from the first.
 got="$(shown_run failed "$tmp/shown-clean.md")"
 contains "MUT-SHOWN-RENDERING-OPTIONAL [a failed rendering fetch]" "$got" "review-fetch-failed"
@@ -8455,6 +8740,63 @@ expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [a bare verdict]" \
 expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [another block is still scanned]" \
   "$(reader_rows "$tmp/shown-other-block.md")" \
   "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+# AND AN INDENTED VERDICT FENCE IS STILL NOT REPORTED. CommonMark strips the opening fence's
+# indentation from the content, so the block's content is no substring of the comment at all and
+# the rule "a block the comment writes" does not reach it by itself. It is passed to
+# `quoted_code` as its own document, and this row is what says so: delete that argument and every
+# blocking review posted with an indented fence reports its own findings.
+{ printf 'Reviewed head: %s\n\n  ```json\n  ' "$enqueue_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"INDENTED","severity":"P1","failing_test":"a_test"}]}' \
+    "$enqueue_head" "$enqueue_base"
+  printf '\n  ```\n'; } > "$tmp/shown-indented.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [an indented verdict fence]" \
+  "$(reader_rows "$tmp/shown-indented.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:INDENTED:1"
+
+# 2b. AND A `<pre>` THE COMMENT DOES NOT WRITE IS WHAT A READER SEES AND NOTHING ELSE READS.
+# MUT-SHOWN-RAW-PRE-UNREAD, and it is the first of round seven's four.
+#
+# GitHub PASSES RAW HTML THROUGH, `<pre>` included, with the tags inside it still operative and
+# its character references still resolved -- captured, not assumed: the recorded rendering of the
+# first document below is `<pre class="notranslate"><strong>VERDICT</strong>: CHANGES_REQUIRED
+# </pre>`, so a reader sees the correction and the comment writes no such eight characters
+# anywhere. At `7767c71c` both of these were exit 0, PASS, NO STRAY, READY and ONE `gh pr merge`
+# call; each is MANUAL with none here. A trusted reviewer pasting a preformatted correction with a
+# bold field label is normal use, and no outsider is needed.
+raw_pre=(
+  'raw pre verdict|<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>|VERDICT:'
+  'raw pre severity|<pre>The blocker is &#80;1 here.</pre>|P1'
+)
+for row in "${raw_pre[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/raw-pre-$reader_case.md"
+  expect "MUT-SHOWN-RAW-PRE-UNREAD [$reader_case]" \
+    "$(reader_rows "$tmp/raw-pre-$reader_case.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/raw-pre-$reader_case.md")"
+  contains "MUT-SHOWN-RAW-PRE-UNREAD audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-SHOWN-RAW-PRE-UNREAD audit [$reader_case]" "$got" MANUAL
+  expect "MUT-SHOWN-RAW-PRE-UNREAD merge calls [$reader_case]" "${got##*|}" 0
+done
+# And the same correction in the FRONTIER form, which is the form every review in this repository
+# is posted in: the comment writes its own two verdict lines and this is a third a reader sees.
+prose_review '<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>
+' > "$tmp/raw-pre-prose.md"
+expect "MUT-SHOWN-RAW-PRE-UNREAD [raw pre verdict] prose" \
+  "$(reader_rows "$tmp/raw-pre-prose.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+got="$(reader_audit "$tmp/raw-pre-prose.md")"
+contains "MUT-SHOWN-RAW-PRE-UNREAD audit [raw pre verdict] prose" "$got" \
+  "manual:VERDICT:-outside-the-numbered-findings"
+expect "MUT-SHOWN-RAW-PRE-UNREAD merge calls [raw pre verdict] prose" "${got##*|}" 0
+# THE CONTROL THAT KEEPS THE OTHER HALF HONEST: a `<pre>` holding exactly what the comment writes
+# is quiet, because it is scanned where the comment writes it and `\bP1\b` does not match inside
+# `_P1_`. Reading it twice would change nothing; reading it INSTEAD of the characters would.
+reader_comment '<pre>The blocker is _P1_ here.</pre>' > "$tmp/raw-pre-verbatim.md"
+expect "MUT-SHOWN-RAW-PRE-UNREAD [a raw pre the comment writes]" \
+  "$(reader_rows "$tmp/raw-pre-verbatim.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
 
 # 3. THE FRONTIER FORM'S OWN FINDINGS ARE NOT STRAY SEVERITIES. Three numbered findings, rendered
 # as an ordered list, report nothing; the review is READY on this harness's clean head and calls
@@ -8530,6 +8872,132 @@ got="$(shown_run whole "$tmp/shown-clean.md" "$tmp/shown-unknown.html")"
 contains "MUT-SHOWN-TAG-UNCLASSIFIED audit [a tag in neither set]" "$got" \
   "manual:unreadable-html:x-unclassified-outside-the-verdict-object"
 expect "MUT-SHOWN-TAG-UNCLASSIFIED merge calls" "${got##*|}" 0
+
+# --- one fetch, so the characters and the rendering are one version -----------------------------
+# MUT-REVIEW-TWO-VERSIONS-SPLICED and MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL.
+#
+# ROUND SIX'S OWN P1. The audit fetched the comment's `body` and its `body_html` in two calls. A
+# reviewer editing the comment between them gives it VERSION A'S CHARACTERS AND VERSION B'S
+# RENDERING -- and that pair passes where each version alone blocks, because each scan reads the
+# document the other version does not have.
+#
+#   * A is `_P1_` in prose above a clean `PASS` object: the characters carry no severity at a word
+#     boundary and GitHub's rendering of A shows `P1`, so A alone is MANUAL;
+#   * B moves that finding INTO the object and says CHANGES_REQUIRED, so B alone is NOT-READY;
+#   * A's body beside B's rendering is a clean `PASS` whose prose shows nothing: PASS, READY and
+#     ONE `gh pr merge` call, executed at `7767c71c` with this exact stub.
+#
+# `application/vnd.github.full+json` returns `created_at`, `body` and `body_html` TOGETHER, so
+# there is one version and no pair to disagree. The stub still answers the three separate `--jq`
+# calls, with `STUB_SPLICE_HTML` serving B's rendering to the second of them, so an audit that
+# asks for them separately still gets the splice -- and the count of calls this comment costs is
+# asserted, because "one fetch" is the whole of the fix and a second one would restore the defect
+# in silence.
+reader_comment 'The blocker is _P1_ and it is not in the object.' > "$tmp/splice-a.md"
+{ printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"MOVED","severity":"P1","failing_test":"a_test"}]}' \
+    "$enqueue_head" "$enqueue_base"
+  printf '\n```\n'; } > "$tmp/splice-b.md"
+# Each version alone first, and they are the reason the splice means anything.
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [version A alone]" \
+  "$(reader_rows "$tmp/splice-a.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [version B alone]" \
+  "$(reader_rows "$tmp/splice-b.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:MOVED:1"
+# And the splice, through the WHOLE audit against a stub serving both versions. `STUB_SPLICE_HTML`
+# is B's rendering; the one answer is A's, whole. A is MANUAL, so no merge call -- at `7767c71c`,
+# with the same stub, this line was `enqueued #999` and one call.
+: > "$tmp/merge-calls.log"
+: > "$tmp/splice-calls.log"
+splice_out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" \
+  STUB_CALL_LOG="$tmp/splice-calls.log" \
+  STUB_REVIEW_BODY="$tmp/splice-a.md" STUB_REVIEW_HTML="$(rendering_of "$tmp/splice-a.md")" \
+  STUB_SPLICE_HTML="$(rendering_of "$tmp/splice-b.md")" \
+  PATH="$shown_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1 | tr '\n' ' ')"
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [the splice is not available]" "$splice_out" \
+  "manual:P1-outside-the-verdict-object"
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [the splice is not available]" "$splice_out" MANUAL
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED merge calls" \
+  "$(grep -c . "$tmp/merge-calls.log" || true)" 0
+# ONE CALL FOR THE COMMENT, counted. Three is the shape that made the splice possible.
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [one fetch for the comment]" \
+  "$(grep -c . "$tmp/splice-calls.log" || true)" 1
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [and it asks for the whole answer]" \
+  "$(cat "$tmp/splice-calls.log")" "application/vnd.github.full+json"
+[[ "$(cat "$tmp/splice-calls.log")" == *"--jq"* ]] \
+  && error "MUT-REVIEW-TWO-VERSIONS-SPLICED: the audit took a field out of the comment with a separate call: [$(cat "$tmp/splice-calls.log")]"
+
+# AND THE SPLIT IS THE PARSER'S. `comment` takes GitHub's whole answer and writes the two
+# documents `review` reads: a body that reached the parse SHORT is a comment with a different
+# verdict in it, and bash has no write whose count anybody reads -- which is the whole reason this
+# program exists rather than being a shell pipeline.
+splice_answer() {  # splice_answer BODY-FILE HTML-FILE [DROP]: GitHub's answer for one comment
+  "$parser_python" - "$1" "$2" "${3:-}" <<'ANSWER'
+import json, sys
+body, shown, drop = sys.argv[1], sys.argv[2], sys.argv[3]
+answer = {"created_at": "2026-09-01T00:00:00Z", "id": 5001,
+          "body": open(body, encoding="utf-8").read(),
+          "body_html": open(shown, encoding="utf-8").read()}
+if drop:
+    del answer[drop]
+print(json.dumps(answer))
+ANSWER
+}
+split_rows() {  # split_rows ANSWER-FILE: "<status>|<created_at>|<body sha>|<rendering sha>"
+  local status=0
+  "$parser_python" scripts/pr-review-parse.py comment --nul --out "$tmp/split.out" \
+    "$1" "$tmp/split-body.md" "$tmp/split-shown.html" 2> /dev/null || status=$?
+  ((status == 0)) || { printf '%s|' "$status"; return 0; }
+  printf '%s|%s|%s|%s' "$status" "$(tr '\0' '|' < "$tmp/split.out")" \
+    "$(render_digest "$tmp/split-body.md")" "$(render_digest "$tmp/split-shown.html")"
+}
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" > "$tmp/answer-whole.json"
+# The two documents come out BYTE FOR BYTE, which is what the digests say: a split that dropped a
+# trailing newline is a different comment to a parse that reads the last line of it.
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [the answer splits into its two documents]" \
+  "$(split_rows "$tmp/answer-whole.json")" \
+  "0|comment|2026-09-01T00:00:00Z|0||$(render_digest "$tmp/splice-a.md")|$(render_digest "$(rendering_of "$tmp/splice-a.md")")"
+# And `review` over what it wrote is the same result as `review` over the originals.
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [and the review reads the same]" \
+  "$(review_rows "$tmp/split-body.md" "$tmp/split-shown.html")" \
+  "$(reader_rows "$tmp/splice-a.md")"
+# EVERY SHAPE THAT IS NOT ONE COMMENT IS A REFUSAL, and the caller blocks on the status.
+printf 'not a JSON document at all\n' > "$tmp/answer-notjson.json"
+printf '["a list, not an object"]\n' > "$tmp/answer-notobject.json"
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" created_at \
+  > "$tmp/answer-noat.json"
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" body > "$tmp/answer-nobody.json"
+# A NAME THE ANSWER REPEATS IS TWO READINGS. `json.loads` keeps the last, so an answer carrying
+# the review's body and then a second `"body"` would hand the parse a body nobody posted -- the
+# same rule the verdict object is read under, applied to the document that carries it.
+{ printf '{"created_at": "2026-09-01T00:00:00Z", "body": '
+  "$parser_python" -c 'import json,sys; sys.stdout.write(json.dumps(open(sys.argv[1], encoding="utf-8").read()))' \
+    "$tmp/splice-a.md"
+  printf ', "body_html": "<p>x</p>", "body": "PASS"}\n'; } > "$tmp/answer-twice.json"
+for answer_case in notjson notobject noat nobody twice; do
+  expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [$answer_case]" \
+    "$(split_rows "$tmp/answer-$answer_case.json")" '1|'
+done
+# A RENDERING THAT IS NOT A STRING IS WRITTEN AS NOTHING, which is the caller's
+# `review-rendering-missing` and not a reading of the characters alone. The split SUCCEEDS and the
+# rendering it wrote is empty; the audit's own half of it is the `missing` mode below.
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" body_html \
+  > "$tmp/answer-nohtml.json"
+printf '' > "$tmp/split-empty"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer with no rendering in it]" \
+  "$(split_rows "$tmp/answer-nohtml.json")" \
+  "0|comment|2026-09-01T00:00:00Z|0||$(render_digest "$tmp/splice-a.md")|$(render_digest "$tmp/split-empty")"
+# And the audit blocks on the two shapes the section above does not already drive. An answer with
+# NO `body_html` at all is `missing` there; these are one whose rendering is blank, and one that is
+# not a comment -- told apart from each other and from a fetch that failed.
+got="$(shown_run blank "$tmp/shown-clean.md")"
+contains "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer whose rendering is blank]" "$got" \
+  "review-rendering-missing"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL merge calls [blank rendering]" "${got##*|}" 0
+got="$(shown_run notjson "$tmp/shown-clean.md")"
+contains "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer that is not a comment]" "$got" \
+  "review-document-unreadable"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL merge calls [not a comment]" "${got##*|}" 0
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
@@ -8780,12 +9248,18 @@ got="$(review_rows "$tmp/not-utf8.md")"
 [[ "$got" == 0\|* ]] \
   && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE/MUT-PROSE-READ-SUPPRESSED: bytes that are not UTF-8 parsed as a review, got [$got]"
 # Through main, because the helper refusing is only half of it: the audit must block on the status
-# rather than reading whatever the file holds.
-got="$(STUB_REVIEW_BODY="$tmp/not-utf8.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
-contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-parse-failed"
+# rather than reading whatever the answer holds. A comment's characters reach the audit inside
+# GitHub's own JSON answer now, so bytes that are not UTF-8 are an ANSWER that is not one -- and
+# that is a blocker of its own, told apart from a review the parse could not read. Both halves are
+# asserted: the answer is refused, and no verdict comes out of it.
+#   (`review-parse-failed` through main is asserted by MUT-VERDICT-REVIVED-BY-TRUNCATION, which
+#   drives a whole answer whose BODY the review parse refuses.)
+got="$(STUB_ANSWER_RAW="$tmp/not-utf8.md" STUB_REVIEW_BODY="$tmp/not-utf8.md" \
+  STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-document-unreadable"
 contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "NOT-READY"
 [[ "$got" == *"verdict=PASS"* ]] \
-  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of a review the parser refused"
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of an answer the parser refused"
 # The same review readable is judged by the JSON parser and blocks on its P1, so the case above is
 # about the refusal and not about the review.
 got="$(STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
@@ -9254,7 +9728,10 @@ got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_s
 [[ "$got" == *ledger-lookup-failed* ]] \
   && error "MUT-LEDGER-LOOKUP-SUPPRESSED: a readable body was reported unreadable"
 
-if ((failed)); then
+# BOTH, because one of them cannot see a failure reported from inside a command substitution and
+# the other cannot be read by a `((` test. `-s` is the question: the marker file is created empty
+# and every `error` appends to it.
+if ((failed)) || [[ -s "$errors_seen" ]]; then
   echo "test-pr-ready-audit: FAILED" >&2
   exit 1
 fi

@@ -253,9 +253,10 @@ p3_tolerance=3
 review_parser="$audit_dir/pr-review-parse.py"
 review_python="$(command -v python3 || command -v python || true)"
 
-# run_review_parser SUBCOMMAND OUT INPUT...: read the INPUTs with scripts/pr-review-parse.py and
-# leave its flat NUL-separated result in OUT. SUBCOMMAND is `review`, which takes the comment and
-# GITHUB'S OWN RENDERING of it, or `ledger`, which takes the pull request body.
+# run_review_parser SUBCOMMAND OUT ARG...: run scripts/pr-review-parse.py over the ARGs and leave
+# its flat NUL-separated result in OUT. SUBCOMMAND is `comment`, which takes GitHub's whole answer
+# for one review comment and the two files to split it into; `review`, which takes those two --
+# the comment and GITHUB'S OWN RENDERING of it; or `ledger`, which takes the pull request body.
 #
 # ITS EXIT STATUS IS THE WHOLE CONTRACT. The parser builds its result in memory, renders it,
 # checks every field for the record separator, writes the payload to a neighbour of OUT, flushes
@@ -954,7 +955,10 @@ audit_one() {
   done
 
   # The latest review by the trusted account: its posting time, its form, and its parse.
-  local review_id review_at review_file kind="" reviewed="" verdict="" review_base="-"
+  # `review_at` starts empty and not merely declared: it is read below whatever happens here, and
+  # a fetch that never ran leaves it unset -- which under `set -u` ends the whole run at the read
+  # rather than reporting this pull request as unaudited.
+  local review_id review_at="" review_file kind="" reviewed="" verdict="" review_base="-"
   finding_sev=(); finding_id=(); finding_flags=()
   # Three outcomes, kept apart. A lookup that failed is not a pull request without a review: the
   # audit does not know what the reviewer said, so it says so and blocks, rather than proceeding
@@ -965,86 +969,100 @@ audit_one() {
     blockers+=("no-review")
   elif [[ ! "$review_id" =~ ^[0123456789]+$ ]]; then
     # The third answer this channel can carry. A comment id is a number, it is the last thing
-    # between here and three API paths built from it, and a value that is neither empty nor a
+    # between here and the API path built from it, and a value that is neither empty nor a
     # number is a lookup that returned something nobody has checked -- not a review to fetch.
     # Spelled out rather than written as a range, for the reason `valid_login` spells its set out.
     blockers+=("review-id-unreadable")
   else
-    local parse_file shown_file parse_status=0 at_status=0 body_status=0 shown_status=0
+    local parse_file shown_file answer_file at_file parse_status=0 fetch_status=0
     local shown_text stray="-" where i
     review_file="$(mktemp)"
     parse_file="$(mktemp)"
     shown_file="$(mktemp)"
-    # Every fetch checked. `gh ... > "$review_file"` and `review_at="$(gh ...)"` failed closed
-    # only because `set -e` was watching, and `set -e` is watching nothing the moment either is
-    # rewritten into a condition -- which is how four of the defects in this file were introduced.
-    # What the audit does when it cannot read the review is stated here instead.
-    review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')" || at_status=$?
-    gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file" || body_status=$?
-    # AND THE COMMENT AS A READER IS SHOWN IT, which is what the two scans over its prose read.
-    # `body_html` is GitHub's own rendering of this comment, returned by the same endpoint under
-    # the rendering media type, and it is the third call this review costs. It could be the first:
-    # `application/vnd.github.full+json` returns `created_at`, `body` and `body_html` together, and
-    # the audit would then have to take three values out of one JSON document -- which means either
-    # a jq this file does not otherwise need or a second program between the fetch and the answer.
-    # Three calls whose statuses are three separate answers is the cheaper thing to be sure of.
-    gh api "repos/$repo/issues/comments/$review_id" \
-      -H 'Accept: application/vnd.github.html+json' --jq '.body_html' > "$shown_file" \
-      || shown_status=$?
-    # WITHOUT THE RENDERING THIS AUDIT DOES NOT PROCEED. The scans exist because the characters a
-    # comment is stored as are not what its reviewer and its reader see, so reading the characters
-    # alone when the rendering is missing is the defect itself, arriving quietly. And it would
-    # arrive quietly: `--jq '.body_html'` against an answer that carries no such field -- the media
-    # type dropped, the endpoint changed -- prints ONE NEWLINE and exits 0.
+    answer_file="$(mktemp)"
+    at_file="$(mktemp)"
+    # ONE FETCH, SO THE CHARACTERS AND THE RENDERING ARE ONE VERSION OF ONE COMMENT.
+    # `application/vnd.github.full+json` returns `created_at`, `body` and `body_html` together.
+    # Two fetches did not: a reviewer editing the comment between them gave this audit VERSION A'S
+    # BODY AND VERSION B'S RENDERING, and that pair was PASS, READY and one `gh pr merge` call
+    # where each version alone blocked -- executed, with neither the comment id nor the reviewed
+    # sha changing. It is also one call fewer than the review cost before, and two rather than the
+    # three round six spent.
     #
-    # The emptiness is read by the shell, not by a command: `$(< file)` on a file it cannot read is
-    # an empty string, and so is a blank rendering, and both are this blocker. A `grep` here would
-    # have a third answer, and its failure would be one of the two.
-    shown_text="$(< "$shown_file")"
-    if ((at_status != 0 || body_status != 0 || shown_status != 0)); then
+    # The fetch is checked. `gh ... > "$answer_file"` failed closed only because `set -e` was
+    # watching, and `set -e` is watching nothing the moment it is rewritten into a condition --
+    # which is how four of the defects in this file were introduced. What the audit does when it
+    # cannot read the review is stated here instead.
+    gh api "repos/$repo/issues/comments/$review_id" \
+      -H 'Accept: application/vnd.github.full+json' > "$answer_file" || fetch_status=$?
+    # AND THE SPLIT IS THE PARSER'S, not this shell's. What is being split is the review: a body
+    # that reaches the parse SHORT is a comment with a different verdict in it, and bash has no
+    # write whose count anybody reads. `comment` writes each document the way it writes every
+    # result -- staged, flushed, fsynced, renamed -- and its status is the whole contract.
+    if ((fetch_status != 0)); then
       blockers+=("review-fetch-failed")
-    elif [[ -z "${shown_text//[$' \t\n\r']/}" ]]; then
-      blockers+=("review-rendering-missing")
+    elif ! run_review_parser comment "$at_file" "$answer_file" "$review_file" "$shown_file" \
+         || ! read_parser_fields "$at_file" comment 3 0; then
+      # An answer that is not one comment. The fetch succeeded and what came back is not a review
+      # to read: not JSON, not an object, no `created_at`, or no `body`. It is told apart from a
+      # failed fetch because it is a different thing to go and look at.
+      blockers+=("review-document-unreadable")
     else
-      # ONE PARSER, ONE SUCCESS CONDITION, and this is the whole of the audit's side of it: run
-      # it, and if its status is not 0 there is no result to read. Format detection is inside it,
-      # so a detection that failed cannot choose a parser -- and the two forms do not agree about
-      # the same review, so choosing between them on a failed read is choosing a verdict. Nothing
-      # below re-derives, re-scans or repairs anything the parser emitted.
-      run_review_parser review "$parse_file" "$review_file" "$shown_file" || parse_status=$?
-      if ((parse_status != 0)); then
-        blockers+=("review-parse-failed:$parse_status")
-      elif ! read_parser_fields "$parse_file" review 7 3; then
-        # Belt and braces: the parser renames its payload into place whole or not at all, so this
-        # cannot fire unless something outside it truncated the file between the two. A payload
-        # that did not arrive whole is a findings list short by an unknown amount, and every
-        # finding missing from it is a blocker this audit would never raise.
-        blockers+=("review-parse-incomplete")
+      review_at="${fields[1]}"
+      # WITHOUT THE RENDERING THIS AUDIT DOES NOT PROCEED. The scans exist because the characters
+      # a comment is stored as are not what its reviewer and its reader see, so reading the
+      # characters alone when the rendering is missing is the defect itself, arriving quietly. And
+      # it would arrive quietly: an answer that carries no `body_html` -- the media type dropped,
+      # the endpoint changed -- is a rendering written as nothing, exactly as the `--jq` that
+      # fetched it separately printed ONE NEWLINE and exited 0 for the same cause.
+      #
+      # The emptiness is read by the shell, not by a command: `$(< file)` on a file it cannot read
+      # is an empty string, and so is a blank rendering, and both are this blocker. A `grep` here
+      # would have a third answer, and its failure would be one of the two.
+      shown_text="$(< "$shown_file")"
+      if [[ -z "${shown_text//[$' \t\n\r']/}" ]]; then
+        blockers+=("review-rendering-missing")
       else
-        kind="${fields[1]}"
-        reviewed="${fields[2]}"
-        verdict="${fields[3]}"
-        review_base="${fields[4]}"
-        stray="${fields[5]}"
-        # `-` is how the parser says "the review did not record this"; it is not a value.
-        [[ "$reviewed" == "-" ]] && reviewed=""
-        [[ "$verdict" == "-" ]] && verdict=""
-        if [[ "$stray" != "-" ]]; then
-          where=numbered-findings
-          [[ "$kind" == json ]] && where=verdict-object
-          blockers+=("manual:$stray-outside-the-$where")
+        # ONE PARSER, ONE SUCCESS CONDITION, and this is the whole of the audit's side of it: run
+        # it, and if its status is not 0 there is no result to read. Format detection is inside it,
+        # so a detection that failed cannot choose a parser -- and the two forms do not agree about
+        # the same review, so choosing between them on a failed read is choosing a verdict. Nothing
+        # below re-derives, re-scans or repairs anything the parser emitted.
+        run_review_parser review "$parse_file" "$review_file" "$shown_file" || parse_status=$?
+        if ((parse_status != 0)); then
+          blockers+=("review-parse-failed:$parse_status")
+        elif ! read_parser_fields "$parse_file" review 7 3; then
+          # Belt and braces: the parser renames its payload into place whole or not at all, so this
+          # cannot fire unless something outside it truncated the file between the two. A payload
+          # that did not arrive whole is a findings list short by an unknown amount, and every
+          # finding missing from it is a blocker this audit would never raise.
+          blockers+=("review-parse-incomplete")
+        else
+          kind="${fields[1]}"
+          reviewed="${fields[2]}"
+          verdict="${fields[3]}"
+          review_base="${fields[4]}"
+          stray="${fields[5]}"
+          # `-` is how the parser says "the review did not record this"; it is not a value.
+          [[ "$reviewed" == "-" ]] && reviewed=""
+          [[ "$verdict" == "-" ]] && verdict=""
+          if [[ "$stray" != "-" ]]; then
+            where=numbered-findings
+            [[ "$kind" == json ]] && where=verdict-object
+            blockers+=("manual:$stray-outside-the-$where")
+          fi
+          # Three fields per finding, at a fixed offset, because `read_parser_fields` has already
+          # established that there are exactly as many as the payload declared. No `read`, and so
+          # no here-string whose failure would leave the previous finding's severity standing.
+          for ((i = 7; i < ${#fields[@]}; i += 3)); do
+            finding_sev+=("${fields[i]}")
+            finding_id+=("${fields[i + 1]}")
+            finding_flags+=("${fields[i + 2]}")
+          done
         fi
-        # Three fields per finding, at a fixed offset, because `read_parser_fields` has already
-        # established that there are exactly as many as the payload declared. No `read`, and so
-        # no here-string whose failure would leave the previous finding's severity standing.
-        for ((i = 7; i < ${#fields[@]}; i += 3)); do
-          finding_sev+=("${fields[i]}")
-          finding_id+=("${fields[i + 1]}")
-          finding_flags+=("${fields[i + 2]}")
-        done
       fi
     fi
-    rm -f "$review_file" "$parse_file" "$shown_file"
+    rm -f "$review_file" "$parse_file" "$shown_file" "$answer_file" "$at_file"
 
     # A review that does not say which commit it reviewed cannot be checked against the head.
     [[ -z "$reviewed" ]] && blockers+=("review-records-no-reviewed-sha")
