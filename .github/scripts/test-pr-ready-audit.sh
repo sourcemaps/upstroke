@@ -8497,7 +8497,11 @@ expect "MUT-SHOWN-FINDINGS-ARE-STRAY merge calls [unrecorded]" "${got##*|}" 0
 # renderer put in any of the 685 comments this repository held on 2026-09-21T20:49:34Z, counted by
 # `html.parser` over each one's `body_html`; the pull request body carries the command. A tag in
 # NEITHER set would be a reading this program cannot make, and a tag in BOTH would be two readings.
-shown_census=(a blockquote br code details div em g-emoji h1 h2 h3 h4 h5 h6 hr li
+# THESE 28 ARE WHAT THE FETCH FOUND, and not one more: `h4`, `h5` and `h6` are classified in
+# `BLOCK_HTML` beside `h1`-`h3` and NO COMMENT USED THEM, so they are not in this list. A census
+# that quietly holds tags nobody measured is the claim this file keeps catching in other people's
+# prose.
+shown_census=(a blockquote br code details div em g-emoji h1 h2 h3 hr li
   markdown-accessiblity-table ol p pre span strong summary table tbody td th thead tr tt ul)
 shown_status=0
 "$parser_python" - scripts/pr-review-parse.py "${shown_census[@]}" \
