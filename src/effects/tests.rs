@@ -493,12 +493,13 @@ fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
     );
 }
 
-fn module_directory(path: &str) -> &str {
-    let (directory, file) = path.rsplit_once('/').unwrap_or(("", path));
-    if matches!(file, "mod.rs" | "lib.rs" | "main.rs") {
-        directory
-    } else {
-        path.strip_suffix(".rs").unwrap_or(path)
+fn module_directory(path: &Path) -> PathBuf {
+    let heads_its_directory = path
+        .file_name()
+        .is_some_and(|file| file == "mod.rs" || file == "lib.rs" || file == "main.rs");
+    match path.parent() {
+        Some(directory) if heads_its_directory => directory.to_path_buf(),
+        _ => path.with_extension(""),
     }
 }
 
@@ -535,7 +536,7 @@ fn governed_deny_lists_written_anywhere(source: &str) -> Vec<BTreeSet<&'static s
 }
 
 fn fences_that_deny_where_forbid_would_compile(sources: &[(String, String)]) -> Vec<String> {
-    let allowed: Vec<(&str, BTreeSet<&'static str>)> = sources
+    let allowed: Vec<(&Path, BTreeSet<&'static str>)> = sources
         .iter()
         .map(|(path, source)| {
             let lints: BTreeSet<&'static str> = governed_allows(source)
@@ -543,7 +544,7 @@ fn fences_that_deny_where_forbid_would_compile(sources: &[(String, String)]) -> 
                 .flat_map(|allow| allow.lints.iter())
                 .filter_map(|lint| normalize_lint(lint))
                 .collect();
-            (path.as_str(), lints)
+            (Path::new(path), lints)
         })
         .filter(|(_, lints)| !lints.is_empty())
         .collect();
@@ -564,10 +565,11 @@ fn fences_that_deny_where_forbid_would_compile(sources: &[(String, String)]) -> 
                  written `deny(` found none, so the two disagree and this census measures nothing"
             ));
         }
-        let below = format!("{}/", module_directory(path));
+        let file = Path::new(path);
+        let below = module_directory(file);
         let refused: BTreeSet<&'static str> = allowed
             .iter()
-            .filter(|(other, _)| *other == path.as_str() || other.starts_with(&below))
+            .filter(|(other, _)| *other == file || other.starts_with(&below))
             .flat_map(|(_, lints)| lints.iter().copied())
             .collect();
         for list in lists {

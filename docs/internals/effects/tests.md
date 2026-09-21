@@ -275,7 +275,7 @@ found an attribute in.
 A file listed with a non-empty `allows` and no attribute is a stale entry;
 a scan that found nothing is a scan that proves nothing.
 
-## `fn module_directory(path: &str) -> &str {`
+## `fn module_directory(path: &Path) -> PathBuf {`
 
 The directory a module file's out-of-line children live in, by the path
 convention and by nothing else: `a/b.rs` answers `a/b`, and `a/mod.rs`,
