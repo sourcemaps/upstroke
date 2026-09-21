@@ -6622,8 +6622,10 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
 # turns in it -- so a definition anywhere in the long document above puts two extra readings on
 # every one of those repeats. Measured on 2026-09-21 with the definitions inside it, this probe took
 # 4m1s standalone over the same nine drives; split out, 1m46s. Coverage is
-# unchanged and asserted the same way: every executable line of every function this round added is
-# entered by a document, measured with `sys.settrace` over these drives.
+# unchanged and MEASURED rather than asserted: with `sys.settrace` over these ten drives, every
+# executable line of every function round five added is entered by a document EXCEPT ONE --
+# `prefix_stripped_reading`'s `return None`, which needs a document carrying no block prefix
+# anywhere in it and which the SWEEP below covers rather than a drive.
 { printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
   printf 'A full [reference][label], a bare [label], a collapsed [label][] one and a wrapped\n'
   printf '[definition][wrapped] one, with [nocolon] naming nothing.\n\n'
