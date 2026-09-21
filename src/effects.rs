@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/effects.md`
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLIPPY_TOML: &str = "clippy.toml";
 
@@ -50,6 +50,16 @@ pub struct GovernedAllow {
     pub written: Vec<String>,
     pub keywords: Vec<&'static str>,
     pub reasoned: bool,
+}
+
+pub const RUSTC_WHITESPACE: [char; 11] = [
+    '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}', '\u{200E}',
+    '\u{200F}', '\u{2028}', '\u{2029}',
+];
+
+#[must_use]
+pub fn is_rustc_whitespace(character: char) -> bool {
+    RUSTC_WHITESPACE.contains(&character)
 }
 
 #[must_use]
@@ -123,11 +133,14 @@ fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {
     let mut at = from + 1;
     if bytes.get(at) == Some(&b'\\') {
         at += 2;
-        let limit = (from + 13).min(bytes.len());
-        while at < limit && bytes[at] != b'\'' {
-            at += 1;
+        loop {
+            match *bytes.get(at)? {
+                b'\'' => return Some(at + 1),
+                b'\n' => return None,
+                b'\\' => at += 2,
+                _ => at += 1,
+            }
         }
-        return (bytes.get(at) == Some(&b'\'')).then_some(at + 1);
     }
     let width = match *bytes.get(at)? {
         0x00..=0x7F => 1,
@@ -174,8 +187,26 @@ fn literal_end(bytes: &[u8], from: usize) -> Option<usize> {
 }
 
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn blank_comments_and_strings(source: &str) -> String {
+    let code = code_bytes_only(source);
+    let unread =
+        |character: char| is_rustc_whitespace(character) && !character.is_ascii_whitespace();
+    if !code.contains(unread) {
+        return code;
+    }
+    let mut spaced = String::with_capacity(code.len());
+    for character in code.chars() {
+        if unread(character) {
+            spaced.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        } else {
+            spaced.push(character);
+        }
+    }
+    spaced
+}
+
+#[allow(clippy::too_many_lines)]
+fn code_bytes_only(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = vec![b' '; bytes.len()];
     for (index, byte) in bytes.iter().enumerate() {
@@ -574,7 +605,6 @@ fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> boo
 }
 
 pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[
-    "src/engine/mod.rs",
     "src/engine/coordinator.rs",
     "src/engine/resume.rs",
     "src/engine/attempt.rs",
@@ -698,17 +728,11 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     let mut trait_impl_spans = Vec::new();
     let mut public_trait_spans = Vec::new();
 
-    let mut t = 0;
-    while let Some(hit) = region[t..].find("trait ") {
-        let start = t + hit;
-        t = start + "trait ".len();
-        if start > 0 && is_ident_byte(bytes[start - 1]) {
+    for (start, after) in keyword_sites(&region, "trait") {
+        if !declares_visibility(region.get(..start).unwrap_or_default()) {
             continue;
         }
-        if !declares_visibility(&region[..start]) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, t) else {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -716,19 +740,12 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    let mut i = 0;
-    while let Some(hit) = region[i..].find("impl") {
-        let start = i + hit;
-        i = start + 4;
-        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
-        if !before_ok || !region[i..].starts_with([' ', '<']) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, i) else {
+    for (_, after) in keyword_sites(&region, "impl") {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
-        let header = &region[i..brace];
-        if !header.contains(" for ") {
+        let header = region.get(after..brace).unwrap_or_default();
+        if keyword_sites(header, "for").next().is_none() {
             continue;
         }
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -736,18 +753,8 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    for (index, _) in region.match_indices("fn ") {
-        if index > 0 && is_ident_byte(bytes[index - 1]) {
-            continue;
-        }
-        let Some(name) = region[index + 3..]
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .next()
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        let visible = declares_visibility(&region[..index]);
+    for (index, name) in declared_fns(&region) {
+        let visible = declares_visibility(region.get(..index).unwrap_or_default());
         let in_trait_impl = trait_impl_spans
             .iter()
             .any(|(open, close)| index > *open && index < *close);
@@ -762,32 +769,238 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
+#[must_use]
+pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = BTreeMap::new();
+    for (_, name) in declared_fns(&region) {
+        if reachable.contains(name) {
+            *bearers.entry(name.to_owned()).or_insert(0) += 1;
+        }
+    }
+    bearers
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerHeader {
+    Module(String),
+    Trait(String),
+    TraitImpl(String),
+    InherentImpl,
+    Unread,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub opened_at: usize,
+    pub header: OwnerHeader,
+}
+
+#[must_use]
+pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = declared_fns(&region).into_iter().peekable();
+    let mut open: Vec<(u8, OwnerScope)> = Vec::new();
+    let mut header_from = 0;
+    let mut owners: BTreeMap<String, Vec<Vec<OwnerScope>>> = BTreeMap::new();
+    for (at, byte) in region.bytes().enumerate() {
+        while let Some((_, name)) = bearers.next_if(|(index, _)| *index <= at) {
+            if reachable.contains(name) {
+                owners
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(open.iter().map(|(_, scope)| scope.clone()).collect());
+            }
+        }
+        let in_braces = open.last().is_none_or(|(opener, _)| *opener == b'{');
+        match byte {
+            b'{' => {
+                let header = owner_header(region.get(header_from..at).unwrap_or_default());
+                open.push((
+                    byte,
+                    OwnerScope {
+                        opened_at: at,
+                        header,
+                    },
+                ));
+                header_from = at + 1;
+            }
+            b'(' | b'[' => open.push((
+                byte,
+                OwnerScope {
+                    opened_at: at,
+                    header: OwnerHeader::Unread,
+                },
+            )),
+            b'}' | b')' | b']' => {
+                let opener = match byte {
+                    b'}' => b'{',
+                    b')' => b'(',
+                    _ => b'[',
+                };
+                if open.last().is_some_and(|(opened, _)| *opened == opener) {
+                    open.pop();
+                }
+                if byte == b'}' {
+                    header_from = at + 1;
+                }
+            }
+            b';' if in_braces => header_from = at + 1,
+            _ => {}
+        }
+    }
+    owners
+}
+
+fn owner_header(header: &str) -> OwnerHeader {
+    let mut item = header.trim_start();
+    while let Some(attribute) = item.strip_prefix('#') {
+        let attribute = attribute.strip_prefix('!').unwrap_or(attribute);
+        let close = attribute
+            .starts_with('[')
+            .then(|| matching(attribute.as_bytes(), 0, b'[', b']'))
+            .flatten();
+        let Some(close) = close else {
+            return OwnerHeader::Unread;
+        };
+        item = attribute.get(close + 1..).unwrap_or_default().trim_start();
+    }
+
+    let mut depth = 0usize;
+    let mut plain = String::with_capacity(item.len());
+    let mut previous = ' ';
+    for character in without_visibility(item).chars() {
+        match character {
+            '<' => {
+                if depth == 0 {
+                    plain.push(' ');
+                }
+                depth += 1;
+            }
+            '>' if depth > 0 && previous != '-' => depth -= 1,
+            _ if depth == 0 => plain.push(character),
+            _ => {}
+        }
+        previous = character;
+    }
+
+    let mut words = plain.split_whitespace().peekable();
+    words.next_if_eq(&"unsafe");
+    match words.next() {
+        Some("mod") => match words.next() {
+            Some(name) if is_identifier(name) => OwnerHeader::Module(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("trait") => match words.next().map(|name| name.trim_end_matches(':')) {
+            Some(name) if is_identifier(name) => OwnerHeader::Trait(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("impl") => {
+            let written: Vec<&str> = words.take_while(|word| *word != "where").collect();
+            match written.iter().position(|word| *word == "for") {
+                None => OwnerHeader::InherentImpl,
+                Some(1) => written
+                    .first()
+                    .filter(|name| is_identifier(name))
+                    .map_or(OwnerHeader::Unread, |name| {
+                        OwnerHeader::TraitImpl((*name).to_owned())
+                    }),
+                _ => OwnerHeader::Unread,
+            }
+        }
+        _ => OwnerHeader::Unread,
+    }
+}
+
+fn without_visibility(item: &str) -> &str {
+    let Some(after) = item.strip_prefix("pub") else {
+        return item;
+    };
+    if let Some(restriction) = after.trim_start().strip_prefix('(') {
+        return restriction.split_once(')').map_or(item, |(_, rest)| rest);
+    }
+    if after.starts_with(char::is_whitespace) {
+        after
+    } else {
+        item
+    }
+}
+
+fn is_identifier(word: &str) -> bool {
+    word.bytes().all(is_ident_byte)
+        && word
+            .bytes()
+            .next()
+            .is_some_and(|first| !first.is_ascii_digit())
+}
+
+fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let bytes = text.as_bytes();
+    text.match_indices(keyword)
+        .map(|(start, word)| (start, start + word.len()))
+        .filter(move |(start, end)| {
+            let glued_before = start
+                .checked_sub(1)
+                .and_then(|before| bytes.get(before))
+                .is_some_and(|byte| is_ident_byte(*byte));
+            let glued_after = text.get(*end..).is_some_and(|rest| {
+                rest.starts_with(|next: char| next.is_alphanumeric() || next == '_')
+            });
+            !glued_before && !glued_after
+        })
+}
+
+fn declared_fns(region: &str) -> Vec<(usize, &str)> {
+    keyword_sites(region, "fn")
+        .filter_map(|(index, after)| {
+            let written = region
+                .get(after..)?
+                .strip_prefix(is_rustc_whitespace)?
+                .trim_start_matches(is_rustc_whitespace)
+                .split(|c: char| is_rustc_whitespace(c) || matches!(c, '(' | '<'))
+                .next()?;
+            let name = written.strip_prefix("r#").unwrap_or(written);
+            (!name.is_empty() && !name.starts_with('$')).then_some((index, name))
+        })
+        .collect()
+}
+
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn declares_visibility(prefix: &str) -> bool {
     let mut rest = prefix.trim_end();
-    for modifier in ["unsafe", "const", "async"] {
+    for modifier in ["extern", "unsafe", "const", "async"] {
         for _ in 0..3 {
             rest = rest.strip_suffix(modifier).unwrap_or(rest).trim_end();
         }
     }
-    rest.ends_with("pub") || rest.ends_with("pub(crate)") || rest.ends_with("pub(super)")
+    if rest.ends_with("pub") {
+        return true;
+    }
+    rest.strip_suffix(')')
+        .and_then(|restriction| restriction.rsplit_once('('))
+        .is_some_and(|(before, _)| before.trim_end().ends_with("pub"))
 }
 
 fn find_header_brace(region: &str, from: usize) -> Option<usize> {
     let bytes = region.as_bytes();
     let mut angle = 0i32;
     let mut paren = 0i32;
+    let mut bracket = 0i32;
     for (index, byte) in bytes.iter().enumerate().skip(from) {
         match byte {
             b'<' => angle += 1,
             b'>' => angle -= 1,
             b'(' => paren += 1,
             b')' => paren -= 1,
-            b';' if angle <= 0 && paren <= 0 => return None,
-            b'{' if angle <= 0 && paren <= 0 => return Some(index),
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b';' if angle <= 0 && paren <= 0 && bracket <= 0 => return None,
+            b'{' if angle <= 0 && paren <= 0 && bracket <= 0 => return Some(index),
             _ => {}
         }
     }
@@ -1307,6 +1520,23 @@ pub(crate) mod census_domain {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ScannedInlineModule {
+        pub(crate) name: String,
+        pub(crate) inline_path: Vec<String>,
+        pub(crate) guard: String,
+        pub(crate) test_only: bool,
+        pub(crate) line: usize,
+        pub(crate) outer_attributes: String,
+        pub(crate) body: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub(crate) struct ScannedModules {
+        pub(crate) declared: Vec<ScannedDeclaration>,
+        pub(crate) inline: Vec<ScannedInlineModule>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum ScanRefusal {
         UnclosedAttribute {
             line: usize,
@@ -1388,6 +1618,10 @@ pub(crate) mod census_domain {
     pub(crate) fn scan_module_declarations(
         source: &str,
     ) -> Result<Vec<ScannedDeclaration>, ScanRefusal> {
+        scan_modules(source).map(|scanned| scanned.declared)
+    }
+
+    pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {
         struct Scope {
             open_depth: usize,
             name: String,
@@ -1401,10 +1635,12 @@ pub(crate) mod census_domain {
         let line_of = |at: usize| blanked[..at].matches('\n').count() + 1;
 
         let mut found = Vec::new();
+        let mut inline = Vec::new();
         let mut scopes: Vec<Scope> = Vec::new();
         let mut top_level: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut pending: Vec<Predicate> = Vec::new();
         let mut pending_path = false;
+        let mut attributes_from: Option<usize> = None;
         let mut depth = 0_usize;
         let mut i = 0;
 
@@ -1426,7 +1662,9 @@ pub(crate) mod census_domain {
                     return Err(ScanRefusal::UnclosedAttribute { line: line_of(i) });
                 };
                 let raw = &source[open + 1..close];
-                let name = raw
+                let name = blanked
+                    .get(open + 1..close)
+                    .unwrap_or_default()
                     .trim_start()
                     .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
                     .next()
@@ -1457,6 +1695,9 @@ pub(crate) mod census_domain {
                     "cfg_attr" if raw.contains("path") => pending_path = true,
                     _ => {}
                 }
+                if !inner {
+                    attributes_from.get_or_insert(i);
+                }
                 i = close + 1;
                 continue;
             }
@@ -1471,6 +1712,7 @@ pub(crate) mod census_domain {
                 }
                 pending.clear();
                 pending_path = false;
+                attributes_from = None;
                 i = close + 1;
                 continue;
             }
@@ -1497,6 +1739,21 @@ pub(crate) mod census_domain {
                 preds.extend(pending.iter().cloned());
                 match body {
                     Some(brace) => {
+                        let effective = Predicate::all(preds);
+                        let close =
+                            super::matching(bytes, brace, b'{', b'}').unwrap_or(bytes.len());
+                        inline.push(ScannedInlineModule {
+                            name: name.clone(),
+                            inline_path: scopes.iter().map(|scope| scope.name.clone()).collect(),
+                            guard: effective.render(),
+                            test_only: entails_test(&effective),
+                            line: line_of(name_at),
+                            outer_attributes: attributes_from
+                                .and_then(|from| source.get(from..i))
+                                .unwrap_or_default()
+                                .to_owned(),
+                            body: source.get(brace + 1..close).unwrap_or_default().to_owned(),
+                        });
                         scopes.push(Scope {
                             open_depth: depth,
                             name,
@@ -1532,11 +1789,13 @@ pub(crate) mod census_domain {
                     }
                 }
                 pending_path = false;
+                attributes_from = None;
                 continue;
             }
 
             pending.clear();
             pending_path = false;
+            attributes_from = None;
             if byte == b'{' {
                 depth += 1;
                 i += 1;
@@ -1557,7 +1816,10 @@ pub(crate) mod census_domain {
             }
             i += 1;
         }
-        Ok(found)
+        Ok(ScannedModules {
+            declared: found,
+            inline,
+        })
     }
 
     struct MacroInvocation {
@@ -2013,6 +2275,32 @@ pub(crate) mod lint_levels {
             at = close + 1;
         }
         resolution
+    }
+
+    #[must_use]
+    pub(crate) fn leading_inner_attributes(source: &str) -> &str {
+        let blanked = super::blank_comments_and_strings(source);
+        let bytes = blanked.as_bytes();
+        let mut end = 0;
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at].is_ascii_whitespace() {
+                at += 1;
+                continue;
+            }
+            if bytes[at] != b'#'
+                || bytes.get(at + 1) != Some(&b'!')
+                || bytes.get(at + 2) != Some(&b'[')
+            {
+                break;
+            }
+            let Some(close) = super::matching(bytes, at + 2, b'[', b']') else {
+                break;
+            };
+            at = close + 1;
+            end = at;
+        }
+        source.get(..end).unwrap_or_default()
     }
 
     #[must_use]

@@ -5400,9 +5400,9 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
 #[test]
 fn production_reaches_a_spawn_through_one_host_runner_per_run() {
     const SITES: [(&str, usize); 6] = [
-        ("src/engine/mod.rs", 2),
-        ("src/engine/coordinator.rs", 0),
-        ("src/engine/resume.rs", 0),
+        ("src/engine/mod.rs", 0),
+        ("src/engine/coordinator.rs", 1),
+        ("src/engine/resume.rs", 1),
         ("src/engine/attempt.rs", 0),
         ("src/engine/preflight.rs", 0),
         ("src/engine/options.rs", 0),
@@ -5488,8 +5488,15 @@ fn production_control() {
          resolution per attempt and DESIGN.md:612 is open again"
     );
 
-    let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));
-    for facade in ["fn run_harness(", "fn resume_harness("] {
+    let conductors = [
+        (
+            include_str!("../../engine/coordinator.rs"),
+            "fn run_harness(",
+        ),
+        (include_str!("../../engine/resume.rs"), "fn resume_harness("),
+    ];
+    for (conductor, facade) in conductors {
+        let engine = crate::effects::production_code(conductor);
         let after = engine
             .split_once(facade)
             .map(|(_, rest)| rest.lines().take(8).collect::<Vec<_>>().join("\n"))

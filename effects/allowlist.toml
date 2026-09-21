@@ -472,7 +472,9 @@ wrapper runtime delegates the seam's four effectful methods. So a \
 which both re-deny that lint deliberately. `src/events/log/tests.rs` and \
 `src/engine/tests.rs` are the precedent for a test module needing both. \
 `clippy::disallowed_macros` is re-denied, so a `println!` here is still an \
-error."""
+error. Two of its tests drive `engine::run_with` and `engine::resume_with`, \
+which are denied by path since 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`); the \
+`disallowed_methods` this file already allowed covers them."""
 
 [[funnel]]
 path = "src/runner/container/exec.rs"
@@ -794,62 +796,26 @@ being absent from it would be the one omission nobody would think to look for.""
 # Both tests are also driven with synthetic input that DOES grow and DOES name a
 # topology module, so the refusals are executed rather than assumed.
 #
-# ONE GROWTH SINCE PR5, by the owner's decision on #306: `src/engine/mod.rs`,
-# the first row below. `FROZEN_LEGACY_ALLOWLIST` grew with it in the same
-# commit, which is the only way the test above admits an entry, and the row
-# says what it is for and what it cost. The section is otherwise as PR5 froze
-# it.
+# ONE GROWTH SINCE PR5, AND IT IS GONE AGAIN. #306 added `src/engine/mod.rs`
+# by the owner's decision, so the v0.1 facade could call the two conductor
+# entry points that change denied by path; `FROZEN_LEGACY_ALLOWLIST` grew with
+# it in the same commit, which is the only way the test above admits an entry.
+# A lint level inherits down the module tree and covers a file's own items, so
+# that one allow reached every module the facade declares, every inline module
+# written in it, and every item placed in it, all of them visible to
+# `engine::topology`: the third review of #306 walked through an unfenced
+# sibling (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) and the fourth through an
+# inline child and through the facade itself (`PR306-FACADE-INLINE-ESCAPE`).
+# The row carried its own end state -- "its entry points move into the allowed
+# legacy modules they call, at which point this file calls nothing denied" --
+# and on 2026-09-20 that is what happened: the six entry points and their four
+# seams are defined in `src/engine/coordinator.rs` and `src/engine/resume.rs`,
+# rows of this section already, the facade re-exports the six and denies all
+# three governed lints at file level like the children below it, and both the
+# row and the frozen entry are removed. The section is as PR5 froze it, and
+# `effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
+# refuses an allow written anywhere in that file again.
 # ---------------------------------------------------------------------------
-
-# Added on #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`). The three engine conductors'
-# effectful `pub(super)` fns are denied by their crate paths since then; two of
-# them, `coordinator::run_harness_inner_on` and `resume::resume_harness_inner_on`,
-# have their only production caller in this facade, which carried no allow. A
-# module-level allow here reaches every module under `engine::topology` by
-# inheritance -- a lint level is scoped by the module tree, not the file, and
-# the placement scan records only what a file writes -- so the same commit put
-# `#![deny(..)]` of all three governed lints on `src/engine/topology.rs`, the
-# root all forty of those files descend from, and
-# `effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
-# holds that deny lexically and by compiling the shape. That fence stopped at
-# the topology and nowhere else. The third review of #306
-# (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) put a `pub(super) fn` calling
-# `std::fs::write` in `src/engine/assembly.rs`, referenced it from a production
-# body under `engine::topology`, and clippy and the whole suite stayed green:
-# `assembly`, `classify`, `options`, `preflight` and `report` wrote no attribute,
-# so they inherited this file's allow and appear nowhere in this list. Since
-# round 3 those five carry the same `#![deny(..)]` as the topology root, and
-# `effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
-# walks this file's own `mod` declarations, recursively, and refuses any module
-# that neither denies each lint in effect at its parent at file level nor
-# records its own allow of it below -- so a child declared tomorrow is judged
-# the day it is declared, not the day somebody remembers it.
-[[legacy]]
-path = "src/engine/mod.rs"
-allows = ["clippy::disallowed_methods"]
-packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths -- the public facade of src/engine/{coordinator,resume}.rs, added on #306"
-legacy_effect = """
-LEGACY-EFFECT: the v0.1 conductor's public entry points (`run`, `run_with`, \
-`run_harness`, `resume`, `resume_with`, `resume_harness`) call \
-`coordinator::run_harness_inner_on` and `resume::resume_harness_inner_on`, \
-effectful wrappers denied by path since #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): \
-the coordinator removes both run halves with `fs::remove_dir_all` on a failed \
-start, and the resume conductor re-materialises open questions through \
-`interaction::write_question`. Nothing else in this file reaches an effect: it \
-declares the engine's modules and threads a `Contained` token. The allow is \
-`disallowed_methods` alone, and it does NOT stop at this file's own items: a \
-lint level inherits down the module tree, so any child declared here that \
-writes no attribute of its own is exempt by inheritance and recorded nowhere. \
-Every child is therefore either fenced or recorded. `topology.rs`, \
-`assembly.rs`, `classify.rs`, `options.rs`, `preflight.rs` and `report.rs` deny \
-all three governed lints at file level; `attempt.rs`, `coordinator.rs`, \
-`resume.rs` and `tests.rs` write allows of their own, each a row of this \
-section; and \
-`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits` \
-holds that over this file's own `mod` declarations, so the allow reaches \
-nothing that is not either denied or in this list."""
-shrinks_when = "the v0.1 conductor is retired, or its entry points move into the allowed legacy modules they call, at which point this file calls nothing denied."
-
 
 [[legacy]]
 path = "src/engine/coordinator.rs"
@@ -859,7 +825,17 @@ legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 coordinator's own run-directory teardown \
 (`fs::remove_dir_all` of a public and a private half on a failed start). \
 `invariants_preserved[1]` requires the legacy engine's behaviour untouched by \
-this slice, so the calls are frozen rather than moved."""
+this slice, so the calls are frozen rather than moved. Since 2026-09-20 the \
+same allow covers the v0.1 conductor's three public run entry points and their \
+two seams, which moved here from `src/engine/mod.rs` unchanged \
+(`PR306-FACADE-INLINE-ESCAPE`): `run_contained` calls \
+`run_harness_inner_on`, denied by path since #306, and each of the others \
+calls the one below it, all five denied by path themselves as effectful rows \
+of `effects/wrappers.toml`. That call is what the facade's own allow existed \
+for; it sits here instead because this file is classified and nothing a \
+topology module can reach descends from it, where the facade is neither. The \
+allow is the lint it already was and the move widens nothing: the same calls, \
+under one recorded allow instead of two."""
 shrinks_when = "PR7-PR11 route the legacy coordinator's teardown through the RunDir husk funnels, which need the ownership proof this slice adds."
 
 [[legacy]]
@@ -869,7 +845,11 @@ packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths"
 legacy_effect = """
 LEGACY-EFFECT: reaches `interaction::write_question`, an effectful wrapper, when \
 the legacy resume path asks a question. Frozen with the rest of the legacy \
-engine."""
+engine. Since 2026-09-20 the same allow covers the three public resume entry \
+points and their two seams, moved here from `src/engine/mod.rs` unchanged with \
+the run entry points and for the reason `src/engine/coordinator.rs`'s row \
+states: `resume_contained` calls `resume_harness_inner_on`, denied by path, \
+and the five are denied by path themselves."""
 shrinks_when = "the schema-4 coordinator asks questions through RunDir.WriteQuestionPayload directly, at which point this call site goes."
 
 [[legacy]]
@@ -890,11 +870,13 @@ legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
 primitive today, so it carries no allow. Since #306 round 3 it carries \
 `#![deny(..)]` of all three governed lints instead, because its parent \
-`src/engine/mod.rs` allows `disallowed_methods` and a lint level inherits down \
-the module tree: without that deny an effect added here would be exempt by \
+`src/engine/mod.rs` then allowed `disallowed_methods` and a lint level inherits \
+down the module tree: without that deny an effect added here was exempt by \
 inheritance while this row still read `allows = []`, which is exactly the \
 promise the third review of #306 found broken in `assembly.rs` \
-(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). Listed so that a legacy effect \
+(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). The parent's allow is gone since \
+2026-09-20 and the deny stays, held for every module the facade declares \
+whatever the facade writes. Listed so that a legacy effect \
 added here is reviewed into `allows`, with the deny lifted in the same change, \
 rather than appearing silently."""
 shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the deny it carries needs no row."
@@ -1003,7 +985,14 @@ is an external effect with no resource row, no site and no funnel, and \
 than moved. This is a CRATE-LEVEL attribute — `main.rs` is a crate root — and \
 the mechanism sentence scans exactly that: "crate-level attributes in \
 lib.rs/main.rs". `src/lib.rs` is deliberately NOT in this file, so a crate-level \
-allow there fails the scan."""
+allow there fails the scan. Since 2026-09-20 its `disallowed_methods` also \
+covers the two calls the binary exists to make, `engine::run` and \
+`engine::resume`: the v0.1 conductor's entry points are effectful rows of \
+`effects/wrappers.toml` and denied by path since they moved into the conductor \
+modules (`PR306-FACADE-INLINE-ESCAPE`), and a denial binds a call through the \
+facade's re-export as it binds any other. The binary is the legitimate caller, \
+the attribute is the one it already carried, and its crate path stays empty in \
+`effects/wrappers.toml`: nothing in this file is nameable from the library."""
 shrinks_when = "the CLI reports through a sink the engine owns rather than through the print macros."
 # `disallowed_types` is the union-over-platforms case this file's header
 # predicts: `src/main.rs`'s Windows-only test
@@ -1122,7 +1111,10 @@ legacy_effect = """
 LEGACY-EFFECT: the whole-file `#[cfg(test)] mod tests;` of the legacy engine. It \
 builds real repositories and run directories with `fs` and `git` `Command`s to \
 drive the schema-1..3 paths end to end. Attached to the legacy section because \
-the modules it tests are in it."""
+the modules it tests are in it. It drives the engine's six public entry points \
+and their seams, which are denied by path since 2026-09-20 \
+(`PR306-FACADE-INLINE-ESCAPE`), under the `disallowed_methods` it already \
+allowed."""
 shrinks_when = "the legacy engine goes; these tests go with it."
 
 [[legacy]]

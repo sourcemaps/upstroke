@@ -14,14 +14,15 @@ use super::attempt::{
     QUESTION_MARKER, artifact_path, evaluate_outcome, materialize_prompt, review_failure,
     worker_question,
 };
-use super::coordinator::{question_options, run_harness_inner};
+use super::coordinator::{question_options, run_contained, run_harness_inner, run_harness_on};
 use super::preflight::{gates_differ, validate_inputs};
 use super::report::{sum_opt, task_report, total_of};
-use super::resume::resume_harness_inner;
+use super::resume::{resume_contained, resume_harness_inner};
 use super::*;
 use crate::agent::{AgentAdapter, Caps, ProcessOutput, TaskRun};
 use crate::capacity;
 use crate::config;
+use crate::error::UpstrokeError;
 use crate::events::{self, EventBody, EventLog, GateSummary, Progress, RunState, TaskState};
 use crate::interaction::{self, AnswerSource, QuestionRecord, Sleeper};
 use crate::ir::{
@@ -8681,21 +8682,26 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         raw.len()
     );
 
-    let public_fns: BTreeSet<&str> = source
-        .lines()
-        .filter_map(|line| line.strip_prefix("pub fn "))
-        .filter_map(|rest| rest.split(['(', '<', ' ']).next())
-        .collect();
     assert_eq!(
-        public_fns,
-        BTreeSet::from([
+        top_level_public_fns(source),
+        BTreeSet::new(),
+        "the engine facade declares a public function of its own again; its six entry points \
+         are defined in the conductor modules they drive and re-exported here"
+    );
+    let entry_points: BTreeSet<String> = public_facade_entry_points().into_iter().collect();
+    assert_eq!(
+        entry_points,
+        [
             "run",
             "run_with",
             "run_harness",
             "resume",
             "resume_with",
             "resume_harness",
-        ]),
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<String>>(),
         "the engine facade's public functions moved away from the packet's list"
     );
 
@@ -8713,34 +8719,11 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         );
     }
 
-    let mut reexported: BTreeSet<&str> = BTreeSet::new();
-    let mut rest = source;
-    while let Some(start) = rest.find("pub use ") {
-        rest = &rest[start + "pub use ".len()..];
-        let end = rest.find(';').expect("a `pub use` ends in a semicolon");
-        let statement = &rest[..end];
-        rest = &rest[end..];
-        match (statement.find('{'), statement.find('}')) {
-            (Some(open), Some(close)) => {
-                for name in statement[open + 1..close].split(',') {
-                    let name = name.trim();
-                    if !name.is_empty() {
-                        reexported.insert(name);
-                    }
-                }
-            }
-            _ => {
-                reexported.insert(
-                    statement
-                        .rsplit("::")
-                        .next()
-                        .expect("a path")
-                        .trim()
-                        .trim_end_matches(';'),
-                );
-            }
-        }
-    }
+    let reexported: BTreeSet<&str> = facade_reexports(source)
+        .into_iter()
+        .filter(|(from, _)| !CONDUCTOR_MODULES.contains(from))
+        .flat_map(|(_, names)| names)
+        .collect();
     assert_eq!(
         reexported,
         BTreeSet::from([
@@ -8766,22 +8749,95 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         "the engine facade's re-exports moved away from the packet's list"
     );
     assert_eq!(reexported.len(), 18, "five groups, eighteen names");
-
-    for private in ["fn run_harness_on(", "fn resume_harness_on("] {
-        assert!(source.contains(private), "`{private}` is gone");
-    }
-    assert!(
-        !source.contains("pub fn run_harness_on") && !source.contains("pub fn resume_harness_on"),
-        "an explicit-Runner entry point is public again"
+    assert_eq!(
+        facade_reexports(source).len(),
+        7,
+        "the packet's five groups and one per conductor module"
     );
+
+    let conductors = [
+        (
+            "coordinator",
+            include_str!("coordinator.rs"),
+            "run_harness_on",
+        ),
+        ("resume", include_str!("resume.rs"), "resume_harness_on"),
+    ];
+    assert_eq!(
+        conductors.map(|(module, _, _)| module),
+        CONDUCTOR_MODULES,
+        "a conductor module is re-exported here and not read below"
+    );
+    for (module, text, seam) in conductors {
+        let production = crate::effects::production_code(text);
+        let declared = top_level_public_fns(&production);
+        let reexported_from_it: BTreeSet<&str> = facade_reexports(source)
+            .into_iter()
+            .filter(|(from, _)| *from == module)
+            .flat_map(|(_, names)| names)
+            .collect();
+        assert_eq!(
+            declared, reexported_from_it,
+            "`engine::{module}` declares a `pub fn` the facade does not re-export, or the facade \
+             re-exports a name that is not one"
+        );
+        assert!(
+            production.contains(&format!("pub(super) fn {seam}(")),
+            "`pub(super) fn {seam}(` is gone from `engine::{module}`"
+        );
+        for public in [format!("pub fn {seam}"), format!("pub(crate) fn {seam}")] {
+            assert!(
+                !production.contains(&public),
+                "an explicit-Runner entry point is public again: `{public}` in `engine::{module}`"
+            );
+        }
+    }
 }
 
-fn public_facade_entry_points() -> Vec<&'static str> {
-    let source = include_str!("mod.rs");
-    let mut names: Vec<&str> = source
+const CONDUCTOR_MODULES: [&str; 2] = ["coordinator", "resume"];
+
+fn top_level_public_fns(production: &str) -> std::collections::BTreeSet<&str> {
+    production
         .lines()
         .filter_map(|line| line.strip_prefix("pub fn "))
         .filter_map(|rest| rest.split(['(', '<', ' ']).next())
+        .collect()
+}
+
+fn facade_reexports(production: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut groups = Vec::new();
+    let mut rest = production;
+    while let Some(start) = rest.find("pub use ") {
+        rest = &rest[start + "pub use ".len()..];
+        let end = rest.find(';').expect("a `pub use` ends in a semicolon");
+        let statement = &rest[..end];
+        rest = &rest[end..];
+        match (statement.find('{'), statement.find('}')) {
+            (Some(open), Some(close)) => {
+                let from = statement[..open].trim().trim_end_matches("::");
+                let names = statement[open + 1..close]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                groups.push((from, names));
+            }
+            _ => {
+                let (from, name) = statement.trim().rsplit_once("::").expect("a path");
+                groups.push((from, vec![name.trim()]));
+            }
+        }
+    }
+    groups
+}
+
+fn public_facade_entry_points() -> Vec<String> {
+    let production = crate::effects::production_code(include_str!("mod.rs"));
+    let mut names: Vec<String> = facade_reexports(&production)
+        .into_iter()
+        .filter(|(from, _)| CONDUCTOR_MODULES.contains(from))
+        .flat_map(|(_, names)| names)
+        .map(str::to_owned)
         .collect();
     names.sort_unstable();
     names.dedup();

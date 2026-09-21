@@ -35,10 +35,72 @@
 # whose own body performs or hands out an effect. It is not the transitive
 # closure over the crate, because the transitive closure of "reaches an effect"
 # in a program whose purpose is to perform effects is the whole program -- it
-# would deny `engine::run_harness` and every CLI entry point beneath it. The
+# would deny every CLI entry point and everything between it and a wrapper.
+# (`engine::run_harness` was this sentence's example until 2026-09-20. It IS
+# denied since then, and not by that closure: it moved into
+# `src/engine/coordinator.rs`, where it reaches the conductor without leaving
+# its file, which is the walk this record applies.) The
 # residue that leaves is exactly one thing: a topology module reaching an effect
 # through a chain of undenied public functions, and that is closed from the other
 # end by `effects::tests::no_topology_module_calls_a_funnel_in_production`.
+#
+# A NAME IS NOT A CALLABLE, SO A SHARED NAME IS PINNED. Rows are bare names (or
+# `Type::name`, compared by its last component), and a denial names one path. A
+# second callable under a classified name was therefore answered for by a row
+# nobody wrote for it: the review of 409a6138 put a `pub(crate) fn run` calling
+# `std::fs::write` in an inline module of `src/engine/coordinator.rs`, beside the
+# effectful entry point `run`, and the census and clippy stayed green
+# (`PR309-INLINE-WRAPPER-NAME-COLLISION`). `shared = { name = n }` says that `n`
+# callables of the file's production code bear `name`, for every name more than
+# one bears; `effects::tests::every_name_more_than_one_callable_bears_is_pinned_by_its_count`
+# derives the counts and asserts the table exactly, both ways. A module with no
+# `shared` table has no shared name. Raising a count says that every bearer is
+# what the row says. AN EFFECTFUL NAME IS SHARED IN TWO SHAPES ONLY, because no
+# record can be written for a second path -- a denial for it needs a row, and a
+# row for it is a name in two classes: every bearer written directly in ONE AND
+# THE SAME BRACES, reached through inline `mod`s alone (`cfg` twins), or ONE
+# TRAIT'S DECLARATION AND THE IMPLS WRITTEN UNDER ITS OWN NAME BESIDE IT. Which
+# braces hold a bearer is read by position. What a header spells decides only
+# whether a scope is one of those shapes, never whether two scopes are the
+# same one; a header the reading cannot place refuses the pin, and so do a
+# macro's parentheses or brackets, and two `impl` blocks of one spelling. The
+# review of 1ff88a78 pinned `run_with = 2` over a second, undenied `run_with`
+# and everything stayed green
+# (`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`); the repair compared
+# what the owners' headers spelled, and the review of 993f080d passed two
+# receivers as one twice over -- const-generic braces that lost both `impl`
+# headers, and one alias for two types in two `const _` blocks. The repair
+# reads a scope by the byte its brace opens at, and the review of 84123789
+# passed two receivers as one a third time, through the tokenizer under that
+# reading: a legal Unicode escape made long by underscores was longer than the
+# char-literal reader's window, a brace survived as code, both `impl` blocks
+# closed early and both bearers read as file-scope twins. A position is only
+# as good as the tokenization under it; an escape ends where rustc's lexer
+# ends it now, and
+# `effects::tests::a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+# holds that witness and its control refused.
+# `effects::tests::an_effectful_name_is_shared_only_by_bearers_of_one_path` and
+# `effects::tests::a_shared_effectful_name_is_placed_by_its_braces_and_not_by_what_a_header_spells`
+# hold all three pins refused. The reading is of the text and resolves no
+# name: the first shape needs none, and in the second the impl's trait is the
+# one declared in the same braces PROVIDED THAT DECLARATION IS COMPILED, which
+# a reading that does not evaluate `cfg` cannot know. ALL OF THIS READS THE
+# NAMES THE SOURCE WRITES, AS FAR AS THESE RECOGNISERS READ THEM. Two things are
+# in no count and no class. What expansion writes: a function a macro names by
+# substitution, or one an aliased `include!` brings in. And what the text
+# writes and a recogniser misreads: the review of 84123789 wrote `pub(crate)
+# fn`, U+200E, a name in `src/engine/coordinator.rs` -- a name the source
+# writes -- and it was in no count and no class, because the name reader split
+# on `char::is_whitespace` and rustc separates tokens on eleven code points
+# that predicate does not all hold. That spelling is read now: the tokenizer
+# every reader starts from writes rustc's separators as ones every reader
+# reads (`RUSTC_WHITESPACE` in `src/effects.rs`), and
+# `effects::tests::a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+# holds all eleven against the real coordinator. The class is not closed by
+# closing a spelling: these are recognisers of the shapes this tree and its
+# reviews have produced, not rustc's lexer and parser
+# (`PR7-WRAPPERS-EMPTY-DOMAIN`, deferred, with the project owner, records both
+# halves).
 #
 # Regenerate the membership (never the classification) with
 # UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1 cargo test -p upstroke effects::
@@ -46,6 +108,7 @@
 [[module]]
 path = "src/workspace_manager.rs"
 crate_path = "upstroke::workspace_manager"
+shared = { common_git_dir = 2, object_exists = 2 }
 funnel = [
     "add_site",
     "add_worktree",
@@ -236,6 +299,7 @@ effect_free = []
 [[module]]
 path = "src/workspace_manager/containment.rs"
 crate_path = "upstroke::workspace_manager::containment"
+shared = { is_reparse_point = 2, strip_verbatim = 2 }
 funnel = [
 ]
 effectful = []
@@ -253,6 +317,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/hooks.rs"
 crate_path = "upstroke::workspace_manager::hooks"
+shared = { durability_ledger = 2, phase = 3, refusal_cause = 3 }
 funnel = [
 ]
 effectful = []
@@ -276,6 +341,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/naming.rs"
 crate_path = "upstroke::workspace_manager::naming"
+shared = { as_str = 3, deserialize = 3, expecting = 3, fmt = 3, kind = 3, serialize = 2, try_from = 2, visit_str = 2 }
 funnel = [
 ]
 effectful = []
@@ -327,6 +393,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/parsers.rs"
 crate_path = "upstroke::workspace_manager::parsers"
+shared = { decode_path = 2 }
 funnel = [
 ]
 effectful = []
@@ -371,6 +438,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/snapshot_ref.rs"
 crate_path = "upstroke::workspace_manager::snapshot_ref"
+shared = { fmt = 2, new = 2 }
 funnel = [
 ]
 effectful = []
@@ -422,6 +490,7 @@ effect_free = [
 [[module]]
 path = "src/workspace_manager/worktree.rs"
 crate_path = "upstroke::workspace_manager::worktree"
+shared = { branch = 2, head = 2 }
 funnel = [
 ]
 effectful = []
@@ -447,6 +516,7 @@ effect_free = [
 [[module]]
 path = "src/rundir.rs"
 crate_path = "upstroke::rundir"
+shared = { acquire = 2, drop = 4, durability_ledger = 2, enter = 2, hold_cleanup_lease_for_child = 2, holder = 2, hook = 3, is_held = 2, lock_file = 2, new = 2, take = 4 }
 funnel = [
     "acquire_hooked",
     "acquire_in_hooked",
@@ -547,6 +617,7 @@ effect_free = [
 [[module]]
 path = "src/interaction.rs"
 crate_path = "upstroke::interaction"
+shared = { ask = 2, id = 6, poll = 2, resolve = 4, sleep = 2 }
 funnel = []
 effectful = [
     "write_question",
@@ -642,6 +713,7 @@ effect_free = [
 [[module]]
 path = "src/events/log.rs"
 crate_path = "upstroke::events::log"
+shared = { durability_ledger = 2, fmt = 2, new = 2, phase = 2, point = 2, synced = 2, written_kill_shape = 2 }
 funnel = [
     "append",
     "append_hooked",
@@ -707,6 +779,7 @@ effect_free = [
 [[module]]
 path = "src/runner/host.rs"
 crate_path = "upstroke::runner::host"
+shared = { new = 2, start_write_command = 2 }
 funnel = []
 effectful = [
 ]
@@ -848,6 +921,7 @@ effect_free = [
 [[module]]
 path = "src/runner/container.rs"
 crate_path = "upstroke::runner::container"
+shared = { discard = 2, materialize = 2, new = 3, phase = 3, trace = 2 }
 funnel = [
     "write_intent",
     "create_container",
@@ -923,6 +997,7 @@ effect_free = [
 [[module]]
 path = "src/runner/invocation.rs"
 crate_path = "upstroke::runner::invocation"
+shared = { parse = 3, render = 3 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1049,10 +1124,34 @@ funnel = []
 # `engine::topology`, and denied by its path in clippy.toml. `Run` is
 # `pub(super)` too, so the inherent method is recorded with its receiver, as
 # `src/workspace.rs` records `Workspace::branch_exists`.
+#
+# The v0.1 conductor's three public run entry points and their two seams are
+# rows here since 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`), when they moved
+# out of `src/engine/mod.rs` so that the facade calls nothing denied and
+# carries no allow. `run_contained` establishes containment through the step
+# it is handed and calls `run_harness_inner_on`, the row above, without
+# leaving this file; `run_harness_on` is `run_contained` with production's
+# containment step supplied, `run_harness` is that on the legacy-workspace
+# `HostRunner`, `run_with` builds the `Harness`, and `run` supplies
+# `BuiltinAdapters` -- each reaches the coordinator through the one below it,
+# in this file, which is the module-closed walk the rule above states. The
+# three `pub fn`s are re-exported by `engine`, so `upstroke::engine::run`,
+# `::run_with` and `::run_harness` are the public paths they always were, and
+# clippy resolves a call through the re-export to the path denied here: their
+# callers are `src/main.rs`, `src/engine/tests.rs` and
+# `src/runner/container/resolve/tests.rs`, each under its own recorded allow of
+# `clippy::disallowed_methods`. The two seams are `pub(super)` because
+# `engine::tests` drives them; that is the set of modules the facade's private
+# items were visible to, no wider.
 effectful = [
     "Run::drain_and_report",
+    "run",
+    "run_contained",
+    "run_harness",
     "run_harness_inner_on",
     "run_harness_inner_with_id",
+    "run_harness_on",
+    "run_with",
 ]
 effectful_unnameable = []
 # `emit` appends through the Event funnel with `EventSite::LegacyAppend`;
@@ -1086,8 +1185,21 @@ funnel = []
 # only primitive is a read of the frozen plan. `pub(super)` in a private `mod`
 # of `engine`, reachable from every module under `engine::topology`, so denied
 # by its path.
+#
+# The three public resume entry points and their two seams are rows here since
+# 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`), moved out of `src/engine/mod.rs`
+# with the run entry points and for the same reason; `src/engine/coordinator.rs`'s
+# record states it. `resume_contained` establishes containment and calls
+# `resume_harness_inner_on` without leaving this file, and `resume_harness_on`,
+# `resume_harness`, `resume_with` and `resume` each reach it through the one
+# below, as the run entry points do.
 effectful = [
+    "resume",
+    "resume_contained",
+    "resume_harness",
     "resume_harness_inner_on",
+    "resume_harness_on",
+    "resume_with",
 ]
 effectful_unnameable = []
 effect_free = []
@@ -1158,6 +1270,7 @@ effect_free = [
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
+shared = { drop = 3 }
 funnel = []
 effectful = [
     "Workspace::run_git_with_private_hooks",
@@ -1206,6 +1319,7 @@ effect_free = [
 [[module]]
 path = "src/gates.rs"
 crate_path = "upstroke::gates"
+shared = { check = 2, name = 2 }
 funnel = []
 effectful = [
     "run_all",
@@ -1231,6 +1345,7 @@ effect_free = [
 [[module]]
 path = "src/review.rs"
 crate_path = "upstroke::review"
+shared = { passes_for = 2 }
 funnel = []
 effectful = [
     "run_review",
@@ -1261,6 +1376,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
+shared = { deref = 2, drop = 5, fmt = 2 }
 funnel = [
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
@@ -1371,6 +1487,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc/hooks.rs"
 crate_path = "upstroke::agent::proc::hooks"
+shared = { point = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1405,6 +1522,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc/ambient.rs"
 crate_path = "upstroke::agent::proc::ambient"
+shared = { join_ambient_job = 2, set_container_reclaim_scope = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1474,6 +1592,7 @@ effect_free = ["collect", "drop", "failure_report"]
 [[module]]
 path = "src/agent/proc/pipe_io.rs"
 crate_path = "upstroke::agent::proc::pipe_io"
+shared = { try_read = 3, try_write = 3 }
 funnel = []
 effectful = []
 # These private operations create/transfer writable pipe handles or write the
@@ -1581,6 +1700,7 @@ effect_free = [
 [[module]]
 path = "src/capacity.rs"
 crate_path = "upstroke::capacity"
+shared = { describe = 2, fmt = 5, parse = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1728,6 +1848,7 @@ effect_free = [
 [[module]]
 path = "src/events/mod.rs"
 crate_path = "upstroke::events"
+shared = { fmt = 2, task = 2 }
 funnel = []
 effectful = []
 effectful_unnameable = []

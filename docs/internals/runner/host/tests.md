@@ -2716,15 +2716,19 @@ in every observation except how many times the filesystem was asked, and
 that observation belongs to a fixture that would have to drive a whole
 engine run against a moving filesystem.
 
-The expectation is written out — two construction sites, both in
-`src/engine/mod.rs`, being `run_harness` and `resume_harness` — rather
-than counted from the tree, because a count read from the tree grows
-with it.
+The expectation is written out — two construction sites, `run_harness` in
+`src/engine/coordinator.rs` and `resume_harness` in `src/engine/resume.rs` —
+rather than counted from the tree, because a count read from the tree grows
+with it. Until 2026-09-20 both were in `src/engine/mod.rs`: the facade's entry
+points moved into the conductor modules they drive so that the facade calls
+nothing denied and carries no allow (`PR306-FACADE-INLINE-ESCAPE`), the facade
+re-exports them, and the two constructions moved with them, one per file. The
+census still counts two in the engine and none anywhere else.
 
 `CONSTRUCTORS` is why the census survived `HostRunner::for_legacy_workspace`
 (PR #271): a second constructor is a second spelling of the same thing this
 counts, and one that the census did not know would have read as *no* runner
-in `src/engine/mod.rs` rather than as a second one. Both spellings are
+in the file that constructs it rather than as a second one. Both spellings are
 counted and both appear in the control.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `const SITES: [(&str, usize); 6] = [`
@@ -2736,9 +2740,10 @@ and how many times in each file.
 
 The injected control contains comments, literals, a typed test function and one later production construction per constructor spelling. It must add exactly `CONSTRUCTORS.len()` counts alone and when appended to each of the six source files.
 
-## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
+## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let conductors = [`
 
-And the two are the run and the resume facade, each of which then
+And the two are the run and the resume entry point the facade re-exports,
+each read from the conductor module that defines it, and each of which then
 borrows that one runner for pre-flight and every attempt.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {`

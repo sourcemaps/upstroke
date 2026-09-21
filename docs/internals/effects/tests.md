@@ -588,27 +588,70 @@ type list, which is seven, and all three lints fire.
 
 ## `fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {`
 
-The guard #306 owes for putting `#![allow(clippy::disallowed_methods)]` on
+The guard #306 owed for putting `#![allow(clippy::disallowed_methods)]` on
 `src/engine/mod.rs`. A lint level is scoped by the module tree, so that allow
-reaches every module under `engine::topology` unless something below it says
-otherwise, and the placement scan cannot notice: `governed_allows` records
+reached every module under `engine::topology` unless something below it said
+otherwise, and the placement scan could not notice: `governed_allows` records
 what a file writes, and a child exempted by inheritance writes nothing. The
-`deny` on `src/engine/topology.rs` is what says otherwise, and an attribute
-somebody can delete is held here twice. Lexically: the facade allows exactly
-the set this test models, the root denies all three governed lints at file
-level, and no child under the root writes an allow of its own. Executed:
-three fixtures compiled with `lint_fixture` against the real denylist -- a
-facade root declaring a topology module declaring a child that reaches one
-denied primitive per governed lint (a denied wrapper called, a denied type
-in a signature, a denied macro) while the facade calls a second denied
-wrapper itself. With no attribute anywhere all four reaches are reported. With the
-facade's allow and an open topology file, the child's reach into the wrapper
-goes unreported -- the hazard, executed rather than described. With the
-facade's allow and the tree's deny, the child's three come back as build
-errors and the facade's own call stays allowed. What it catches: the deny
-deleted or narrowed, a child re-allowing below it, the facade's allow widened
-past what the root re-denies, and a toolchain whose inheritance or override
-semantics moved.
+`deny` on `src/engine/topology.rs` is what said otherwise. The facade's allow
+is gone since 2026-09-20 (`PR306-FACADE-INLINE-ESCAPE`); the deny stays,
+because it is what keeps the topology closed against an allow written above it
+by anyone, and an attribute somebody can delete is held here twice. Lexically:
+the root denies all three governed lints at file level, no child under the
+root writes an allow of its own, and whatever the facade writes -- nothing,
+today -- is within the ancestor allow the fixtures model. Executed: three
+fixtures compiled with `lint_fixture` against the real denylist -- an ancestor
+declaring a topology module declaring a child that reaches one denied
+primitive per governed lint (a denied wrapper called, a denied type in a
+signature, a denied macro) while the ancestor calls a second denied wrapper
+itself. With no attribute anywhere all four reaches are reported. With the
+allow #306 wrote and an open topology file, the child's reach into the wrapper
+goes unreported -- the hazard, executed rather than described. With that allow
+and the tree's deny, the child's three come back as build errors and the
+ancestor's own call stays allowed. What it catches: the deny deleted or
+narrowed, a child re-allowing below it, the facade allowing something the
+fixtures do not model, and a toolchain whose inheritance or override semantics
+moved. The allow the fixtures carry is stated (`MODELLED_ANCESTOR_ALLOW`)
+rather than read from the facade, because the facade no longer writes one and
+a fixture with nothing to inherit would prove nothing about the deny.
+
+## `const ENGINE_FACADE: &str = "src/engine/mod.rs";`
+
+The root of every walk below: the one file every module under `engine`,
+topology included, descends from.
+
+## `const FACADE_ALLOW_OF_306: &str = "#![allow(clippy::disallowed_methods)]\n";`
+
+What `src/engine/mod.rs` wrote from #306 (`94c21c45`) until 2026-09-20, kept
+as the ancestor allow the sibling and route fixtures compile under. It is
+history stated, not a reading of the tree: the facade writes nothing now, and
+a fixture has to show what an allow above a module does to it in order to show
+what the fence, or the absence of the allow, is worth.
+
+## `struct EngineModule {`
+
+One module file under the facade, as the walk found it: who declared it,
+whether it is compiled only under `cfg(test)` (its own declaration or one
+above it), the governed lints allowed in effect at its parent, what it writes
+and denies at file level, its source, and the inline modules the file holds at
+every depth.
+
+## `impl EngineModule` › `fn in_effect(&self) -> BTreeSet<String> {`
+
+What is allowed in effect at the file's own scope: what it inherited, less
+what it denies, plus what it writes. A file that writes both an allow and a
+deny of one lint is read as allowing it, which is the conservative reading.
+
+## `fn engine_module_tree() -> Vec<EngineModule> {`
+
+Every module the engine facade declares, recursively, derived and never
+listed. `scan_modules` reads each file's `mod` declarations and its inline
+modules; `candidates_for` and `sole_present` resolve a declaration to exactly
+one file, through the inline path when it is written inside an inline module;
+and each entry carries forward what is in effect at the file that declares it.
+A declaration that resolves to no file, or to two, is a panic, because a walk
+that skips what it cannot read reports a tree it did not see. Three guards
+share it, so they judge one derivation.
 
 ## `fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits() {`
 
@@ -624,36 +667,286 @@ whole suite, because `assembly`, `classify`, `options`, `preflight` and
 nowhere in `effects/allowlist.toml` -- the placement scan records what a file
 writes. Since round 3 those five carry the topology root's fence.
 
-The boundary is derived, never listed. Starting from the facade, every `mod`
-declaration is read by `scan_module_declarations` and resolved by
-`candidates_for` to exactly one file, and the walk carries the allows in
-effect at each parent: what it inherited, less what it denies, plus what it
-writes. A module inheriting a governed lint must either deny it at file level
+The boundary is derived, never listed (`engine_module_tree`). A module
+inheriting a governed lint must either deny it at file level
 (`file_level_denies`) or write its own module-level allow of it that
-`effects/allowlist.toml` records for that path; one that inherits something
-and writes no allow at all must carry the whole three-lint fence, the form the
-topology root wrote first. The walk recurses through recording children too,
-so a helper declared under `attempt.rs` tomorrow would be judged against
-`attempt.rs`'s allow the day it is declared. Then the review's witness is
-compiled with `lint_fixture` against the real denylist, in three shapes: with
-no attribute anywhere, a sibling's `std::fs::write` and the facade's own
-`write_json` are both reported; with the facade's allow, the sibling open and a
-denying topology module referencing the sibling's fn, nothing is reported and
-the crate builds -- the hole, executed; with the facade's allow and the sibling
-carrying the fence the children write, the sibling's reach is a build error
-and the facade's own call stays allowed.
+`effects/allowlist.toml` records for that path. **And a module the facade
+declares itself states its own level whatever the facade writes**: the whole
+three-lint fence, the form the topology root wrote first, or a recorded allow
+of its own. That second rule is unconditional since 2026-09-20, when the
+facade's allow went: nothing is inherited at the first level today, and a rule
+that only judged what is inherited would have stopped holding the five fences
+the day they stopped mattering -- which is the day before somebody writes an
+allow above them again. The walk recurses through recording children too, so
+a helper declared under `attempt.rs` tomorrow is judged against `attempt.rs`'s
+allow the day it is declared, and a module declared under a fenced file
+inherits the fence and passes. Then the review's witness is compiled with
+`lint_fixture` against the real denylist, in three shapes: with no attribute
+anywhere, a sibling's `std::fs::write` and the ancestor's own `write_json` are
+both reported; with the allow #306 wrote, the sibling open and a denying
+topology module referencing the sibling's fn, nothing is reported and the
+crate builds -- the hole, executed; with that allow and the sibling carrying
+the fence the children write, the sibling's reach is a build error and the
+ancestor's own call stays allowed.
 
-What it catches: a fenced module's deny deleted or narrowed; a module declared
-anywhere under `engine` without a fence or a row while something is in effect
-above it; a recording module whose row stops recording a lint its parent
-allows; the facade's allow widened past what a child re-denies; a toolchain
-whose inheritance or override semantics moved. What it does not see: the
-facade's own items, which its allow covers by design and its row justifies; a
-`deny` written through `cfg_attr`, which the file-level reader does not
-evaluate and this test therefore does not credit; a `mod` declaration
-carrying a `path` attribute, which the scanner refuses rather than resolves;
-and every module outside `engine`, where the same inheritance rule holds and
-nothing here walks.
+What it catches: a fenced module's deny deleted or narrowed, today and not
+only under an allow; a module declared by the facade with neither a fence nor
+a row; a module declared anywhere below without one while something is in
+effect above it; a recording module whose row stops recording a lint it
+writes; a toolchain whose inheritance or override semantics moved. What it
+does not see: what a file HOLDS rather than declares -- its own items and its
+inline modules, which the two tests below answer for; a `deny` written through
+`cfg_attr`, which the file-level reader does not evaluate and this test
+therefore does not credit; a `mod` declaration carrying a `path` attribute,
+which the scanner refuses rather than resolves; and every module outside
+`engine`, where the same inheritance rule holds and nothing here walks.
+
+## `fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {`
+
+`PR306-FACADE-INLINE-ESCAPE`, the fourth review of #306, and the surviving
+half of `PR7-WRAPPERS-EMPTY-DOMAIN`. The two guards above fence what the
+facade declares out of line. Under the allow #306 wrote on the facade, two
+routes from `engine::topology` to a raw effect went round every fence, because
+they went through what the facade holds: an attribute-free inline
+`mod x { .. }` written in it, which no guard walked, and a function placed
+directly in it, which nothing classifies. Each called `std::fs::write`, each
+was referenced from the production body of `park_question`, and each left
+clippy at exit 0 and the suite green. The function does not need a visibility
+keyword: a private item of `engine` is visible to every module under
+`engine::topology`, which is also why classifying the facade would not have
+answered for it -- the classification domain reads functions that declare a
+visibility.
+
+What closes both is that the facade allows nothing. Its six entry points are
+defined in `src/engine/coordinator.rs` and `src/engine/resume.rs` and
+re-exported, so the file calls nothing denied and needs no allow; it carries
+the fence its children carry. This test holds that in two ways.
+
+Lexically, over a set derived from the walk: for every module that a topology
+module descends from -- found by following each topology module's parents up
+the walked tree, and required to include at least one module outside the
+topology, which is the facade -- `governed_allows` finds no `allow` or `expect`
+of a governed lint anywhere in the file, in any form (file level, on an inline
+module, on a `mod` declaration, on an item), and nothing is allowed in effect
+by inheritance; and the facade, which no walked module stands above, denies
+all three governed lints at file level, so its level is stated rather than
+left to the crate root and the command line.
+
+By execution: each route is compiled through `lint_fixture` against the real
+denylist as a crate root holding the route and declaring a topology module
+that carries the root's deny and calls into it. Under no attribute the reach
+is reported, so the fixture sees it. Under the allow #306 wrote it is not, and
+the crate builds with a denying topology module calling a raw write -- the
+route as the review executed it. Under this tree's facade header, which is the
+leading inner attributes of `src/engine/mod.rs` read from the file and pasted
+verbatim, it is a build error naming `std::fs::write`. The direct route is
+compiled with a private function, the spelling no visibility census can see.
+
+**And the facade holds no code at all** (`items_beyond_declarations`). Every
+reading above is of source text, and an allow does not have to be written in
+the text it takes effect in. The review of `409a6138`
+(`PR309-FACADE-EXPANSION-ESCAPE`) brought an allowed inline module into the
+facade twice with every guard green: through `include!` of a `.inc` file,
+which no scan reads, and through a macro taking `$kind:ident` and
+`$level:ident`, expanding `#[$level(clippy::disallowed_methods)] $kind x { .. }`
+and invoked with `(mod, allow)`, which spells neither `mod x {` nor `allow(`
+anywhere. A scan cannot expand Rust, so the boundary refuses what it cannot
+read: a module outside the topology that a topology module descends from holds
+its leading attributes, `mod x;` declarations (under `#[cfg(test)]` or not)
+and `use` re-exports, and nothing else -- no inline module, no function, no
+constant, no macro definition or invocation, no `include!`, no attribute on a
+declaration. That is a whitelist and not a list of spellings, so it does not
+depend on recognising the next one; and it costs the facade nothing, because
+declaring and re-exporting is all it does since its entry points moved. The
+harmless inline child the round before allowed is refused now too, on purpose:
+a file that holds no code cannot hide any.
+
+What it catches: an allow or expect of a governed lint written anywhere in the
+facade or in any other module the topology descends from; anything in the
+facade that is not a declaration or a re-export, however it is spelled; the
+facade's deny deleted or narrowed; and a toolchain under which an inline
+module or a private item stops inheriting its file's level. What it would
+still miss: a route that needs no allow at all -- a chain of undenied
+functions from a topology module to an effectful one, which
+`effects/wrappers.toml`'s header names as the residue the classification
+boundary leaves and `no_topology_module_calls_a_funnel_in_production` closes
+only from the funnel end; **an allow that arrives by expansion anywhere the
+whitelist does not reach** -- a fenced sibling, a topology file, any other
+module of the crate -- where a substituted `#[$level(..)]` or a `cfg_attr` is
+as unread by `governed_allows`, and so by the placement scan and by every
+fence here, as it was in the facade (the facade forms are executed, by the
+first review of #309; the form in a file that carries a deny is reasoned; and
+the form that needs no allow at all -- a macro-named function under an allowed
+legacy module's existing allow -- is executed, by the second review, and is
+what `PR7-WRAPPERS-EMPTY-DOMAIN` is restored for, beside
+`an-applied-cfg-attr-is-invisible-to-the-scan`); and everything in an allowed,
+classified file that the classification domain does not read, which the test
+below states.
+
+## `fn items_beyond_declarations(source: &str) -> Vec<(usize, String)> {`
+
+What a file holds besides its leading inner attributes, `mod x;` declarations
+and `use` items, as (line, item) pairs. Read from the text with comments and
+strings blanked, one `;`-terminated item at a time: an item passes only if,
+after an optional `#[cfg(test)]`, it is `mod name` or `<pub..> mod name`, or a
+`use` whose every byte belongs to a path, a group or a visibility. Everything
+else is returned, so the reader does not have to know what it is looking at to
+refuse it. `a_declaring_module_holds_declarations_and_re_exports_and_nothing_else`
+pins it on the facade itself and on twelve additions, the review's `include!`
+and substituting macro among them.
+
+## `fn includes_a_file(source: &str) -> bool {`
+
+Whether a source invokes `include!` -- the identifier `include`, then `!` --
+with comments and strings blanked, so `include_str!`, `include_bytes!` and
+prose do not count.
+
+## `fn no_scanned_source_includes_a_file_no_scan_reads() {`
+
+No source the placement scan reads SPELLS `include!`. What it includes is Rust
+that nothing here reads: the placement scan, the module walk and the
+classification census each read `.rs` sources. The tree has none. **It refuses
+the spelling, not the macro**: the second review of #309 wrote
+`use std::include as rf2_read; rf2_read!("rf2_review.inc");` in
+`src/engine/coordinator.rs` and this test stayed green, with clippy at exit 0
+and 185 tests passing, where the literal spelling fails it. The round before
+claimed this closed the review's `include!` form "for every file"; it does
+not, and resolving a macro's name is not something a reading of the text can
+do. In the engine facade the alias is refused all the same, by the whitelist:
+the invocation is not a declaration or a re-export whatever it is called.
+Elsewhere it is part of what `PR7-WRAPPERS-EMPTY-DOMAIN` records.
+
+## `fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {`
+
+`items_beyond_declarations` on the real facade, which must hold nothing beyond
+its declarations, and on the facade with one addition at a time: four
+legitimate ones that pass, and eight that are refused -- an inline module
+empty and not, a function, a constant, `include!`, an allow on a declaration,
+a `path` attribute, and the review's macro, whose definition and invocation
+are two items and both refused.
+
+Then the eleven separators rustc reads (`RUSTC_WHITESPACE`), one at a time
+between `mod` and a name: the whitelist admits the declaration **and
+`scan_modules` reads the same one**, and with `#[rustfmt::skip]` in front it
+is refused. The pair is the point. At `84123789` the whitelist split words
+with `split_whitespace` and the walk wanted ASCII whitespace, so for U+000B,
+U+0085, U+2028 and U+2029 the facade could declare a child the whitelist
+admitted and no walk judged; the review executed it with U+000B, and only the
+facade's own deny kept an effect from following.
+
+## `fn every_separator_rustc_reads_is_one_every_reader_here_reads() {`
+
+The one definition of a token separator, held two ways. **By value**: the
+eleven code points, written out. The compiler's own answer is in the round's
+evidence and not in the suite -- rustc builds a `fn` whose name follows each
+of the eleven with nothing reported, and refuses U+00A0 and U+200B as unknown
+tokens -- because a fixture compiled here is one more child process of the
+test binary, and this test's first draft compiled three. **By the readers**,
+for each of the eleven: the tokenizer keeps every byte offset and line and
+leaves no separator that a byte test or `char::is_whitespace` would not read;
+the review's escape (a) is read on this tree's own `src/engine/attempt.rs` --
+`#[rustfmt::skip]`, `pub(super) mod`, the separator, `rf4_child;` is one
+declared child, U+0020 being the control that always was; and the other
+readers of the same text answer as they do for a space -- `include`, the
+separator, `!` includes a file, a file-level deny behind the separator is a
+deny, a `path` attribute whose name follows the separator is refused, and an
+allow whose lint follows it is an allow of that lint.
+
+What it does not hold: that the walk then *judges* the child. That is
+`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`,
+which walks the tree on disk from what `scan_modules` reports; the compiled
+witness, with the child file and a topology caller, is in the round's
+evidence and not in the suite.
+
+## `fn inline_module_openers(source: &str) -> usize {`
+
+How many inline modules a file's text opens, read the crude way: `mod`, a
+name, a `{`, in the text with comments and strings blanked. It is deliberately
+not the scanner. `scan_modules` is checked against it per file, so the day the
+scanner's inline branch goes quiet again -- which is how an inline module came
+to be walked by no guard in the first place -- the two disagree and the guard
+below fails, rather than both agreeing that a file holds none. It reads the
+same text the scanner reads, so it is a check on the scanner and not on the
+text: **a module that is not written as `mod name {` is invisible to both, and
+they agree.** The round before this sentence claimed the opposite -- that a
+macro body made the two disagree and fail closed -- and the review of
+`409a6138` disproved it with a macro that substitutes the `mod` keyword:
+neither reading finds a module, both count zero, and the guard passed over a
+production child. A literal `mod x {` inside a macro body is refused by the
+scanner (`ModuleShapedMacroBody`); a substituted one is not seen by anything.
+That is why the facade is held by a whitelist instead
+(`items_beyond_declarations`), and why this guard claims the modules a file
+WRITES and nothing about what it expands to.
+
+**The two readings are not independent, and the fourth review of #309 showed
+how far that goes.** Both wanted `u8::is_ascii_whitespace` after `mod`, so for
+U+000B, U+0085, U+200E, U+200F, U+2028 and U+2029 both counted zero and
+agreed. Both are right for all eleven separators now, and for one reason, not
+two: the tokenizer they share writes those six as spaces (`RUSTC_WHITESPACE`).
+This is what their agreement is worth: it catches a defect in the scanner's
+own walk -- a branch that stops reporting, a macro or an attribute skipped too
+far, a depth miscounted, which is how inline modules came to be unread in the
+first place -- and it catches nothing they share: a defect in the tokenizer, or
+a spelling of a module neither recognises (`mod`, a separator, an ASCII name,
+`{`). What holds the shared part is
+`every_separator_rustc_reads_is_one_every_reader_here_reads` and the scan's own
+shape test, not this comparison.
+
+## `fn every_inline_module_under_the_engine_facade_is_walked_and_answered_for() {`
+
+The half of `PR306-FACADE-INLINE-ESCAPE` that was a hole in the guards
+themselves: `scan_module_declarations` emits a declaration only for `mod x;`,
+so an inline module was never a module to any census. An inline module has no
+file and no row; it inherits the level of the file it is written in and can
+write attributes of its own, outside or inside its braces. So it is answered
+for by its file, and this test makes that an assertion. For every file under
+the facade, `scan_modules` reports every inline module the source writes as
+`mod name { .. }`, at every depth -- not one a macro or an `include!` expands
+to, which no reading of the text finds -- and the count must equal what
+`inline_module_openers` counts; for each one, every governed lint
+allowed in effect -- by the file, or by the module's own outer and leading
+inner attributes -- must be recorded by the file's row in
+`effects/allowlist.toml`; and wherever anything is allowed in effect in
+production code, in a file or in an inline module of it, the file must be in
+`CLASSIFIED_MODULES`, whose census reads every function the file writes as
+`fn name`, inline modules included -- and not one a macro names.
+A recorded allow with no classification behind it is exactly what the facade
+had: its row recorded its allow, and this test refuses that state all the
+same -- an allowed production file outside the classification domain.
+
+Floors keep it from passing on nothing: more than ten inline modules in more
+than four files, at least one nested inside another (this tree nests seven
+under `recover::chain`), and more than two production files found with
+something allowed in effect, so the classification half judged something.
+
+**Being a classified module answers for a name, and a name is not a
+callable.** This guard's last step rests on the classification census, and the
+review of `409a6138` showed what that was worth
+(`PR309-INLINE-WRAPPER-NAME-COLLISION`): the census compares bare names, so a
+`pub(crate) fn run` calling `std::fs::write`, written in an inline module of
+`src/engine/coordinator.rs`, was answered for by the row of the entry point
+`run` this same change had classified, denied under a path that is not its
+own, and reachable from `engine::topology` with clippy at exit 0 and this
+guard green. It is closed in the census, for every classified module and not
+for `engine` alone: `every_name_more_than_one_callable_bears_is_pinned_by_its_count`
+(`docs/internals/effects/tests/classification.md`).
+
+What it catches: a written inline module the scanner stops reporting; an
+inline module that writes an allow its file's row does not record; an allowed
+production file, or an inline module of one, outside the classification
+domain. What it would still miss, stated rather than implied: a module that
+arrives by expansion, above; and being in
+`CLASSIFIED_MODULES` answers for a file's FUNCTIONS and not for everything a
+file can hold. The domain (`externally_reachable_fns`) reads `fn` items that
+declare a visibility, trait-impl methods and public traits' default bodies. A
+`const` or `static` of an allowed, classified file whose value is a closure or
+a function pointer is code under that file's allow that the domain does not
+read and the denylist cannot name, and a topology module that can see it can
+call it. That is reasoned from the domain's definition, not executed; it
+predates the facade's allow, holds of every classified module rather than of
+`engine`, and needs a design -- what the classification says about a value
+that carries code -- rather than a guard. And the walk starts at the engine
+facade: an allow-bearing parent elsewhere in the crate is outside it.
 
 ## `fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {`
 
@@ -1571,6 +1864,35 @@ identifier rather than as the keyword it names.
 (16) **CRLF.** The guest checks this tree out with CRLF, and every
 structural answer above has to be the same there. Driven by converting
 each fixture rather than by trusting that nothing here reads a line.
+
+## `fn the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write() {`
+
+The scanner's inline half, pinned on one fixture. `scan_modules` must report
+every inline module the fixture writes, at every depth, in source order -- with its enclosing
+inline path, its line, whether it is test-only by inheritance, the outer
+attributes written on it and the body whose leading inner attributes are the
+rest of what it writes -- and must not report what a comment or a string
+spells. Its out-of-line half must equal what `scan_module_declarations`
+answers for the same source; since that entry point is now the declared half
+of this one, the equality pins the adapter and proves nothing about the
+scanner before the change. What holds the older behaviour is the literal
+expectation beside it and the scan tests that predate the change
+(`the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute`,
+`the_module_resolver_refuses_every_shape_it_cannot_resolve` and the rest),
+which pass unedited. An
+attribute-free inline module directly below an attributed item, and one
+directly below an attributed `mod x;` declaration, must be handed neither
+neighbour's attributes. `inline_module_openers`, the cruder reading the engine
+guard checks the scanner against, is held to the same fixture, and
+`leading_inner_attributes` to three: a file's head, a file whose inner
+attribute comes after an item, and CRLF.
+
+Then the eleven separators rustc reads (`RUSTC_WHITESPACE`), one at a time
+after `mod` and again before the `;` or the `{`: one declared child, one
+inline module, and one opener by the cruder reading, for each. At `84123789`
+the scanner and the cruder reading both wanted ASCII whitespace there and read
+five of the eleven; the review executed one of the six they did not, `mod`,
+U+200E, a child of `src/engine/attempt.rs`, with every gate green.
 
 ## `fn is_the_literal_mod_tests_form(name: &str, inline_path: &[String], guard: &str) -> bool {`
 

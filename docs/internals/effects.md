@@ -229,6 +229,61 @@ build owns rather than a claim a reviewer has to re-check.
 
 Whether it carries a `reason = "…"`.
 
+## `pub const RUSTC_WHITESPACE: [char; 11] = [`
+
+The eleven code points rustc's lexer reads as whitespace between tokens:
+U+0009 TAB, U+000A LF, U+000B VT, U+000C FF, U+000D CR, U+0020 SPACE,
+U+0085 NEL, U+200E LRM, U+200F RLM, U+2028 LS and U+2029 PS. **This is the one
+definition of a token separator here**, and it is rustc's rather than a
+library's: `u8::is_ascii_whitespace` leaves out U+000B and cannot see the five
+that are not ASCII, and `char::is_whitespace` leaves out U+200E and U+200F and
+adds code points rustc refuses between tokens, U+00A0 among them.
+`every_separator_rustc_reads_is_one_every_reader_here_reads` pins the eleven by
+value; that rustc builds each of them with nothing reported, and refuses
+U+00A0 and U+200B (whitespace to the eye and to no predicate) as unknown
+tokens, was compiled once for round 4 of #309 and is in that round's evidence,
+not in the suite.
+
+The fourth review of #309 measured the difference at `84123789`. Three
+readers took three sets -- the module walk `u8::is_ascii_whitespace`, the name
+reader `char::is_whitespace`, the facade whitelist `str::split_whitespace` --
+and two ordinary declarations, written with `#[rustfmt::skip]` and no macro,
+passed every gate while a topology caller wrote through them: `mod`, U+200E, a
+child of `src/engine/attempt.rs` that no walk judged, and `fn`, U+200E, a name
+in `src/engine/coordinator.rs` that was no classification obligation and no
+count. In the facade the whitelist admitted `mod`, U+000B, a name, and the walk
+did not read it; only the facade's own deny kept an effect from following.
+rustc reports none of this: its text-direction lints cover literals and
+comments, not the space between tokens.
+
+**It is applied once, where every reader gets its text.** The module walk, the
+name reader, the whitelist and the other readers in this module and its tests
+each decide where a token ends, with a byte test, a `trim` or a
+`split_whitespace`, and they read [`blank_comments_and_strings`] or
+[`production_code`], which is made from it. So that function writes each of
+the six separators those predicates do not all read -- U+000B, U+0085, U+200E,
+U+200F, U+2028, U+2029 -- as spaces of the same byte length, and on its output
+the three library predicates and rustc's agree. A reader added later inherits
+that; a predicate repaired reader by reader is what rounds 1 to 3 did, each
+leaving the next reader's blind spot. [`declared_fns`], which matches text
+rather than testing bytes, names this definition itself; the `trait`, `impl`
+and `for` readers of [`externally_reachable_fns`] read a keyword as a whole
+word and ask nothing of what follows it ([`keyword_sites`]). The byte readers
+([`census_domain`]'s `whitespace` among them) keep `u8::is_ascii_whitespace`,
+which on that text is the whole set.
+
+**What it does not reach.** A reader that reads the raw source instead of the
+tokenizer's text is outside it; the module walk read an attribute's name that
+way and now reads it from the tokenizer's text (see `scan_modules`).
+[`blank_comments`] keeps literals and is not rewritten: its callers look for a
+string's contents, not for where a token ends. And a separator is one thing a
+recogniser can misread, not the only one: see `PR7-WRAPPERS-EMPTY-DOMAIN`.
+
+## `pub fn is_rustc_whitespace(character: char) -> bool {`
+
+Whether rustc reads `character` as whitespace between tokens:
+[`RUSTC_WHITESPACE`] as a predicate.
+
 ## `pub fn blank_comments(source: &str) -> String {`
 
 `source` with every comment **removed** and every string literal **kept**
@@ -354,9 +409,30 @@ scalar is not a quote — rather than by a list.
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `at += 2;`
 
-An escape. The longest Rust spells is `\u{10FFFF}`, which closes at
-`from + 11`, so the window is bounded and a runaway scan over the rest
-of the file cannot happen.
+An escape, read the way rustc's lexer reads one: past the escaped character,
+then to the next quote that is not itself escaped. A line break before that
+quote means this was no char literal, so a scan cannot run past its own line.
+
+**It used to be a window, and the window was wrong.** This note said the
+longest escape Rust spells is `\u{10FFFF}`, closing at `from + 11`, and the
+reader stopped looking at `from + 13`. A Unicode escape is one to six hex
+digits and **any number of underscores**, so `'\u{7b____________________}'` is
+legal and longer than any window. The regression lens of #309's fourth review
+executed what follows from that at `84123789`: the reader gave up on the
+literal, took the `','` after it for a char literal, and the `}` of a
+following `'}'` survived as code. Written twice in each of two `impl` blocks
+inside `stringify! { .. }` -- once with `'}'` and once with `'{'`, which keeps
+the braces balanced for the module walk -- it closed both impls early, so two
+effectful `rf4_write`s read as file-scope twins and the sharing rule admitted
+two paths under one denial; fmt, clippy and 188 tests passed while a topology
+caller wrote through the undenied one. The same text with the underscores
+removed was refused. **A structural reading is only as good as the
+tokenization under it**: every brace position [`reachable_fn_owners`] compares
+comes from this function. Pinned by
+`a_multi_byte_char_literal_does_not_desync_the_blanker` (each legal escape
+form beside a brace) and by
+`a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+(the review's witness and its control, both refused).
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `let width = match *bytes.get(at)? {`
 
@@ -375,8 +451,19 @@ literal ends at end of input — a file that does not compile.
 ## `pub fn blank_comments_and_strings(source: &str) -> String {`
 
 `source` with every comment and string literal replaced by spaces of the same
-length, newlines preserved. The output is exactly as long as the input, so an
-offset, a line and a column measured in it are `source`'s own.
+length, newlines preserved, **and every token separator rustc reads that is
+not ASCII whitespace written as spaces of its own byte length**
+([`RUSTC_WHITESPACE`]: U+000B, U+0085, U+200E, U+200F, U+2028, U+2029). The
+output is exactly as long as the input, so an offset, a line and a column
+measured in it are `source`'s own.
+
+This is the tokenizer every structural reader here starts from, which is why
+the separators are settled here and not in each reader: after it, a byte test
+for ASCII whitespace, `char::is_whitespace` and `split_whitespace` all read
+exactly what rustc reads between tokens. A source that writes none of the six
+comes back byte for byte as `code_bytes_only` made it. LF stays LF, and the
+other four ASCII separators stay what they are, so a CRLF checkout reads as it
+did.
 
 ```text
 in: /*why*/let x = "docker";
@@ -396,15 +483,20 @@ can no longer contain. [`blank_comments`] is the half that keeps it, and
 `the_notes_give_each_blanker_its_own_contract` runs both worked examples
 above against the functions themselves.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
+## `fn code_bytes_only(source: &str) -> String {`
+
+The blanking itself, unchanged since before the separators were settled above
+it: comments and literals to spaces, code bytes kept, newlines kept.
+
+## `fn code_bytes_only(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
 
 Newlines survive so line numbers do.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `let mut j = i;`
+## `fn code_bytes_only(source: &str) -> String` › `let mut j = i;`
 
 `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `match char_literal_end(bytes, i) {`
+## `fn code_bytes_only(source: &str) -> String` › `match char_literal_end(bytes, i) {`
 
 [`char_literal_end`] decides, so this and its sibling in
 [`blank_comments`] cannot drift apart.
@@ -533,16 +625,21 @@ test: a frozen list that lived in the file it freezes would agree with any
 edit to that file.
 
 One entry was added after PR5, by the owner's decision on #306
-(`PR7-WRAPPERS-EMPTY-DOMAIN`): `src/engine/mod.rs`, the v0.1 conductor's
-facade, whose only denied calls are the two conductor entry points denied by
-path in that change. The list and the TOML grew in the same commit, which is
-the only way `the_legacy_section_is_frozen_and_may_only_shrink` admits an
-entry; the row in `effects/allowlist.toml` says what the allow costs and how
-every module below the facade is kept from inheriting it: `src/engine/topology.rs`
-and the five siblings that write no allow of their own deny the governed lints
-at file level, the rest record their own allows in the same section, and
-`every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
-holds that boundary from the facade's own `mod` declarations.
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and removed again on 2026-09-20:
+`src/engine/mod.rs`, the v0.1 conductor's facade, whose only denied calls were
+the two conductor entry points denied by path in that change. The list and the
+TOML grew in the same commit, which is the only way
+`the_legacy_section_is_frozen_and_may_only_shrink` admits an entry, and the row
+said how every module below the facade was kept from inheriting the allow. It
+could not say the same of what the facade itself held: the fourth review of
+#306 (`PR306-FACADE-INLINE-ESCAPE`) reached `std::fs::write` from
+`engine::topology` through an inline module written in the facade and through
+a function placed in it, both under that allow, neither classified. The row's
+own `shrinks_when` was the remedy -- the entry points moved into
+`src/engine/coordinator.rs` and `src/engine/resume.rs`, the facade re-exports
+them and calls nothing denied -- so the row and this entry went together, and
+the list is again what PR5 froze. Putting the facade back needs an edit here,
+which is the point of holding the list in the code.
 
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
@@ -751,8 +848,8 @@ Three shapes, because "pubfn" in the packet's sentence has three of them in
 this tree and a classification that saw one would be complete against a
 domain nobody drew:
 
-* `pub fn` / `pub(crate) fn` / `pub(super) fn` items, free or in an inherent
-  `impl`;
+* `pub fn` / `pub(crate) fn` / `pub(super) fn` / `pub(in a::b) fn` items, free
+  or in an inherent `impl`;
 * every `fn` inside an `impl <Trait> for <Type>` block, which is reachable
   through the trait whatever its own visibility says;
 * associated `fn`s of a public trait's default bodies, which are the same
@@ -778,15 +875,40 @@ A trait method **declaration** (no body) is deliberately still excluded: it
 performs nothing, and every implementation of it is reached by the
 `impl … for …` shape above.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut t = 0;`
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (start, after) in keyword_sites(&region, "trait") {`
 
 `pub trait X: Y { … }` — the bodies inside are reachable through the
 trait, exactly as a trait impl's are.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut i = 0;`
+**`trait` as a whole word, whatever follows it.** This was the text `trait` and
+one U+0020, and the `impl` reader below wanted one U+0020 or `<` after `impl`
+and one U+0020 on each side of `for`. A tab or a line break is enough to miss
+all three, no Unicode needed: `pub trait`, a tab, a name left every default
+body of that trait outside the domain, and `impl`, a tab, a trait, `for` left
+every fn of that impl outside it. Found while settling the separators in round
+4 of #309, by reading; the tree writes none of them and the domain did not
+move (759 names in the 54 classified modules).
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` holds all eleven
+separators after `fn`, `trait` and `impl` and around `for`.
+
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (_, after) in keyword_sites(&region, "impl") {`
 
 `impl <something> for <something> {` — the `for` is what makes it a trait
 impl; an inherent `impl Type {` has none before the brace.
+
+**Both keywords are whole words and nothing more is asked of their
+neighbours**, because rustc asks nothing more: `impl::path::Trait for Thing`,
+`impl<T> Glued<T>for Thing<T>` and `impl Trait for&'static str` are trait
+impls, and a reader that wants a separator after `impl`, or on each side of
+`for`, leaves their methods outside the domain (found by attacking round 4's
+own first draft, which had widened "one U+0020" to "a separator" and no
+further; executed as parser omissions only). The price is an over-reading,
+and it is pinned: an inherent impl whose header holds a higher-ranked bound,
+`impl<F: for<'a> Fn(&'a u8)> Holder<F>`, reads as a trait impl, so its
+private fns are in the domain. That costs a row and fails closed. The next
+token cannot tell the two apart -- `impl Tr for <X as Y>::Out` is a trait impl
+whose `for` is followed by `<` too -- and the tree holds no such header: no
+name moved.
 
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let is_default_body = public_trait_spans`
 
@@ -806,9 +928,206 @@ the second copy still caught it. Two hand-maintained lists of three strings
 disagree eventually, and the one that disagreed silently would be this one.
 Measured, mutation `the-parser-misses-pub-crate`.
 
+**Any restriction, not a list of two.** The arm read `pub`, `pub(crate)` and
+`pub(super)`, and `pub(in crate::engine) fn` is as visible to a module under
+`engine::topology` as `pub(super) fn` written in a child of `engine` is, so a
+function spelled that way in an allowed, classified file would have stood
+outside the domain: unclassified, undenied, and reachable. Found by reading
+this function while closing `PR306-FACADE-INLINE-ESCAPE` on 2026-09-20, not by
+a witness, and widened then: a `pub` followed by a parenthesised restriction of
+any content counts, which admits `pub(self)` too and fails closed by doing so
+-- a name the domain holds needlessly costs a row, and a name it misses costs
+the guarantee. The widening added no name to any classified module at that
+head; `the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both the
+path form and a spaced one.
+
+**`extern` is a modifier too.** The review of `409a6138` handed the widened
+recogniser `pub(in crate::engine) extern "Rust" fn probe() {}` and got no
+name: the ABI string is blanked with every other literal, which leaves
+`extern` as the word before `fn`, and the list of modifiers stripped from the
+end of the prefix did not hold it. It is stripped first now, being the last
+modifier Rust's grammar admits before `fn`, and the shape test pins the path
+form and `pub unsafe extern "C" fn`. This is a recogniser of the shapes the
+tree and its reviews have produced, not of Rust's item grammar, and nothing
+here should be read as saying otherwise.
+
+## `pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {`
+
+For each name [`externally_reachable_fns`] derives, how many `fn` declarations
+of the file's production code bear it -- every one, whatever its own
+visibility, wherever in the file it is written.
+
+The record classifies by bare name, so a name is the whole of a callable's
+identity there, and a denial names one path. One name borne by two callables
+is one row answering for both. That is ordinary -- two `Display` impls, a
+`#[cfg(unix)]` and a `#[cfg(windows)]` twin, a trait's declaration and its
+impl -- and it is also how a function the source writes is added to a
+classified module without the record changing: give it a name that is already
+classified
+(`PR309-INLINE-WRAPPER-NAME-COLLISION`). The census pins every count above one
+in the record's `shared` table, so the second bearer of a name is a
+disagreement like a new name is.
+
+## `pub enum OwnerHeader {`
+
+What the header of one pair of braces was read as, for
+[`reachable_fn_owners`]: an inline `mod`, a `trait` declaration, a trait's
+impl with the trait's name as the header writes it, an inherent impl, or
+`Unread` -- everything else, which is most braces: a function body, a `const`
+block, a `match`, a macro's definition or invocation, an `extern` block, and
+any header the reading below cannot place. An inherent impl carries no type
+name on purpose. Nothing downstream may compare two impls by what their
+headers spell, and the way to be sure nothing does is for the spelling not to
+be there.
+
+## `pub struct OwnerScope {`
+
+One pair of braces open at a declaration: the byte its `{` sits at in the
+file's production code, and what its header was read as. **The offset is the
+scope's identity.** Two scopes are the same scope when they open at the same
+byte and at no other time, whatever their headers say, because a header is
+text and text is what an alias, a `use` inside a block or a generic argument
+changes without changing the path -- or changes the path without changing the
+text.
+
+## `pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {`
+
+For each name [`externally_reachable_fns`] derives, where each of its bearers
+is declared: the chain of braces open at the `fn`, outermost first, the file's
+top level being the empty chain. It exists for one question -- whether the
+bearers of an effectful name are one path or several
+(`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) -- and answers no
+other. Each bearer owns its chain, so the open stack is cloned once per
+reachable declaration; a chain is a handful of small values.
+
+**What it returned before, and why it does not now.** Until the review of
+`993f080d` a chain was a string of labels (`block > impl Rf3Target`) and the
+caller compared strings. Both lenses of that review passed two receivers as
+one with ordinary source-written Rust and no expansion. `impl RfFirst<{ 1 + 1 }>`
+and `impl RfSecond<{ 1 + 1 }>`: the braces of the const argument are braces,
+closing them restarted the header, what was left of each `impl` header was
+`>`, and both owners read `block`. Two `const _: () = { .. }` blocks each
+importing a different receiver as `Rf3Target`: both owners read
+`block > impl Rf3Target`. In each case the record classified and denied the
+first path, a production body under `engine::topology` called the second, and
+clippy exited 0 with 186 tests passing. Writing `2` for `{ 1 + 1 }`, or
+renaming one alias, made the same check fail -- so the verdict followed the
+spelling and not the path. Every `{` still opens a scope here, a const
+argument's included; what changed is that a scope is known by where it opens,
+and a header that does not read as an item is `Unread` rather than something
+two blocks can have in common.
+
+**Parentheses and square brackets open scopes too, always `Unread`.** No item
+is declared inside either in ordinary Rust, and the one thing that does put a
+`fn` there is a macro invocation, `place!( pub fn held() {} );`, which can set
+its tokens down anywhere. Found by attacking the first draft of this repair,
+which tracked braces alone: twins inside one invocation's parentheses were
+two bearers at the file's top level, one scope, admitted. A closer leaves only
+the scope its own opener made, so a stray one cannot close an `impl`; and a
+`;` ends a header only when the innermost thing open is a brace, which is what
+lets `impl View for [u8; 4]` be read as the impl it is.
+
+It is a lexical reading like every other in this file. It sees the
+declarations the source writes, it does not evaluate `cfg`, and it resolves no
+name.
+
+## `fn owner_header(header: &str) -> OwnerHeader {`
+
+The text between the last `;`, `{` or `}` and an opening brace, read as an
+item header or not at all. Leading attributes are stepped over by matching
+their brackets, a visibility is dropped, generic argument lists are dropped
+(an `->` inside one does not close it), and then **the first word has to be
+the keyword**, after at most one `unsafe`: `mod name`, `trait Name`, or
+`impl`. An `impl` header is a trait's impl when the word
+`for` is its second word after `impl` and the first is a plain identifier --
+`impl View for A`, not `impl fmt::Display for A`, whose trait this reading
+would have to resolve -- and an inherent impl when it holds no `for` at all.
+Anything else is `Unread`.
+
+The keyword has to lead because the earlier reading took the last of `trait`,
+`impl` or `mod` found *anywhere* in the header, and answered `impl Sized)` for
+`fn host(value: impl Sized) {` (measured at `993f080d`). That direction -- a
+scope read as an item it is not -- is the one that could admit something, so
+it is the strict one. The other direction is deliberately loose: a header this
+cannot place is refused by the caller, so a brace inside the header
+(`impl Wide<{ 1 + 1 }>`), a trait named by a path, an `impl const`, a
+non-ASCII name and a negative impl all come back `Unread`, and the cost is
+that the author of such a header gives the other callable its own name.
+
+## `fn without_visibility(item: &str) -> &str {`
+
+An item header with its `pub`, `pub(crate)` or `pub(in path)` removed. `pub`
+has to end at whitespace or a parenthesis, so an item whose first word merely
+begins with those letters keeps it and is read as what it is.
+
+## `fn is_identifier(word: &str) -> bool {`
+
+An ASCII identifier: the name a `mod`, a `trait` or the trait of an impl has
+to be for the header to be placed. A raw or non-ASCII identifier is not one,
+which leaves its header `Unread`.
+
+## `fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {`
+
+Where `keyword` is written in `text` as a whole word -- no identifier byte
+before it, no identifier character after it -- as `(start, end)`. That is all
+rustc asks of a keyword, so it is all the `trait`, `impl` and `for` readers
+ask; [`declared_fns`] goes on to want a separator after `fn`, because a name
+has to follow and `fn(` is a type. One reading of "a keyword is written here"
+for the four, where there were three and each wanted its own neighbour. A
+non-ASCII character before the keyword is taken for a boundary, which
+over-reads.
+
+## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
+
+Every `fn name` a region declares, with its offset: the one reading the
+domain, its multiplicity and its owners are all made from, so they cannot
+disagree about what a declaration is.
+
+**A name is read by what ends it, not by what it is made of.** After `fn` and
+any run of separators, the name is the text up to the first `(`, `<` or
+separator, less a leading `r#` -- a separator being one of
+[`RUSTC_WHITESPACE`], which this reader names itself, so it reads `fn`, U+200E,
+a name on text no tokenizer has rewritten as well (round 3 had widened it to
+`char::is_whitespace`, which reads neither U+200E nor U+200F, and the review
+of `84123789` executed that: see [`RUSTC_WHITESPACE`]). It used to be `fn`,
+exactly one space, and a
+run of ASCII letters, digits and underscores, and round 3 of #309 measured
+what that left out at `993f080d`, each with the control `pub fn plain() {}`
+read beside it: `pub fn /* between */ commented() {}` was unread, because the
+blanker turns the comment into spaces and the first piece after `fn ` is then
+empty; so was a name after a line break; so was a non-ASCII name; and
+`pub fn r#raw() {}` was read as `r`. Each is a function the source writes and
+the record never asked about, or asked about under another name, and the
+count this file's sharing rule rests on was short by it. Executed as parser
+omissions; the bypass each would allow is reasoned. The tree writes none of
+them, and the fix moves nothing at that head: 759 names in the 54 classified
+modules, 2267 across all 186 source files, byte-identical, and the 69 pins
+still exact.
+
+One thing that follows `fn` is deliberately not a name: a macro metavariable.
+`pub fn $name() {}` names nothing the text holds, reading it as `$name` would
+make expansion look covered when it is not
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and `$` cannot begin an identifier, so the
+exclusion costs no real name. `the_reachable_fn_parser_finds_each_shape_this_tree_uses`
+pins all five.
+
 ## `fn find_header_brace(region: &str, from: usize) -> Option<usize> {`
 
 The `{` that opens an `impl` block's body, skipping generics and where-clauses.
+
+**A `;` or a `{` inside square brackets is not the header's end.** It used to
+be: the scan counted angle brackets and parentheses and stopped at the first
+`;` outside them, so `impl Trait for [u8; 4] { fn f(&self) {} }` gave no span,
+`f` declares no visibility, and the method was outside the classification
+domain; a public trait's default body returning `[u8; 4]` went the same way.
+Found in round 3 of #309 while pinning what [`reachable_fn_owners`] reads, by
+a shape test that came back empty: executed as a parser omission, the bypass
+it would allow reasoned. Brackets are counted now. It adds no name at that
+head -- 759 names in the 54 classified modules and 2267 across all 186 source
+files, byte-identical with the hunk reverted -- and
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both shapes.
+Like `declares_visibility` above, this is a recogniser of the shapes the tree
+and its reviews have produced, not of Rust's item grammar.
 
 ## `pub struct DenialFixture {`
 
@@ -1344,6 +1663,55 @@ The effective predicate, rendered.
 
 Whether that predicate is false wherever `test` is false.
 
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedInlineModule {`
+
+One inline `mod name { … }`, at whatever depth it is written.
+
+[`ScannedDeclaration`] is a module that has a file. This is the other kind, and
+until 2026-09-20 the scan recorded nothing for it: the inline branch opened a
+scope, so that a declaration *inside* it carried the right `inline_path`, and
+moved on. No census could judge a module the scan never reported, and the
+fourth review of #306 (`PR306-FACADE-INLINE-ESCAPE`) used exactly that -- an
+attribute-free inline module in `src/engine/mod.rs`, under that file's allow,
+walked by no guard. An inline module has no file and no allowlist row; it
+inherits the level of the file it is written in and can write attributes of
+its own, outside its braces or inside them, so a census that wants to answer
+for it needs both.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) inline_path: Vec<String>,`
+
+The inline modules enclosing this one, outermost first; empty at the top level
+of the file. Its length is the depth.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) guard: String,`
+
+The effective `cfg` predicate, as [`ScannedDeclaration::guard`] renders it:
+what the module inherits from the inline modules around it and what is written
+on it.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) outer_attributes: String,`
+
+The run of outer attributes written directly above the item, verbatim from the
+raw source, comments between them included; empty when the item has none. The
+run starts at the first `#[` since the last token that was not an attribute,
+so an attribute on a neighbouring item is never handed to this one --
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`
+pins that against an attributed item and an attributed declaration directly
+above an attribute-free inline module.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) body: String,`
+
+The text between the braces, verbatim. Inner attributes are the head of it,
+which [`super::lint_levels::leading_inner_attributes`] reads. A body that never
+closes runs to the end of the file rather than refusing, so that
+[`scan_module_declarations`] refuses exactly what it refused before this
+record existed.
+
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedModules {`
+
+Both halves of one scan: the declarations that name a file, and the inline
+modules that do not.
+
 ## `pub(crate) mod census_domain` › `pub(crate) enum ScanRefusal {`
 
 Why a file's structure could not be read, and where.
@@ -1391,6 +1759,17 @@ A macro body holding a module-shaped token sequence.
 Every `mod` declaration in `source`, with the inline modules enclosing it
 and the effective `cfg` predicate it inherits.
 
+The out-of-line half of [`scan_modules`], and nothing else. The branch that
+emits a declaration is the one it always was; what holds that is the scan
+tests written before inline modules were reported, which pass unedited -- not
+the comparison of this entry point with [`scan_modules`] in
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`,
+which compares a function with its own delegate and pins only the adapter.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {`
+
+The scan itself: one pass, both kinds of module.
+
 Pure over `&str`, which is what makes the refusals above drivable: the
 tree satisfies every one of them, so the only way to see one is to hand
 this a source that does not.
@@ -1419,6 +1798,17 @@ The brace depth *outside* the module's body.
 `path` names the file directly; `cfg_attr` can apply one
 conditionally. Both are refused where they could reach a
 module, which is decided when the item is read.
+
+The attribute's **name** is read from the tokenizer's text and its `cfg`
+predicate from the source, which still holds the string values the tokenizer
+blanks. The name used to come from the source too, through `trim_start`, which
+does not read U+200E or U+200F: `#[`, U+200E, `path = ".."]` was then an
+attribute with no name, the refusal never fired, and the walk went on to the
+file the declaration's own name resolves to while rustc compiled the one the
+attribute names. Found by reading in round 4 of #309 while settling the
+separators ([`RUSTC_WHITESPACE`]), not by a compiled witness;
+`every_separator_rustc_reads_is_one_every_reader_here_reads` holds the refusal
+for all eleven.
 
 ## `pub(crate) mod census_domain` › `if let Some(invocation) = macro_at(bytes, i) {`
 
@@ -1590,7 +1980,12 @@ Whether `text` is a Rust keyword written plainly.
 
 ## `pub(crate) mod census_domain` › `fn whitespace(bytes: &[u8], from: usize) -> usize {`
 
-The first non-whitespace index at or after `from`.
+The first non-whitespace index at or after `from`. ASCII whitespace is the
+whole of it **because `bytes` is the tokenizer's text**, where every other
+separator rustc reads is already spaces ([`RUSTC_WHITESPACE`]). At `84123789`
+the tokenizer's text still held them as written, this stopped at U+000B and
+at the five that are not ASCII, and that is how `mod`, U+200E, a name went
+unread.
 
 ## `pub(crate) mod census_domain` › `struct ModuleShape {`
 
@@ -1814,6 +2209,18 @@ parenthesis is what makes the prefix an exact attribute name.
 Ordered, and `forbid` is sticky. A weaker level after a
 `forbid` is `E0453`, which is the file not compiling rather
 than a level; anything else replaces what came before it.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
+
+The inner attributes a file, or an inline module's body, opens with: the raw
+text from its first byte to the end of the last `#![…]` before anything that
+is not one. Comments and blank lines between them are kept, because the text
+is handed on verbatim -- to `governed_allows`, to learn what an inline module
+writes inside its braces, and to a compiled fixture, as the header of a crate
+root that has to carry exactly what `src/engine/mod.rs` carries
+(`the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`).
+It stops where [`file_level_lint_resolution`] stops, for the same reason: an
+inner attribute after the first item is not one rustc accepts.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {`
 
