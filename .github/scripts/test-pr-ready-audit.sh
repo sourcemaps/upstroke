@@ -6578,19 +6578,17 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
   printf '[four](https://example.invalid/p (a (nested title)), a titled\n'
   printf '[five](https://example.invalid/p (title)), a title that [never](https://example.invalid/n\n'
 
-  printf '"closes, a destination that [never balances](%s x, a full [reference][label],\n' \
+  printf '"closes, a destination that [never balances](%s x, a pair [nothing defines], an\n' \
     '((((((((((((((((((((((((((((((((('
-  printf 'a bare [label], a wrapped [definition][wrapped], a pair [nothing defines], an\n'
   printf '[escaped][lab\\]el] label, a [plain][lab[el] one, a [label][that never closes, an\n'
   printf 'unbalanced [one](unclosed and an escaped \\`tick\\[. And one that ends a paragraph: [x](\n\n'
   printf 'More of the same rule: an empty [five](), an escaped space [six](a\\ b), a nested angle\n'
-  printf '[seven](<a<b>), a collapsed [label][] one, an escape in a title\n'
+  printf '[seven](<a<b>), an escape in a title\n'
   printf '[eight](https://example.invalid/e "a \\" quote"), and a destination that ends the\n'
   printf 'paragraph [nine](https://example.invalid/z\n\n'
   printf 'An angle destination that never closes: [ten](<unclosed\n\n'
   printf 'A label that never closes: [label][unclosed\n\n'
   printf 'And a correction a reader sees that this comment does not write: **VERDICT**: see below.\n\n'
-  printf '[label]: https://example.invalid/l\n\n[wrapped]:\n  https://example.invalid/w\n\n'
   # AND ROUND FIVE'S THREE RULES, by the same rule again: a block prefix, a raw HTML tag and a
   # definition's own grammar are each entered only by a comment that HAS one. With the material
   # above and none of this, the line below read `unproven=block_prefix,definition_label,
@@ -6601,10 +6599,9 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
   # value, an attribute name that is not one, a tag name that is not one, a closing tag that is
   # not one, a processing instruction, a declaration, an empty comment, one whose content may not
   # begin as it does, a dashed one, a CDATA section, an unterminated comment, a bare `<` and a
-  # paragraph that ends in one; and a definition with no colon, an empty label, a destination that
-  # never balances, one whose protocol a renderer refuses, one it accepts, a titled one, a titled
-  # one with rubbish after it, one with trailing spaces and an angled one.
-  printf '> A quoted line, a quoted span `a[b]c`, and a quoted [pair][label] of brackets.\n'
+  # paragraph that ends in one. The REFERENCE DEFINITIONS are a drive of their own below, and why
+  # they are is a cost decision stated there.
+  printf '> A quoted line, a quoted span `a[b]c`, and a quoted [pair] of brackets.\n'
   printf '> > Twice quoted, and a nested [a[b] c] pair, and a collapsed [a[b] c][] one.\n\n'
   printf -- '- A bullet item, and an ordered one below it.\n'
   printf -- '* A star bullet, and a plus one below that.\n'
@@ -6617,18 +6614,23 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
   printf 'instruction, a <!DOCTYPE html> declaration, an empty <!----> comment, a <!--> that is\n'
   printf 'not one, a <!--- dashed --> one, a <![CDATA[bracketed]]> section, an unterminated\n'
   printf '<!--comment and a bare < and a <x that never closes, and a paragraph ending in <\n\n'
-  printf 'Definitions of every shape follow this paragraph.\n\n'
-  printf '[nocolon] is no definition at all.\n\n'
-  printf '[ ]: https://example.invalid/empty\n\n'
-  printf '[unbalanced]:\n  (never closes\n\n'
-  printf '[refused]: javascript:alert(1)\n\n'
-  printf '[allowed]: data:image/png;base64,AA\n\n'
-  printf '[titled]: https://example.invalid/t "a title"\n\n'
-  printf '[garbage]: https://example.invalid/g "a title" and rubbish\n\n'
-  printf '[trailing]: https://example.invalid/s   \n\n'
-  printf '[angled]: <https://example.invalid/a>\n\n'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-reader.md"
+# AND THE REFERENCE DEFINITIONS ARE A DRIVE OF THEIR OWN, WHICH IS A COST DECISION AND IS STATED AS
+# ONE. `reading_questions` reads a comment that defines a label SIX ways and one that defines none
+# FOUR, and the probe repeats whichever drive FIRST entered a code object once for every branch it
+# turns in it -- so a definition anywhere in the long document above puts two extra readings on
+# every one of those repeats. Measured on 2026-09-21 with the definitions inside it, this probe took
+# 4m1s standalone over the same nine drives; split out, 1m46s. Coverage is
+# unchanged and asserted the same way: every executable line of every function this round added is
+# entered by a document, measured with `sys.settrace` over these drives.
+{ printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
+  printf 'A full [reference][label], a bare [label], a collapsed [label][] one and a wrapped\n'
+  printf '[definition][wrapped] one, with [nocolon] naming nothing.\n\n'
+  printf '[label]: https://example.invalid/l\n\n[wrapped]:\n  https://example.invalid/w\n\n'
+  printf '[ ]: https://example.invalid/empty\n\n[nodestination]:\n\n'
+  printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
+} > "$tmp/probe-drive-definition.md"
 
 
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
@@ -6639,7 +6641,7 @@ got="$(decode_probe scripts/pr-review-parse.py \
   "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
   "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
   "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
-  "review|$tmp/probe-drive-reader.md" \
+  "review|$tmp/probe-drive-reader.md" "review|$tmp/probe-drive-definition.md" \
   "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
@@ -7533,8 +7535,8 @@ done
 # AND THE EXEMPTION IS WHAT MAKES IT SHIPPABLE. This form's verdict IS a `VERDICT:` line and its
 # template writes TWO of them -- a bold summary near the top and the authoritative one at the end.
 # Asking "does a reader see such a line" would report EVERY REVIEW EVER POSTED: measured over the
-# 681 comments this repository held on 2026-09-21, 242 of the 249 readable prose reviews write
-# exactly two and 6 more write three, four or five. So what is reported is A LINE A READER SEES
+# 684 comments this repository held on 2026-09-21, 250 carry this form's marker, 241 of them write
+# exactly two `VERDICT:` lines and 8 more write three or more. So what is reported is A LINE A READER SEES
 # AND THE COMMENT DOES NOT WRITE -- more of them in some reading than in the characters -- and the
 # control below is a whole ordinary prose review, two verdict lines and all, that must stay READY
 # with one merge call.

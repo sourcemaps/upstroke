@@ -340,9 +340,9 @@ BLOCK_BULLET = frozenset("-*+")
 BLOCK_ORDERED = re.compile(r"[0-9]{1,9}[.)]")
 
 # The shapes `markdown-it-py` 3.0.0's `html_inline` recognises, transcribed from its own
-# `html_re.py`. A TAG IS MARKUP AND WHAT STANDS BETWEEN TWO OF THEM IS TEXT: `<strong>VERDICT</strong>:`
-# and `` `VERDICT`: `` render to the same eight characters, and this is the pass that reads the
-# first of them.
+# `html_re.py`. A TAG IS MARKUP AND WHAT STANDS BETWEEN TWO OF THEM IS TEXT:
+# `<strong>VERDICT</strong>:` and `` `VERDICT`: `` render to the same eight characters, and this is
+# the pass that reads the first of them.
 HTML_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 HTML_ATTRIBUTE_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9:._-]*")
 HTML_UNQUOTED_VALUE = re.compile(r"[^\"\'=<>`\x00-\x20]+")
@@ -1467,8 +1467,9 @@ def reader_spelling(text, emphasis=True, structure=False, references=True):
     IT IS A READING BESIDE THE OTHERS AND NOT INSTEAD OF THEM, for the reason EMPHASIS=FALSE is:
     consuming a delimiter takes a WORD BOUNDARY with it, so ``P1`x` `` reads `P1x` here and is a
     token only where the delimiters stay written. `stray_summary` scans every combination of the
-    two questions, which is four readings out of this function, and every combination again over
-    the block-prefix-stripped view, which is four more; a token in any of them is reported.
+    three questions, which is up to six readings out of this function, and every combination again
+    over the block-prefix-stripped view, which is up to six more; a token in any of them is
+    reported, and `reading_questions` leaves out the ones that are the same TEXT as another.
     THE TWO QUESTIONS ARE NOT THE SAME KIND, and that is worth saying plainly: pairing delimiters
     is something this file cannot do, while a code span's extent is something it CAN decide and
     does. Both answers are scanned anyway, because deciding right and deciding differently from the
@@ -1691,17 +1692,19 @@ def stray_summary(outside, contradicting_verdict=False):
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
 
-    UP TO TEN SPELLINGS ARE SCANNED -- what the comment writes, what a JSON decoder reads, and WHAT
-    A READER OF THE PROSE SEES under each combination of THREE questions one reading cannot settle:
-    whether a renderer paired a delimiter run or left it written, whether the comment's code spans,
-    links and raw HTML tags are consumed or written, and whether each line's BLOCK PREFIX has been
-    taken off. The last question is four of the ten and is asked only when some line carries a
-    prefix, which is what `prefix_stripped_reading` answers None for. Reading all of them is the
-    safe direction for this scan, the same direction `re.ASCII` is chosen for above: every token it
-    finds sends the review to a person, so one found in ten spellings costs what one found in one
-    costs, and one found in none is the defect. `reader_spelling` is the last eight, and it is why
-    `_P1_`, `&#80;1`, `P**1**`, `P~~1~~`, `P<em>1</em>` and `> P[1][policy]` -- each `P1` to the
-    person who wrote the comment and to the person reading it -- are `P1` here.
+    UP TO FOURTEEN SPELLINGS ARE SCANNED -- what the comment writes, what a JSON decoder reads, and
+    WHAT A READER OF THE PROSE SEES under each combination of FOUR questions one reading cannot
+    settle: whether a renderer paired a delimiter run or left it written, whether the comment's code
+    spans, links and raw HTML tags are consumed or written, whether a REFERENCE PAIR is a link or
+    its own brackets, and whether each line's BLOCK PREFIX has been taken off. `reading_questions`
+    drops the answers that are the same TEXT as another, and the prefix ones are asked only when
+    some line carries a prefix -- so an ordinary comment is read FOUR ways and not twelve.
+    Reading all of them is the safe direction for this scan, the same direction `re.ASCII` is
+    chosen for above: every token it finds sends the review to a person, so one found in fourteen
+    spellings costs what one found in one costs, and one found in none is the defect.
+    `reader_spelling` is the last twelve, and it is why `_P1_`, `&#80;1`, `P**1**`, `P~~1~~`,
+    `P<em>1</em>`, ``P`1`[policy]`` and `> P[1][policy]` -- each `P1` to the person who wrote the
+    comment and to the person reading it -- are `P1` here.
 
     THIS IS A NET, AND WHAT IT CATCHES GOES TO A PERSON. A token found here is reported, and
     `scripts/pr-ready-audit.sh` turns it into a `manual:` blocker; it decides no verdict. THE
@@ -1731,11 +1734,11 @@ def stray_summary(outside, contradicting_verdict=False):
       * the PROSE form's verdict IS a line, and the form's own template writes TWO -- a `VERDICT:`
         summary near the top and the authoritative one at the end, which `parse_prose_review`
         resolves by taking the LAST. Reporting the mere presence of one would report EVERY REVIEW
-        THAT FORM HAS EVER POSTED: measured over the 681 comments this repository holds on
-        2026-09-21, 242 of the 249 readable prose reviews write exactly two and 6 more write
-        three, four or five. Each of those lines is exempt because the comment WRITES it, and
-        `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is still reported -- the
-        ordinary bold correction, in the form this program's own reviews arrive in, which was
+        THAT FORM HAS EVER POSTED: measured over the 684 comments this repository holds on
+        2026-09-21, 250 carry this form's marker, 241 of them write exactly two `VERDICT:` lines
+        and 8 more write three or more. Each of those lines is exempt because the comment WRITES
+        it, and `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is still reported
+        -- the ordinary bold correction, in the form this program's own reviews arrive in, which was
         exit 0, PASS, READY and ONE MERGE CALL at `d599216`.
 
     ASKING IT BY COUNT WAS ROUND THREE'S RULE AND IT LOST A MERGE AT `3fe68c37`. "More seen in
