@@ -3,7 +3,7 @@
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods)]
-#![deny(clippy::disallowed_types, clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::runtime::Settled;
 use std::collections::{BTreeMap, BTreeSet};

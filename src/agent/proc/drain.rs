@@ -24,7 +24,7 @@
 //! in the invocation's retained FailureReport instead of losing the error on
 //! an early return. A caller retains that observer before starting a sibling.
 //!
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

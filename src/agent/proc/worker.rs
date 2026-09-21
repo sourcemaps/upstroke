@@ -4,7 +4,7 @@
 //! wait for an external peer. The owner releases before joining on every path.
 //! A finite park and the retained unpark token cover the check-to-park race.
 //! Settlement depends on scheduling and finite local operations, not pipe EOF.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

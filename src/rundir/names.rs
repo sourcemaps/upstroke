@@ -83,7 +83,7 @@
 // per lint, with this attribute cited as the level; the identical three lines in
 // `src/rundir.rs` emit no `disallowed_*` at all, under that file's own allow. So
 // the deny is load-bearing rather than a restatement of an ambient rule.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
