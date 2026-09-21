@@ -4493,6 +4493,17 @@ kill took is settled interrupted after the planted one. A further step re-verifi
 and publishes it under the next sequence, and the log replays twice to equal states.
 
 
+## `fn integration_ref_reflog(fixture: &Fixture) -> Vec<String> {`
+
+The integration ref's reflog, one new value per entry, as Git reports it. The ref lives under
+`refs/upstroke/`, where Git keeps a reflog only under `core.logAllRefUpdates=always`, which the
+witness below sets on its scratch repository before anything writes the ref.
+
+## `fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {`
+
+Every ref under `refs/upstroke/` with its value, as `git for-each-ref` lists them: what the
+repository holds, read without the engine.
+
 ## `fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(`
 
 Rows 31 and 32 of Gate 5's audit, `Ref.CreateIntegration` before and after, and row 68,
@@ -4501,10 +4512,17 @@ integration ref (P8), with nothing durable between the two (`create.rs`, `p8_cre
 takes the `MarkerRemoved` state directly), so a creation killed after its marker's removal leaves
 row 68's prefix and row 31's alike. `Fixture::healthy` is the committed run with its marker still
 standing (P6); the prefix is built through the funnels whose phases it ends at: `rundir::remove_marker`
-under the production adapter, and for row 32 also the refs seam's `create_zero_old` under the
-production effects adapter, so the run's log is exactly its committed prefix, the marker is gone,
-the ref exists only when its creation was performed, and nothing a later step does (the execution
-root) is on disk. `kill_after_run_started_creates_integration_ref` and
+under the production adapter, and for row 32 also P8's own body, `ensure_integration_ref`, over
+the real `WorkspaceManager` under the production effects adapter, so the run's log is exactly its
+committed prefix, the marker is gone, the ref exists only when its creation was performed, and
+nothing a later step does (the execution root) is on disk. **The ref is a Git ref in the fixture's
+repository.** Until the gate's third run it was `RecordingRefs`, an in-memory double read through
+the resume's `IntegrationRefs` seam, and that run graded both rows near-exact for it (report §8.4).
+The prefix is read three ways before the resume: through the manager's `direct_ref_target`, which
+is what the recovery reads; through `git for-each-ref` over the run's namespace, which lists that
+ref and no other; and, after the resume, through the ref's reflog, which holds one entry at the
+recorded base whether the prefix or the resume created it. The resume is `resume_with_real_refs`,
+whose refs seam is the manager. `kill_after_run_started_creates_integration_ref` and
 `a_resume_adopts_an_integration_ref_already_at_the_recorded_base` resume `Fixture::healthy` with its
 marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
 enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix

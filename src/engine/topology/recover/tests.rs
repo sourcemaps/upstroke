@@ -16756,14 +16756,45 @@ fn a_kill_after_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next
     );
 }
 
+fn integration_ref_reflog(fixture: &Fixture) -> Vec<String> {
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H",
+            fixture.started.integration_ref.as_str(),
+        ],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/upstroke/",
+        ],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
 fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     ref_created: bool,
     tag: &str,
 ) {
     let fixture = Fixture::healthy(tag);
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &["config", "core.logAllRefUpdates", "always"],
+    );
+    let manager = fixture.manager();
     let integration_ref = fixture.started.integration_ref.as_str().to_owned();
     let base = fixture.started.base_sha.as_str().to_owned();
     let remove_marker = EffectSiteId::RunDir(RunDirSite::RemoveMarker);
@@ -16782,14 +16813,13 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     )
     .expect("P7: the creator's marker is removed through its funnel");
     if ref_created {
-        given
-            .refs
-            .create_zero_old(
-                &mut crate::workspace_manager::HarnessEffects::new(Arc::clone(&constructed)),
-                &integration_ref,
-                &base,
-            )
-            .expect("P8: the integration ref is created through its funnel");
+        ensure_integration_ref(
+            &manager,
+            &mut crate::workspace_manager::HarnessEffects::new(Arc::clone(&constructed)),
+            &integration_ref,
+            &base,
+        )
+        .expect("P8: the integration ref is created through its funnel");
     }
     {
         let seen = constructed.lock().unwrap_or_else(PoisonError::into_inner);
@@ -16801,12 +16831,21 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     }
     assert!(!marker.exists(), "{tag}: the marker is gone");
     assert_eq!(
-        given.refs.target(),
+        ref_target(&fixture, &integration_ref),
         ref_created.then(|| base.clone()),
         "{tag}: the ref exists exactly when its creation was performed"
     );
+    assert_eq!(
+        upstroke_refs_on_disk(&fixture),
+        if ref_created {
+            vec![format!("{integration_ref} {base}")]
+        } else {
+            Vec::new()
+        },
+        "{tag}: and it is the repository's own ref, as Git lists it, beside no other ref of the run"
+    );
     assert!(
-        !fixture.manager().execution_root().exists(),
+        !manager.execution_root().exists(),
         "{tag}: nothing the run does after its creation is on disk"
     );
     assert_eq!(
@@ -16816,8 +16855,9 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     );
 
     let recovery = harness();
-    let (result, _) = resume(&fixture, &recovery, &given);
-    result.expect("the resume over the creation's prefix converges");
+    let (_, handle) = resume_with_real_refs(&fixture, &recovery)
+        .expect("the resume over the creation's prefix converges");
+    drop(handle);
     assert_eq!(
         recovery
             .lock()
@@ -16832,12 +16872,22 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         "{tag}: the resume creates the ref only when the prefix does not hold it"
     );
     assert_eq!(
-        given.refs.created(),
-        vec![(integration_ref, base.clone())],
+        ref_target(&fixture, &integration_ref),
+        Some(base.clone()),
+        "{tag}"
+    );
+    assert_eq!(
+        upstroke_refs_on_disk(&fixture),
+        vec![format!("{integration_ref} {base}")],
+        "{tag}: the repository holds the run's integration ref at the recorded base, and no \
+         other ref of the run"
+    );
+    assert_eq!(
+        integration_ref_reflog(&fixture),
+        vec![base],
         "{tag}: across the prefix and the resume the ref was created once, at the recorded name \
          and base"
     );
-    assert_eq!(given.refs.target(), Some(base), "{tag}");
     let after = fixture.log_bytes();
     assert!(
         after.starts_with(&committed)
