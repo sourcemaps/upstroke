@@ -5,7 +5,7 @@ disposition: deferred
 category: security-trust
 pr: 286
 reviewed_sha: 196ecd1a6f0932126251cc7aa1dae5de2e0d260a
-location: scripts/pr-review-parse.py:636
+location: scripts/pr-review-parse.py:949
 
 provenance: pre_existing
 first_bad:
@@ -27,8 +27,13 @@ guard: a change that decides how this program reads what a reader of a comment s
 > stores, and each round's repair introduced defects of its own: two in round three, one in round
 > four, **three in round five**, which is the rate that made the rule count beside the point. Round
 > six deletes the transcription. The audit fetches `body_html` -- GITHUB'S OWN RENDERING of the
-> comment -- beside the body, and the two scans read the text that HTML shows. Every measurement
-> below was executed against round six's head.
+> comment -- beside the body, and the two scans read the text that HTML shows.
+>
+> **ROUND SEVEN KEEPS THAT DESIGN AND REPAIRS THREE DEFECTS IN IT, EACH EXECUTED AS A MERGE AT
+> `7767c71c`**: a `<pre>` GitHub renders raw HTML inside was not read at all, the exemption asked
+> whether the comment writes a LINE rather than where, and the body and the rendering were two
+> fetches that could return two versions. Every measurement below was executed against round
+> seven's head unless it names another.
 
 ## What this is now
 
@@ -43,10 +48,13 @@ The third is `Rendering`, and it is a reduction of HTML rather than a reading of
   side of it join, and every other tag ends a line;
 - each run GitHub copied out of the comment is kept as its own piece, so `unwritten_verdict` can
   ask whether an occurrence a reader sees stands wholly inside one of them AND whether the comment
-  writes that piece's line;
-- `<pre>` is not read here at all: a code block's content is shown VERBATIM, so the comment's own
-  characters already are what a reader sees there, and reading it here as well would report the
-  workflow form's own verdict object as a severity written outside the findings;
+  writes that piece's line AT OR AFTER THE ONE IT LAST MATCHED;
+- `<pre>` IS read, and the code blocks THE COMMENT WRITES are taken out of the reading afterwards
+  (`quoted_code`). A fenced block's content is shown verbatim, so the comment's own characters
+  already are what a reader sees there and the first of the three readings holds it; RAW `<pre>`
+  HTML is not verbatim -- GitHub passes the tags inside it through -- and that is read here because
+  nothing else reads it. What the narrowing is for is the workflow form's own verdict object, which
+  would otherwise be reported as a severity written outside the findings;
 - and an ordered list item opening with a severity is a NUMBERED FINDING, which is the frontier
   form's own findings rather than prose outside them.
 
@@ -71,21 +79,46 @@ severity token -- and neither does `P1policy` written plainly, so a reviewer wri
 gets the same answer either way. This is not a divergence between the reading and the reader; it is
 the token rule, applied to what the reader sees. Two rows are fixtured.
 
-**3. The exemption asks whether the comment writes that LINE, not where.** `unwritten_verdict`
-exempts an occurrence a reader sees when it stands wholly inside one run GitHub copied out of the
-comment AND the comment writes that run's line somewhere in the scanned text. A correction whose
-rendered line happens to coincide with a line the comment writes elsewhere is therefore exempt. Not
-reproduced as a merge: for the workflow form a literal `VERDICT:` line anywhere outside the object
-is already a refusal, and for the frontier form `parse_prose_review` reads the LAST verdict run in
-the characters, so a correction written plainly enough to coincide is a correction that form has
-already read.
+**3. AN OCCURRENCE THE COMMENT WRITES AND NO READER SEES CAN BE SPENT ON ONE A READER DOES, AND
+THIS ONE COSTS A MERGE.** Round six's item 3 asked whether the comment writes a correction's LINE
+ANYWHERE; round seven matches the occurrences IN ORDER instead, so an earlier quotation is spent on
+the occurrence a reader sees in it and a later correction has only its own spelling to match
+against. What is left is narrower and is not closed. A `VERDICT:` the comment writes INSIDE A LINK
+REFERENCE DEFINITION'S TITLE is shown to nobody, and a correction a reader does see whose line is
+the same characters can be matched to it:
 
-**4. The merge path depends on one more API call.** Three calls per review where there were two,
-and the audit BLOCKS rather than merging when the third does not arrive: `review-fetch-failed` when
-it fails, `review-rendering-missing` when it returns nothing, and a parser refusal when the comment
-has text and its rendering shows none. That is the product decision, made in #310 round 6 under
-`ORCH-P1-RESTART.md` §4 and recorded in that pull request's body: it does NOT fall back to the
-stored text, because that fall back is the defect this whole family is about.
+    <!-- upstroke-frontier-review pr=999 head=... -->
+    **VERDICT: PASS**
+
+    Nothing blocks.
+
+    VERDICT&#58; CHANGES_REQUIRED
+
+    [ref]: https://example.invalid/x "VERDICT: CHANGES_REQUIRED"
+
+    VERDICT: PASS
+
+A reader sees `VERDICT: CHANGES_REQUIRED` between the two PASS lines. **Executed: exit 0, verdict
+PASS, `stray=null`, READY and ONE `gh pr merge` call -- AT `7767c71c` AND at round seven's head,
+which give the same answer.** It is not round seven's regression and not round seven's repair.
+
+**ORDER CANNOT TELL THE TWO APART AND NEITHER COULD A COUNT**: one written occurrence disappears as
+the definition is rendered and one appears as the reference is resolved, so the two cancel exactly
+-- which is round three's counting failure, in the one shape identity does not reach either. What
+would tell them apart is knowing which written characters the renderer dropped, and that is a
+Markdown parse, which is the thing this design exists not to do. Two rows are fixtured, one with
+the definition after the correction and one with it before, under
+`MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: ...]`.
+
+**4. The merge path depends on the rendering arriving.** ONE call per review where there were two
+before round six and three in it: `application/vnd.github.full+json` returns `created_at`, `body`
+and `body_html` together, and `pr-review-parse.py comment` splits that one answer into the two
+documents the parse reads. The audit BLOCKS rather than merging when it does not arrive:
+`review-fetch-failed` when the call fails, `review-document-unreadable` when the answer is not one
+comment, `review-rendering-missing` when it carries no rendering or a blank one, and a parser
+refusal when the comment has text and its rendering shows none. That is the product decision, made
+in #310 round 6 under `ORCH-P1-RESTART.md` §4 and recorded in that pull request's body: it does NOT
+fall back to the stored text, because that fall back is the defect this whole family is about.
 
 ## What round 6 closed
 
@@ -113,6 +146,38 @@ renders `<em>P1</em>~<em>P2</em>` and was `P1P2` to round five's reading, so no 
 and `P1` here. The third was a fixture that could not fail, and it is round six's gate that fixes
 it.
 
+## What round 7 closed
+
+**Three classes, each executed as a merge at `7767c71c` and each MANUAL with none at round seven's
+head.** Every row is fixtured.
+
+| the comment writes | what GitHub shows | at `7767c71c` | at round 7's head |
+|---|---|---|---|
+| `<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>` over a clean `PASS` | `VERDICT: CHANGES_REQUIRED` | stray none, **READY, one merge call** | stray `VERDICT:`, MANUAL, none |
+| `<pre>The blocker is &#80;1 here.</pre>` over a clean `PASS` | `The blocker is P1 here.` | stray none, **READY, one merge call** | stray `P1`, MANUAL, none |
+| `` `VERDICT: CHANGES_REQUIRED` `` quoted, then `VERDICT\: CHANGES_REQUIRED` appended | the quotation, then the correction | stray none, **READY, one merge call** | stray `VERDICT:`, MANUAL, none |
+
+**The `<pre>` premise was false and it was round six's own.** That round skipped `<pre>` entirely,
+on the ground that a code block's content is shown VERBATIM, so the comment's characters are
+already what a reader sees there. GitHub renders RAW HTML inside `<pre>` -- the recorded rendering
+of the first row is `<pre class="notranslate"><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>` --
+so the tags are operative and the character references resolve. `quoted_code` replaces the premise
+with a test: a code block whose shown text the comment WRITES is taken out of this reading, because
+the first of the three readings holds it; one the comment does not write is read here.
+
+**And a fourth, in the audit rather than the parser.** `scripts/pr-ready-audit.sh` fetched the
+comment's `body` and its `body_html` in two calls, so a reviewer editing between them gave the
+audit VERSION A'S CHARACTERS AND VERSION B'S RENDERING -- a pair that passes where each version
+alone blocks. Executed against the whole audit: A (`_P1_` in prose over a clean `PASS`) is MANUAL,
+B (that finding moved into the object, verdict CHANGES_REQUIRED) is NOT-READY, and A's body beside
+B's rendering was PASS, READY and ONE `gh pr merge` call, with neither the comment id nor the
+reviewed sha changing. One fetch under `application/vnd.github.full+json` is one version.
+
+**Measured.** Over the 685 comments this repository held on 2026-09-21T20:49:34Z, **0 of 685 change
+any field** between `7767c71c` and round seven's head. Over the 126 documents the gate ships a
+recorded rendering for, **5 change and every one of them GAINS a token**; the five are the three
+rows above plus the second `<pre>` row in the frontier form and a second quotation row.
+
 ## Why this is P2 and not P1
 
 **The bar is the owner's ruling of 2026-09-11: a P1 blocks a merge only if it can happen in normal
@@ -121,32 +186,68 @@ use, or someone without push access can trigger it.**
 **The push-access limb is measured and not met.** `scripts/pr-ready-audit.sh` parses exactly one
 comment per pull request: the id comes from `latest_review_id`, whose listing runs
 `review_comment_filter`, whose predicate keeps only comments whose `user.login` lowercases to the
-trusted reviewer's; the body and the rendering are then fetched by that id. `ledger_result`, the
-only other thing the parser reads, uses neither scan. `grep -n 'run_review_parser ' scripts/pr-ready-audit.sh`
-returns the two call sites and the function's own comment, and nothing else.
+trusted reviewer's; GitHub's whole answer for that id is then fetched once and split into the two
+documents. `ledger_result`, the only other thing the parser reads, uses neither scan.
+`grep -n 'run_review_parser ' scripts/pr-ready-audit.sh` returns THREE call sites and the
+function's own comment, and nothing else: `comment` and `review`, which are the two halves of
+reading that one comment, and `ledger`, which reads the pull request body.
 
 **Asserted end to end by `MUT-REVIEWER-ANY-AUTHOR-READ`**: the witness comment written by
 `a-contributor` is `NOT-READY`, `blockers=no-review`, zero `gh pr merge` calls, and the clean `PASS`
 object attributed to the same outsider is READY, enqueued, one merge call once the login predicate
 is deleted. Both directions executed.
 
-**The normal-use limb.** Of the four things left, one costs a `manual:` line if GitHub emits a new
-tag (2 and 3 cost nothing and 4 costs a block, not a merge). **None of the four is a reading that
-shows a reader a severity and reports none**: the only way that happens now is a tag in neither
-set, and that is reported.
+**The normal-use limb, and item 3 is the one that has to answer it.** 1 costs a `manual:` line if
+GitHub emits a tag this classification does not hold, 2 costs nothing, and 4 costs a block rather
+than a merge. **3 COSTS A MERGE**, and what keeps it here rather than at P1 is what the document
+has to be:
+
+- the review is written in the frontier form (the workflow form refuses any literal `VERDICT:`
+  outside its object, so this shape has no reading there at all);
+- the reviewer writes their correction in a spelling only a reader sees -- `VERDICT&#58;`,
+  `VERDICT\:`, `**VERDICT**:` -- which is ordinary;
+- AND the same comment carries a LINK REFERENCE DEFINITION, or a link title, whose text is
+  character for character the correction's rendered line, `VERDICT: CHANGES_REQUIRED` and nothing
+  else, and which no reader is shown.
+
+The third is not something a reviewer writes. It is not "a quotation of the protocol", which is
+what round seven closed: a quotation is SHOWN, so it is spent on the occurrence a reader sees in
+it. It is an occurrence written where a reader sees nothing, whose line is exactly the correction's
+line. **There is no instance of it in the 685 comments this repository holds** -- measured by
+parsing every one at both heads, 0 of 685 differ -- and none in the gate's 126 documents but the
+two fixtures that exist to record it.
+
+**A weaker sentence that is true, in place of round six's.** Round six wrote "none of the four is a
+reading that shows a reader a severity and reports none". That is still true OF A SEVERITY -- the
+severity scan has no exemption at all, so a token in any of the three readings is reported, and the
+only silence left there is a tag in neither set, which is itself reported. It is NOT true of a
+`VERDICT:` line, which does have an exemption, and item 3 is where it fails.
 
 ## What the change that takes this up should do
 
-**Nothing, until something measures a cost.** Round six's reading agreed with the transcription on
-all 685 comments and closed the six open rows; there is no known shape where a reader sees a token
-and this reports none. The three places to look if one turns up:
+**Item 3, and it needs something this design does not have.** Round seven's reading agrees with
+round six's on all 685 comments and closed three classes that each cost a merge; the shape that is
+left is item 3, it costs a merge, and closing it means telling a written occurrence a reader sees
+from one a reader does not -- which is knowing what the renderer dropped, which is a Markdown
+parse. Two things would do it without one, and both are outside this file:
+
+- **ask GitHub for the correspondence rather than for the result.** Nothing in the REST API offers
+  it today; if a rendering ever carries the source offsets of the runs it copied, the exemption
+  becomes exact and item 3 closes;
+- **or take the exemption away and pay for it.** Every rendered `VERDICT:` would be reported unless
+  the comment writes it literally at that point, which makes the frontier form's own two verdict
+  lines the only exempt ones and costs a `manual:` line on any review that quotes the protocol.
+  Measured: 250 of the 685 comments carry that form's marker. That is a product decision and not a
+  repair, so it belongs to the owner.
+
+The other two places to look if a new shape turns up:
 
 - **the tag classification**, which is the only place a wrong answer is silent-ish (it reports,
   rather than reading wrong, so "silent" is the wrong word -- but a person still has to look);
-- **the `<pre>` decision**, which rests on a code block's content being shown verbatim. If that
-  ever stops being true -- a renderer that rewrites inside `<pre>` -- the scan would read the
-  characters where the reader sees something else;
-- **the exemption's line test**, item 3 above.
+- **`quoted_code`**, which decides which code blocks this reading keeps. It compares the block's
+  shown text against what the comment writes, with line endings folded; a block the comment writes
+  that this comparison misses would be READ, which is the reporting direction, and one the comment
+  does not write that it matches anyway would be DROPPED, which is not.
 
 **AND WHATEVER IS TAKEN, MEASURE IT AGAINST GITHUB'S OWN RENDERING OF THE COMMENTS THIS REPOSITORY
 HOLDS.** Five rounds of this finding were closed by a review and not by a test, and the two defects
