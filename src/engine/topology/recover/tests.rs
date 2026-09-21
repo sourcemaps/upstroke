@@ -1822,6 +1822,7 @@ struct FinishedPlanting {
     fixture: Fixture,
     candidate: crate::topology::events::CandidateRef,
     prepared_pin: GitRef,
+    surplus_candidate_pin: bool,
     beta_slot: crate::workspace_manager::Slot,
     beta_worktree: PathBuf,
     snapshot: Option<PathBuf>,
@@ -1899,10 +1900,12 @@ fn plant_finished_run_with(
     let (candidate, head) = match alpha {
         AlphaEnd::Queued => {
             let planted = plant_queued_candidate(&fixture);
+            prune_the_planted_candidate_pins(&fixture, &[ALPHA], tag);
             (planted.candidate, fixture.base_sha.clone())
         }
         AlphaEnd::Published => {
             let planted = publish_alpha(&fixture);
+            prune_the_planted_candidate_pins(&fixture, &[ALPHA], tag);
             (planted.candidate, planted.commit)
         }
         AlphaEnd::Parked => {
@@ -1992,6 +1995,7 @@ fn plant_finished_run_with(
         fixture,
         candidate,
         prepared_pin: names.prepared_ref,
+        surplus_candidate_pin: false,
         beta_slot,
         beta_worktree,
         snapshot,
@@ -2003,6 +2007,33 @@ fn plant_finished_run_with(
         store,
         report_leftover,
     }
+}
+
+fn with_a_candidate_pin_no_crash_leaves(planted: FinishedPlanting) -> FinishedPlanting {
+    assert_eq!(
+        ref_target(&planted.fixture, planted.prepared_pin.as_str()),
+        None,
+        "the finished plant completed the candidate's promotion: no candidate-prepared pin stands"
+    );
+    crate::workspace_manager::fixture::git(
+        &planted.fixture.repo_root,
+        &[
+            "update-ref",
+            planted.prepared_pin.as_str(),
+            planted.candidate.commit_sha.as_str(),
+        ],
+    );
+    FinishedPlanting {
+        surplus_candidate_pin: true,
+        ..planted
+    }
+}
+
+fn candidate_pins_on_disk(fixture: &Fixture) -> Vec<String> {
+    upstroke_refs_on_disk(fixture)
+        .into_iter()
+        .filter(|line| line.contains("/candidate-prepared/"))
+        .collect()
 }
 
 fn plant_report_leftover(fixture: &Fixture) -> PathBuf {
@@ -2020,7 +2051,10 @@ fn resume_finalizes_halted_then_refuses() {
         ("halted", RunOutcome::Halted),
         ("complete", RunOutcome::Complete),
     ] {
-        let planted = plant_finished_run(&format!("finished-{tag}"), outcome.clone());
+        let planted = with_a_candidate_pin_no_crash_leaves(plant_finished_run(
+            &format!("finished-{tag}"),
+            outcome.clone(),
+        ));
         let fixture = &planted.fixture;
         let manager = fixture.manager();
         assert!(
@@ -20193,6 +20227,7 @@ struct FinalizationEffect {
     sites: Vec<EffectSiteId>,
     label: &'static str,
     done: fn(&FinishedPlanting) -> bool,
+    planted: fn(&FinishedPlanting) -> bool,
 }
 
 fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
@@ -20223,11 +20258,13 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                 planted.fixture.public().join("report.json").is_file()
                     && !planted.report_leftover.exists()
             },
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Worktree(WorktreeSite::Remove)],
             label: "beta's worktree removed",
             done: |planted| !planted.beta_worktree.exists(),
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveIntent)],
@@ -20237,11 +20274,13 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                     matches!(slot, crate::workspace_manager::Slot::Task { .. })
                 })
             },
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Snapshot(SnapshotSite::Remove)],
             label: "the snapshot removed",
             done: |planted| planted.snapshot.as_ref().is_some_and(|path| !path.exists()),
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Snapshot(SnapshotSite::RemoveIntent)],
@@ -20251,11 +20290,13 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                     matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })
                 })
             },
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveStaging)],
             label: "the staging worktree removed",
             done: |planted| planted.staging.as_ref().is_some_and(|path| !path.exists()),
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent)],
@@ -20265,6 +20306,7 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                     matches!(slot, crate::workspace_manager::Slot::Staging { .. })
                 })
             },
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Ref(RefSite::DeletePreparedPin)],
@@ -20275,11 +20317,13 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                     .as_ref()
                     .is_some_and(|pin| !ref_present(planted, pin.as_str()))
             },
+            planted: |_| true,
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Ref(RefSite::DeleteCandidatePin)],
             label: "the candidate-prepared pin deleted",
             done: |planted| !ref_present(planted, planted.prepared_pin.as_str()),
+            planted: |planted| planted.surplus_candidate_pin,
         },
     ];
     if *outcome == RunOutcome::Complete {
@@ -20287,17 +20331,20 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
             sites: vec![EffectSiteId::Ref(RefSite::DeleteCandidatesRef)],
             label: "the candidates ref deleted",
             done: |planted| candidates_refs_of(&planted.fixture).is_empty(),
+            planted: |_| true,
         });
     }
     effects.push(FinalizationEffect {
         sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot)],
         label: "the execution root removed",
         done: |planted| !planted.fixture.manager().execution_root().exists(),
+        planted: |_| true,
     });
     effects.push(FinalizationEffect {
         sites: vec![EffectSiteId::Lock(LockSite::Release)],
         label: "the run lock released",
         done: |planted| !rundir::is_running(&planted.fixture.public()),
+        planted: |_| true,
     });
     effects
 }
@@ -20332,6 +20379,15 @@ fn assert_finalization_order(
     let release = EffectSiteId::Lock(LockSite::Release);
     let survivable = cell.0 == release;
     for (index, effect) in effects.iter().enumerate() {
+        if !(effect.planted)(planted) {
+            assert!(
+                index != faulted && (effect.done)(planted),
+                "{tag}: `{}` has no residue in this plant, so no fault lands in it and it \
+                 stays done",
+                effect.label
+            );
+            continue;
+        }
         let releases = effect.sites.contains(&release);
         let expected = (survivable && !releases)
             || index < faulted
@@ -20425,6 +20481,12 @@ fn kill_after_report_before_each_cleanup_step() {
                     prepared_pin: true,
                 },
             );
+            let sweeps_a_candidate_pin = site == EffectSiteId::Ref(RefSite::DeleteCandidatePin);
+            let planted = if sweeps_a_candidate_pin {
+                with_a_candidate_pin_no_crash_leaves(planted)
+            } else {
+                planted
+            };
             cells += 1;
             let fixture = &planted.fixture;
             assert!(
@@ -20433,8 +20495,14 @@ fn kill_after_report_before_each_cleanup_step() {
                     .filter(|effect| !effect
                         .sites
                         .contains(&EffectSiteId::Lock(LockSite::Release)))
-                    .all(|effect| !(effect.done)(&planted)),
-                "{tag}: the residue each step prunes is there to be pruned"
+                    .all(|effect| (effect.planted)(&planted) != (effect.done)(&planted)),
+                "{tag}: the residue each step prunes is there to be pruned, and nothing stands \
+                 where the plant left none"
+            );
+            assert_eq!(
+                candidate_pins_on_disk(fixture).len(),
+                usize::from(sweeps_a_candidate_pin),
+                "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
             );
             let before = fixture.log_bytes();
             let runtime = runtime_holding_the_record();
@@ -20485,6 +20553,15 @@ fn kill_after_report_before_each_cleanup_step() {
                     "{tag}: {text}"
                 );
             }
+            assert_eq!(
+                second.lock().unwrap_or_else(PoisonError::into_inner).count(
+                    EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+                    HookPhase::Before
+                ),
+                u32::from(sweeps_a_candidate_pin && phase == HookPhase::Before),
+                "{tag}: the next resume deletes a candidate-prepared pin only where the cell \
+                 declared one and the fault came before its deletion"
+            );
             assert_finalized(&planted, &outcome, &tag);
             assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
 
@@ -21500,6 +21577,7 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
                 prepared_pin: true,
             },
         );
+        let planted = with_a_candidate_pin_no_crash_leaves(planted);
         let fixture = &planted.fixture;
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
@@ -21652,6 +21730,7 @@ fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
                 prepared_pin: true,
             },
         );
+        let planted = with_a_candidate_pin_no_crash_leaves(planted);
         let fixture = &planted.fixture;
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
@@ -21833,6 +21912,7 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
                 prepared_pin: true,
             },
         );
+        let planted = with_a_candidate_pin_no_crash_leaves(planted);
         let fixture = &planted.fixture;
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
@@ -22063,7 +22143,15 @@ fn finalization_resume_child() {
         seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before)
             && seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After)
     };
+    let candidate_pin_deletions = harness
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .count(
+            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            HookPhase::Before,
+        );
     let resumed = serde_json::json!({
+        "candidate_pin_deletions": candidate_pin_deletions,
         "refusal": outcome.as_ref().err().map(message),
         "continued": outcome.as_ref().ok().map(|(recovered, _)| format!("{recovered:?}")),
         "released_through_the_funnel": released,
@@ -22164,6 +22252,22 @@ fn resume_in_a_fresh_process(planted: &FinishedPlanting, tag: &str) -> (String, 
     (refusal.to_owned(), released)
 }
 
+#[track_caller]
+fn candidate_pin_deletions_of_the_fresh_resume(planted: &FinishedPlanting, tag: &str) -> u64 {
+    let reported = std::fs::read_to_string(planted.fixture.root.join("finalization-resume-report"))
+        .unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(reported.trim_end())
+        .ok()
+        .and_then(|resumed| {
+            resumed
+                .get("candidate_pin_deletions")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or_else(|| {
+            panic!("{tag}: the resume child reported no candidate-pin count: {reported}")
+        })
+}
+
 #[test]
 fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume() {
     let planted = plant_finished_run_with(
@@ -22242,15 +22346,33 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
                 prepared_pin: true,
             },
         );
+        let sweeps_a_candidate_pin = site == EffectSiteId::Ref(RefSite::DeleteCandidatePin);
+        let planted = if sweeps_a_candidate_pin {
+            with_a_candidate_pin_no_crash_leaves(planted)
+        } else {
+            planted
+        };
+        let pin_outlives_the_kill = sweeps_a_candidate_pin && phase == HookPhase::Before;
         cells += 1;
         let fixture = &planted.fixture;
         let before = fixture.log_bytes();
+        assert_eq!(
+            candidate_pins_on_disk(fixture).len(),
+            usize::from(sweeps_a_candidate_pin),
+            "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
+        );
 
         let observed = kill_inside_finalization(&planted, (site, phase), &tag);
         assert_eq!(
             fixture.log_bytes(),
             before,
             "{tag}: the death appended nothing"
+        );
+        assert_eq!(
+            candidate_pins_on_disk(fixture).len(),
+            usize::from(pin_outlives_the_kill),
+            "{tag}: at the boundary the next resume reads, no candidate-prepared pin stands \
+             beside the completed promotion but the declared one a kill before its deletion left"
         );
         planted
             .answer_files
@@ -22273,6 +22395,12 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
                 }),
             "{tag}: the next resume finalizes then refuses, and writes the report only when the \
              kill came before it: {text}"
+        );
+        assert_eq!(
+            candidate_pin_deletions_of_the_fresh_resume(&planted, &tag),
+            u64::from(pin_outlives_the_kill),
+            "{tag}: the fresh resume deletes no candidate-prepared pin but the declared one, so \
+             what it repairs is what the kill at this cell left"
         );
         assert_finalized(&planted, outcome, &format!("{tag}: after the kill"));
         assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
