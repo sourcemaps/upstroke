@@ -660,7 +660,10 @@ def reader_spelling(text):
         if reference is not None:
             if reference[0] != "#":
                 # Looked up AS WRITTEN. That renderer's pattern is case-insensitive and its table
-                # is not, so `&AMP;` is no reference and stays the five characters a reader sees.
+                # is not, and the table holds several names in more than one case, so the two
+                # disagree only on a spelling it holds in NEITHER: `&amp;` and `&AMP;` are both
+                # `&`, and `&Amp;` is no reference and stays the five characters a reader sees.
+                # Measured against `markdown-it-py` 3.0.0 on 2026-09-21, all three.
                 return NAMED_REFERENCE.get(reference, match.group(0))
             body = reference[1:]
             point = int(body[1:], 16) if body[0] in "xX" else int(body)
