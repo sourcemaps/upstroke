@@ -76,7 +76,7 @@ fact — the production binary does not drive schema 4 yet.
 production callers and the allow stops being true rather than stops being
 convenient.
 
-## `#![deny(`
+## `#![forbid(`
 
 **The topology subtree's effect denials, restated at its root rather than
 inherited from the crate's defaults.** From #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`)

@@ -28,7 +28,7 @@ anything that only degrades what it can say is a warning that names the key.
 Pool order is file order, and file order is preference — the span each entry
 carries is what preserves it through a map.
 
-## `#![deny(`
+## `#![forbid(`
 
 **This child states its own lint level and inherits nothing.** A Rust lint
 level is scoped by the module tree rather than by the file, so an out-of-line
