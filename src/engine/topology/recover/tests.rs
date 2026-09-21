@@ -6909,6 +6909,16 @@ fn resume_as(
     runtime: &dyn ContainerRuntime,
     hooks: &mut dyn TopologyHooks,
 ) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    resume_as_certified_by(fixture, incarnation, runtime, &AlwaysCertifies, hooks)
+}
+
+fn resume_as_certified_by(
+    fixture: &Fixture,
+    incarnation: &str,
+    runtime: &dyn ContainerRuntime,
+    preflight: &dyn RunnerPreflight,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
     let liveness = FakeOwnerLiveness::new();
     let view = DisposableDirView::new(ContainerTrace::default());
     let incarnation = IncarnationId(incarnation.to_owned());
@@ -6927,7 +6937,7 @@ fn resume_as(
             runtime,
             liveness: &liveness,
             view: &view,
-            preflight: &AlwaysCertifies,
+            preflight,
             refs: &manager,
             manager: &manager,
             clock: &Frozen,
@@ -6935,6 +6945,62 @@ fn resume_as(
         hooks,
         &mut warnings,
     )
+}
+
+const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";
+
+fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag: &str) -> usize {
+    let (_, handle) = resume_as(
+        fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    assert_the_creation_prefix_is_complete(fixture, tag);
+    assert_eq!(
+        durable_kinds(fixture),
+        vec!["run_started", "run_resumed"],
+        "{tag}: the first resume recorded itself and nothing else"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: and no process holds the run"
+    );
+    durable_kinds(fixture).len()
+}
+
+fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {
+    assert!(
+        !fixture.public().join(rundir::MARKER).exists()
+            && !fixture.public().join(rundir::MARKER_STAGED).exists(),
+        "{tag}: the creator's marker is gone"
+    );
+    assert!(
+        fixture.manager().execution_root().is_dir(),
+        "{tag}: the execution root stands"
+    );
+    assert!(
+        ref_target(fixture, fixture.started.integration_ref.as_str()).is_some(),
+        "{tag}: and the integration ref exists"
+    );
+}
+
+fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {
+    let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+    for site in [
+        EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+        EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
+        EffectSiteId::Ref(RefSite::CreateIntegration),
+    ] {
+        assert_eq!(
+            seen.count(site, HookPhase::Before),
+            0,
+            "{tag}: the resume enters no `{site}`: the prefix carries no creation marker, and \
+             its execution root and its integration ref stand"
+        );
+    }
 }
 
 #[test]
@@ -7282,6 +7348,12 @@ struct ReportingHooks {
     inner: HarnessTopologyHooks,
     effects: ReportingEffects,
     events: ReportingEvents,
+    rundir: ReportingRunDir,
+}
+
+struct ReportingRunDir {
+    inner: rundir::HarnessHooks,
+    report: PathBuf,
 }
 
 struct ReportingEffects {
@@ -7310,19 +7382,41 @@ impl ReportingHooks {
                 report: report.to_path_buf(),
             },
             events: ReportingEvents {
-                inner: crate::events::log::HarnessEventHooks::new(harness),
+                inner: crate::events::log::HarnessEventHooks::new(Arc::clone(&harness)),
+                report: report.to_path_buf(),
+            },
+            rundir: ReportingRunDir {
+                inner: rundir::HarnessHooks::new(harness),
                 report: report.to_path_buf(),
             },
         }
     }
 }
 
+impl rundir::RunDirHooks for ReportingRunDir {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == EffectSiteId::RunDir(RunDirSite::RemoveMarker) && phase == HookPhase::Before {
+            report(&self.report, &format!("repair {site}"));
+        }
+        self.inner.hook(site, phase)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
 impl crate::workspace_manager::EffectHooks for ReportingEffects {
     fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        if site == EffectSiteId::Ref(RefSite::CompareAndSwapIntegration)
-            && phase == HookPhase::Before
-        {
-            report(&self.report, "cas");
+        if phase == HookPhase::Before {
+            if site == EffectSiteId::Ref(RefSite::CompareAndSwapIntegration) {
+                report(&self.report, "cas");
+            }
+            if site == EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot)
+                || site == EffectSiteId::Ref(RefSite::CreateIntegration)
+            {
+                report(&self.report, &format!("repair {site}"));
+            }
         }
         self.inner.phase(site, phase)
     }
@@ -7367,7 +7461,7 @@ impl TopologyHooks for ReportingHooks {
     }
 
     fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
-        self.inner.rundir()
+        &mut self.rundir
     }
 
     fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
@@ -7460,10 +7554,12 @@ fn two_crash_kill_child() {
 fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()
 {
     let fixture = Fixture::healthy("two-crash");
+    the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, "two-crash");
     let planted = plant_queued_candidate(&fixture);
     let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
     let prefix_with_prepared = u64::try_from(fixture.log_bytes().len()).expect("a small log");
     drop(first);
+    assert_the_creation_prefix_is_complete(&fixture, "two-crash");
 
     let report_path = fixture.root.join("two-crash-report");
     let status = crate::workspace_manager::fixture::run_kill_child(
@@ -7485,7 +7581,8 @@ fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_lo
     assert_eq!(
         reported.lines().collect::<Vec<_>>(),
         vec![format!("synced {prefix_with_prepared}").as_str(), "cas"],
-        "the barrier's sync covered the merge_prepared line and preceded the swap"
+        "the barrier's sync covered the merge_prepared line and preceded the swap, and the \
+         resumed incarnation repaired nothing of the creation's prefix on the way to it"
     );
     assert_eq!(
         ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
@@ -7515,6 +7612,7 @@ fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_lo
     let third = harness();
     let (_, handle) = resume_with_real_refs(&fixture, &third)
         .expect("the ref already at the proposal is recorded, not swapped again");
+    assert_no_repair_of_the_creation_prefix(&third, "two-crash");
     assert_eq!(merged_sequences(&fixture), vec![0]);
     assert_eq!(cas_integration_entries(&third), 0);
     assert!(handle.fold.transaction().is_none());
@@ -7530,10 +7628,12 @@ fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_lo
 #[test]
 fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
     let fixture = Fixture::healthy("barrier-sync-fails");
+    the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, "barrier-sync-fails");
     let planted = plant_queued_candidate(&fixture);
     let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
     let durable = proven_durable_len(&first, &fixture);
     drop(first);
+    assert_the_creation_prefix_is_complete(&fixture, "barrier-sync-fails");
     let before = fixture.log_bytes();
 
     let harness = harness();
@@ -7576,11 +7676,27 @@ fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
         "the unsynced line was lost"
     );
     let seams = DriveSeams::default();
-    let driven = drive_observing(
+    let converging = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&converging));
+    let (_, handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the resume after the loss converges");
+    assert_no_repair_of_the_creation_prefix(&converging, "barrier-sync-fails");
+    for phase in [HookPhase::Before, HookPhase::After] {
+        let seen = converging.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(EffectSiteId::Lock(LockSite::AcquireRun), phase)
+                && seen.observed(EffectSiteId::Lock(LockSite::ProbeCleanupExclusive), phase),
+            "the converging resume takes the run lock again and repeats the exclusive cleanup \
+             probe ({phase})"
+        );
+    }
+    let driven = drive_handle_observing(
         &fixture,
+        handle,
         &seams,
         1,
         &driven_runner(&seams),
+        &mut hooks,
         &mut |_, run| assert_log_replays_twice_equal(&fixture, Some(run.fold()), "after the loss"),
     );
     assert!(
@@ -9249,6 +9365,19 @@ fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification
     );
 }
 
+struct ProbeDiesLeaving<'a> {
+    residue: &'a dyn Fn(),
+}
+
+impl RunnerPreflight for ProbeDiesLeaving<'_> {
+    fn certify(&self, _policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
+        (self.residue)();
+        Err(UpstrokeError::Refused {
+            message: "the pre-flight probe did not survive its launch".to_owned(),
+        })
+    }
+}
+
 #[test]
 fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()
  {
@@ -9280,50 +9409,98 @@ fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaime
             0,
         )
         .expect("the agent probe identity");
-        let name = ContainerName::new(fixture.repo_key.as_str(), RUN_ID, CREATOR, &invocation)
-            .expect("a container name for the creator incarnation");
+        let name = ContainerName::new(
+            fixture.repo_key.as_str(),
+            RUN_ID,
+            FIRST_RESUMER,
+            &invocation,
+        )
+        .expect("a container name for the incarnation whose probe dies");
         let record = ContainerIntent::new(
             RUN_ID.to_owned(),
             &fixture.public(),
-            CREATOR.to_owned(),
+            FIRST_RESUMER.to_owned(),
             fixture.repo_key.as_str().to_owned(),
             invocation.render(),
             crate::runner::policy::runner_policy_sha256(&fixture.started.runner),
         );
         let view_path = crate::runner::container::exec::view_dir(&fixture.private_root, &name);
-        let mut container_hooks = crate::runner::container::NoHooks;
-        if intent {
-            crate::runner::container::write_intent(
-                &mut container_hooks,
-                ContainerSite::WriteIntent,
-                &fixture.private_root,
-                &name,
-                &record,
+        let residue = || {
+            let mut container_hooks = crate::runner::container::NoHooks;
+            if intent {
+                crate::runner::container::write_intent(
+                    &mut container_hooks,
+                    ContainerSite::WriteIntent,
+                    &fixture.private_root,
+                    &name,
+                    &record,
+                )
+                .expect("the container funnel writes the intent");
+            }
+            if view {
+                crate::runner::container::mount_git_view(
+                    &mut container_hooks,
+                    ContainerSite::MountGitView,
+                    &DisposableDirView::new(ContainerTrace::off()),
+                    &crate::runner::container::GitViewRequest {
+                        path: view_path.clone(),
+                        workspace: fixture.repo_root.clone(),
+                        head: None,
+                    },
+                )
+                .expect("the container funnel mounts the view");
+            }
+            if let Some(state) = container {
+                runtime.seed_container(
+                    name.as_str(),
+                    record.labels(&fixture.private_root),
+                    IMAGE_ID,
+                    IMAGE_ID,
+                    state,
+                );
+            }
+        };
+
+        let dying = harness();
+        let refused = message(
+            &resume_as_certified_by(
+                &fixture,
+                FIRST_RESUMER,
+                &runtime,
+                &ProbeDiesLeaving { residue: &residue },
+                &mut HarnessTopologyHooks::new(Arc::clone(&dying)),
             )
-            .expect("the container funnel writes the intent");
-        }
-        if view {
-            crate::runner::container::mount_git_view(
-                &mut container_hooks,
-                ContainerSite::MountGitView,
-                &DisposableDirView::new(ContainerTrace::off()),
-                &crate::runner::container::GitViewRequest {
-                    path: view_path.clone(),
-                    workspace: fixture.repo_root.clone(),
-                    head: None,
-                },
-            )
-            .expect("the container funnel mounts the view");
-        }
-        if let Some(state) = container {
-            runtime.seed_container(
-                name.as_str(),
-                record.labels(&fixture.private_root),
-                IMAGE_ID,
-                IMAGE_ID,
-                state,
-            );
-        }
+            .map(|_| ())
+            .expect_err("the run's first resume ends in its pre-flight probe"),
+        );
+        assert!(
+            refused.contains("did not survive its launch"),
+            "{cell}: the command ended where the probe did: {refused}"
+        );
+        assert_eq!(
+            dying.lock().unwrap_or_else(PoisonError::into_inner).count(
+                EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+                HookPhase::After
+            ),
+            1,
+            "{cell}: that resume's census removed the creator's marker before its probe"
+        );
+        assert!(
+            !fixture.public().join(rundir::MARKER).exists()
+                && !fixture.manager().execution_root().exists()
+                && ref_target(&fixture, fixture.started.integration_ref.as_str()).is_none(),
+            "{cell}: the marker is gone, and the probe precedes the execution root and the \
+             integration ref"
+        );
+        assert_eq!(
+            durable_kinds(&fixture),
+            vec!["run_started"],
+            "{cell}: and it precedes `run_resumed`"
+        );
+        assert!(
+            !rundir::is_running(&fixture.public()),
+            "{cell}: no process holds the run"
+        );
         assert_eq!(
             (
                 !crate::runner::container::list_intents(&fixture.private_root)
@@ -9336,12 +9513,14 @@ fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaime
             "{cell}: the planted state"
         );
 
-        let harness = harness();
-        let certifies = AlwaysCertifies;
-        let given = Given::healthy(&fixture, &runtime, &certifies);
-        let (outcome, _) = resume_holding(&fixture, &harness, &given);
-        let (_, handle) =
-            outcome.unwrap_or_else(|error| panic!("{cell}: the resume converges: {error}"));
+        let recovery = harness();
+        let (_, handle) = resume_as(
+            &fixture,
+            RESUMER,
+            &runtime,
+            &mut HarnessTopologyHooks::new(Arc::clone(&recovery)),
+        )
+        .unwrap_or_else(|error| panic!("{cell}: the resume converges: {error}"));
         assert!(
             runtime.container_names().is_empty(),
             "{cell}: the census removed the container: {:?}",
@@ -9354,6 +9533,29 @@ fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaime
             "{cell}: and the intent"
         );
         assert!(!view_path.exists(), "{cell}: and the view");
+        {
+            let seen = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(
+                seen.count(
+                    EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+                    HookPhase::Before
+                ),
+                0,
+                "{cell}: the resume enters no `RunDir.RemoveMarker`: the dead resume's census \
+                 had removed the marker"
+            );
+            for own in [
+                EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
+                EffectSiteId::Ref(RefSite::CreateIntegration),
+            ] {
+                assert_eq!(
+                    seen.count(own, HookPhase::After),
+                    1,
+                    "{cell}: `{own}` is this resume's to perform: no resume of the run had \
+                     reached it"
+                );
+            }
+        }
         assert_log_replays_twice_equal(&fixture, Some(&handle.fold), cell);
     }
 }
@@ -13059,15 +13261,18 @@ fn a_repairs_same_session_retry_records_retained_and_is_not_materialized_again()
 /// the next incarnation ingests it before selecting anything else.
 #[test]
 fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {
+    let tag = "answer-file";
     let fixture = Fixture::build(
-        "answer-file",
+        tag,
         Damage {
             two_tasks: true,
             no_automatic_repairs: true,
             ..Damage::default()
         },
     );
+    the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (rejection, repair) = plant_over_limit_repair(&fixture);
+    assert_the_creation_prefix_is_complete(&fixture, tag);
     let question = rejection
         .repair
         .admission
@@ -13078,7 +13283,14 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         answers_from_run_dir: true,
         ..DriveSeams::default()
     };
-    let blocked = drive(&fixture, &seams, 1);
+    let first_drive = harness();
+    let blocked = drive_hooked(
+        &fixture,
+        &seams,
+        1,
+        &mut HarnessTopologyHooks::new(Arc::clone(&first_drive)),
+    );
+    assert_no_repair_of_the_creation_prefix(&first_drive, tag);
     assert!(
         matches!(
             blocked.progress.first(),
@@ -13090,6 +13302,7 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         "with no answer file the hard block finds nobody and the run ends parked: {:?}",
         blocked.progress
     );
+    assert_log_replays_twice_equal(&fixture, None, "with no answer file");
 
     let paths = crate::rundir::RunPaths::with_private_root(
         &fixture.repo_root,
@@ -13939,7 +14152,9 @@ fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_
             ..Damage::default()
         },
     );
+    the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    assert_the_creation_prefix_is_complete(&fixture, tag);
     assert!(
         fixture.manager().intents().expect("intents").is_empty(),
         "{tag}: the durable prefix stages nothing: no staging intent, no staging worktree"
@@ -13962,6 +14177,7 @@ fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
     let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
     drop(hooks);
+    assert_no_repair_of_the_creation_prefix(&observed, tag);
     for (site, phase) in [
         (
             EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
@@ -14005,8 +14221,10 @@ fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_ca
             ..Damage::default()
         },
     );
+    the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let (_planted, head) = plant_stale_queued_candidate(&fixture);
     let staging = plant_staging_worktree(&fixture, 1, head.as_str());
+    assert_the_creation_prefix_is_complete(&fixture, tag);
     let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
     let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
         .at(&staging)
@@ -14018,8 +14236,10 @@ fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_ca
          into it: `Worktree.AddStaging`'s after phase, `{site}`'s before phase"
     );
 
-    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+    let recovery = harness();
+    let (_, handle) = resume_with_real_refs(&fixture, &recovery)
         .expect("the resume reclaims the clean staging worktree rather than refusing");
+    assert_no_repair_of_the_creation_prefix(&recovery, tag);
     assert_staging_residue_reclaimed(&fixture, &staging, &handle);
     drop(handle);
 
@@ -15665,15 +15885,9 @@ fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_
     use crate::topology::effects::{EntryPhase, ResourceRow};
 
     let tag = "open-log-truncate-error";
-    let fixture = Fixture::build(
-        tag,
-        Damage {
-            open_generation: true,
-            ..Damage::default()
-        },
-    );
+    let fixture = Fixture::healthy(tag);
+    let planted = the_runs_first_resume_by_an_incarnation_that_then_dies(&fixture, tag);
     let committed = fixture.log_bytes();
-    let planted = durable_kinds(&fixture).len();
     crate::workspace_manager::fixture::write_file(
         &fixture.log(),
         &[
@@ -15690,9 +15904,7 @@ fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_
         vec![ResourceRow::R21],
         "{tag}"
     );
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
+    assert_the_creation_prefix_is_complete(&fixture, tag);
 
     let faulted = harness();
     faulted
@@ -15700,8 +15912,11 @@ fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_
         .unwrap_or_else(PoisonError::into_inner)
         .arm(site, point, mode)
         .expect("TruncateTornTail supports an error return");
-    let (outcome, _) = resume(&fixture, &faulted, &given);
-    let text = message(&outcome.expect_err("the error after the truncation refuses the resume"));
+    let text = message(
+        &resume_with_real_refs(&fixture, &faulted)
+            .map(|_| ())
+            .expect_err("the error after the truncation refuses the resume"),
+    );
     assert!(
         text.contains(point.name()) && text.contains("the run is resumable"),
         "{tag}: the write command refuses resumably, naming the point: {text}"
@@ -15723,11 +15938,29 @@ fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_
                 && !seen.touched(EffectSiteId::Event(EventSite::Append)),
             "{tag}: no proof, no census effect and no recovery event follow the refusal"
         );
+        let beyond_the_open: Vec<EffectSiteId> = seen
+            .coverage()
+            .iter()
+            .map(|observation| observation.site)
+            .filter(|site| {
+                !matches!(
+                    site,
+                    EffectSiteId::Lock(_) | EffectSiteId::Event(EventSite::OpenLog)
+                )
+            })
+            .collect();
+        assert!(
+            beyond_the_open.is_empty(),
+            "{tag}: the refused resume entered nothing but its locks and the open: \
+             {beyond_the_open:?}"
+        );
     }
 
     let observed = harness();
-    let (outcome, _) = resume(&fixture, &observed, &given);
-    outcome.expect("the next resume converges");
+    let (_, handle) =
+        resume_with_real_refs(&fixture, &observed).expect("the next resume converges");
+    drop(handle);
+    assert_no_repair_of_the_creation_prefix(&observed, tag);
     {
         let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(

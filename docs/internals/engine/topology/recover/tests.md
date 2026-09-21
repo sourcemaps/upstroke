@@ -1034,10 +1034,32 @@ An intent this run's *creator* incarnation left behind, in the recorded
 root. It is dead by construction: the run lock is exclusive, so only one
 incarnation of a run is ever live, and this process is a different one.
 
+## `struct ProbeDiesLeaving<'a> {`
+
+A `RunnerPreflight` for a resume that ends in its pre-flight probe: `certify` runs the residue
+the witness hands it (what a launch that died part way leaves) and then refuses, so the command
+ends at step (c) of the recovery order with nothing cleaned up. The refusal stands in for the
+death; the residue is planted, not left by a launch.
+
 ## `fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()`
 
+Rows 153 to 158 and 161 to 168 of Gate 5's audit, the container launch and release coordinates.
+The gate's third run found each cell's container state exact and the run around it not: the state
+was planted beside `Fixture::healthy`'s published creation marker and labelled with the creator's
+incarnation, where a probe container beside a committed run is left by a *resume* that died in its
+`RunnerPreflight` probe, whose census had already removed the marker (the census precedes
+`PreflightCertified::certify`). So each cell's state is now left by the run's first resume,
+`FIRST_RESUMER`: that resume runs `run_recovery_order` for real, its census removes the creator's
+marker through `RunDir.RemoveMarker` (asserted on its harness), and its pre-flight seam
+(`ProbeDiesLeaving`) plants the cell's state under that incarnation and refuses. What stands
+before the credited resume is asserted: the marker gone; no execution root, no integration ref and
+no `run_resumed`, because the probe precedes all three; no process holding the run; and the cell's
+intent, view and container. The next resume, a different incarnation over the real refs, reclaims
+the state in its container census and enters no `RunDir.RemoveMarker`; the execution root and the
+integration ref are its own to create, once each, because no resume of the run had reached them.
+
 The states a container launch or release can leave between its funnels,
-each left by the creator incarnation of a run with a log and resumed over:
+each left by the dead incarnation of a run with a log and resumed over:
 nothing; the intent alone (between `Container.WriteIntent` and the mount, or
 after the view's unmount); the intent and the view with no container (before
 `Container.Create`, or after `Container.Remove`); and the intent, the view and
@@ -2987,6 +3009,52 @@ The `RecordingRefs` double every other resume here supplies answers
 exactly how a resume that refused its own published head stayed green
 (`pr8-triage.md` C1). A publication test resumes through this.
 
+## `fn resume_as_certified_by(`
+
+`resume_as` with the pre-flight seam a parameter, for the one witness whose resume has to end in
+its probe (`ProbeDiesLeaving`). `resume_as` passes `AlwaysCertifies`, as it always did.
+
+## `const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";`
+
+The incarnation that resumes a run first in the witnesses below and then dies: neither the
+creator nor `RESUMER`, so the resume a witness credits is a different incarnation from the one
+whose work it recovers.
+
+## `fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag: &str) -> usize {`
+
+`Fixture::build` plants P6: `run_started` durable, the creator's marker still published, no
+integration ref and no execution root. A creator never steps, and a resume's census removes the
+marker before that resume appends anything, so no crash leaves a dispatch, a queued candidate, a
+rejection or a prepared transaction beside a published marker or a missing root. The gate's third
+run graded the witnesses that planted such events on the fixture near-exact for it (report §8.4,
+"the recover fixture's P6 hybrid"): their credited resume removed the marker, and at some rows
+recreated the root, besides performing the row's action.
+
+This is the setup resume that report asks for. `FIRST_RESUMER` resumes the fixture through
+`run_recovery_order` over the real refs and its handle is dropped: the marker is removed, the
+execution root and the integration ref are created, `run_resumed` is the log's second line and no
+process holds the run (all asserted). A witness plants the dead incarnation's work after it, so the
+planted events follow a `run_resumed`, as a stepping incarnation's do. Returns the number of
+durable events, for `kinds_after`.
+
+Two simplifications remain and are the fixture's, not this helper's: `Fixture::manager` derives the
+manager under the creator's incarnation, so an intent planted through it names the creator (the
+recovery never reads an intent's incarnation), and the planted run carries no `run.lock` or private
+skeleton from its creation (a resume opens or creates the lock file and reads neither).
+
+## `fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {`
+
+The on-disk half of the exactness claim, asserted after the plant and before the credited
+recovery: no creation marker (published or staged), the execution root a directory, the
+integration ref present. With these standing, a resume has no marker to remove, no root to
+recreate and no ref to create.
+
+## `fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {`
+
+The executed half: the credited recovery's harness holds no entry into `RunDir.RemoveMarker`,
+`Worktree.CreateExecutionRoot` or `Ref.CreateIntegration`. These are the three repairs the gate's
+exactness listing (`audit/exactness/resumes-per-witness.py`) reads a hybrid prefix by.
+
 ## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
 
 `transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
@@ -3083,7 +3151,15 @@ A hook bundle for a child that will be killed: it forwards to the harness
 bundle and writes, in order, every sync of the log file and every entry
 into the integration compare-and-swap to a report file the parent reads
 after the kill — the durability oracle carried across the process
-boundary, since the child's ledger dies with it.
+boundary, since the child's ledger dies with it. It also writes a `repair <site>` line for every
+entry into `RunDir.RemoveMarker` (`ReportingRunDir`), `Worktree.CreateExecutionRoot` or
+`Ref.CreateIntegration`, so the parent's comparison of the whole report also holds that the killed
+incarnation's resume repaired nothing of the creation's prefix.
+
+## `struct ReportingRunDir {`
+
+The run-directory half of `ReportingHooks`: the production adapter on the shared harness, with an
+entry into `RunDir.RemoveMarker` written to the report.
 
 ## `fn two_crash_kill_child() {` › `let repo_root = PathBuf::from(`
 
@@ -3103,6 +3179,14 @@ contains merge_prepared, the ref is at proposed_sha, and the next resume
 appends task_merged — on a real repository, with the sync ledger as the
 durability oracle: in-process for the first crash, reported across the
 process boundary for the second.
+
+Rows 33 and 34 of Gate 5's audit (`Ref.CompareAndSwapIntegration` before and after). The run is
+resumed once first (`the_runs_first_resume_by_an_incarnation_that_then_dies`), so the queued
+candidate and the unsynced `merge_prepared` follow a `run_resumed` and stand beside no creation
+marker and an execution root: the gate's third run graded both rows near-exact because the
+incarnation that issued the swap had first removed the marker and recreated the root. The child's
+report is compared whole, and it would carry a `repair` line for either; the third resume's
+harness is held to the same (`assert_no_repair_of_the_creation_prefix`).
 
 ## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
 
@@ -3130,6 +3214,15 @@ The next resume records the merge it finds done, with no second swap.
 (a1). No CAS is issued, the command ends resumably having done nothing,
 and after the loss of the unsynced line the before-append order holds:
 the candidate is still queued, and the next incarnation integrates it.
+
+Rows 98 and 133 of Gate 5's audit (`Event.OpenLog`'s `SyncPrefix` error return, and
+`Lock.ProbeCleanupExclusive`/after). The run is resumed once first, so the queued candidate and the
+unsynced line stand beside no creation marker; the gate's third run graded both rows near-exact
+because the converging resume removed the marker and recreated the root. The converging resume is
+made here on a harness of its own rather than inside `drive_observing`: it enters none of the
+three creation repairs, and it is observed taking `Lock.AcquireRun` and repeating
+`Lock.ProbeCleanupExclusive`, before and after, which row 133's reading had inferred from the
+resume's success.
 
 ## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `lose_unsynced_writes(&fixture, durable);`
 
@@ -4057,6 +4150,13 @@ byte-identical, and only then is the answer published. Both incarnations end
 with their log replayed twice to the driven run's fold (`drive_observing`,
 `assert_log_replays_twice_equal`).
 
+Row 122 of Gate 5's audit (`Answer.StageWrite`/before) is the first drive: the open question with
+no answer file, resumed over, and the run parked. The gate's third run graded it near-exact because
+that drive's resume removed the creation marker standing beside the planted rejection. The run is
+now resumed once before the rejection is planted, the first drive runs on a harness of its own and
+enters none of the three creation repairs, and the log is replayed twice after it parks, where the
+pair the row had was the one made after the second drive.
+
 `T-ANSWER` through the production reader: with no answer file the run
 hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
@@ -4119,6 +4219,31 @@ stopped. The resume's first step ingests it, in epoch 1 rather than in the stopp
 is cleared, the question is closed, and the file is retained byte for byte (R21). A second resume
 with the file still on disk ingests nothing, the log still holds exactly one `question_answered`
 for the repair, and it replays twice to equal states.
+
+## `fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal()`
+
+Row 15 of Gate 5's audit, `Worktree.WriteStagingIntent`/before: beta published and the integration
+head moved, alpha's candidate queued at the old base, and nothing of the staging path on disk (no
+staging intent, no staging worktree, no prepared pin for the next sequence, all asserted). The
+resume and its first step take the staging path from there, through the staging intent, the
+staging add, the pick and the pin, and the candidate integrates under sequence 1 on the moved
+head; the log then replays twice to equal states. The gate's third run graded the row near-exact
+because the queue was planted on the P6 fixture and the credited resume removed the creation
+marker and recreated the execution root before the step. The run is now resumed once before the
+queue is planted (`the_runs_first_resume_by_an_incarnation_that_then_dies`), the prefix is asserted
+complete after the plant, and the credited resume and step enter none of the three creation
+repairs.
+
+## `fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()`
+
+Rows 18 and 57 of Gate 5's audit, `Worktree.AddStaging`/after and `Object.ProposalCherryPick`/before,
+which are one durable state: the sequence's staging intent and its worktree at the integration
+head with nothing picked into it (`classify_object_residue` answers `None`). The resume reclaims
+the worktree and its intent as stale residue, creates no pin and leaves the candidate queued, and
+the next step stages again and integrates the candidate under sequence 1. Near-exact in the gate's
+third run for the P6 fixture's marker, which the credited resume removed; the run is now resumed
+once before the queue and the staging worktree are planted, and the credited resume enters none of
+the three creation repairs.
 
 ## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
 
@@ -4330,12 +4455,20 @@ accepted, pinning its own candidate and pruning that pin with its promotion.
 Gate 5's strict re-audit, row 96: `Event.OpenLog`'s `TruncateTornTail` point in error-return mode had
 no committed witness. The coverage test fires it on a bare log and drives nothing.
 
-A committed run with an open generation gets an unterminated final line, and the resume is armed
-to fail at the point. The open truncates the torn tail, the point answers the error, and the
+The run is resumed once and that incarnation dies writing its first event: the log is
+`run_started`, `run_resumed` and an unterminated final line, beside no creation marker, with the
+execution root and the integration ref standing. Until Gate 5's third run the torn line followed a
+dispatch planted on the P6 fixture, which that run graded near-exact: a dispatch beside a published
+marker is a state no crash leaves, and the converging resume removed the marker and recreated the
+root. The dispatch is gone rather than moved after the first resume, because a torn append after a
+dispatch is the attempt's start, which the generation's worktree precedes. Both resumes go through
+the real refs. The resume is armed to fail at the point. The open truncates the torn tail, the point answers the error, and the
 barrier stops at the open. The refusal names the point and says the run is resumable. What the
 refusal leaves is the registry's residue for the point, R21 with the unterminated final line
 truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
-event: nothing derived from the log was acted on. The next resume repeats the barrier: it opens
+event: nothing derived from the log was acted on, and the refused resume's harness holds no site
+but its locks and the open. The next resume enters none of the three creation repairs and repeats
+the barrier: it opens
 and proves the prefix, and has nothing left to truncate because the refused open's truncation
 stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
 states.
