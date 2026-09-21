@@ -292,10 +292,38 @@ MARKUP_WHITESPACE = frozenset("\t\n\x0b\x0c\r ")
 # two literal runs rather than a code span.
 BACKTICK_RUN = re.compile(r"`+")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
+NEWLINE = re.compile(r"\n")
+
+# A line ending inside a code span, which is SHOWN as one space whichever of the three it is.
+CODE_SPAN_ENDING = re.compile(r"\r\n|\n|\r")
+# The whitespace a link's parentheses may hold around its destination and title: `markdown-it-py`
+# 3.0.0 skips `isStrSpace` -- tab and space -- and a line feed, and never sees a carriage return,
+# because it normalises every line ending before its rules run. This reading is run over the
+# comment AS GITHUB STORES IT, where a line ending is `\r\n`, so the return is skipped here too.
+LINK_WHITESPACE = frozenset("\t\n\r ")
+# How deep that renderer's `parseLinkDestination` lets parentheses nest before it gives up, and
+# taking the bound from it rather than choosing one is what keeps `markup_regions` linear: a
+# destination that never balances stops after this many rather than rescanning the paragraph.
+DESTINATION_NESTING = 32
+
 # And the block that makes a reference link a link. A LABEL IS DEFINED OR THE BRACKETS ARE SHOWN,
 # and `link_labels` says why reading every pair as a link instead loses a token rather than finding
-# one. Up to three spaces of indentation, the label, the colon, and something on the line after it.
-LINK_DEFINITION = re.compile(r"^ {0,3}\[((?:[^\[\]\\]|\\.)*)\]:[ \t]*(?=\S)", re.M)
+# one. Up to three spaces of indentation, the label, the colon, and A DESTINATION -- which
+# CommonMark 0.31.2 4.7 lets stand ON THE LINE AFTER THE COLON, and `markdown-it-py` 3.0.0 reads
+# it there: that rule skips whitespace past the colon and stops at the first BLANK line, so one
+# line ending may stand between them and a blank one leaves the definition with no destination.
+#
+# REQUIRING IT ON THE LABEL'S OWN LINE COST A MERGE. `[VERDICT][policy]:` with `[policy]:` and its
+# destination wrapped onto the next line is `VERDICT: CHANGES_REQUIRED` to that renderer and was
+# no definition here, so the pair was no link, so the brackets stayed written and the correction
+# carried no token at all. Measured at `3fe68c37` through the whole audit, in BOTH review forms
+# and for the severity scan as well (`The blocker is P[1][policy].`): exit 0, PASS, no stray,
+# READY and ONE `gh pr merge` call, where the same definition written on one line was MANUAL and
+# none.
+LINK_DEFINITION = re.compile(
+    r"^ {0,3}\[((?:[^\[\]\\]|\\.)*)\]:[ \t]*(?:\r\n|\n|\r)?[ \t]*(?=\S)", re.M
+)
+
 
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
@@ -350,11 +378,14 @@ PROSE_MARKER = re.compile(r"<!-- upstroke-frontier-review")
 # SPELLINGS: what was wrong was not that an attacker could hide a line, it was that the reviewer's
 # own ordinary writing did.
 #
-# AND IT IS ASKED OF BOTH FORMS, DIFFERENTLY. The workflow form writes no verdict LINE of its own,
-# so any a reader sees outside its object is reported. The FRONTIER form's verdict IS such a line
-# and its template writes two of them, so what is reported there is a line A READER SEES AND THE
-# COMMENT DOES NOT WRITE -- `stray_summary` carries the count that says so, and the measurement
-# over this repository's own reviews that made the difference necessary.
+# AND IT IS ASKED OF BOTH FORMS, AS ONE QUESTION. What is reported is a line A READER SEES AND THE
+# COMMENT DOES NOT WRITE, in those characters, at that place: the workflow form writes no verdict
+# LINE of its own, so any a reader sees outside its object is reported; the FRONTIER form's
+# verdict IS such a line and its template writes two of them, and those are exempt BY BEING
+# WRITTEN. `unwritten_verdict` carries the rule, the merge that comparing COUNTS instead cost at
+# `3fe68c37`, and the measurement over this repository's own reviews that made an exemption
+# necessary at all.
+
 #
 # WHAT IS STILL NOT READ: INLINE RAW HTML. `VER<span>DICT:</span>` renders as `VERDICT:` and is no
 # token in any of the readings, measured with `markdown-it-py` 3.0.0 on 2026-09-21 and pinned as a
@@ -641,8 +672,28 @@ def emphasis_delimiter(marker, before, after):
             or (right and (not left or next_punct)))
 
 
-def code_span_closer(text, start, ticks):
-    """The backtick string that closes a code span opened by TICKS, searching TEXT from START.
+def block_limits(text):
+    """Every offset in TEXT a blank line starts at, in order.
+
+    ONE PASS INSTEAD OF ONE SEARCH PER PAIR. A blank line is the only block boundary this reading
+    knows, and `code_span_closer` and `link_extent` each need the end of the block they stand in;
+    searching for it FROM EVERY backtick run and EVERY `]` reads the rest of the paragraph that
+    many times, which is quadratic whatever the rules inside it cost. `markup_regions` walks
+    forward and only forward, so it takes its limit off this list with a pointer that only
+    advances, and the limit it hands down is the same offset the search returned: a blank line
+    cannot begin inside a backtick run or on the `]` the walk is standing on, so reading it from
+    the walk's own position rather than from just past that is the same answer.
+
+    Measured on 2026-09-21 with the per-pair search still in place, at the head this replaced:
+    `'[x](' * 16000` -- 64,216 bytes -- read in 0.220 seconds and `'[x](' * 64000` -- 256,216 --
+    in 2.004, where the whole of the rest of this pass is linear.
+    """
+    return [found.start() for found in NEWLINE.finditer(text)
+            if BLANK_LINE.match(text, found.start())]
+
+
+def code_span_closer(text, start, ticks, limit):
+    """The backtick string that closes a code span opened by TICKS, in TEXT[START:LIMIT].
 
     `markdown-it-py` 3.0.0's `backtick` rule: a code span runs from one backtick string to the NEXT
     ONE OF THE SAME LENGTH, and a run with no such closer is that many literal backticks. A
@@ -650,65 +701,222 @@ def code_span_closer(text, start, ticks):
     runs only, so "the same length" is the same text and no lookaround has to say so.
 
     AND IT DOES NOT CROSS A BLANK LINE, because inline rules run inside ONE BLOCK and this is the
-    only block boundary this reading knows. A heading or a list that interrupts a paragraph ends
-    one too, so a run can pair across one here where a renderer leaves both written -- the same
-    over-reading direction as the rest of this reading, and the reason it is a reading BESIDE the
-    two that leave every delimiter written rather than instead of them.
+    only block boundary this reading knows -- LIMIT is where the caller's block ends. A heading or
+    a list that interrupts a paragraph ends one too, so a run can pair across one here where a
+    renderer leaves both written -- the same over-reading direction as the rest of this reading,
+    and the reason it is a reading BESIDE the two that leave every delimiter written rather than
+    instead of them.
     """
-    stop = BLANK_LINE.search(text, start)
-    limit = len(text) if stop is None else stop.start()
     for run in BACKTICK_RUN.finditer(text, start, limit):
         if run.group(0) == ticks:
             return run
     return None
 
 
-def code_span_text(content):
-    """CONTENT as a code span shows it: CommonMark 0.31.2 6.1, which is that renderer's own rule.
 
-    A line ending inside a code span is a space, and one space comes off each end when both ends
-    carry one and the content is not spaces all the way through. NOTHING ELSE HAPPENS TO IT: a
-    backslash escape, a character reference and an emphasis run inside a code span are shown
-    exactly as they were written, which is why the caller copies this out rather than reading it.
+def code_span_parts(content, start):
+    """CONTENT as a code span shows it, in parts, each naming the offset it is a COPY of.
+
+    CommonMark 0.31.2 6.1, which is that renderer's own rule. A line ending inside a code span is
+    a space, and one space comes off each end when both ends carry one and the content is not
+    spaces all the way through. NOTHING ELSE HAPPENS TO IT: a backslash escape, a character
+    reference and an emphasis run inside a code span are shown exactly as they were written, which
+    is why the caller copies this out rather than reading it.
+
+    AND IN PARTS BECAUSE THE CALLER HAS TO BE ABLE TO SAY WHERE A TOKEN CAME FROM. CONTENT stands
+    at START in the comment; a run between line endings is a copy of the comment from a known
+    offset, and the space a line ending is shown as is a copy of nothing, so it carries None. The
+    one space taken off each end is taken off the CONTENT rather than off the reading -- a `\\r\\n`
+    is one space and two characters and every other ending and a written space are one of each --
+    so every character left still names where it came from. `unwritten_verdict` says what it is for.
+
     """
-    shown = content.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    shown = CODE_SPAN_ENDING.sub(" ", content)
     if len(shown) >= 2 and shown[0] == " " and shown[-1] == " " and shown.strip(" "):
-        shown = shown[1:-1]
-    return shown
+        lead = 2 if content.startswith("\r\n") else 1
+        trail = 2 if content.endswith("\r\n") else 1
+        start += lead
+        content = content[lead:len(content) - trail]
+    parts = []
+    at = 0
+    for ending in CODE_SPAN_ENDING.finditer(content):
+        parts.append((content[at:ending.start()], start + at))
+        parts.append((" ", None))
+        at = ending.end()
+    parts.append((content[at:], start + at))
+    return parts
 
 
-def balanced_run(text, at, opener, closer):
-    """The offset just past the CLOSER that balances the OPENER at AT, or None.
 
-    A backslash escape is consumed whole, so `\\)` closes nothing, and the run stops at a blank
-    line for the reason `code_span_closer` does.
-    """
-    depth = 0
-    stop = BLANK_LINE.search(text, at)
-    limit = len(text) if stop is None else stop.start()
+def markup_skip(text, at, limit):
+    """The offset past the whitespace standing at AT, which is what a link's parentheses may hold."""
     position = at
+    while position < limit and text[position] in LINK_WHITESPACE:
+        position += 1
+    return position
+
+
+def link_destination(text, at, limit):
+    """The offset just past a link destination beginning at AT, or None.
+
+    `markdown-it-py` 3.0.0's `parseLinkDestination`, transcribed. Two shapes: a `<...>` form that
+    no line feed and no unescaped `<` may stand in, and a run of characters holding no space and
+    no ASCII control character whose parentheses balance. A backslash escape is consumed whole,
+    and a backslash before a space ends the run.
+
+    THE NESTING BOUND IS THAT RENDERER'S AND IT IS LOAD-BEARING HERE. `DESTINATION_NESTING` is its
+    own `level > 32`, and taking it rather than scanning on is what makes `markup_regions` LINEAR:
+    a destination that never balances gives up after that many parentheses instead of reading the
+    rest of the paragraph for every pair that opens one. Measured at `3fe68c37`, where the scan
+    was a balanced run with no bound: `'[x](' * 16000` before a clean verdict object -- 64,223
+    bytes -- took 41.88 seconds to parse against 0.03 at `d599216`.
+    """
+    position = at
+    if position < limit and text[position] == "<":
+        position += 1
+        while position < limit:
+            here = text[position]
+            if here == "\n" or here == "<":
+                return None
+            if here == ">":
+                return position + 1
+            position += 2 if here == "\\" and position + 1 < limit else 1
+        return None
+    level = 0
+    while position < limit:
+        here = text[position]
+        if here == " " or here < "\x20" or here == "\x7f":
+            break
+        if here == "\\" and position + 1 < limit:
+            if text[position + 1] == " ":
+                break
+            position += 2
+            continue
+        if here == "(":
+            level += 1
+            if level > DESTINATION_NESTING:
+                return None
+        if here == ")":
+            if level == 0:
+                break
+            level -= 1
+        position += 1
+    if position == at or level != 0:
+        return None
+    return position
+
+
+def link_title(text, at, limit):
+    """The offset just past a link title beginning at AT, or None: that renderer's `parseLinkTitle`.
+
+    A title is quoted with `"`, with `'` or in parentheses; a backslash escape is consumed whole;
+    an unescaped `(` inside a parenthesised title ends it as a failure rather than nesting.
+
+    THE TITLE IS WHY THIS FUNCTION EXISTS AND NOT A BALANCED RUN.
+    `[VERDICT](https://example.invalid/policy "4) Review"):` is `VERDICT: CHANGES_REQUIRED` to a
+    reader, and balancing parentheses alone ended the link at the `)` INSIDE THE TITLE, leaving
+    `Review"):` written where the token is not. Measured at `3fe68c37` through the whole audit, in
+    both review forms: exit 0, PASS, no stray, READY and ONE `gh pr merge` call, where the same
+    citation titled `"Review"` was MANUAL and none.
+    """
+    if at >= limit:
+        return None
+    marker = text[at]
+    if marker not in "\"'(":
+        return None
+    if marker == "(":
+        marker = ")"
+    position = at + 1
+    while position < limit:
+        here = text[position]
+        if here == marker:
+            return position + 1
+        if here == "(" and marker == ")":
+            return None
+        position += 2 if here == "\\" and position + 1 < limit else 1
+    return None
+
+
+def label_extent(text, at, limit):
+    """The offset just past the `]` closing a reference link's label at AT, or None.
+
+    A LINK LABEL HOLDS NO UNESCAPED BRACKET -- CommonMark 0.31.2 6.3 -- which is why this is a
+    scan for the first `]` rather than a balanced run. `markdown-it-py` 3.0.0's `parseLinkLabel`
+    does balance them, and the difference cannot change an answer: a label carrying a `[` matches
+    no definition, because that renderer's own reference rule refuses a definition whose label
+    holds one, so a pair this refuses is a pair it finds no reference for and leaves written.
+    Executed against it on 2026-09-21: `[VERDICT][a[b]]:` beside `[a[b]]: https://example.invalid/x`
+    renders as its own brackets, not as a link.
+
+    AND IT IS THE OTHER HALF OF WHAT KEEPS THE WALK LINEAR. Stopping at the first bracket of
+    either kind means the scan from one `]` cannot pass the next one, so the work over a paragraph
+    is bounded by its length however many pairs open in it, where a balanced run rescanned the
+    rest of the paragraph for every `[` that never closes.
+    """
+    position = at + 1
     while position < limit:
         here = text[position]
         if here == "\\":
             position += 2
             continue
-        if here == opener:
-            depth += 1
-        elif here == closer:
-            depth -= 1
-            if depth == 0:
-                return position + 1
+        if here == "[":
+            return None
+        if here == "]":
+            return position + 1
         position += 1
     return None
+
+
+def inline_link_extent(text, at, limit):
+    """The offset just past the `(destination "title")` opening at AT, or None.
+
+    `markdown-it-py` 3.0.0's `link` rule for the inline form, in the order it has it: whitespace,
+    a destination, whitespace, a title, whitespace, and the `)` that must stand there. A
+    destination it cannot read is not a failure -- `[VERDICT]()` is a link with an empty one -- and
+    a title is only taken where whitespace stood before it, which is that rule's `start != pos`.
+
+    WHAT IS STILL NOT READ IS WHETHER THE DESTINATION IS ONE A RENDERER WOULD FOLLOW. That
+    renderer refuses `javascript:`, `vbscript:`, `file:` and most `data:` destinations and shows
+    the brackets instead; this reads the pair as a link. That direction reports a token the
+    comment does not show, which costs a `manual:` line and cannot cost the review, and it is the
+    direction every approximation in this file is wrong in.
+    """
+    position = markup_skip(text, at + 1, limit)
+    if position >= limit:
+        return None
+    found = link_destination(text, position, limit)
+    if found is not None:
+        position = found
+        start = position
+        position = markup_skip(text, position, limit)
+        titled = link_title(text, position, limit)
+        if position < limit and start != position and titled is not None:
+            position = markup_skip(text, titled, limit)
+    if position >= limit or text[position] != ")":
+        return None
+    return position + 1
+
 
 
 def folded_label(label):
     """LABEL as a renderer matches it: CommonMark 0.31.2 4.7, and `markdown-it-py` 3.0.0 does this.
 
-    Leading and trailing whitespace off, every internal run of it one space, and case folded --
-    `[Verdict]` and `[ VERDICT ]` name the same definition.
+    Leading and trailing whitespace off, every internal run of it one space, and the case folded
+    the way that renderer's `normalizeReference` folds it -- `[Verdict]` and `[ VERDICT ]` name the
+    same definition.
+
+    `.lower().upper()` AND NOT `.casefold()`, which is its own comment's point: lowering alone
+    leaves 125 code points unnormalised and uppering alone leaves six, and doing both in that order
+    settles every letter variant. The two agree on all but ONE class over every code point,
+    measured on 2026-09-21 with the labels folded character by character: `casefold` keeps U+0131
+    DOTLESS I apart from `I` and `i`, and that renderer merges all three. Which is the direction
+    that matters -- a definition spelling its label `i` and a use spelling it `ı` is a link there
+    and was no link here, so the brackets stayed written and a `VERDICT:` between them was no
+    token. The same shape as the wrapped definition `LINK_DEFINITION` used to miss, reached by a
+    different rule, and closed by taking that renderer's fold rather than a near one.
     """
-    return " ".join(label.split()).casefold()
+    return " ".join(label.split()).lower().upper()
+
 
 
 def link_labels(text):
@@ -731,26 +939,33 @@ def link_labels(text):
     return {folded_label(found.group(1)) for found in LINK_DEFINITION.finditer(text)}
 
 
-def link_extent(text, bracket, close, labels):
+def link_extent(text, bracket, close, labels, limit):
     """(offset just past the link, whether the bracket pair at BRACKET..CLOSE is one at all).
+
 
     WHAT A READER SEES OF A LINK IS ITS TEXT. `[VERDICT](https://example.invalid/policy):` shows
     `VERDICT:` and shows nothing of the destination; `[VERDICT][policy]:` and `[VERDICT]:` show the
     same when LABELS defines the label, and show their brackets when it does not.
 
     THE INLINE FORM NEEDS NO DEFINITION and the other three do, which is CommonMark's own rule and
-    the whole reason `link_labels` exists. Neither the destination nor the label is parsed, only
-    DELIMITED: what stands between the parentheses is not checked for being a destination a
-    renderer would accept, because the check has to be wrong in one direction or the other and
-    refusing the pair is the direction that leaves a token hidden.
+    the whole reason `link_labels` exists. WHERE A FORM'S EXTENT IS READ IT IS READ AS THAT
+    RENDERER READS IT -- `inline_link_extent` and `label_extent` are its own rules -- because
+    ending the link in the wrong place leaves the rest of the destination WRITTEN IN THE PROSE,
+    and a token that a reader sees whole is then split by it. Balancing parentheses and brackets
+    instead was both defects of round three: a `)` inside a quoted title ended the link early, and
+    a `[` that never closes was rescanned for to the end of the paragraph.
+
+    WHAT IS STILL NOT PARSED IS WHETHER EITHER IS ONE A RENDERER WOULD ACCEPT:
+    `inline_link_extent` says which check that leaves out and why the direction is the safe one.
     """
     after = close + 1
-    if after < len(text) and text[after] == "(":
-        found = balanced_run(text, after, "(", ")")
+    if after < limit and text[after] == "(":
+
+        found = inline_link_extent(text, after, limit)
         if found is not None:
             return found, True
-    if after < len(text) and text[after] == "[":
-        found = balanced_run(text, after, "[", "]")
+    if after < limit and text[after] == "[":
+        found = label_extent(text, after, limit)
         if found is not None:
             label = text[after + 1:found - 1]
             if not label.strip():                      # the collapsed form names its own text
@@ -758,6 +973,7 @@ def link_extent(text, bracket, close, labels):
             if folded_label(label) in labels:
                 return found, True
     return after, folded_label(text[bracket + 1:close]) in labels
+
 
 
 def markup_regions(text):
@@ -788,10 +1004,17 @@ def markup_regions(text):
     cost the review, and it is the direction every rule in this file is wrong in when it is wrong.
     """
     labels = link_labels(text)
+    blanks = block_limits(text)
+    edge = 0
     regions = []
     opens = []
     position = 0
     while position < len(text):
+        # WHERE THIS POSITION'S BLOCK ENDS, off a pointer that only advances, which is the whole
+        # of `block_limits`: the walk never goes backwards, so neither does this.
+        while edge < len(blanks) and blanks[edge] < position:
+            edge += 1
+        limit = blanks[edge] if edge < len(blanks) else len(text)
         here = text[position]
         if here == "\\":
             position += 2 if position + 1 < len(text) \
@@ -799,10 +1022,11 @@ def markup_regions(text):
             continue
         if here == "`":
             opener = BACKTICK_RUN.match(text, position)
-            closer = code_span_closer(text, opener.end(), opener.group(0))
+            closer = code_span_closer(text, opener.end(), opener.group(0), limit)
             if closer is None:
                 position = opener.end()
                 continue
+
             regions.append((opener.start(), opener.end(), "drop"))
             regions.append((opener.end(), closer.start(), "literal"))
             regions.append((closer.start(), closer.end(), "drop"))
@@ -814,7 +1038,8 @@ def markup_regions(text):
             continue
         if here == "]" and opens:
             bracket = opens.pop()
-            tail, linked = link_extent(text, bracket, position, labels)
+            tail, linked = link_extent(text, bracket, position, labels, limit)
+
             if not linked:
                 position += 1
                 continue
@@ -827,8 +1052,19 @@ def markup_regions(text):
     return regions
 
 
+# One reading of a comment's prose: what a reader sees, and THE PARTS IT WAS JOINED OUT OF, in
+# order. Each part is `(what the reading shows, the offset in the comment it is a COPY of, or
+# None)` -- so a part with an offset is exactly the comment's own characters from there, and a
+# part without one, such as a resolved reference or the space a line ending inside a code span is
+# shown as, was MADE by the reading and is a copy of nothing. The parts spell the text and nothing
+# else, so an offset in one is an offset in the other. `unwritten_verdict` says what they decide.
+Reading = collections.namedtuple("Reading", "text parts")
+
+
+
 def reader_spelling(text, emphasis=True, structure=False):
     """TEXT as a reader of the comment's inline prose sees it, for the markup that can hide a token.
+
 
     THE THIRD READING, AND THE SIBLING OF `decoded_spelling` AND `rendered_language`. Each of the
     three answers one consumer's question with that consumer's own function: `json.loads` reads a
@@ -891,11 +1127,21 @@ def reader_spelling(text, emphasis=True, structure=False):
     a tag is not what writing a sentence produces, and that is exactly what bold, a correction, a
     code span and a link are. PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`
     carries every class, measured at this head and at the head before it.
+
+    AND THE ANSWER IS KEPT IN PARTS, EACH SAYING WHETHER IT IS A COPY, which is `Reading`'s second
+    half. That a reader SEES a token is half of what the caller has to know; the other half is
+    whether the COMMENT WRITES it, in those characters, at that place -- and only a reading that
+    kept the offsets can answer that. What is a copy is what was MOVED rather than MADE: the text
+    between two matches, a backslash escape's own character, a reference no table holds, a
+    delimiter run left written, and the runs of a code span's content between its line endings.
+    `unwritten_verdict` says what the difference decides and what counting instead cost.
+
     """
     def resolved(match):
+        """(what MATCH is shown as, the offset it copies that from, or None where it is made)."""
         escape = match.group("escape")
         if escape is not None:
-            return escape
+            return escape, match.start("escape")
         reference = match.group("reference")
         if reference is not None:
             if reference[0] != "#":
@@ -903,12 +1149,16 @@ def reader_spelling(text, emphasis=True, structure=False):
                 # is not, and the table holds several names in more than one case, so the two
                 # disagree only on a spelling it holds in NEITHER: `&amp;` and `&AMP;` are both
                 # `&`, and `&Amp;` is no reference and stays the five characters a reader sees.
-                # Measured against `markdown-it-py` 3.0.0 on 2026-09-21, all three.
-                return NAMED_REFERENCE.get(reference, match.group(0))
+                # Measured against `markdown-it-py` 3.0.0 on 2026-09-21, all three. A NAME NO TABLE
+                # HOLDS is the one answer here that is a copy: those characters stay written.
+                if reference not in NAMED_REFERENCE:
+                    return match.group(0), match.start()
+                return NAMED_REFERENCE[reference], None
             body = reference[1:]
             point = int(body[1:], 16) if body[0] in "xX" else int(body)
-            return chr(point) if referable(point) else "�"
+            return (chr(point) if referable(point) else "�"), None
         run = match.group("run")
+
         # The characters either side IN THE COMMENT, which is where `scanDelims` reads them -- that
         # renderer scans delimiters over its own source, so a code span consumed before this one
         # runs does not move them -- and a space for each end of the text, because it treats the
@@ -917,14 +1167,15 @@ def reader_spelling(text, emphasis=True, structure=False):
         before = text[match.start() - 1] if match.start() else " "
         after = text[match.end()] if match.end() < len(text) else " "
         if emphasis and emphasis_delimiter(run[0], before, after):
-            return ""
-        return run
+            return "", None
+        return run, match.start("run")
+
     # WITH NO REGIONS THIS IS `INLINE_MARKUP.sub(resolved, text)` AND NOTHING ELSE, which is what
     # the two readings that leave the structure written must stay: no alternative of that pattern
     # can contain a region's first character, so a region never splits a match and the search below
     # is stopped at the next region only to keep that true by construction rather than by argument.
     regions = markup_regions(text) if structure else []
-    pieces = []
+    parts = []
     position = 0
     index = 0
     while position < len(text):
@@ -937,23 +1188,74 @@ def reader_spelling(text, emphasis=True, structure=False):
             start, end, kind = regions[index]
             index += 1
             if kind == "literal":
-                pieces.append(code_span_text(text[start:end]))
+                parts.extend(code_span_parts(text[start:end], start))
             position = end
             continue
         edge = regions[index][0] if index < len(regions) else len(text)
         match = INLINE_MARKUP.search(text, position, edge)
         if match is None:
-            pieces.append(text[position:edge])
+            parts.append((text[position:edge], position))
             position = edge
             continue
-        pieces.append(text[position:match.start()])
-        pieces.append(resolved(match))
+        parts.append((text[position:match.start()], position))
+        parts.append(resolved(match))
         position = match.end()
-    return "".join(pieces)
+    return Reading("".join([piece for piece, _ in parts]), parts)
 
 
-def stray_summary(outside, contradicting_verdict=False, verdicts_written=0):
+
+
+def unwritten_verdict(reading):
+    """Whether READING shows a `VERDICT:` line the comment does not write, in those characters.
+
+    THE EXEMPTION NAMES THE OCCURRENCE IT EXEMPTS, and that is the whole of this function.
+    COMPARING HOW MANY a reading shows against how many the comment writes was round three's rule
+    and it lost a merge at `3fe68c37`: a `VERDICT:` inside a LINK TITLE is written and shown to
+    nobody, so a review that cites the review format with such a title and then appends a
+    `` `VERDICT`: CHANGES_REQUIRED `` correction shows three where it writes three -- the title's
+    occurrence disappears as the link is consumed, the correction's appears as the code span is --
+    and the correction cancelled against an occurrence no reader has ever seen. Exit 0, PASS, no
+    stray, READY and ONE `gh pr merge` call, where the same review without the title was MANUAL
+    and none. A COUNT CANNOT SAY WHICH ONE DISAPPEARED.
+
+    What is exempt is an occurrence THE COMMENT SPELLS, AT THE PLACE IT SPELLS IT: one standing
+    wholly inside a single part the reading COPIED out of the comment IS those eight characters of
+    the comment, and every other one is a line the reading shows and the comment does not write.
+    No part can begin or end inside a `VERDICT:` -- no alternative of `INLINE_MARKUP` and no edge
+    of a `markup_regions` region is made of any character in it, and a code span's content is cut
+    only at a line ending -- so "inside one part" is the same question as "contiguous in the
+    comment", and adjacent parts are not joined up before it is asked.
+
+
+    AND IT IS NOW THE SAME QUESTION FOR BOTH FORMS, which is what the identity buys over the
+    count. The workflow form writes no verdict line of its own -- `the_verdict_block` has already
+    refused the comment if a literal one stands outside its object -- so nothing there is exempt
+    and every occurrence is reported, exactly as comparing against zero did. The frontier form
+    writes two and may write more, and each is exempt BY BEING WRITTEN rather than by being
+    counted. It is also strictly stronger than the count it replaces: a reading's exempt
+    occurrences are distinct spans of the comment, so there are never more of them than the
+    comment writes, and every comment the count reported is reported here too.
+    """
+    # The occurrences and the parts are both in order, so ONE PASS over each answers every
+    # occurrence: advance to the part this one ENDS in, and it is inside that part exactly when
+    # the part began at or before it started. The parts spell the reading, so the walk cannot run
+    # off the end of them while an occurrence of it is still to be placed.
+    parts = iter(reading.parts)
+    began, ended, source = 0, 0, None
+    for found in PROSE_VERDICT.finditer(reading.text):
+        at, end = found.span()
+        while ended < end:
+            piece, source = next(parts)
+            began, ended = ended, ended + len(piece)
+        if source is None or began > at:
+            return True
+    return False
+
+
+
+def stray_summary(outside, contradicting_verdict=False):
     """The tokens found outside the findings, as one field, or None.
+
 
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
@@ -986,23 +1288,29 @@ def stray_summary(outside, contradicting_verdict=False, verdicts_written=0):
     THIS FIELD AND NOT AS A NEW ONE, so the shell's field count and its "whole result or nothing"
     reading of this program are untouched.
 
-    VERDICTS_WRITTEN IS HOW MANY VERDICT LINES THE FORM WRITES FOR ITSELF, and it is the whole
-    difference between the two callers. What is reported is A LINE A READER SEES AND THE COMMENT
-    DOES NOT WRITE -- more of them in some reading than in the characters -- and not the mere
-    presence of one:
+    WHAT IS REPORTED IS A LINE A READER SEES AND THE COMMENT DOES NOT WRITE, which is
+    `unwritten_verdict`, and it is one question with no per-caller number in it:
 
-      * the WORKFLOW form's verdict is an object, so it writes none, and `the_verdict_block` has
-        already refused every literal one standing before the block. Zero, which makes this "any
-        line a reader sees", exactly as it was when only that form asked;
+      * the WORKFLOW form's verdict is an object, so it writes no verdict line at all, and
+        `the_verdict_block` has already refused the comment if a literal one stands outside that
+        object. Nothing is exempt, so every occurrence a reader sees is reported, exactly as it
+        was when only that form asked;
       * the PROSE form's verdict IS a line, and the form's own template writes TWO -- a `VERDICT:`
         summary near the top and the authoritative one at the end, which `parse_prose_review`
-        resolves by taking the LAST. Asking "is there a line a reader sees" of that form reports
-        EVERY REVIEW IT HAS EVER POSTED: measured over the 681 comments this repository holds on
+        resolves by taking the LAST. Reporting the mere presence of one would report EVERY REVIEW
+        THAT FORM HAS EVER POSTED: measured over the 681 comments this repository holds on
         2026-09-21, 242 of the 249 readable prose reviews write exactly two and 6 more write
-        three, four or five. Asking "does a reader see MORE than the comment writes" reports none
-        of them, and still reports `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended --
-        the ordinary bold correction, in the form this program's own reviews arrive in, which was
+        three, four or five. Each of those lines is exempt because the comment WRITES it, and
+        `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is still reported -- the
+        ordinary bold correction, in the form this program's own reviews arrive in, which was
         exit 0, PASS, READY and ONE MERGE CALL at `d599216`.
+
+    ASKING IT BY COUNT WAS ROUND THREE'S RULE AND IT LOST A MERGE AT `3fe68c37`. "More seen in
+    some reading than written in the characters" is true of the bold correction and false of a
+    comment where an occurrence a reader NEVER sees -- one inside a link title -- disappears as
+    the same reading reveals a real one. `unwritten_verdict` carries that witness and what an
+    exemption has to be instead.
+
 
     WHAT NEITHER READING REACHES is a token cut in half by inline raw HTML, and what the readings
     that leave the structure written read wider than a renderer is an unpaired delimiter run and
@@ -1020,19 +1328,20 @@ def stray_summary(outside, contradicting_verdict=False, verdicts_written=0):
     unpaired_read = reader_spelling(outside, emphasis=False, structure=True)
     readings = (paired, unpaired, paired_read, unpaired_read)
     tokens = set()
-    for reading in (outside, decoded_spelling(outside)) + readings:
+    for reading in (outside, decoded_spelling(outside)):
         tokens |= set(STRAY_TOKEN.findall(reading))
-    # THE READER'S SPELLINGS ONLY, for this one, and COUNTED rather than searched. A `VERDICT:` the
+    for reading in readings:
+        tokens |= set(STRAY_TOKEN.findall(reading.text))
+    # THE READER'S SPELLINGS ONLY, for this one, and MATCHED rather than counted. A `VERDICT:` the
     # comment spells literally is either already a refusal or already this form's own verdict by
     # the time this runs, and a JSON escape of one of its letters is not a spelling of it anywhere
     # a person reads: `json.loads` resolves that inside the verdict object, and nothing resolves it
     # in prose, where a reader sees the backslash. Scanning `decoded_spelling` for this would
     # report a line no reader of either ever sees.
-    if contradicting_verdict:
-        seen = max(len(PROSE_VERDICT.findall(one)) for one in readings)
-        if seen > verdicts_written:
-            tokens.add("VERDICT:")
+    if contradicting_verdict and any(unwritten_verdict(one) for one in readings):
+        tokens.add("VERDICT:")
     return "/".join(sorted(tokens)) if tokens else None
+
 
 
 # ---- the review ---------------------------------------------------------------------------------
@@ -1495,18 +1804,21 @@ def parse_prose_review(text):
         "base_sha": None,
         # AND THE CONTRADICTING VERDICT LINE IS ASKED FOR HERE TOO, WITH THIS FORM'S OWN LINES
         # EXEMPTED. This form's verdict is a `VERDICT:` line and its template writes two of them,
-        # so the question the workflow form asks -- is there a line a reader sees -- would report
-        # every prose review ever posted. The question asked here is whether A READER SEES MORE OF
-        # THEM THAN THE COMMENT WRITES, which is the same rule with the exemption made explicit:
-        # `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is one written and two
-        # seen, and that is an ordinary bold correction of a review in the form this program's own
-        # reviews arrive in. It was exit 0, PASS, READY and one `gh pr merge` call at `d599216`.
+        # so asking merely whether a reader sees such a line would report every prose review ever
+        # posted. What is reported is A LINE A READER SEES AND THE COMMENT DOES NOT WRITE:
+        # `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is a line written and a
+        # line seen, and that is an ordinary bold correction of a review in the form this
+        # program's own reviews arrive in. It was exit 0, PASS, READY and one `gh pr merge` call
+        # at `d599216`.
         #
-        # COUNTED OVER `OUTSIDE` AND NOT OVER `TEXT`, because that is the text the readings are
-        # taken of: a numbered finding line is not scanned, so a `VERDICT:` written on one must not
-        # be exempted either.
-        "stray": stray_summary(outside, contradicting_verdict=True,
-                               verdicts_written=len(PROSE_VERDICT.findall(outside))),
+        # AND THE EXEMPTION NAMES THE OCCURRENCE. Round three asked this by COUNTING -- more seen
+        # in some reading than written in the characters -- and an occurrence a reader never sees
+        # offset one it does: `unwritten_verdict` carries the merge that cost and what replaced
+        # it. The argument is `outside` and not `text` for the same reason it always was: that is
+        # the text the readings are taken of, so a `VERDICT:` written on a numbered finding line
+        # is neither scanned nor exempted.
+        "stray": stray_summary(outside, contradicting_verdict=True),
+
         "findings": numbered,
     }
 

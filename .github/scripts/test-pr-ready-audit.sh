@@ -6559,20 +6559,42 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
 } > "$tmp/probe-drive-quoted.md"
 # AND THE READER DRIVE IS THE SAME RULE APPLIED AGAIN, to the reading that answers what a person
 # sees. `markup_regions` walks a comment's code spans and links, and the loops inside `link_labels`
-# and `balanced_run` are entered only by a comment that HAS a link reference definition and a
-# destination to balance: with the eight drives above and no ninth this line read
-# `unproven=balanced_run,link_labels`. Turning a branch cannot enter a loop no document enters, so
-# this document carries one of each -- a code span that closes and an unclosed run, a padded span
-# and a plain one, an inline destination with a nested pair and an escape in it, a full reference,
-# a shortcut, a pair nothing defines, an unbalanced destination, and a backslash before a backtick
-# and a bracket.
+# and the four functions that read a link's extent are entered only by a comment that HAS a link
+# reference definition and a link to delimit: with the eight drives above and no ninth this line
+# read `unproven=balanced_run,link_labels`, naming the function round four replaced. Turning a
+# branch cannot enter a loop no document enters, so this document carries one of each form each
+# of those functions has a rule for -- a code span that closes, one that is padded at both ends,
+# one that crosses a line ending and an unclosed run; an inline destination with a nested pair and
+# an escape in it, one in angle brackets, one whose parentheses never balance, and one that runs
+# off the end of the paragraph; a title in each of the three markers a renderer takes and one that
+# never closes; a full reference, a shortcut, a pair nothing defines, a label carrying an escaped
+# bracket, a label carrying a plain one, a label that never closes; a definition on one line and
+# one whose destination is wrapped onto the next; and a backslash before a backtick and a bracket.
 { printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
-  printf 'A code span `held whole`, one with ` padded ends `, an unclosed ``run, an inline\n'
-  printf '[link](https://example.invalid/(nested)a\\)b), a full [reference][label], a bare [label],\n'
-  printf 'a pair [nothing defines], an unbalanced [one](unclosed and an escaped \\`tick\\[.\n\n'
-  printf '[label]: https://example.invalid/l\n\n'
+  printf 'A code span `held whole`, one with ` padded ends `, one that `crosses\n'
+  printf 'a line`, an unclosed ``run, an inline [link](https://example.invalid/(nested)a\\)b), an\n'
+  printf 'angled [one](<https://example.invalid/b r>), a titled [two](https://example.invalid/t\n'
+  printf '"a (title"), a quoted [three](https://example.invalid/q %s), a parenthesised\n' "'q'"
+  printf '[four](https://example.invalid/p (a (nested title)), a titled\n'
+  printf '[five](https://example.invalid/p (title)), a title that [never](https://example.invalid/n\n'
+
+  printf '"closes, a destination that [never balances](%s x, a full [reference][label],\n' \
+    '((((((((((((((((((((((((((((((((('
+  printf 'a bare [label], a wrapped [definition][wrapped], a pair [nothing defines], an\n'
+  printf '[escaped][lab\\]el] label, a [plain][lab[el] one, a [label][that never closes, an\n'
+  printf 'unbalanced [one](unclosed and an escaped \\`tick\\[. And one that ends a paragraph: [x](\n\n'
+  printf 'More of the same rule: an empty [five](), an escaped space [six](a\\ b), a nested angle\n'
+  printf '[seven](<a<b>), a collapsed [label][] one, an escape in a title\n'
+  printf '[eight](https://example.invalid/e "a \\" quote"), and a destination that ends the\n'
+  printf 'paragraph [nine](https://example.invalid/z\n\n'
+  printf 'An angle destination that never closes: [ten](<unclosed\n\n'
+  printf 'A label that never closes: [label][unclosed\n\n'
+  printf 'And a correction a reader sees that this comment does not write: **VERDICT**: see below.\n\n'
+  printf '[label]: https://example.invalid/l\n\n[wrapped]:\n  https://example.invalid/w\n\n'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-reader.md"
+
+
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
@@ -7526,6 +7548,150 @@ expect "MUT-PROSE-VERDICT-UNCHECKED [third written line]" \
   "$(review_rows "$tmp/prose-third.md")" "0|prose/$enqueue_head/PASS/-/-"
 got="$(filtered_run eventloops "$tmp/prose-third.md")"
 expect "MUT-PROSE-VERDICT-UNCHECKED merge calls [third written line]" "${got##*|}" 1
+
+# --- a link's extent is the renderer's, and an exemption names the occurrence it exempts ---------
+# MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS and MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY.
+#
+# ONE SENTENCE HOLDS BOTH, and it is the sentence the two sections above are for: NO SEQUENCE IN
+# WHICH AN ORDINARY REVIEWER, WRITING ORDINARY MARKDOWN, PRODUCES A MERGE THAT THE SAME WORDS
+# WRITTEN PLAINLY WOULD HAVE BLOCKED. Those sections close the code span and the link. These are
+# the two ways THE CODE THAT CLOSED THEM left the sentence false, each reproduced through the
+# whole audit at `3fe68c37` and each found by all three lenses of one review.
+#
+# 1. A REFERENCE DEFINITION'S DESTINATION MAY STAND ON THE LINE AFTER THE COLON -- CommonMark
+#    0.31.2 4.7, and `markdown-it-py` 3.0.0 reads it there. `[VERDICT][policy]:` with `[policy]:`
+#    and its destination wrapped onto the next line renders `VERDICT: CHANGES_REQUIRED` and was no
+#    definition to `LINK_DEFINITION`, so the pair was no link, so the brackets stayed written and
+#    the correction carried no token at all. `The blocker is P[1][policy].` hid a severity the
+#    same way.
+# 2. A `)` INSIDE A QUOTED TITLE IS NOT THE END OF THE LINK.
+#    `[VERDICT](https://example.invalid/policy "4) Review"):` renders that same correction, and
+#    delimiting the destination by balancing parentheses ended the link at the `)` in `4)`,
+#    leaving `Review"):` written in the prose where the token is not.
+# 3. THE EXEMPTION WAS COUNTED AND NOT IDENTIFIED. The frontier form's own verdict lines have to
+#    be exempt, and round three exempted them by COMPARING HOW MANY a reading shows against how
+#    many the comment writes. A `VERDICT:` inside a LINK TITLE is written and shown to nobody, so
+#    a review citing the review format with such a title and then appending a `` `VERDICT`: ``
+#    correction shows three where it writes three -- one occurrence disappearing as the link is
+#    consumed, another appearing as the code span is -- and a real blocking correction cancelled
+#    against an occurrence no reader has ever seen.
+#
+# 4. AND THE LABEL FOLD WAS A NEAR ONE. `folded_label` used `casefold()` where that renderer's
+#    `normalizeReference` uses `.lower().upper()`; they agree on every code point but U+0131.
+#    Found by comparing the two over the whole range rather than by a lens, and it is the same
+#    shape as 1 reached by a different rule.
+#
+# EVERY ROW BELOW IS DRIVEN THROUGH THE PARSER AND THE WHOLE AUDIT. The first four merged at
+# `3fe68c37` -- exit 0, PASS, no stray, READY and ONE `gh pr merge` call -- and the last three are
+# the same corrections written the way that head already caught, which is what says the difference
+# is the Markdown and not the words.
+
+wrapped_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]:
+  https://example.invalid/review-policy'
+wrapped_severity='The blocker is P[1][policy] and it is not in the object.
+
+[policy]:
+  https://example.invalid/review-policy'
+oneline_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: https://example.invalid/review-policy'
+# AND THE LABEL FOLD IS THAT RENDERER'S TOO. `normalizeReference` is `.lower().upper()`, which its
+# own comment explains: lowering alone leaves 125 code points unnormalised and uppering alone
+# leaves six. `casefold()` agrees with it on every code point but ONE -- U+0131 DOTLESS I, which
+# that renderer merges with `I` and `i` and `casefold` keeps apart -- so a definition spelling its
+# label `i` and a use spelling it `%s` was a link there and no link here, brackets and all.
+# Measured at `3fe68c37` through the whole audit in both forms: exit 0, PASS, no stray, READY and
+# ONE merge call, where the same correction using `[i]` was MANUAL with none. This file stays
+# ASCII, so the character is built rather than written.
+dotless_verdict="$(printf '[VERDICT][ı]: CHANGES_REQUIRED -- correcting the review below.')
+$(printf '\n[i]: https://example.invalid/review-policy')"
+dotless_control='[VERDICT][i]: CHANGES_REQUIRED -- correcting the review below.
+
+[i]: https://example.invalid/review-policy'
+
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+round4_closed=(
+  "wrapped definition verdict|$wrapped_verdict|VERDICT:"
+  "wrapped definition severity|$wrapped_severity|P1"
+  'titled link verdict|[VERDICT](https://example.invalid/policy "4) Review"): CHANGES_REQUIRED.|VERDICT:'
+  "dotless label verdict|$dotless_verdict|VERDICT:"
+  "one-line definition verdict|$oneline_verdict|VERDICT:"
+  'plainly titled link verdict|[VERDICT](https://example.invalid/policy "Review"): CHANGES_REQUIRED.|VERDICT:'
+  "same label spelled i|$dotless_control|VERDICT:"
+)
+
+for row in "${round4_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  # The workflow form: the correction in front of a generated `PASS` object.
+  reader_comment "$reader_prose" > "$tmp/round4-closed.md"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case]" \
+    "$(review_rows "$tmp/round4-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round4-closed.md")"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit status [$reader_case]" "${got%%|*}" 0
+  # And the frontier form, where the same correction stands in a review that writes its own
+  # verdict line -- the form every review in this repository is posted in.
+  prose_review "$reader_prose
+" > "$tmp/round4-closed-prose.md"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case] prose" \
+    "$(review_rows "$tmp/round4-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(filtered_run eventloops "$tmp/round4-closed-prose.md")"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case] prose" "$got" \
+    "manual:$reader_want-outside-the-numbered-findings"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS merge calls [$reader_case] prose" "${got##*|}" 0
+done
+# THE EXEMPTION, MATCHED RATHER THAN COUNTED. A review that cites the review format with a titled
+# link and then appends a code-formatted correction: three `VERDICT:` occurrences written, three
+# seen in the reading that consumes both, and the correction lost. At `3fe68c37`: exit 0, PASS,
+# no stray, READY and ONE merge call.
+prose_review 'See [review format](https://example.invalid/policy "VERDICT: PASS") for the shape.
+
+`VERDICT`: CHANGES_REQUIRED -- correcting my own review above.
+' > "$tmp/prose-cancelled.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY" \
+  "$(review_rows "$tmp/prose-cancelled.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+got="$(filtered_run eventloops "$tmp/prose-cancelled.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" \
+  "manual:VERDICT:-outside-the-numbered-findings"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" MANUAL
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls" "${got##*|}" 0
+# AND THE EXEMPTION STILL EXEMPTS, which is the half that keeps it shippable and the half a
+# stricter rule breaks. An occurrence THE COMMENT WRITES is exempt wherever it stands -- including
+# where a reader never sees it, and including where the reading that shows it had to move it --
+# so each of these is quiet, READY and ONE merge call, here and at `3fe68c37`.
+exempt_quiet=(
+  'verdict in a link title|See [review format](https://example.invalid/policy "VERDICT: PASS") for it.'
+  'verdict in a code span|A code span `VERDICT: PASS` quoted whole, which this comment writes.'
+  'verdict in a padded code span|A span ` VERDICT: PASS ` padded at both ends, which it writes.'
+)
+for row in "${exempt_quiet[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  prose_review "$reader_prose
+" > "$tmp/prose-exempt.md"
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" \
+    "$(review_rows "$tmp/prose-exempt.md")" "0|prose/$enqueue_head/PASS/-/-"
+  got="$(filtered_run eventloops "$tmp/prose-exempt.md")"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" "$got" "enqueued #999"
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [$reader_case]" "${got##*|}" 1
+done
+# The row that needs a newline inside the span, so it is built rather than tabulated: a code span
+# crossing a line ending shows the ending AS A SPACE, and `VERDICT: PASS` on the two sides of it
+# is still eight characters the comment wrote in one run.
+prose_review 'A span crossing a line `VERDICT:
+PASS` which this comment writes.
+' > "$tmp/prose-exempt-crossed.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [verdict across a line ending]" \
+  "$(review_rows "$tmp/prose-exempt-crossed.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(filtered_run eventloops "$tmp/prose-exempt-crossed.md")"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a line ending]" \
+  "${got##*|}" 1
 
 # --- what this head still does not read, pinned rather than claimed closed -----------------------
 # PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is now the finding for what is LEFT. Each
