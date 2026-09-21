@@ -92,7 +92,10 @@ refusal:
     accounted for, and let a `PASS` appended after it stand as the only candidate. What such a
     block holds is material, on the same terms as what lies outside one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
-    stands outside it. Not "nothing this program recognises as a block" -- nothing;
+    stands outside it. Not "nothing this program recognises as a block" -- nothing; and the
+    verdict line is matched AS THE COMMENT SPELLS IT, which makes it a check on the trusted
+    reviewer's comment contradicting itself rather than a trust boundary -- `PROSE_VERDICT` says
+    what a reader of the comment sees that this does not read;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
     the LAST occurrence of a repeated name, so an object carrying a `findings` array with a P1 in
     it and then a second `"findings":[]` deserialises to a clean PASS with no findings -- one
@@ -247,6 +250,40 @@ MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
 PROSE_MARKER = re.compile(r"<!-- upstroke-frontier-review")
 # The prose form's verdict, looked for OUTSIDE a workflow verdict block. No workflow-form review in
 # the repository carries one, and one that did would be a comment saying two different things.
+#
+# WHAT THIS SCAN IS FOR. It detects THE TRUSTED REVIEWER'S COMMENT CONTRADICTING ITSELF -- a
+# verdict object and a verdict line in the one comment -- so that this program refuses instead of
+# choosing between them. THE VERDICT OBJECT IS THE AUTHORITY for what a workflow-form review says;
+# this scan adds nothing to it and decides no verdict of its own.
+#
+# IT IS NOT A TRUST BOUNDARY, and nothing here should be read as one. `scripts/pr-ready-audit.sh`
+# parses exactly one comment and it is one the account named as the trusted reviewer wrote --
+# `review_comment_filter`'s login predicate, which .github/scripts/test-pr-ready-audit.sh asserts
+# on the filter program itself (MUT-REVIEWER-JQ-INJECTION, MUT-REVIEWER-CASE-MISMATCH) and through
+# the whole audit (MUT-REVIEWER-ANY-AUTHOR-READ). An account that can write this line can write
+# the object instead and put anything in it, so a spelling of the line that this misses buys
+# nothing that writing the object does not already give.
+#
+# THE KNOWN LIMIT, STATED AND NOT ENFORCED. This compares the characters the comment is STORED as.
+# A reader sees what GitHub's renderer resolves them to, and in the comment's INLINE PROSE -- not
+# inside a code span or a code block, where a renderer resolves nothing and the two readings agree
+# -- those are two documents. Four spellings render as `VERDICT:` to a reader and carry none of it
+# here. Measured with `markdown-it-py` 3.0.0 on 2026-09-21, and each read by this program as a
+# comment with no verdict line outside its block at all:
+#
+#     VERDICT&#58;            a character reference
+#     VERDICT\:              a backslash escape
+#     V*ERDICT:*             emphasis
+#     VER<span>DICT:</span>  inline raw HTML
+#
+# ADDING A SPELLING IS THE DEFECT, not the repair: this rule's history is an enumeration that read
+# as a closure while the next shape stood. Resolving them all means rendering the comment, because
+# the consumer here is THE WHOLE INLINE RENDERER -- where `rendered_language` and
+# `decoded_spelling` each answer to one complete, small transformation that can be implemented in
+# full -- and this program is stdlib-only, with CI installing nothing for it. So the divergence is
+# written down rather than claimed closed. The finding that owns it is
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`, and the change that takes it
+# up is the change that decides how this program reads comment prose at all.
 PROSE_VERDICT = re.compile(r"VERDICT:")
 
 # The older bare form's object opener, with whatever a writer left between the brace and the key.
@@ -491,8 +528,23 @@ def stray_summary(outside):
 
     BOTH SPELLINGS ARE SCANNED -- what the comment writes and what a decoder reads -- and the two
     are not the same text. Reading both is the safe direction for this scan, the same direction
-    `re.ASCII` is chosen for above: every token it finds is a blocker that sends the review to a
-    person, so one found in both spellings costs nothing and one found in neither is the defect.
+    `re.ASCII` is chosen for above: every token it finds sends the review to a person, so one
+    found in both spellings costs nothing.
+
+    THIS IS A NET, AND WHAT IT CATCHES GOES TO A PERSON. A token found here is reported, and
+    `scripts/pr-ready-audit.sh` turns it into a `manual:` blocker; it decides no verdict. THE
+    VERDICT OBJECT IS THE AUTHORITY, and a severity written outside it is read by nothing else in
+    this program. SO THIS IS NOT A TRUST BOUNDARY EITHER: the audit parses one comment and the
+    trusted reviewer wrote it (`review_comment_filter`, asserted through the whole audit by
+    MUT-REVIEWER-ANY-AUTHOR-READ), and an account that can write a severity into the prose can
+    write the verdict object instead.
+
+    THE KNOWN LIMIT IS `PROSE_VERDICT`'S, STATED THERE IN FULL AND NOT ENFORCED HERE. This reads
+    the characters the comment is stored as, and in the comment's inline prose a reader sees what a
+    renderer resolves them to: `&#80;1` and `P**1**` are `P1` to that reader and are no token at
+    all here, measured with `markdown-it-py` 3.0.0 on 2026-09-21. A MISS IS THAT LIMIT RATHER THAN
+    A DEFECT TO BE PATCHED SPELLING BY SPELLING; PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES
+    under `findings/` owns it.
     """
     tokens = sorted(set(STRAY_TOKEN.findall(outside))
                     | set(STRAY_TOKEN.findall(decoded_spelling(outside))))
@@ -800,7 +852,9 @@ def the_verdict_block(text, candidates):
     The two checks after the count are the same rule pointed outwards. Nothing but WHITESPACE may
     follow the block -- not "nothing this program recognises as a block", which is the enumeration
     that failed; and no `VERDICT:` may stand outside it, because a comment carrying a verdict object
-    and a verdict line says two things and this program would be choosing between them.
+    and a verdict line says two things and this program would be choosing between them. That second
+    check reads the line as the comment spells it, and `PROSE_VERDICT` states what it does and does
+    not reach: it is a self-contradiction check, not a trust boundary.
     """
     if len(candidates) != 1:
         raise Unparsed(

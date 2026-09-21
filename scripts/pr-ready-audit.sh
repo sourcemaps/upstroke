@@ -178,6 +178,17 @@
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
 # commit outside the ledger.
 #
+# AND THE TWO SCANS OVER THE REVIEW'S PROSE ARE NETS AND NOT GATES: the `VERDICT:` line outside the
+# verdict block, which is a check on the reviewer's comment contradicting itself, and the stray
+# severity, which is what puts a review in front of a person as `manual:`. Both compare the
+# characters the comment is STORED as, and in the comment's inline prose a reader sees what
+# GitHub's renderer resolves them to. A spelling that renders as the token and is stored otherwise
+# -- `&#80;1`, `P**1**` -- is past both, measured. NEITHER IS A TRUST BOUNDARY AND NEITHER IS
+# CLAIMED TO BE ONE: the verdict object is the authority for what a review says, and the property
+# this audit does rest on is the one stated above -- the only comment it parses is one the trusted
+# reviewer wrote. `scripts/pr-review-parse.py` states the limit where each scan is defined, and
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/` owns it.
+#
 # The pure parts (the lane table, the parser call and the reader for its result, the frontmatter id
 # match, the newest-check-run choice) are functions, exercised by
 # .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing

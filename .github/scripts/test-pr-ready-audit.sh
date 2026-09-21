@@ -73,6 +73,20 @@
 #                                a following option was consumed as the login and switched off
 #   MUT-REVIEWER-NULL-AUTHOR     the comment filter raised on a comment whose author is null, which
 #                                failed the whole page it was on and dropped every review with it
+#   MUT-REVIEWER-ANY-AUTHOR-READ a comment carrying a review's markers was parsed whoever wrote it,
+#                                so anybody who can comment on a pull request could write the
+#                                review the audit judges it by. The unit cases above run the
+#                                comment filter on a fixture; this one runs the WHOLE AUDIT with
+#                                the stub answering the listing by running the filter program the
+#                                audit itself hands it, and the comment is one the finding
+#                                PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES measured: the two
+#                                prose scans read what it is stored as, a reader sees the tokens,
+#                                and both scans are silent. Written by the trusted reviewer it is
+#                                READY with one merge call -- that limit, stated and not enforced;
+#                                written by anyone else it must be `no-review` and no call, and
+#                                THAT is the property those scans not being trust boundaries rests
+#                                on. Drop the login predicate from the filter and this row reaches
+#                                READY and calls merge
 #   MUT-REVIEW-LOOKUP-SUPPRESSED a failed comment lookup was reported as "no review", so the audit
 #                                judged whatever survived the failure and an older PASS could win
 #   MUT-TIMELINE-LOOKUP-SUPPRESSED  a failed timeline lookup was reported as "the base did not
@@ -257,9 +271,9 @@
 #   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
 #                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
 #                                spelling every witness in this family uses -- carried no `P1` for
-#                                it to find, and the one check standing between an object outside
-#                                the verdict block and READY found nothing. Both spellings are
-#                                read now, and a doubled backslash is still not an escape
+#                                it to find, and the net that exists to put such a review in front
+#                                of a person found nothing. Both spellings are read now, and a
+#                                doubled backslash is still not an escape
 #   MUT-JSON-REPEATED-NAME-CHOSEN  the verdict object was decoded with unrestricted
 #                                `json.loads`, which KEEPS THE LAST OCCURRENCE of a repeated
 #                                name: a `findings` array carrying a P1 followed by a second
@@ -6841,7 +6855,11 @@ contains MUT-GUARD-READS-THE-WRITTEN-SPELLING "$(parse_why "$tmp/enc-two-candida
 #
 # The case that needs it is the residue of the section above: a `text`-fenced object whose first
 # key is NOT `role_understanding` and whose content holds no `json` fence line is material to
-# neither new rule, so the stray scan is the whole of what is left standing between it and READY.
+# neither new rule, so the stray scan is the only thing left that reports this comment at all.
+# WHAT IT REPORTS IS `manual:`, a review put in front of a person -- and what it reports it of is
+# the two spellings it reads. This comment's severity sits inside a fenced block, where a renderer
+# resolves nothing and a reader sees the characters the scan reads; in the comment's inline prose
+# the two part company, and `stray_summary` states that limit rather than claiming to close it.
 { printf 'Reviewed head: %s\n\n```text\n' "$revived_head"; swallow_blocking
   printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-escaped.md"
 expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-escaped.md")" \
@@ -7147,6 +7165,139 @@ for bytes in '\013' '\302\205' '\034' '\035' '\036' '\037'; do
   contains "MUT-NAME-FOUND-IN-NO-RENDERING literal boundary [$bytes]" \
     "$(parse_why "$tmp/no-rendering-point.md")" "2 places a verdict could be read from"
 done
+
+# --- one comment is read, and the trusted reviewer wrote it -------------------------------------
+# MUT-REVIEWER-ANY-AUTHOR-READ, and the limit it is the answer to.
+#
+# `PROSE_VERDICT` and `stray_summary` read the characters a comment is STORED as; a reader of the
+# comment sees what GitHub's renderer resolves them to, and in inline prose those are two
+# documents. Four spellings render as the token and carry none of it in the stored text --
+# `scripts/pr-review-parse.py` names them where each scan is defined, with the finding
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES. NEITHER SCAN IS A TRUST BOUNDARY, and the
+# reading this audit does rest on is a different one: THE ONLY COMMENT IT EVER PARSES IS ONE THE
+# TRUSTED REVIEWER WROTE. Someone who can write that comment can write the verdict object and put
+# anything in it, so a spelling either scan misses buys nothing; someone who cannot is not read at
+# all. That is the sentence this section executes.
+#
+# The unit cases near the top of this file run `review_comment_filter` on a fixture. These run THE
+# WHOLE AUDIT, against a stub whose comment listing answers by running the jq program the audit
+# itself handed it -- the program arrives in argv after `--jq`, exactly as `gh api` receives it,
+# and the login arrives in `UPSTROKE_AUDIT_REVIEWER`, which the audit sets for that one call. Drop
+# the login predicate from that program and the `a-contributor` row below reaches READY and calls
+# merge.
+filtered_gh="$tmp/filtered-gh"
+mkdir -p "$filtered_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$filtered_gh/gh"
+cat >> "$filtered_gh/gh" <<'GH'
+jq_program() {  # jq_program ARG...: the value of the --jq option this call was given
+  while (( $# )); do
+    if [[ "$1" == --jq ]]; then printf '%s' "${2-}"; return 0; fi
+    shift
+  done
+  return 1
+}
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;
+  "label create"*)            ;;
+  "pr edit"*)                 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG" ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) prog="$(jq_program "$@")" || { echo "GH-NO-JQ-PROGRAM $*" >&2; exit 96; }
+                              jq -r "$prog" "$STUB_COMMENTS_JSON" ;;
+  *"/issues/comments/7001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/7001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"--json body"*)            echo "no ledger" ;;
+  *"--json headRefOid"*)      echo "$head" ;;
+  *"--json baseRefName"*)     echo master ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                feature/x "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$filtered_gh/gh"
+comments_page() {  # comments_page LOGIN BODY-FILE: the one page the audit's filter is run over
+  "$parser_python" - "$1" "$2" "$tmp/filtered-comments.json" <<'PY'
+import json, sys
+login, body_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(body_path, encoding="utf-8") as handle:
+    body = handle.read()
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump([{"created_at": "2026-09-01T00:00:00Z", "id": 7001,
+                "user": {"login": login}, "body": body}], handle)
+PY
+}
+filtered_run() {  # filtered_run LOGIN FILE: "<status>|<output, on one line>|<gh pr merge calls>"
+  local out status=0
+  comments_page "$1" "$2"
+  : > "$tmp/merge-calls.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$2" \
+    STUB_COMMENTS_JSON="$tmp/filtered-comments.json" \
+    PATH="$filtered_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
+    || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/merge-calls.log" || true)"
+}
+# THE HARNESS CONTROL FIRST, and it is the only reason a zero below is evidence: a clean review by
+# the trusted reviewer, through this stub and this filter, is READY and calls merge once. A count
+# that is zero for every input, the ones that must not be zero included, asserts nothing.
+got="$(filtered_run eventloops "$tmp/enqueue-clean.md")"
+contains "MUT-REVIEWER-ANY-AUTHOR-READ control" "$got" "enqueued #999"
+expect "MUT-REVIEWER-ANY-AUTHOR-READ control calls" "${got##*|}" 1
+expect "MUT-REVIEWER-ANY-AUTHOR-READ control status" "${got%%|*}" 0
+# The finding's two witnesses, in one comment: a `VERDICT:` line and a blocking severity, each
+# spelled as a character reference, over a clean `PASS` object. A reader of this comment sees
+# `VERDICT: CHANGES_REQUIRED` and `P1`; both scans read the stored characters and are silent.
+prose_witness() {  # prose_witness VERDICT-SPELLING SEVERITY-SPELLING: one comment, both witnesses
+  printf 'Reviewed head: %s\n\n' "$enqueue_head"
+  printf '%s CHANGES_REQUIRED -- the blocker is %s and it is not in the object.\n\n' "$1" "$2"
+  printf '```json\n'; enqueue_pass; printf '\n```\n'
+}
+prose_witness 'VERDICT&#58;' '&#80;1'  > "$tmp/prose-witness.md"
+prose_witness 'VERDICT:'     '&#80;1'  > "$tmp/prose-witness-verdict-literal.md"
+prose_witness 'VERDICT&#58;' 'P1'      > "$tmp/prose-witness-stray-literal.md"
+# THE PROPERTY. The same comment, written by an account that is not the trusted reviewer, is not
+# read: `no-review`, and no merge call. This is what makes the two scans' blindness cost nothing,
+# and it is the row that moves if the filter's login predicate ever stops being applied.
+got="$(filtered_run a-contributor "$tmp/prose-witness.md")"
+# `blockers=no-review` and not `no-review`: `review-records-no-reviewed-sha` is a DIFFERENT blocker
+# that the bare substring also matches, and it is one a comment that WAS read can carry -- so the
+# bare form would be green on a run that read the comment and merely could not find a commit in it.
+contains MUT-REVIEWER-ANY-AUTHOR-READ "$got" "blockers=no-review"
+contains MUT-REVIEWER-ANY-AUTHOR-READ "$got" "NOT-READY"
+expect "MUT-REVIEWER-ANY-AUTHOR-READ merge calls" "${got##*|}" 0
+[[ "$got" == *"enqueued #999"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: another account's comment enqueued the pull request"
+[[ "$got" == *"verdict=PASS"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: another account's comment was read as the review"
+# And the other direction, or a filter that matched nobody would pass the row above: the SAME
+# comment written by the trusted reviewer IS read. What it is then read as is the limit below, and
+# this assertion deliberately does not pin it -- any of the three directions the finding names
+# leaves this comment read and changes what it is read as.
+got="$(filtered_run eventloops "$tmp/prose-witness.md")"
+[[ "$got" == *"blockers=no-review"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: the trusted reviewer's own comment was not read: [$got]"
+# --- the limit itself, recorded rather than enforced ---------------------------------------------
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES. These three rows are the finding's measurement
+# and they are here so that the change that decides how this program reads comment prose has to
+# move them. Neither scan sees the reference spelling; each sees the literal one. Rendered by
+# `markdown-it-py` 3.0.0, all three comments read `VERDICT: CHANGES_REQUIRED` and `P1`.
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [both encoded]" \
+  "$(review_rows "$tmp/prose-witness.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [verdict literal]" \
+  "$(review_rows "$tmp/prose-witness-verdict-literal.md")" '1|'
+contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [verdict literal]" \
+  "$(parse_why "$tmp/prose-witness-verdict-literal.md")" \
+  "a VERDICT: line outside the block its verdict is read from"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [severity literal]" \
+  "$(review_rows "$tmp/prose-witness-stray-literal.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/P1"
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
