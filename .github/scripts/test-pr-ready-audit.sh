@@ -105,11 +105,32 @@
 #                                pair nothing defines is no link, or dropping its brackets loses a
 #                                token a reader sees. Eleven rows that must stay READY, and they
 #                                are what decides whether the rule above can ship at all
-#   MUT-STRAY-FLANKING-SUPERSET  the punctuation class this file calls the flanking rule with is
-#                                wider than the renderer's, by 7,994 non-ASCII code points, and the
-#                                property that makes that safe -- widening never keeps a delimiter
-#                                run it would have dropped -- was asserted over the whole
-#                                classification rather than over a sample
+#   MUT-SHOWN-RENDERING-OPTIONAL the two scans over a review's prose read the characters the comment
+#                                is stored as, where the reviewer writing it and the person reading
+#                                it both see what GITHUB'S RENDERER resolves them to. The reading is
+#                                GitHub's own now -- `body_html`, fetched beside the body -- and the
+#                                shape that would undo that is not a failed call but a call that
+#                                SUCCEEDS and carries nothing: `--jq '.body_html'` without the
+#                                rendering media type prints one newline and exits 0. Three shapes
+#                                through the whole audit -- whole, blank at exit 0, failed -- with a
+#                                control that merges, and the parser's own refusals beside them
+#   MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE  the reduction read a `<pre>` as prose, so the workflow
+#                                form's own verdict object reported its `"severity":"P1"` as a
+#                                severity written outside the findings -- every blocking review this
+#                                repository has ever had, sent to a person. A code block's content
+#                                is shown verbatim, so the comment's own characters are what a
+#                                reader sees there; the older BARE object, which a renderer shows as
+#                                a paragraph, is taken out by `bare_spans` instead
+#   MUT-SHOWN-FINDINGS-ARE-STRAY the frontier form's own numbered findings were read as stray
+#                                severities, and at most as many items as the parse recorded are
+#                                taken out -- so an item it did NOT record is still read
+#   MUT-SHOWN-TAG-UNCLASSIFIED   a tag was classified as neither a boundary nor a run, and both
+#                                wrong answers lose a token: `P<em>1</em>` is `P1` to a reader and
+#                                `P` and `1` to a reading that breaks at `em`, and
+#                                `<li>P1</li><li>P2</li>` is two lines to a reader and `P1P2` to one
+#                                that does not. Every tag GitHub put in any of the 685 comments this
+#                                repository held on 2026-09-21 is classified, and one in neither set
+#                                is a `manual:` blocker naming it
 #   MUT-REVIEW-LOOKUP-SUPPRESSED a failed comment lookup was reported as "no review", so the audit
 #                                judged whatever survived the failure and an older PASS could win
 #   MUT-TIMELINE-LOOKUP-SUPPRESSED  a failed timeline lookup was reported as "the base did not
@@ -351,6 +372,16 @@ command -v jq > /dev/null || { echo "test-pr-ready-audit: needs jq to run the co
 PR_READY_AUDIT_LIBRARY=1 source scripts/pr-ready-audit.sh
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# A rendering with no severity, MUST or VERDICT token in it, and it is GitHub's rendering of the
+# one sentence named here rather than of any comment below. EVERY CASE THAT USES IT SAYS THE SAME
+# THING: its claim is about what the parser makes of THE COMMENT -- which block the verdict is read
+# from, what refuses, what the payload carries -- and not about what a reader sees, so the reading
+# of the rendering contributes nothing to it. The cases whose claim IS about what a reader sees
+# take `rendering_of`, which is GitHub's rendering of that exact document.
+nothing_shown="$tmp/nothing-shown.html"
+printf '%s' '<p dir="auto">A comment with nothing in it.</p>' > "$nothing_shown"
+
 
 # --- the lane table: every prefix in the vocabulary, not a sample ------------------------------
 # scripts/lane.sh is sourced by scripts/pr-ready-audit.sh, so sourcing the audit above defined it.
@@ -869,6 +900,8 @@ case "$*" in
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"/issues/comments/5001"*"--jq .body_html")
+                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
                               echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
@@ -891,7 +924,8 @@ esac
 GH
 chmod +x "$lookup/gh"
 run_lookup() {  # run_lookup: the audit's table line, with the comment fetch exiting $1
-  STUB_COMMENTS_STATUS="$1" PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
+  STUB_COMMENTS_STATUS="$1" STUB_NOTHING_SHOWN="$nothing_shown" PATH="$lookup:$PATH" \
+    bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
 }
 got="$(run_lookup 1)"
 contains MUT-REVIEW-LOOKUP-SUPPRESSED "$got" "NOT-READY"
@@ -922,7 +956,8 @@ got="$(STUB_REVIEW_BODY="$tmp/id-check-review.md" run_lookup 0)"
 
 run_stub() {  # run_stub ARG...: "<exit status>|<output, on one line>", against the stub above
   local out status=0
-  out="$(PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
+  out="$(STUB_NOTHING_SHOWN="$nothing_shown" PATH="$lookup:$PATH" \
+    bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
   printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
 }
 # A pull request whose own metadata could not be read is reported unaudited, not audited on the
@@ -1205,6 +1240,8 @@ case "$*" in
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"/issues/comments/5001"*"--jq .body_html")
+                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
   *"--json body"*)            echo "no ledger" ;;
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
                                 "${STUB_BRANCH:-feature/x}" "$head" "$head"
@@ -1220,7 +1257,8 @@ GH
 chmod +x "$apply_gh/gh"
 run_apply() {  # run_apply ARG...: "<exit status>|<output, on one line>", with --apply
   local out status=0
-  out="$(PATH="$apply_gh:$PATH" bash scripts/pr-ready-audit.sh --apply "$@" 2>&1)" || status=$?
+  out="$(STUB_NOTHING_SHOWN="$nothing_shown" PATH="$apply_gh:$PATH" \
+    bash scripts/pr-ready-audit.sh --apply "$@" 2>&1)" || status=$?
   printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
 }
 : > "$tmp/apply-edits.log"
@@ -1273,19 +1311,119 @@ contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "blockers=pr-lookup-failed"
 command -v python3 > /dev/null || command -v python > /dev/null \
   || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
 parser_python="$(command -v python3 || command -v python)"
-review_rows() {  # review_rows FILE: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
+
+# WHAT A READER IS SHOWN, RECORDED. `pr-review-parse.py review` takes TWO documents now: the
+# comment as GitHub stores it, and GITHUB'S OWN RENDERING of it -- `body_html`, which
+# `scripts/pr-ready-audit.sh` fetches beside the body and which the two scans over a review's prose
+# read. There is no renderer in this repository to produce one, and that is the point of the change
+# rather than a gap in it, so every rendering this file needs was CAPTURED FROM THE API and is
+# recorded here. A CI run reads the recording and talks to nothing.
+#
+# HOW THEY WERE CAPTURED. `gh api --method POST /markdown` with
+# `{"mode":"gfm","context":"sourcemaps/upstroke"}` renders a text as a comment on this repository
+# renders: the same renderer `body_html` comes out of, asked for a text that is not yet a comment.
+# Checked, not assumed -- over the 685 comments this repository held on 2026-09-21, this call's
+# answer and the comment's own `body_html` agree token for token, which is the measurement in the
+# pull request body.
+#
+# RE-RECORD after adding or changing any document that is rendered below:
+#
+#     UPSTROKE_RENDER_CAPTURE="$PWD/captured" bash .github/scripts/test-pr-ready-audit.sh
+#     python3 - "$PWD/captured" <<'PACK'
+#     import base64, glob, gzip, json, os, sys
+#     rows = {os.path.basename(p)[:-5]: open(p, encoding="utf-8").read()
+#             for p in glob.glob(os.path.join(sys.argv[1], "*.html"))}
+#     print(base64.b64encode(gzip.compress(
+#         json.dumps(rows, sort_keys=True).encode("utf-8"), 9, mtime=0)).decode("ascii"))
+#     PACK
+#
+# The first step needs `gh` and the network and writes one readable `<sha256>.html` per document;
+# the second prints the one line `recorded_renderings` is. `UPSTROKE_RENDER_DUMP=<dir>` writes the
+# recordings back out as files, so what is recorded can be read without either.
+#
+# A DOCUMENT WITH NO ROW IS A FAILED CASE naming its hash, never a case run against something else.
+recorded_renderings='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'
+renderings_dir="$tmp/renderings"
+mkdir -p "$renderings_dir"
+"$parser_python" - "$recorded_renderings" "$renderings_dir" <<'UNPACK'
+import base64, gzip, json, os, sys
+if sys.argv[1] and not sys.argv[1].startswith("RECORDED-"):
+    for digest, html in json.loads(gzip.decompress(base64.b64decode(sys.argv[1]))).items():
+        with open(os.path.join(sys.argv[2], digest + ".html"), "w", encoding="utf-8") as handle:
+            handle.write(html)
+UNPACK
+
+render_digest() {  # render_digest FILE: how a recorded rendering is keyed
+  "$parser_python" - "$1" <<'DIGEST'
+import hashlib, sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+DIGEST
+}
+capture_rendering() {  # capture_rendering FILE OUT: ask GitHub for FILE's rendering, into OUT
+  "$parser_python" - "$1" "$2" <<'CAPTURE'
+import json, os, subprocess, sys, tempfile
+with open(sys.argv[1], encoding="utf-8") as handle:
+    text = handle.read()
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+    json.dump({"text": text, "mode": "gfm", "context": "sourcemaps/upstroke"}, handle)
+    payload = handle.name
+try:
+    done = subprocess.run(["gh", "api", "--method", "POST", "/markdown", "--input", payload],
+                          capture_output=True, text=True)
+finally:
+    os.unlink(payload)
+if done.returncode != 0:
+    sys.exit("capture failed: %s" % done.stderr.strip()[:400])
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(done.stdout)
+CAPTURE
+}
+# THE TWO DRIVES FOR A CASE ABOUT WHAT A READER SEES: the parser, and the whole audit, each
+# handed GITHUB'S OWN RENDERING of the document rather than `nothing_shown`. Every row of every
+# section below that says what a reader sees goes through one of these, so a row that forgot the
+# rendering is a row that fails for want of a recording rather than a row that quietly asserts
+# less.
+reader_rows() {  # reader_rows FILE: review_rows, with GitHub's own rendering of FILE
+  review_rows "$1" "$(rendering_of "$1")"
+}
+reader_audit() {  # reader_audit FILE: the whole audit as the trusted reviewer, with that rendering
+  filtered_run eventloops "$1" "$(rendering_of "$1")"
+}
+rendering_of() {  # rendering_of FILE: the path to GitHub's own recorded rendering of FILE
+  local digest out
+  digest="$(render_digest "$1")"
+  out="$renderings_dir/$digest.html"
+  if [[ ! -s "$out" ]]; then
+    if [[ -n "${UPSTROKE_RENDER_CAPTURE:-}" ]]; then
+      mkdir -p "$UPSTROKE_RENDER_CAPTURE"
+      capture_rendering "$1" "$UPSTROKE_RENDER_CAPTURE/$digest.html"
+      cp "$UPSTROKE_RENDER_CAPTURE/$digest.html" "$out"
+    else
+      error "no recorded rendering for [$1] ($digest): re-record, see the top of this section"
+      printf '%s' "$nothing_shown"
+      return 0
+    fi
+  fi
+  [[ -n "${UPSTROKE_RENDER_DUMP:-}" ]] && { mkdir -p "$UPSTROKE_RENDER_DUMP"; cp "$out" "$UPSTROKE_RENDER_DUMP/"; }
+  printf '%s' "$out"
+}
+review_rows() {  # review_rows FILE [RENDERING]: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
   local out status=0
-  out="$("$parser_python" scripts/pr-review-parse.py review "$1" 2>/dev/null)" || status=$?
+  out="$("$parser_python" scripts/pr-review-parse.py review "$1" "${2:-$nothing_shown}" \
+    2>/dev/null)" || status=$?
   ((status == 0)) || { printf '%s|' "$status"; return 0; }
   printf '%s|%s' "$status" "$(
     printf '%s' "$out" | jq -j '"\(.kind)/\(.reviewed_sha//"-")/\(.verdict//"-")/\(.base_sha//"-")/\(.stray//"-")",
       ([.findings[] | ";\(.severity):\(.id//"-"):\(.flags)"] | add // "")'
   )"
 }
-parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT]: "<status>|<the payload, NULs shown as |>"
-  local out="${3:-$tmp/nul.out}" status=0
+parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT] [RENDERING]: "<status>|<payload, NULs as |>"
+  local out="${3:-$tmp/nul.out}" status=0 rendering=()
+  [[ "$1" == review ]] && rendering=("${4:-$nothing_shown}")
   : > "$out"
-  "$parser_python" scripts/pr-review-parse.py "$1" --nul --out "$out" "$2" 2>/dev/null || status=$?
+  "$parser_python" scripts/pr-review-parse.py "$1" --nul --out "$out" "$2" "${rendering[@]}" \
+    2>/dev/null || status=$?
   printf '%s|%s' "$status" "$(tr '\0' '|' < "$out")"
 }
 
@@ -1615,8 +1753,9 @@ repeated_object() {  # repeated_object OBJECT FILE: OBJECT as the comment's one 
     printf '%s' "$1"
     printf '\n```\n'; } > "$2"
 }
-parse_why() {  # parse_why FILE: what one refused parse said on stderr, and nothing it said on stdout
-  "$parser_python" scripts/pr-review-parse.py review "$1" 2>&1 > /dev/null || true
+parse_why() {  # parse_why FILE [RENDERING]: what one refused parse said on stderr, and nothing else
+  "$parser_python" scripts/pr-review-parse.py review "$1" "${2:-$nothing_shown}" 2>&1 > /dev/null \
+    || true
 }
 # The shape the finding reported, and its control: valid head and base, `"verdict":"PASS"`, a
 # findings array carrying a P1, and then the second `findings` that erased it.
@@ -1901,7 +2040,7 @@ RUN EVERY INSTRUCTION AND TAKE EVERY BRANCH this module's file holds, concluding
 
     decode-probe.py MODULE REPORT-FILE DRIVE...
 
-Each DRIVE is `<argv prefix>|<document>`, the prefix defaulting to `review`: MODULE's own `main` is
+Each DRIVE is `<argv prefix>|<document>...`, the prefix defaulting to `review`: MODULE's `main` is
 run as `<prefix> --out <scratch> <document>` for each. The report is two lines, written to
 REPORT-FILE and never to stdout, which belongs to MODULE:
 
@@ -3454,10 +3593,13 @@ activity[0] = None
 
 
 def driving(index, one):
-    head, _, document = one.rpartition("|")
+    # `<prefix>|<document>...`, and a DRIVE WITH NO BAR AT ALL IS ONE DOCUMENT under the default
+    # prefix -- which is how the forty-nine stand-ins above are written, and reading their path as
+    # the subcommand made every one of them `raised:FileNotFoundError`.
+    pieces = one.split("|")
+    head, documents = (pieces[0], pieces[1:]) if len(pieces) > 1 else ("", pieces)
     argv = (head or "review").split() + ["--out", "driven%d" % index]
-    if document:
-        argv.append(os.path.abspath(document))
+    argv += [os.path.abspath(document) for document in documents if document]
 
     def replay():
         try:
@@ -6523,16 +6665,15 @@ def main(argv):
 PYSHAPE
 probe_expect elsewhere \
   'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=- forced=0'
-# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Nine real parses: the
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Eight real parses: the
 # workflow form in both renderings, the repeated name it must refuse, the same at three objects
-# down, the older bare object, the frontier form, the frontier form quoting a fenced example, the
-# frontier form carrying a code span and every shape of link, and the ledger subcommand. They are
-# drives rather than assertions -- what the first eight return is asserted by the families above,
-# on these same shapes -- and their job here is that the parser's own code runs, and every scan it
-# makes is answered for. What they leave, the probe takes: a handler the nine never enter is
-# entered, and a branch they take one way only is turned -- measured on 2026-09-21, all 188
-# conditional branches in the 54 code objects of `scripts/pr-review-parse.py` went both ways, over
-# 163 altered runs -- and the verdict line below asserts that every instruction in the file ran. A
+# down, the older bare object with a rendering that SHOWS that object, the frontier form, the
+# frontier form quoting a fenced example, a frontier review whose RENDERING carries one of each
+# shape the reduction reads, and the ledger subcommand. They are drives rather than assertions --
+# what the first seven return is asserted by the families above, on these same shapes -- and their
+# job here is that the parser's own code runs, and every scan it makes is answered for. What they
+# leave, the probe takes: a handler the eight never enter is entered, and a branch they take one
+# way only is turned, and the verdict line below asserts that every instruction in the file ran. A
 # loop no document enters is the one thing turning cannot reach -- `verdict_candidates` reads the
 # bare object only inside one, which is why the bare drive is here -- so if a change leaves one
 # behind, give it a drive rather than a filter.
@@ -6557,93 +6698,54 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
     '\*&amp;&notareal;&#110;&#x6a;&#11;'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-quoted.md"
-# AND THE READER DRIVE IS THE SAME RULE APPLIED AGAIN, to the reading that answers what a person
-# sees. `markup_regions` walks a comment's code spans and links, and the loops inside `link_labels`
-# and the four functions that read a link's extent are entered only by a comment that HAS a link
-# reference definition and a link to delimit: with the eight drives above and no ninth this line
-# read `unproven=balanced_run,link_labels`, naming the function round four replaced. Turning a
-# branch cannot enter a loop no document enters, so this document carries one of each form each
-# of those functions has a rule for -- a code span that closes, one that is padded at both ends,
-# one that crosses a line ending and an unclosed run; an inline destination with a nested pair and
-# an escape in it, one in angle brackets, one whose parentheses never balance, and one that runs
-# off the end of the paragraph; a title in each of the three markers a renderer takes and one that
-# never closes; a full reference, a shortcut, a pair nothing defines, a label carrying an escaped
-# bracket, a label carrying a plain one, a label that never closes; a definition on one line and
-# one whose destination is wrapped onto the next; and a backslash before a backtick and a bracket.
+# AND THE REDUCTION OF THE RENDERING IS DRIVEN THE SAME WAY, because it is the other half of what
+# runs on the merge path. `Rendering` is entered only by a document that HAS the tag it reads:
+# with the drives above and no rendering but `nothing_shown`, this line read
+# `unproven=Rendering.handle_endtag,Rendering.handle_startendtag,bare_spans,finding_spans,
+# narrowed`. So the document below is a frontier review with a numbered finding -- which is what
+# `finding_spans` and `narrowed` need -- and ITS RENDERING, written out here, carries one of each
+# shape that reduction has a rule for.
+#
+# THAT RENDERING IS NOT GITHUB'S RENDERING OF THAT DOCUMENT AND IS NOT RECORDED AS ONE. It is a
+# COVERAGE drive: what it is for is that every branch of the reduction runs, and a document GitHub
+# renders would carry a handful of tags rather than all of them. What the reduction DECIDES is
+# asserted against GitHub's own renderings, by the sections that take `rendering_of`.
 { printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
-  printf 'A code span `held whole`, one with ` padded ends `, one that `crosses\n'
-  printf 'a line`, an unclosed ``run, an inline [link](https://example.invalid/(nested)a\\)b), an\n'
-  printf 'angled [one](<https://example.invalid/b r>), a titled [two](https://example.invalid/t\n'
-  printf '"a (title"), a quoted [three](https://example.invalid/q %s), a parenthesised\n' "'q'"
-  printf '[four](https://example.invalid/p (a (nested title)), a titled\n'
-  printf '[five](https://example.invalid/p (title)), a title that [never](https://example.invalid/n\n'
-
-  printf '"closes, a destination that [never balances](%s x, a pair [nothing defines], an\n' \
-    '((((((((((((((((((((((((((((((((('
-  printf '[escaped][lab\\]el] label, a [plain][lab[el] one, a [label][that never closes, an\n'
-  printf 'unbalanced [one](unclosed and an escaped \\`tick\\[. And one that ends a paragraph: [x](\n\n'
-  printf 'More of the same rule: an empty [five](), an escaped space [six](a\\ b), a nested angle\n'
-  printf '[seven](<a<b>), an escape in a title\n'
-  printf '[eight](https://example.invalid/e "a \\" quote"), and a destination that ends the\n'
-  printf 'paragraph [nine](https://example.invalid/z\n\n'
-  printf 'An angle destination that never closes: [ten](<unclosed\n\n'
-  printf 'A label that never closes: [label][unclosed\n\n'
-  printf 'And a correction a reader sees that this comment does not write: **VERDICT**: see below.\n\n'
-  # AND ROUND FIVE'S THREE RULES, by the same rule again: a block prefix, a raw HTML tag and a
-  # definition's own grammar are each entered only by a comment that HAS one. With the material
-  # above and none of this, the line below read `unproven=block_prefix,definition_label,
-  # html_attribute_value,html_bang_extent,html_tag_extent,link_labels`. So: a quoted line, a twice
-  # quoted one, a bracket inside a quoted code span, a bracket pair nested inside another and a
-  # collapsed pair naming it; each of the five list markers; an open tag with an unquoted and a
-  # quoted attribute, one with a bracket in an attribute, a self-closing one, an attribute with no
-  # value, an attribute name that is not one, a tag name that is not one, a closing tag that is
-  # not one, a processing instruction, a declaration, an empty comment, one whose content may not
-  # begin as it does, a dashed one, a CDATA section, an unterminated comment, a bare `<` and a
-  # paragraph that ends in one. The REFERENCE DEFINITIONS are a drive of their own below, and why
-  # they are is a cost decision stated there.
-  printf '> A quoted line, a quoted span `a[b]c`, and a quoted [pair] of brackets.\n'
-  printf '> > Twice quoted, and a nested [a[b] c] pair, and a collapsed [a[b] c][] one.\n\n'
-  printf -- '- A bullet item, and an ordered one below it.\n'
-  printf -- '* A star bullet, and a plus one below that.\n'
-  printf -- '+ A plus bullet.\n'
-  printf '1. An ordered item.\n'
-  printf '2) One with the other marker.\n\n'
-  printf 'Raw HTML: <strong>bold</strong>, <code>a span</code>, a <span data-x="[y]">tag with a\n'
-  printf 'bracket</span>, <a href=plain title=%s>unquoted and quoted</a>, a self-closing <br/>, a\n' "'q'"
-  printf 'malformed <a b= > one, a <a =b> one, a <1nottag>, a </ nottag>, a <?php echo 1; ?>\n'
-  printf 'instruction, a <!DOCTYPE html> declaration, an empty <!----> comment, a <!--> that is\n'
-  printf 'not one, a <!--- dashed --> one, a <![CDATA[bracketed]]> section, an unterminated\n'
-  printf '<!--comment and a bare < and a <x that never closes, and a paragraph ending in <\n\n'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
-} > "$tmp/probe-drive-reader.md"
-# AND THE REFERENCE DEFINITIONS ARE A DRIVE OF THEIR OWN, WHICH IS A COST DECISION AND IS STATED AS
-# ONE. `reading_questions` reads a comment that defines a label SIX ways and one that defines none
-# FOUR, and the probe repeats whichever drive FIRST entered a code object once for every branch it
-# turns in it -- so a definition anywhere in the long document above puts two extra readings on
-# every one of those repeats. Measured on 2026-09-21 with the definitions inside it, this probe took
-# 4m1s standalone over the same nine drives; split out, 1m46s. Coverage is
-# unchanged and MEASURED rather than asserted: with `sys.settrace` over these ten drives, every
-# executable line of every function round five added is entered by a document EXCEPT ONE --
-# `prefix_stripped_reading`'s `return None`, which needs a document carrying no block prefix
-# anywhere in it and which the SWEEP below covers rather than a drive.
-{ printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
-  printf 'A full [reference][label], a bare [label], a collapsed [label][] one and a wrapped\n'
-  printf '[definition][wrapped] one, with [nocolon] naming nothing.\n\n'
-  printf '[label]: https://example.invalid/l\n\n[wrapped]:\n  https://example.invalid/w\n\n'
-  printf '[ ]: https://example.invalid/empty\n\n[nodestination]:\n\n'
-  printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
-} > "$tmp/probe-drive-definition.md"
-
+} > "$tmp/probe-drive-shown.md"
+{ printf '<p>A <em>paragraph</em> with an inline tag, a void <br>one, a self-closing <br/>one,\n'
+  printf 'an <x-unknown>unclassified</x-unknown> one and a closing </b> nothing opened.</p>\n'
+  printf '<pre><code>A code block, which this reading does not read: P1 MUST VERDICT:\n</code></pre>\n'
+  printf '<ol>\n<li>\n<p><strong>P2 -- a finding.</strong> Detail, and a second line.<br>\nStill'
+  printf ' the same item.</p>\n</li>\n<li><p>An item that opens with no severity: P2 later.</p></li>\n'
+  printf '</ol>\n<ul><li>A bullet, which is not a numbered finding.</li></ul>\n'
+  printf '<p>A comment between two runs: VERDICT<!--split-->: and <strong>VERDICT</strong>: too,\n'
+  printf 'and one written whole, VERDICT: PASS.</p>\n'
+  printf '<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>P3</td></tr></tbody></table>\n'
+} > "$tmp/probe-drive-shown.html"
+# AND THE OLDER BARE FORM'S OBJECT IS SHOWN AS A PARAGRAPH, which is the one shape `bare_spans`
+# exists for: a FENCED verdict is inside a `<pre>` and is not in the reading at all, so nothing
+# takes it out; a bare one is ordinary prose to a renderer, and the scan must not read the review's
+# own findings out of it. Written here rather than recorded, for the reason above.
+"$parser_python" - "$tmp/one-bare.md" "$tmp/one-bare.html" <<'BAREHTML'
+import html, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lines = [line for line in handle.read().split("\n") if line.strip()]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write("".join('<p dir="auto">%s</p>\n' % html.escape(line) for line in lines))
+BAREHTML
 
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
 # parser with no decode left for the probe to watch satisfies every count and fails here.
 got="$(decode_probe scripts/pr-review-parse.py \
-  "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
-  "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
-  "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
-  "review|$tmp/probe-drive-reader.md" "review|$tmp/probe-drive-definition.md" \
+  "review|$tmp/one-findings.md|$nothing_shown" "review --nul|$tmp/one-findings.md|$nothing_shown" \
+  "review|$tmp/dup-findings.md|$nothing_shown" "review|$tmp/dup-deep.md|$nothing_shown" \
+  "review|$tmp/one-bare.md|$tmp/one-bare.html" \
+  "review|$tmp/probe-drive-prose.md|$nothing_shown" \
+  "review|$tmp/probe-drive-quoted.md|$nothing_shown" \
+  "review|$tmp/probe-drive-shown.md|$tmp/probe-drive-shown.html" \
   "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
@@ -7058,12 +7160,24 @@ expect MUT-STRAY-TOKEN-ENCODED "$(parse_nul review "$tmp/stray-unresolvable.md")
 # rewriting clears. Measured, `markdown-it-py` 3.0.0 renders that fence `language-json&#133;x`; so
 # does `json&amp;#133;x`, byte for byte, and the two are read the same way here. `json&#11;x` is the
 # same defect at U+000B; a case here once required it to refuse, and it is asserted green below.
+# THESE TWO COMMITS ARE BYTE-STABLE, AND THAT IS NOT TIDINESS. Their ids are written into every
+# fixture comment below, so a comment's own bytes -- and therefore the sha256 the recorded
+# renderings are keyed by -- change with them. With the commit time left to `now`, every run built
+# documents no recording could match, and the gate answered `no recorded rendering` 215 times and
+# fell back to `nothing_shown` for each. An empty tree, a fixed parent, a fixed author and
+# committer and a fixed date give one id, every run, on every machine.
 enqueue_repo="$tmp/enqueue-repo"
+enqueue_when="2026-01-01T00:00:00+0000"
 git init -q "$enqueue_repo"
-git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+# `--date` and a `committer.date` config set the AUTHOR date and nothing else; the COMMITTER date
+# comes from the environment, and leaving it at `now` left the id moving by the second -- which two
+# runs a second apart do not show and a run a minute later does.
+GIT_AUTHOR_DATE="$enqueue_when" GIT_COMMITTER_DATE="$enqueue_when" \
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
   commit -q --allow-empty -m "the base the review was made against"
 enqueue_base="$(git -C "$enqueue_repo" rev-parse HEAD)"
-git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+GIT_AUTHOR_DATE="$enqueue_when" GIT_COMMITTER_DATE="$enqueue_when" \
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
   commit -q --allow-empty -m "the head the review read"
 enqueue_head="$(git -C "$enqueue_repo" rev-parse HEAD)"
 git -C "$enqueue_repo" remote add origin "$enqueue_repo"
@@ -7092,6 +7206,8 @@ case "$*" in
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"/issues/comments/5001"*"--jq .body_html")
+                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
@@ -7101,10 +7217,11 @@ case "$*" in
 esac
 GH
 chmod +x "$enqueue_gh/gh"
-merge_run() {  # merge_run FILE: "<status>|<output, on one line>|<gh pr merge calls>"
+merge_run() {  # merge_run FILE [RENDERING]: "<status>|<output, one line>|<gh pr merge calls>"
   local out status=0
   : > "$tmp/merge-calls.log"
   out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$1" \
+    STUB_REVIEW_HTML="${2:-$nothing_shown}" STUB_NOTHING_SHOWN="$nothing_shown" \
     PATH="$enqueue_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
     || status=$?
   printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
@@ -7324,6 +7441,8 @@ case "$*" in
                               jq -r "$prog" "$STUB_COMMENTS_JSON" ;;
   *"/issues/comments/7001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/7001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"/issues/comments/7001"*"--jq .body_html")
+                              cat "${STUB_REVIEW_HTML:-$STUB_NOTHING_SHOWN}" ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
@@ -7344,11 +7463,12 @@ with open(out_path, "w", encoding="utf-8") as handle:
                 "user": {"login": login}, "body": body}], handle)
 PY
 }
-filtered_run() {  # filtered_run LOGIN FILE: "<status>|<output, on one line>|<gh pr merge calls>"
+filtered_run() {  # filtered_run LOGIN FILE [RENDERING]: "<status>|<output>|<gh pr merge calls>"
   local out status=0
   comments_page "$1" "$2"
   : > "$tmp/merge-calls.log"
   out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$2" \
+    STUB_REVIEW_HTML="${3:-$nothing_shown}" STUB_NOTHING_SHOWN="$nothing_shown" \
     STUB_COMMENTS_JSON="$tmp/filtered-comments.json" \
     PATH="$filtered_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
     || status=$?
@@ -7420,12 +7540,14 @@ got="$(filtered_run eventloops "$tmp/prose-witness.md")"
 # it, so `` `VERDICT`: CHANGES_REQUIRED `` and `[VERDICT](url): CHANGES_REQUIRED` prepended to the
 # same generated `PASS` were exit 0, PASS, no stray, READY AND ONE MERGE CALL at `d599216` as well
 # -- the plain label being exit 1 and none -- and formatting a field label as code or linking it to
-# the policy it comes from is ordinary reviewer writing by the same measure. `markup_regions` is
-# the reading that closes those, and the last three rows below are its witnesses.
+# the policy it comes from is ordinary reviewer writing by the same measure.
 #
-# `reader_spelling` is the reading that closes all of them, and these are its witnesses. EACH ROW
-# IS DRIVEN THROUGH BOTH the parser and THE WHOLE AUDIT, because the parser's `stray` field is only
-# half the claim: what must not happen is the MERGE, and `filtered_run` is what counts the calls.
+# GITHUB'S OWN RENDERING OF EACH COMMENT IS WHAT CLOSES ALL OF THEM, and these are its witnesses.
+# Rounds 2 to 5 closed them by transcribing a renderer's inline rules over the characters instead;
+# round 6 deleted that and reads `body_html`. EACH ROW IS DRIVEN THROUGH BOTH the parser and THE
+# WHOLE AUDIT, with the recorded rendering of that exact document, because the parser's `stray`
+# field is only half the claim: what must not happen is the MERGE, and `filtered_run` counts the
+# calls.
 #
 # THE TWO DIRECTIONS ARE DELIBERATELY NOT THE SAME. A literal `VERDICT:` outside the block is still
 # a REFUSAL and that is unchanged; a spelling only the reader sees is a `manual:` blocker, and the
@@ -7454,15 +7576,16 @@ reader_closed=(
   'code span splits the severity|The blocker is P`1` and it is not in the object.|P1'
   'link splits the severity|The blocker is P[1](https://example.invalid/x) and not in the object.|P1'
   'code span before an undefined label|The cell is P`1`[a]x and nothing defines the label a.|P1'
+  'eight digit reference|The blocker is &#00000080;1 and it is not in the object.|P1'
 )
 for row in "${reader_closed[@]}"; do
   reader_case="${row%%|*}"; rest="${row#*|}"
   reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
   reader_comment "$reader_prose" > "$tmp/reader-closed.md"
   expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [$reader_case]" \
-    "$(review_rows "$tmp/reader-closed.md")" \
+    "$(reader_rows "$tmp/reader-closed.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
-  got="$(filtered_run eventloops "$tmp/reader-closed.md")"
+  got="$(reader_audit "$tmp/reader-closed.md")"
   contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" \
     "manual:$reader_want-outside-the-verdict-object"
   contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" MANUAL
@@ -7471,7 +7594,7 @@ for row in "${reader_closed[@]}"; do
 done
 # AND THE LITERAL LINE IS STILL A REFUSAL, which is the outcome this round must not have changed.
 expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
-  "$(review_rows "$tmp/prose-witness-verdict-literal.md")" '1|'
+  "$(reader_rows "$tmp/prose-witness-verdict-literal.md")" '1|'
 contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
   "$(parse_why "$tmp/prose-witness-verdict-literal.md")" \
   "a VERDICT: line outside the block its verdict is read from"
@@ -7489,11 +7612,12 @@ contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
 # THE LAST TWO ROWS ARE THE SAME QUESTION ASKED OF A BRACKET PAIR. A reference link is a link only
 # where a definition defines its label, and a pair nothing defines is shown WITH ITS BRACKETS --
 # so reading every pair as a link both reports a label nobody linked and, by dropping brackets a
-# reader sees, JOINS the words either side of them and loses a token. Executed: over 400,000
-# random strings against `markdown-it-py` 3.0.0, reading every pair as a link hid a `P1` that
-# renderer shows, and `link_labels` is what stopped it. THAT direction's witness is the LAST ROW OF
-# THE CLOSED TABLE ABOVE rather than one of these: ``P`1`[a]x`` must report `P1`, and with the pair
-# read as a link the reading is `P1ax` and reports nothing.
+# reader sees, JOINS the words either side of them and loses a token. Executed at `3fe68c37`: over
+# 400,000 random strings against `markdown-it-py` 3.0.0, reading every pair as a link hid a `P1`
+# that renderer shows. Nothing here decides that any more -- GitHub does, and its answer is in the
+# recorded rendering -- but the rows stay, because what they assert is the OUTCOME: THAT direction's
+# witness is the LAST ROW OF THE CLOSED TABLE ABOVE rather than one of these: ``P`1`[a]x`` must
+# report `P1`, and with the pair read as a link the reading is `P1ax` and reports nothing.
 #
 # So these rows are the guard, they are asserted through the WHOLE AUDIT as READY WITH ONE MERGE
 # CALL rather than only as a quiet `stray` field, and every one of them is quiet at `a5bcc998` too.
@@ -7508,7 +7632,6 @@ reader_quiet=(
   'arithmetic|The budget is 2 * 3 * 4 and no more.'
   'emphasis elsewhere|This is *important* and so is _this_ one.'
   'escaped reference|A literal \&#80;1 in the text, which renders as itself.'
-  'eight digit reference|The blocker is &#00000080;1 here, which renders as itself.'
   'code span citation|See `findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md` for it.'
   'linked citation|See [the finding](findings/P1_security-trust_202609211100_the-prose-scans-cannot-see.md) for it.'
   'undefined label|A bare [VERDICT] with nothing defining it renders as its brackets.'
@@ -7518,9 +7641,9 @@ for row in "${reader_quiet[@]}"; do
   reader_case="${row%%|*}"; reader_prose="${row#*|}"
   reader_comment "$reader_prose" > "$tmp/reader-quiet.md"
   expect "MUT-STRAY-INTRAWORD-UNDERSCORE [$reader_case]" \
-    "$(review_rows "$tmp/reader-quiet.md")" \
+    "$(reader_rows "$tmp/reader-quiet.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/-"
-  got="$(filtered_run eventloops "$tmp/reader-quiet.md")"
+  got="$(reader_audit "$tmp/reader-quiet.md")"
   contains "MUT-STRAY-INTRAWORD-UNDERSCORE audit [$reader_case]" "$got" "enqueued #999"
   expect "MUT-STRAY-INTRAWORD-UNDERSCORE merge calls [$reader_case]" "${got##*|}" 1
 done
@@ -7550,9 +7673,9 @@ prose_review() {  # prose_review PROSE: a frontier-form review of this head, car
 # THE CONTROL FIRST: the form's own two verdict lines are not a contradiction, and a review that
 # carries nothing else is READY and calls merge once.
 prose_review '' > "$tmp/prose-control.md"
-expect "MUT-PROSE-VERDICT-UNCHECKED control" "$(review_rows "$tmp/prose-control.md")" \
+expect "MUT-PROSE-VERDICT-UNCHECKED control" "$(reader_rows "$tmp/prose-control.md")" \
   "0|prose/$enqueue_head/PASS/-/-"
-got="$(filtered_run eventloops "$tmp/prose-control.md")"
+got="$(reader_audit "$tmp/prose-control.md")"
 contains "MUT-PROSE-VERDICT-UNCHECKED control" "$got" "enqueued #999"
 expect "MUT-PROSE-VERDICT-UNCHECKED control calls" "${got##*|}" 1
 expect "MUT-PROSE-VERDICT-UNCHECKED control status" "${got%%|*}" 0
@@ -7568,8 +7691,8 @@ for row in "${prose_corrections[@]}"; do
   prose_review "$reader_prose
 " > "$tmp/prose-correction.md"
   expect "MUT-PROSE-VERDICT-UNCHECKED [$reader_case]" \
-    "$(review_rows "$tmp/prose-correction.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
-  got="$(filtered_run eventloops "$tmp/prose-correction.md")"
+    "$(reader_rows "$tmp/prose-correction.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+  got="$(reader_audit "$tmp/prose-correction.md")"
   # The prose form names its own place: this blocker is `outside-the-numbered-findings`, which is
   # where this form's stray scan reads, and not the workflow form's `outside-the-verdict-object`.
   contains "MUT-PROSE-VERDICT-UNCHECKED audit [$reader_case]" "$got" \
@@ -7585,8 +7708,8 @@ done
 prose_review 'Quoting the protocol: the line is VERDICT: CHANGES_REQUIRED when it blocks.
 ' > "$tmp/prose-third.md"
 expect "MUT-PROSE-VERDICT-UNCHECKED [third written line]" \
-  "$(review_rows "$tmp/prose-third.md")" "0|prose/$enqueue_head/PASS/-/-"
-got="$(filtered_run eventloops "$tmp/prose-third.md")"
+  "$(reader_rows "$tmp/prose-third.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-third.md")"
 expect "MUT-PROSE-VERDICT-UNCHECKED merge calls [third written line]" "${got##*|}" 1
 
 # --- a link's extent is the renderer's, and an exemption names the occurrence it exempts ---------
@@ -7619,7 +7742,10 @@ expect "MUT-PROSE-VERDICT-UNCHECKED merge calls [third written line]" "${got##*|
 # 4. AND THE LABEL FOLD WAS A NEAR ONE. `folded_label` used `casefold()` where that renderer's
 #    `normalizeReference` uses `.lower().upper()`; they agree on every code point but U+0131.
 #    Found by comparing the two over the whole range rather than by a lens, and it is the same
-#    shape as 1 reached by a different rule.
+#    shape as 1 reached by a different rule. **ROUND SIX MOVED THAT ROW, because GitHub agrees with
+#    NEITHER: it does not fold DOTLESS I to `i` at all, so the pair is no link and a reader sees
+#    the brackets. The row is in the settled table below at the value GitHub gives it, and the
+#    control -- the same label spelled `i`, which IS a link to all three -- stays here.**
 #
 # EVERY ROW BELOW IS DRIVEN THROUGH THE PARSER AND THE WHOLE AUDIT. The first four merged at
 # `3fe68c37` -- exit 0, PASS, no stray, READY and ONE `gh pr merge` call -- and the last three are
@@ -7637,13 +7763,15 @@ wrapped_severity='The blocker is P[1][policy] and it is not in the object.
 oneline_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
 
 [policy]: https://example.invalid/review-policy'
-# AND THE LABEL FOLD IS THAT RENDERER'S TOO. `normalizeReference` is `.lower().upper()`, which its
-# own comment explains: lowering alone leaves 125 code points unnormalised and uppering alone
-# leaves six. `casefold()` agrees with it on every code point but ONE -- U+0131 DOTLESS I, which
-# that renderer merges with `I` and `i` and `casefold` keeps apart -- so a definition spelling its
-# label `i` and a use spelling it dotless was a link there and no link here, brackets and all.
-# Measured at `3fe68c37` through the whole audit in both forms: exit 0, PASS, no stray, READY and
-# ONE merge call, where the same correction using `[i]` was MANUAL with none.
+# AND THE LABEL FOLD WAS THAT RENDERER'S TOO, AND THAT WAS THE WRONG RENDERER TO FOLLOW.
+# `normalizeReference` is `.lower().upper()`, which merges U+0131 DOTLESS I with `I` and `i` where
+# `casefold()` keeps them apart -- so a definition spelling its label `i` and a use spelling it
+# dotless was a link there and no link at `3fe68c37`, brackets and all: exit 0, PASS, no stray,
+# READY and ONE merge call through the whole audit, where the same correction using `[i]` was
+# MANUAL with none. **GITHUB DOES NOT FOLD THEM EITHER**, measured on 2026-09-21 through
+# `POST /markdown`: it renders `[VERDICT][<U+0131>]:` with its brackets written. So the dotless row
+# is quiet here and stands in the settled table below; the `[i]` control is a link to every
+# renderer asked and stays in this one.
 #
 # THE CHARACTER IS BUILT FROM ITS BYTES AND NOT WRITTEN, so what this row asserts cannot be changed
 # by a re-encoding of this file. ROUND FOUR SAID "THIS FILE STAYS ASCII" HERE AND WROTE THE
@@ -7662,7 +7790,6 @@ round4_closed=(
   "wrapped definition verdict|$wrapped_verdict|VERDICT:"
   "wrapped definition severity|$wrapped_severity|P1"
   'titled link verdict|[VERDICT](https://example.invalid/policy "4) Review"): CHANGES_REQUIRED.|VERDICT:'
-  "dotless label verdict|$dotless_verdict|VERDICT:"
   "one-line definition verdict|$oneline_verdict|VERDICT:"
   'plainly titled link verdict|[VERDICT](https://example.invalid/policy "Review"): CHANGES_REQUIRED.|VERDICT:'
   "same label spelled i|$dotless_control|VERDICT:"
@@ -7674,9 +7801,9 @@ for row in "${round4_closed[@]}"; do
   # The workflow form: the correction in front of a generated `PASS` object.
   reader_comment "$reader_prose" > "$tmp/round4-closed.md"
   expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case]" \
-    "$(review_rows "$tmp/round4-closed.md")" \
+    "$(reader_rows "$tmp/round4-closed.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round4-closed.md")"
+  got="$(reader_audit "$tmp/round4-closed.md")"
   contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" \
     "manual:$reader_want-outside-the-verdict-object"
   contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
@@ -7687,8 +7814,8 @@ for row in "${round4_closed[@]}"; do
   prose_review "$reader_prose
 " > "$tmp/round4-closed-prose.md"
   expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case] prose" \
-    "$(review_rows "$tmp/round4-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round4-closed-prose.md")"
+    "$(reader_rows "$tmp/round4-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(reader_audit "$tmp/round4-closed-prose.md")"
   contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case] prose" "$got" \
     "manual:$reader_want-outside-the-numbered-findings"
   expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS merge calls [$reader_case] prose" "${got##*|}" 0
@@ -7702,8 +7829,8 @@ prose_review 'See [review format](https://example.invalid/policy "VERDICT: PASS"
 `VERDICT`: CHANGES_REQUIRED -- correcting my own review above.
 ' > "$tmp/prose-cancelled.md"
 expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY" \
-  "$(review_rows "$tmp/prose-cancelled.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
-got="$(filtered_run eventloops "$tmp/prose-cancelled.md")"
+  "$(reader_rows "$tmp/prose-cancelled.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+got="$(reader_audit "$tmp/prose-cancelled.md")"
 contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" \
   "manual:VERDICT:-outside-the-numbered-findings"
 contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" MANUAL
@@ -7722,8 +7849,8 @@ for row in "${exempt_quiet[@]}"; do
   prose_review "$reader_prose
 " > "$tmp/prose-exempt.md"
   expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" \
-    "$(review_rows "$tmp/prose-exempt.md")" "0|prose/$enqueue_head/PASS/-/-"
-  got="$(filtered_run eventloops "$tmp/prose-exempt.md")"
+    "$(reader_rows "$tmp/prose-exempt.md")" "0|prose/$enqueue_head/PASS/-/-"
+  got="$(reader_audit "$tmp/prose-exempt.md")"
   contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" "$got" "enqueued #999"
   expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [$reader_case]" "${got##*|}" 1
 done
@@ -7734,8 +7861,8 @@ prose_review 'A span crossing a line `VERDICT:
 PASS` which this comment writes.
 ' > "$tmp/prose-exempt-crossed.md"
 expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [verdict across a line ending]" \
-  "$(review_rows "$tmp/prose-exempt-crossed.md")" "0|prose/$enqueue_head/PASS/-/-"
-got="$(filtered_run eventloops "$tmp/prose-exempt-crossed.md")"
+  "$(reader_rows "$tmp/prose-exempt-crossed.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-exempt-crossed.md")"
 expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a line ending]" \
   "${got##*|}" 1
 
@@ -7753,14 +7880,16 @@ expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a li
 #    the indentation. This reading is run over the comment AS GITHUB STORES IT, so every rule that
 #    spans a line ending answered differently: a citation wrapped across two lines inside a quote
 #    met the second line's `>` where a title had to stand, and a QUOTED reference definition failed
-#    `LINK_DEFINITION`'s own `^ {0,3}` anchor. `prefix_stripped_reading` is four more readings over
-#    the comment with each line's prefix taken off; a token in ANY reading is reported, so it finds
-#    more and never different.
+#    `LINK_DEFINITION`'s own `^ {0,3}` anchor. Round five answered that with four more readings of
+#    the comment, each line's prefix taken off; ROUND SIX DELETED ALL OF IT, because GitHub's
+#    rendering has already had the block pass run over it. The rows stay: what they assert is the
+#    outcome, and the outcome is the same.
 # 2. INLINE RAW HTML IS MARKUP AND THE TEXT BETWEEN TWO TAGS IS TEXT. `<strong>VERDICT</strong>:`
 #    and `<code>VERDICT</code>:` render to the same characters as `**VERDICT**:` and
 #    `` `VERDICT`: `` -- asserted below by rendering BOTH spellings of one correction and reading
 #    the same stray out of each -- and were READY with one merge call where the Markdown spellings
-#    were MANUAL with none. `html_tag_extent` is that renderer's `html_inline` rule.
+#    were MANUAL with none. Round five transcribed that renderer's `html_inline` rule; round six
+#    reads the tags GitHub actually emitted.
 # 3. WHETHER A REFERENCE PAIR IS A LINK IS SCANNED BOTH WAYS, because the two renderers that could
 #    answer DISAGREE and neither answer is safe on its own. Round four let a definition's
 #    destination wrap onto the next line by asking only that SOMETHING follow the colon, which
@@ -7784,13 +7913,11 @@ expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a li
 #
 #    TWO OF THE EIGHT, AND THE TRANSCRIPTION MISSED THE CORRECTION GITHUB SHOWS IN BOTH. A
 #    destination `parseLinkDestination` refuses and a protocol `validateLink` refuses are both
-#    definitions to GitHub: it strips the `href` and shows the label's text all the same. So
-#    `definition_label` now reads only what the two agree on -- a label, a colon, and something
-#    that is not whitespace before the block ends -- and `markup_regions` is asked BOTH with
-#    reference pairs linked and with every one of them left written, the way the delimiter runs are
-#    asked both ways. A pair either renderer LINKS carries its token in the first reading and a
-#    pair either renderer SHOWS carries it in the second, so being wrong about a definition costs a
-#    `manual:` line in one reading and nothing in the other.
+#    definitions to GitHub: it strips the `href` and shows the label's text all the same. Round
+#    five answered that by reading a reference pair BOTH WAYS and taking the union; ROUND SIX ASKS
+#    GITHUB, so there is one answer and it is the right one. Two of the rows this paragraph closed
+#    have MOVED to the settled table below, because GitHub links what `markdown-it-py` does not and
+#    a reader then sees `P1policy`, which carries no token.
 #
 # THE CONTROLS ARE THE SAME CORRECTIONS THE HEAD BEFORE THIS ONE ALREADY CAUGHT, which is what says
 # the difference is the Markdown and not the words.
@@ -7842,8 +7969,6 @@ round5_closed=(
   'html split verdict|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|VERDICT:'
   'html attributed verdict|<span data-x="[a](b)">VERDICT</span>: CHANGES_REQUIRED here.|VERDICT:'
   'html quoted bold verdict|> <strong>VERDICT</strong>: CHANGES_REQUIRED here.|VERDICT:'
-  "invented definition, unbalanced|$malformed_defn|P1"
-  "invented definition, refused protocol|$refused_defn|P1"
   "invented definition, rubbish after it|$garbage_defn|P1"
   "unquoted wrapped citation|$unquoted_wrap|VERDICT:"
   'markdown bold verdict|**VERDICT**: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
@@ -7855,9 +7980,9 @@ for row in "${round5_closed[@]}"; do
   # The workflow form: the correction in front of a generated `PASS` object.
   reader_comment "$reader_prose" > "$tmp/round5-closed.md"
   expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case]" \
-    "$(review_rows "$tmp/round5-closed.md")" \
+    "$(reader_rows "$tmp/round5-closed.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round5-closed.md")"
+  got="$(reader_audit "$tmp/round5-closed.md")"
   contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" \
     "manual:$reader_want-outside-the-verdict-object"
   contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" MANUAL
@@ -7868,8 +7993,8 @@ for row in "${round5_closed[@]}"; do
   prose_review "$reader_prose
 " > "$tmp/round5-closed-prose.md"
   expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case] prose" \
-    "$(review_rows "$tmp/round5-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round5-closed-prose.md")"
+    "$(reader_rows "$tmp/round5-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(reader_audit "$tmp/round5-closed-prose.md")"
   contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case] prose" "$got" \
     "manual:$reader_want-outside-the-numbered-findings"
   expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [$reader_case] prose" "${got##*|}" 0
@@ -7884,13 +8009,13 @@ reader_comment '<strong>VERDICT</strong>: CHANGES_REQUIRED -- correcting the rev
 reader_comment '**VERDICT**: CHANGES_REQUIRED -- correcting the review below.' \
   > "$tmp/round5-markdown.md"
 expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike]" \
-  "$(review_rows "$tmp/round5-html.md")" "$(review_rows "$tmp/round5-markdown.md")"
+  "$(reader_rows "$tmp/round5-html.md")" "$(reader_rows "$tmp/round5-markdown.md")"
 reader_comment '<code>VERDICT</code>: CHANGES_REQUIRED -- correcting the review below.' \
   > "$tmp/round5-html.md"
 reader_comment '`VERDICT`: CHANGES_REQUIRED -- correcting the review below.' \
   > "$tmp/round5-markdown.md"
 expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike, code]" \
-  "$(review_rows "$tmp/round5-html.md")" "$(review_rows "$tmp/round5-markdown.md")"
+  "$(reader_rows "$tmp/round5-html.md")" "$(reader_rows "$tmp/round5-markdown.md")"
 # AND THE OTHER DIRECTION IS PINNED AGAINST ROUND FIVE'S OWN INTERMEDIATE STATE, which is where
 # it was found. These three were `stray=VERDICT:` and MANUAL at `196ecd1a`, went SILENT under the
 # `reference`-rule transcription round five wrote first -- exit 0, PASS, no stray, READY, ONE
@@ -7901,16 +8026,15 @@ expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike, code]" \
 intermediate_rows=(
   "GitHub links an unbalanced destination|$unbalanced_verdict|VERDICT:"
   "GitHub links a refused protocol|$refused_verdict|VERDICT:"
-  "neither renderer links rubbish after it|$rubbish_verdict|VERDICT:"
 )
 for row in "${intermediate_rows[@]}"; do
   reader_case="${row%%|*}"; rest="${row#*|}"
   reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
   reader_comment "$reader_prose" > "$tmp/round5-intermediate.md"
   expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
-    "$(review_rows "$tmp/round5-intermediate.md")" \
+    "$(reader_rows "$tmp/round5-intermediate.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round5-intermediate.md")"
+  got="$(reader_audit "$tmp/round5-intermediate.md")"
   contains "MUT-STRAY-DEFINITION-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
   expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS merge calls [$reader_case]" "${got##*|}" 0
 done
@@ -7937,7 +8061,7 @@ for row in "${accepted_defn[@]}"; do
   reader_case="${row%%|*}"; reader_prose="${row#*|}"
   reader_comment "$reader_prose" > "$tmp/round5-accepted.md"
   expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
-    "$(review_rows "$tmp/round5-accepted.md")" \
+    "$(reader_rows "$tmp/round5-accepted.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/VERDICT:"
 done
 # THE FALSE-POSITIVE GUARD, WHICH IS WHAT THIS WHOLE FAMILY IS PAID FOR IN. A review citing a
@@ -7947,9 +8071,9 @@ done
 reader_comment 'See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
   > "$tmp/round5-citation.md"
 expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [finding citation stays quiet]" \
-  "$(review_rows "$tmp/round5-citation.md")" \
+  "$(reader_rows "$tmp/round5-citation.md")" \
   "0|json/$enqueue_head/PASS/$enqueue_base/-"
-got="$(filtered_run eventloops "$tmp/round5-citation.md")"
+got="$(reader_audit "$tmp/round5-citation.md")"
 contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [finding citation stays quiet]" "$got" "enqueued #999"
 expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [finding citation stays quiet]" "${got##*|}" 1
 # AND A QUOTED ONE, because the reading that takes the `>` off is the one this round added and it
@@ -7957,9 +8081,9 @@ expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [finding citation stays quie
 reader_comment '> See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
   > "$tmp/round5-citation.md"
 expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [quoted finding citation stays quiet]" \
-  "$(review_rows "$tmp/round5-citation.md")" \
+  "$(reader_rows "$tmp/round5-citation.md")" \
   "0|json/$enqueue_head/PASS/$enqueue_base/-"
-got="$(filtered_run eventloops "$tmp/round5-citation.md")"
+got="$(reader_audit "$tmp/round5-citation.md")"
 expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [quoted finding citation stays quiet]" \
   "${got##*|}" 1
 
@@ -7979,9 +8103,10 @@ expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [quoted finding citation sta
 #    2026-09-21. `BLANK_LINE` asked for `\n[ \t]*\n`, which no such comment holds, so one had NO
 #    BLANK LINE AT ALL to this reading and every rule that stops at one ran to the end of it. THAT
 #    WAS HARMLESS AT `196ecd1a`, WHOSE DEFINITION PATTERN COULD CROSS ONE LINE ENDING AND NO MORE,
-#    AND ROUND 5 MADE IT COST A SEVERITY: `definition_label` skips whitespace up to this boundary,
-#    so with no boundary a `[policy]:` whose destination stands TWO blank lines below it became a
-#    definition, ``P`1`[policy]`` became the link `P1policy`, and the severity went. Executed
+#    AND ROUND 5 MADE IT COST A SEVERITY: its definition rule skipped whitespace up to this
+#    boundary, so with no boundary a `[policy]:` whose destination stands TWO blank lines below it
+#    became a definition, ``P`1`[policy]`` became the link `P1policy`, and the severity went.
+#    Round six reads no line endings of its own at all -- GitHub did the block pass. Executed
 #    mid-round, before the push: the same words were `stray=P1` with `\n` endings and none with
 #    `\r\n` ones. The row below is therefore a regression test against ROUND 5's own intermediate
 #    state and not against `196ecd1a`, where both spellings already answered `P1` -- six shapes
@@ -7998,9 +8123,9 @@ for row in "${strike_rows[@]}"; do
   reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
   reader_comment "$reader_prose" > "$tmp/round5-strike.md"
   expect "MUT-STRAY-GITHUB-STRIKETHROUGH [$reader_case]" \
-    "$(review_rows "$tmp/round5-strike.md")" \
+    "$(reader_rows "$tmp/round5-strike.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
-  got="$(filtered_run eventloops "$tmp/round5-strike.md")"
+  got="$(reader_audit "$tmp/round5-strike.md")"
   contains "MUT-STRAY-GITHUB-STRIKETHROUGH audit [$reader_case]" "$got" MANUAL
   expect "MUT-STRAY-GITHUB-STRIKETHROUGH merge calls [$reader_case]" "${got##*|}" 0
 done
@@ -8009,7 +8134,7 @@ done
 reader_comment 'Run it from ~/bin, it takes ~5 seconds, and nothing here is a severity.' \
   > "$tmp/round5-strike.md"
 expect "MUT-STRAY-GITHUB-STRIKETHROUGH [an ordinary tilde stays quiet]" \
-  "$(review_rows "$tmp/round5-strike.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
+  "$(reader_rows "$tmp/round5-strike.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
 # THE SAME WORDS WITH EACH LINE ENDING, and the assertion is that they read ALIKE. A comment whose
 # severity survives only because it was typed in an editor that writes `\n` is a comment the merge
 # path reads by accident.
@@ -8027,60 +8152,12 @@ with open(sys.argv[2], "w", encoding="utf-8", newline="") as handle:
     handle.write(body.replace("\r\n", "\n").replace("\n", "\r\n"))
 CRLF
 expect "MUT-STRAY-CRLF-BLANK-LINE [line feeds]" \
-  "$(review_rows "$tmp/round5-lf.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+  "$(reader_rows "$tmp/round5-lf.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
 expect "MUT-STRAY-CRLF-BLANK-LINE [carriage returns read alike]" \
-  "$(review_rows "$tmp/round5-crlf.md")" "$(review_rows "$tmp/round5-lf.md")"
-got="$(filtered_run eventloops "$tmp/round5-crlf.md")"
+  "$(reader_rows "$tmp/round5-crlf.md")" "$(reader_rows "$tmp/round5-lf.md")"
+got="$(reader_audit "$tmp/round5-crlf.md")"
 contains "MUT-STRAY-CRLF-BLANK-LINE audit" "$got" MANUAL
 expect "MUT-STRAY-CRLF-BLANK-LINE merge calls" "${got##*|}" 0
-
-# --- a raw HTML tag's extent is that renderer's own, shape for shape -----------------------------
-# MUT-HTML-TAG-EQUALS-RENDERER.
-#
-# `html_tag_extent` is `markdown-it-py` 3.0.0's `html_inline` rule -- its two preconditions and
-# then its `HTML_TAG_RE` -- WRITTEN OUT AS A SCAN rather than compiled, because that pattern is
-# `attribute*` around `\s*=\s*` and its repetitions partition the same run of whitespace when a
-# value does not follow. A scan that walks forward once cannot do that, and cannot be made to.
-#
-# WRITING A PATTERN OUT IS WHERE A TRANSCRIPTION GOES WRONG, so the two were compared rather than
-# believed: on 2026-09-21, against that renderer's own `HTML_TAG_RE` driven through its rule's two
-# preconditions, they agreed on 56 fixed shapes and on 200,000 random tag-shaped strings built from
-# its own vocabulary -- 0 differences either way. `markdown-it-py` is not installed in CI and this
-# needs none of it: what stands here is the fixed half of that comparison with THE RENDERER'S
-# ANSWER as the want column -- a number is the length of the tag it reads there, `-` is "no tag
-# here" -- so a change that reads any of these differently from that renderer fails this table.
-html_extent_rows=(
-  '<strong>|8' '</strong>|9' '<code>|6' '<em>x|4' '</span >|8'
-  "<a href='x'>|12" '<a href="[a](b)">|17' '<a href=x>|10' '<a/>|4' '<a />|5' '<a b c d>|9'
-  '<a b= >|-' '<a =b>|-' '<1a>|-' '<a-b>|5'
-  '<!---->|7' '<!--->|-' '<!-->|-' '<!--a-->|8' '<!--a--b-->|-' '<!---a-->|9'
-  '<![CDATA[x]]>|13' '<!DOCTYPE html>|15' '<!Ab>|-' '<?php x ?>|10' '<?>|-'
-  '<>|-' '<a|-' '<a>|3' '< a>|-' '<https://e.invalid/u>|-' "<a b='>'>|9" '<a b=`x>|-' '<x [y] z>|-'
-)
-html_extent_want=""
-: > "$tmp/html-extent.in"
-for row in "${html_extent_rows[@]}"; do
-  printf '%s\n' "${row%|*}" >> "$tmp/html-extent.in"
-  html_extent_want+="${row##*|}"$'\n'
-done
-# `|| html_extent_status=$?` and not `set -e`, for the reason `MUT-STRAY-FLANKING-SUPERSET` gives:
-# a probe that cannot even import the module is a REPORT here, not the end of this file.
-html_extent_status=0
-"$parser_python" - scripts/pr-review-parse.py "$tmp/html-extent.in" \
-  > "$tmp/html-extent.out" 2>&1 <<'HTMLEXTENT' || html_extent_status=$?
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("upstroke_parse_html_extent", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-# Each line of the file is one shape, and the answer is read at offset 0 with the whole line as the
-# block -- which is where that renderer reads it, its `state.posMax` being the block's own end.
-with open(sys.argv[2], encoding="utf-8") as handle:
-    for line in handle.read().splitlines():
-        found = module.html_tag_extent(line, 0, len(line))
-        print("-" if found is None else found)
-HTMLEXTENT
-expect "MUT-HTML-TAG-EQUALS-RENDERER probe status" "$html_extent_status" 0
-expect "MUT-HTML-TAG-EQUALS-RENDERER" "$(cat "$tmp/html-extent.out")" "$(printf '%s' "$html_extent_want")"
 
 # --- the structure pass is bounded, and a comment cannot make it run for seconds ------------------
 # MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED.
@@ -8090,9 +8167,9 @@ expect "MUT-HTML-TAG-EQUALS-RENDERER" "$(cat "$tmp/html-extent.out")" "$(printf 
 #
 #   * `'[' * n + 'x' + ']' * n` -- every closing bracket folded a prospective SHORTCUT label a
 #     little longer than the last, with no definitions anywhere. 0.364s at 32 KB at `3fe68c37`,
-#     0.460s at `196ecd1a`, and **29.33 seconds** over the 256 KB document built below. Closed by
-#     `link_extent`'s NAMEABLE: a label holding an unescaped bracket names nothing a definition can
-#     define, and `markup_regions` decides that off the last bracket it walked past.
+#     0.460s at `196ecd1a`, and **29.33 seconds** over the 256 KB document built below. Round five
+#     closed it by deciding nameability off the last bracket its walk had passed; ROUND SIX HAS NO
+#     SUCH WALK, because there is no label reading left in the file at all.
 #   * `[policy]:` followed by a long run of spaces and then a blank line -- `LINK_DEFINITION`'s two
 #     whitespace repetitions either side of an optional line ending partitioned that run again and
 #     again. 0.012s at 32 KB at `3fe68c37` and **85.85 seconds** at `196ecd1a` over the 128 KB
@@ -8106,11 +8183,27 @@ expect "MUT-HTML-TAG-EQUALS-RENDERER" "$(cat "$tmp/html-extent.out")" "$(printf 
 bounded_document() {  # bounded_document FILE PROSE
   { printf 'Reviewed head: %s\n\n' "$enqueue_head"; printf '%s\n\n' "$2"
     printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$1"
+  # AND A RENDERING OF THE SAME SIZE, because the reduction of the rendering is on the merge path
+  # too and these four cases are the only ones that measure TIME. IT IS NOT GITHUB'S RENDERING OF
+  # THIS DOCUMENT and is not recorded as one: these documents are 128 and 256 KB of one character,
+  # what they assert is a CEILING ON A QUADRATIC, and what a reduction costs is a function of the
+  # size and the tag count rather than of what the tags say. Every case that asserts a TOKEN takes
+  # `rendering_of` instead.
+  # THROUGH A FILE AND NOT THROUGH ARGV: these documents are 128 and 256 KB, and an argument list
+  # that long is `/usr/bin/python3: Argument list too long` rather than a rendering.
+  printf '%s' "$2" > "$1.prose"
+  "$parser_python" - "$1.prose" "$1.html" <<'BOUNDEDHTML'
+import html, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    prose = source.read()
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write('<p dir="auto">%s</p>\n' % html.escape(prose))
+BOUNDEDHTML
 }
 bounded_case() {  # bounded_case NAME FILE
   local started elapsed status=0
   started="$(date +%s)"
-  "$parser_python" scripts/pr-review-parse.py review --out "$tmp/bounded.json" "$2" \
+  "$parser_python" scripts/pr-review-parse.py review --out "$tmp/bounded.json" "$2" "$2.html" \
     > /dev/null 2>&1 || status=$?
   elapsed=$(( $(date +%s) - started ))
   expect "MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED status [$1]" "$status" 0
@@ -8120,9 +8213,15 @@ bounded_case() {  # bounded_case NAME FILE
 bounded_brackets="$(printf '%0.s[' $(seq 1 128000))x$(printf '%0.s]' $(seq 1 128000))"
 bounded_document "$tmp/bounded-brackets.md" "$bounded_brackets"
 bounded_case 'a nest of brackets' "$tmp/bounded-brackets.md"
+# AND THE DESTINATIONLESS DEFINITION IS DESTINATIONLESS, which this fixture was not. It appended
+# `and nothing that could be a destination follows it.` after ONE line ending, and that line IS a
+# destination to the regex the row exists to pin: the match SUCCEEDS on its first attempt and the
+# expensive failure path is never entered. Measured on 2026-09-21: the document as it stood took
+# **0.04s** at `196ecd1a`, where the shape this comment describes -- the spaces, then a BLANK LINE
+# -- takes **84.82s**, and 0.06s here. A fixture that cannot fail pins nothing, and this one was
+# green against the very code it names.
 bounded_document "$tmp/bounded-definition.md" \
-  "[policy]:$(printf '%0.s ' $(seq 1 128000))
-and nothing that could be a destination follows it."
+  "[policy]:$(printf '%0.s ' $(seq 1 128000))"
 bounded_case 'a definition with no destination' "$tmp/bounded-definition.md"
 # AND THE TWO ROUND FOUR CLOSED, kept here because a repair of one shape has twice re-opened
 # another. Over the 128 KB documents built below, measured on 2026-09-21: `'[x](' * 32000` took
@@ -8133,117 +8232,300 @@ bounded_case 'destinations that never close' "$tmp/bounded-opens.md"
 bounded_document "$tmp/bounded-labels.md" "$(printf '%0.s[a][' $(seq 1 32000))"
 bounded_case 'labels that never close' "$tmp/bounded-labels.md"
 
-# --- what this head still does not read, pinned rather than claimed closed -----------------------
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is now the finding for what is LEFT. Each
-# row is a comment whose rendering and whose reading still disagree, and each is here so that the
-# next change starts from a measurement rather than a guess. Rendered with `markdown-it-py` 3.0.0
-# on 2026-09-21; the rendering is in the comment beside each row.
+# --- what the rendering settles, and the one thing it does not --------------------------------
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is still the finding for what is LEFT.
 #
-# ONE ROW IS UNDER-READ and it is the only one here that can still cost a merge: the one where a
-# renderer answers TWO delimiter runs in one sentence DIFFERENTLY. It is the residue of not pairing
-# delimiters at all: `stray_summary` scans the text with every run dropped AND with every run kept,
-# which is every answer a renderer can give when it answers them all the same way, and
-# `Deferred: __&#80;1**and__ the rest of it.` is one it does not. INLINE RAW HTML WAS THE SECOND
-# ROW HERE AND IS NOW CLOSED, in the section above. Differential-tested against `markdown-it-py`
-# 3.0.0 over 100,000 random strings per alphabet on 2026-09-21, with the generator carrying
-# blockquote markers, list markers and raw HTML tags: 1 under-read against 59 at `196ecd1a`, and
-# the one is this row's shape.
+# SIX OF THESE ROWS WERE THE OPEN ONES AND THE RENDERING CLOSED ALL SIX, which is the measurement
+# this round's design was chosen on. Each was `reader_open` at `b0c8b8c9`, each is asserted here at
+# the value GITHUB'S OWN RENDERING gives it, and the values moved in both directions:
 #
-# THE REST ARE OVER-READ and cost a `manual:` line and never the review: the readings that leave a
-# code span's delimiters written resolve inside it and inside a code block, where a renderer
-# resolves nothing; an unpaired run is dropped; a LINK REFERENCE DEFINITION is read as the text it
-# is not shown as; a bracket pair NESTED inside a link's text is read as a link of its own where a
-# renderer, which does not nest links, leaves the outer pair written; and the reading that takes a
-# block prefix off each line takes one off a line inside an indented code block, where a renderer
-# takes none.
-reader_open=(
-  'two runs answered differently|Deferred: __&#80;1**and__ the rest of it.|-'
-  'code span reference|The blocker is `&#80;1` here.|P1'
-  'code span underscore|The blocker is `_P1_` here.|P1'
-  'unpaired star|The class is P*1 in the table.|P1'
-  'link reference definition|[VERDICT]: https://example.invalid/review-policy|VERDICT:'
-  'nested bracket pair|Note [a [b](https://example.invalid/u) P](https://example.invalid/v)1 here.|P1'
+#   * `Deferred: __&#80;1**and__ the rest of it.` was the ONE UNDER-READ LEFT -- a sentence whose
+#     two delimiter runs a renderer answers differently, which no pair of unpaired readings can
+#     reach. GitHub renders `<strong>P1**and</strong>`, so a reader sees `P1`, and it is reported.
+#     It was `-` at `b0c8b8c9`, READY with ONE merge call; it is MANUAL with none here;
+#   * and five were OVER-READ -- a reference or an underscore run inside a CODE SPAN or a CODE
+#     BLOCK, where a renderer resolves nothing; an UNPAIRED run, which a renderer leaves written; a
+#     LINK REFERENCE DEFINITION, which a reader is not shown at all; and a bracket pair NESTED in a
+#     link's text, which a renderer leaves written because links do not nest. Each cost a `manual:`
+#     line at `b0c8b8c9` and none here, because GitHub shows no token in any of them.
+#
+# AND FOUR MORE MOVED, EACH BECAUSE GITHUB IS NOT `markdown-it-py` 3.0.0 AND THE ROWS THAT NAMED
+# THEM WERE MEASURED AGAINST THAT RENDERER. Each was a row of an earlier round's closed table, each
+# is here at the value GitHub's own rendering gives it, and each is now quiet:
+#
+#   * `[VERDICT][<U+0131>]:` over `[i]: <url>` -- round four's LABEL FOLD row. `markdown-it-py`
+#     normalises a reference label with `.lower().upper()`, which merges DOTLESS I with `i`, so the
+#     pair is a link there and the correction is shown. GITHUB DOES NOT FOLD THEM: it shows
+#     `[VERDICT][<U+0131>]:`, brackets and all, and there is no `VERDICT:` for a reader to see. The
+#     control beside it -- the same label spelled `i` -- IS a link to both, and it is still
+#     `VERDICT:` in the table above;
+#   * `[VERDICT][policy]:` over `[policy]: <url> and rubbish` -- the row round five kept as the
+#     price of reading a reference pair both ways. Neither renderer makes that a definition, so the
+#     brackets stay written and a reader sees no `VERDICT:`. It was an over-read and it is gone;
+#   * and the two `` P`1`[policy] `` rows, which GitHub LINKS and `markdown-it-py` does not: a
+#     reader sees `P1policy`, which is the boundary case below.
+#
+# WHAT IS LEFT IS NOT A READING ERROR AND IT IS HERE SO IT IS NOT MISTAKEN FOR ONE. `STRAY_TOKEN`
+# asks for a severity at a WORD BOUNDARY, and a renderer can JOIN the severity to the word after
+# it: `` The blocker is P`1`[policy]. `` with `[policy]:` defined renders `P1policy`, which carries
+# no token -- and neither does `P1policy` written plainly, so the sentence this family is paid for
+# still holds. GitHub defines that label where `markdown-it-py` 3.0.0 does not, which is why these
+# two rows were `P1` at `b0c8b8c9` and are `-` here: that head was reading the other renderer.
+rendering_settled=(
+  'two runs answered differently|Deferred: __&#80;1**and__ the rest of it.|P1'
+  'code span reference|The blocker is `&#80;1` here.|-'
+  'code span underscore|The blocker is `_P1_` here.|-'
+  'unpaired star|The class is P*1 in the table.|-'
+  'link reference definition|[VERDICT]: https://example.invalid/review-policy|-'
+  'nested bracket pair|Note [a [b](https://example.invalid/u) P](https://example.invalid/v)1 here.|-'
+  'joined by a definition|The blocker is P`1`[policy].
+
+[policy]:
+  (unfinished|-'
+  'joined by a refused protocol|The blocker is P`1`[policy].
+
+[policy]: javascript:alert(1)|-'
+  "joined by an unbalanced definition|$malformed_defn|-"
+  "joined by a refused protocol, in the object's words|$refused_defn|-"
+  "a label GitHub does not fold|$dotless_verdict|-"
+  "a definition with rubbish after it|$rubbish_verdict|-"
 )
-for row in "${reader_open[@]}"; do
+for row in "${rendering_settled[@]}"; do
   reader_case="${row%%|*}"; rest="${row#*|}"
   reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
-  reader_comment "$reader_prose" > "$tmp/reader-open-$reader_case.md"
+  reader_comment "$reader_prose" > "$tmp/settled-$reader_case.md"
   expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [$reader_case]" \
-    "$(review_rows "$tmp/reader-open-$reader_case.md")" \
+    "$(reader_rows "$tmp/settled-$reader_case.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
 done
-# The code block row needs newlines, so it is built rather than tabulated: a `text` block is not a
-# code span and it is the same class -- a renderer resolves nothing inside either, and the two
-# readings that leave the delimiters written resolve everything everywhere.
+# The code block row needs newlines, so it is built rather than tabulated. A `text` block is not a
+# code span and it is the same class: a renderer resolves nothing inside either, and the readings
+# that used to leave the delimiters written resolved everything everywhere.
 { printf 'Reviewed head: %s\n\n' "$enqueue_head"
   printf '```text\nThe blocker is _P1_ here.\n```\n\n'
-  printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$tmp/reader-open-fence.md"
+  printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$tmp/settled-fence.md"
 expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [code block underscore]" \
-  "$(review_rows "$tmp/reader-open-fence.md")" \
-  "0|json/$enqueue_head/PASS/$enqueue_base/P1"
-# THE UNDER-READ ROW GOES THROUGH THE WHOLE AUDIT, because that is the one that can still cost a
-# merge and a `stray` field of `-` is not that claim: READY, and one call.
-for reader_case in 'two runs answered differently'; do
-  got="$(filtered_run eventloops "$tmp/reader-open-$reader_case.md")"
-  contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [$reader_case]" \
-    "$got" "enqueued #999"
-  expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [$reader_case]" \
-    "${got##*|}" 1
-done
+  "$(reader_rows "$tmp/settled-fence.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+# THE ONE THAT WAS UNDER-READ GOES THROUGH THE WHOLE AUDIT, because that is the one that could
+# cost a merge and a `stray` field is not that claim: MANUAL, and no call, where `b0c8b8c9` was
+# READY with one.
+got="$(reader_audit "$tmp/settled-two runs answered differently.md")"
+contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [two runs answered differently]" \
+  "$got" "manual:P1-outside-the-verdict-object"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [two runs]" "${got##*|}" 0
+# AND THE TWO THE RENDERING JOINS GO THROUGH IT TOO, because `-` is a claim about a merge: these
+# are READY with one call, and the row above is what says the difference is the rendering.
+got="$(reader_audit "$tmp/settled-joined by a definition.md")"
+contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [joined by a definition]" \
+  "$got" "enqueued #999"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [joined]" "${got##*|}" 1
 
-# --- the punctuation class is wider than the renderer's, and wider is the safe side --------------
-# MUT-STRAY-FLANKING-SUPERSET.
+# --- the rendering is fetched, and without it the audit refuses ---------------------------------
+# MUT-SHOWN-RENDERING-OPTIONAL, MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE, MUT-SHOWN-FINDINGS-ARE-STRAY
+# and MUT-SHOWN-TAG-UNCLASSIFIED.
 #
-# `emphasis_delimiter` is `markdown-it-py` 3.0.0's `scanDelims`, and its two character predicates
-# are that renderer's -- except one: `isPunctChar` is a 3 KB generated table of the Unicode P
-# categories, and `markup_punctuation` asks `unicodedata` for P AND S instead. Measured over every
-# code point on 2026-09-21, that is a STRICT SUPERSET: 7,994 code points are punctuation to this
-# file and not to that renderer, NONE the other way, and not one of them is ASCII.
+# THE PROSE THE TWO SCANS READ IS GITHUB'S OWN RENDERING OF THE COMMENT, fetched beside the body by
+# `scripts/pr-ready-audit.sh` and handed to the parser as a second document. Four rounds derived it
+# instead, by transcribing a renderer's inline rules over the characters the comment stores, and
+# each round's repair introduced defects of its own -- two in round three, one in round four, three
+# in round five. These are the cases the fetched reading needs and the derived one did not.
 #
-# A superset is only safe in one direction, and THIS IS THAT CLAIM, asserted over the whole
-# classification rather than over a sample. A character the renderer calls neither whitespace nor
-# punctuation, which this file calls punctuation, is the ONLY difference the measurement leaves --
-# so substituting a punctuation character for an ordinary one, in either position, models it
-# exactly. No substitution may turn a dropped run into a kept one, because a kept run is a token
-# the reader sees and this file does not. `markdown-it-py` is not installed in CI and this needs
-# none of it: the property is about this file's own function under two classifications.
-# `|| flanking_status=$?` and not `set -e`: a probe that cannot even import the module is a
-# REPORT here, not the end of this file. Run without it against a parser that has no
-# `emphasis_delimiter` at all, `set -e` ended the gate at this line and every assertion after it
-# went unrun -- silently, because the file's own FAILED line is printed at the bottom.
-flanking_status=0
-"$parser_python" - scripts/pr-review-parse.py > "$tmp/flanking.out" 2>&1 <<'FLANK' || flanking_status=$?
-import importlib.util, itertools, sys
-spec = importlib.util.spec_from_file_location("upstroke_parse_flanking", sys.argv[1])
+# 1. WITHOUT IT, NOTHING PROCEEDS. The shape that would undo the change is not a failed call: it is
+#    a call that SUCCEEDS and carries nothing. `gh api --jq '.body_html'` against an answer with no
+#    such field -- the media type dropped, the endpoint changed -- prints ONE NEWLINE and exits 0,
+#    which a reading of the characters alone would take for a comment showing no tokens. Both ends
+#    refuse: the audit blocks on a rendering that is blank, and the parser refuses a comment that
+#    has text and renders to nothing.
+# 2. A CODE BLOCK IS NOT PROSE. The workflow form's verdict is a fenced object, and a reader sees
+#    every character of it -- so a reduction that read `<pre>` as prose would report the review's
+#    own `"severity": "P1"` as a severity written outside the findings, on every blocking review
+#    this repository has ever had. The block's content is shown VERBATIM, so the comment's own
+#    characters are already exactly what a reader sees there and `stray_summary` scans those.
+# 3. NOR ARE THE FRONTIER FORM'S NUMBERED FINDINGS. A reader sees no `1.` and no `**`: a numbered
+#    finding is an ordered list item opening with a severity, and the scan reads the prose outside
+#    them. AT MOST AS MANY AS THE PARSE RECORDED, which is the bound `finding_spans` takes and
+#    which the last row here is for: an item the parse did not record IS read, so a finding written
+#    in a spelling `NUMBERED_FINDING` does not match still reaches a person.
+# 4. AND A TAG THE REDUCTION CANNOT PLACE IS REPORTED. Every tag is one a reader sees a boundary at
+#    or one a reader sees none at, and BOTH wrong answers lose a token: `P<em>1</em>` is `P1` to a
+#    reader and `P` and `1` to a reading that breaks at `em`, and `<li>P1</li><li>P2</li>` is two
+#    lines to a reader and `P1P2` -- which carries no severity at all -- to one that does not break
+#    at `li`. Round five lost a severity the second way. So a tag in neither set is a `manual:`
+#    blocker naming it, never a guess.
+shown_gh="$tmp/shown-gh"
+mkdir -p "$shown_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$shown_gh/gh"
+cat >> "$shown_gh/gh" <<'GH'
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;
+  "label create"*)            ;;
+  "pr edit"*)                 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG" ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
+  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  # THE ONE ANSWER THIS STUB EXISTS FOR. `STUB_SHOWN_MODE` says which of the three shapes the
+  # rendering fetch comes back in: the rendering itself, the ONE NEWLINE a `--jq` for a field the
+  # answer does not carry prints at exit 0, or a call that fails.
+  *"/issues/comments/5001"*"--jq .body_html")
+      case "${STUB_SHOWN_MODE:-whole}" in
+        whole)   cat "$STUB_REVIEW_HTML" ;;
+        missing) printf '\n' ;;
+        failed)  exit 22 ;;
+      esac ;;
+  *"--json body"*)            echo "no ledger" ;;
+  *"--json headRefOid"*)      echo "$head" ;;
+  *"--json baseRefName"*)     echo master ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                feature/x "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$shown_gh/gh"
+shown_run() {  # shown_run MODE FILE [HTML]: the whole audit with the rendering fetch in MODE
+  local out status=0 html="${3:-}"
+  [[ -n "$html" ]] || html="$(rendering_of "$2")"
+  : > "$tmp/merge-calls.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$2" \
+    STUB_REVIEW_HTML="$html" STUB_SHOWN_MODE="$1" \
+    PATH="$shown_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/merge-calls.log" || true)"
+}
+# THE CONTROL FIRST, and it is the only reason the two refusals below are evidence: the same pull
+# request, the same clean verdict, the rendering arriving whole, is READY and calls merge once.
+reader_comment 'Nothing in this review is a blocker.' > "$tmp/shown-clean.md"
+got="$(shown_run whole "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL control" "$got" "enqueued #999"
+expect "MUT-SHOWN-RENDERING-OPTIONAL control calls" "${got##*|}" 1
+expect "MUT-SHOWN-RENDERING-OPTIONAL control status" "${got%%|*}" 0
+# A rendering that arrives BLANK at exit 0 blocks, and does not fall back to the characters.
+got="$(shown_run missing "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [a blank rendering at exit 0]" "$got" "review-rendering-missing"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [a blank rendering at exit 0]" "$got" "NOT-READY"
+expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [blank]" "${got##*|}" 0
+# And a fetch that FAILS is the other blocker, told apart from the first.
+got="$(shown_run failed "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [a failed rendering fetch]" "$got" "review-fetch-failed"
+expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [failed]" "${got##*|}" 0
+# The parser's own half of it, with no audit around it: a comment with text in it whose rendering
+# shows none is a refusal, and the message says which document was empty.
+printf '' > "$tmp/shown-empty.html"
+expect "MUT-SHOWN-RENDERING-OPTIONAL [the parser refuses a blank rendering]" \
+  "$(review_rows "$tmp/shown-clean.md" "$tmp/shown-empty.html")" '1|'
+contains "MUT-SHOWN-RENDERING-OPTIONAL [the parser refuses a blank rendering]" \
+  "$(parse_why "$tmp/shown-clean.md" "$tmp/shown-empty.html")" \
+  "its rendering shows none"
+# And a `review` given one document is a refusal too, so a caller that forgets the rendering gets
+# no result rather than a reading of the characters alone.
+one_document_status=0
+"$parser_python" scripts/pr-review-parse.py review --out "$tmp/one-document.json" \
+  "$tmp/shown-clean.md" > /dev/null 2>&1 || one_document_status=$?
+expect "MUT-SHOWN-RENDERING-OPTIONAL [review takes two documents]" "$one_document_status" 1
+
+# 2. THE VERDICT OBJECT IS NOT PROSE. A blocking review with a P1 in its own findings array, with
+# GitHub's rendering of it, carries no stray token -- and the same object written as the older BARE
+# form, which a renderer shows as an ordinary paragraph rather than as a code block, carries none
+# either. The second is what `bare_spans` is for; without it the review's own finding is reported.
+{ printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BLOCKER","severity":"P1","failing_test":"a_test"}]}' \
+    "$enqueue_head" "$enqueue_base"
+  printf '\n```\n'; } > "$tmp/shown-blocking.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [a fenced verdict]" \
+  "$(reader_rows "$tmp/shown-blocking.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:BLOCKER:1"
+printf 'Reviewed head: %s\n\n{"role_understanding":"x","reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BARE","severity":"P1"}]}\n' \
+  "$enqueue_head" "$enqueue_head" "$enqueue_base" > "$tmp/shown-bare.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [a bare verdict]" \
+  "$(reader_rows "$tmp/shown-bare.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:BARE:0"
+# AND A CODE BLOCK THAT IS NOT THE VERDICT IS STILL SCANNED, from the comment's own characters:
+# what a reader sees inside one is what the comment writes, and the scan reads that.
+{ printf 'Reviewed head: %s\n\n```text\nThe blocker is P1 in this example.\n```\n\n```json\n' \
+    "$enqueue_head"; enqueue_pass; printf '\n```\n'; } > "$tmp/shown-other-block.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [another block is still scanned]" \
+  "$(reader_rows "$tmp/shown-other-block.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+
+# 3. THE FRONTIER FORM'S OWN FINDINGS ARE NOT STRAY SEVERITIES. Three numbered findings, rendered
+# as an ordered list, report nothing; the review is READY on this harness's clean head and calls
+# merge once. Reading the items as prose reports three severities and every blocking prose review
+# in this repository goes to a person.
+{ printf '<!-- upstroke-frontier-review pr=999 head=%s -->\n' "$enqueue_head"
+  printf '## Frontier review of `%s` (gpt-5.6-sol, max effort)\n\n' "${enqueue_head:0:7}"
+  printf '**VERDICT: PASS**\n\nI found nothing that blocks; these are recorded and deferred.\n\n'
+  printf '1. **P2 -- the first.** Detail of the first.\n'
+  printf '2. **P3 -- the second.** Detail of the second.\n'
+  printf '3. **P3 -- the third.** Detail of the third.\n\nVERDICT: PASS\n'
+} > "$tmp/shown-findings.md"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY [three numbered findings]" \
+  "$(reader_rows "$tmp/shown-findings.md")" \
+  "0|prose/$enqueue_head/PASS/-/-;P2:-:0;P3:-:0;P3:-:0"
+# Through the whole audit, the claim is that NO FINDING OF ITS OWN IS A STRAY SEVERITY. The review
+# still blocks -- a PASS carrying findings is `pass-with-findings`, and findings with no id are
+# `manual:` lines of a different rule -- and neither is what this case is about, so what is
+# asserted is the blocker this reading would add and does not.
+got="$(reader_audit "$tmp/shown-findings.md")"
+[[ "$got" == *"outside-the-numbered-findings"* ]] \
+  && error "MUT-SHOWN-FINDINGS-ARE-STRAY: a review's own numbered findings were read as stray severities: [$got]"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY merge calls" "${got##*|}" 0
+# AND AN ITEM THE PARSE DID NOT RECORD AS A FINDING IS READ, which is the bound. `1. __P1 -- x__`
+# is no finding to `NUMBERED_FINDING`, which asks for `**`, and `\bP1\b` does not match inside
+# `__P1` either -- so if the rendering's item were taken away as well, that severity would be
+# reported by nothing at all. Under the bound it is over the count, so it is read: MANUAL, and no
+# merge call.
+{ printf '<!-- upstroke-frontier-review pr=999 head=%s -->\n' "$enqueue_head"
+  printf '**VERDICT: PASS**\n\nNothing blocks.\n\n'
+  printf '1. __P1 -- written the other way.__ Detail.\n\nVERDICT: PASS\n'
+} > "$tmp/shown-unrecorded.md"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY [an item the parse did not record]" \
+  "$(reader_rows "$tmp/shown-unrecorded.md")" "0|prose/$enqueue_head/PASS/-/P1"
+got="$(reader_audit "$tmp/shown-unrecorded.md")"
+contains "MUT-SHOWN-FINDINGS-ARE-STRAY audit [an item the parse did not record]" "$got" MANUAL
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY merge calls [unrecorded]" "${got##*|}" 0
+
+# 4. EVERY TAG IS CLASSIFIED, AND ONE THAT IS NOT IS REPORTED. The census is every tag GitHub's
+# renderer put in any of the 685 comments this repository held on 2026-09-21T20:49:34Z, counted by
+# `html.parser` over each one's `body_html`; the pull request body carries the command. A tag in
+# NEITHER set would be a reading this program cannot make, and a tag in BOTH would be two readings.
+shown_census=(a blockquote br code details div em g-emoji h1 h2 h3 h4 h5 h6 hr li
+  markdown-accessiblity-table ol p pre span strong summary table tbody td th thead tr tt ul)
+shown_status=0
+"$parser_python" - scripts/pr-review-parse.py "${shown_census[@]}" \
+  > "$tmp/shown-census.out" 2>&1 <<'CENSUS' || shown_status=$?
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("upstroke_parse_census", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-# " " is whitespace to both readings, "." is punctuation to both, and "a" is punctuation to
-# NEITHER -- so "a" is where the two readings can differ, and replacing it with "." is what this
-# file's wider class does to such a character.
-checked = 0
-for marker in "*_~":
-    for last, nxt in itertools.product(" .a", repeat=2):
-        if not module.emphasis_delimiter(marker, last, nxt):
-            continue
-        for wide_last in ({last, "."} if last == "a" else {last}):
-            for wide_next in ({nxt, "."} if nxt == "a" else {nxt}):
-                checked += 1
-                if not module.emphasis_delimiter(marker, wide_last, wide_next):
-                    print("KEPT: %r between %r and %r is dropped as %r/%r"
-                          % (marker, last, nxt, wide_last, wide_next))
-                    sys.exit(1)
-print("ok %d" % checked)
-FLANK
-# FORTY-ONE, AND THE NUMBER IS THE ASSERTION AS MUCH AS THE WORD IS: twenty-seven (marker, before,
-# after) combinations, twenty-three of which drop the run -- eight for `*`, seven for `_`, the one
-# `_` does not being the intraword pair, and eight for `~`, which takes the `*` arm because GFM's
-# strikethrough has no intraword clause -- and each of those widened in every position that can be
-# widened, which is 23 + 18. A rule that stopped dropping runs would report a SMALLER number here
-# and `ok` all the same, and one that dropped more would report a larger one: deleting the
-# intraword clause, so `_` splits a word the way `*` does, reports `ok 45`, and that is the only
-# case in this file it moves. It read `ok 26` over `*` and `_` alone before `~` was added.
-expect "MUT-STRAY-FLANKING-SUPERSET probe status" "$flanking_status" 0
-expect MUT-STRAY-FLANKING-SUPERSET "$(cat "$tmp/flanking.out")" "ok 41"
+both = sorted(module.INLINE_HTML & module.BLOCK_HTML)
+missing = sorted(tag for tag in sys.argv[2:]
+                 if tag not in module.INLINE_HTML and tag not in module.BLOCK_HTML)
+print("in both: %s" % (",".join(both) or "-"))
+print("unclassified: %s" % (",".join(missing) or "-"))
+CENSUS
+expect "MUT-SHOWN-TAG-UNCLASSIFIED probe status" "$shown_status" 0
+expect "MUT-SHOWN-TAG-UNCLASSIFIED" "$(cat "$tmp/shown-census.out")" \
+  "$(printf 'in both: -\nunclassified: -')"
+# AND THE REPORT ITSELF, driven rather than described: a rendering carrying a tag in neither set is
+# a `manual:` blocker naming that tag, and the review does not merge.
+printf '<p dir="auto">A review with nothing in it.</p>\n<x-unclassified>text</x-unclassified>\n' \
+  > "$tmp/shown-unknown.html"
+expect "MUT-SHOWN-TAG-UNCLASSIFIED [a tag in neither set]" \
+  "$(review_rows "$tmp/shown-clean.md" "$tmp/shown-unknown.html")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/unreadable-html:x-unclassified"
+got="$(shown_run whole "$tmp/shown-clean.md" "$tmp/shown-unknown.html")"
+contains "MUT-SHOWN-TAG-UNCLASSIFIED audit [a tag in neither set]" "$got" \
+  "manual:unreadable-html:x-unclassified-outside-the-verdict-object"
+expect "MUT-SHOWN-TAG-UNCLASSIFIED merge calls" "${got##*|}" 0
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
@@ -8341,7 +8623,7 @@ expect MUT-PARSE-WRITE-UNCHECKED "$(review_rows "$tmp/prose-numbered-p1.md")" \
 write_status=0
 ( trap '' XFSZ; ulimit -f 0
   "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/denied.out" \
-    "$tmp/prose-numbered-p1.md" 2>/dev/null ) || write_status=$?
+    "$tmp/prose-numbered-p1.md" "$nothing_shown" 2>/dev/null ) || write_status=$?
 ((write_status != 0)) \
   || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result could not be written reported success"
 expect MUT-PARSE-WRITE-UNCHECKED "$(wc -c < "$tmp/denied.out")" 0
@@ -8384,7 +8666,7 @@ mkdir -p "$tmp/unwritable"
 chmod a-w "$tmp/unwritable"
 out_status=0
 "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/unwritable/out" \
-  "$tmp/prose-numbered-p1.md" 2>/dev/null || out_status=$?
+  "$tmp/prose-numbered-p1.md" "$nothing_shown" 2>/dev/null || out_status=$?
 chmod u+w "$tmp/unwritable"
 if ((EUID != 0)); then    # root writes into a directory with no write bit, so the case is not one
   ((out_status != 0)) \
@@ -8394,7 +8676,7 @@ fi
 # The rendering the gate itself reads, to stdout, held to the same rule.
 write_status=0
 "$parser_python" scripts/pr-review-parse.py review --nul "$tmp/prose-numbered-p1.md" \
-  > /dev/full 2>/dev/null || write_status=$?
+  "$nothing_shown" > /dev/full 2>/dev/null || write_status=$?
 ((write_status != 0)) \
   || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result went nowhere reported success"
 
@@ -8415,7 +8697,7 @@ for rendering in --nul --json; do
   # the control first: with no limit the whole payload is written and the parse exits 0
   whole_status=0
   "$parser_python" scripts/pr-review-parse.py review "$rendering" "$tmp/many-findings.md" \
-    > "$tmp/many.whole" 2>/dev/null || whole_status=$?
+    "$nothing_shown" > "$tmp/many.whole" 2>/dev/null || whole_status=$?
   expect "MUT-PARSE-SHORT-WRITE [$rendering] control" "$whole_status" 0
   whole="$(wc -c < "$tmp/many.whole")"
   ((whole > 1024)) \
@@ -8423,7 +8705,7 @@ for rendering in --nul --json; do
   short_status=0
   ( trap '' XFSZ; ulimit -f 1
     PYTHONUNBUFFERED=1 "$parser_python" scripts/pr-review-parse.py review "$rendering" \
-      "$tmp/many-findings.md" > "$tmp/many.short" 2>/dev/null ) || short_status=$?
+      "$tmp/many-findings.md" "$nothing_shown" > "$tmp/many.short" 2>/dev/null ) || short_status=$?
   ((short_status != 0)) \
     || error "MUT-PARSE-SHORT-WRITE [$rendering]: a result whose write stopped part way reported success"
   # and the write really did stop part way, so the case is about the count and not about a refusal
@@ -8511,7 +8793,8 @@ contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "open-P1:CRITICAL"
 # input and at a failed read alike, so the audit cannot tell the two apart by looking; it checks
 # what arrived against the record count the parser computed. Truncating the payload after the
 # first finding is what a short read looks like from inside the loop.
-"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/short.payload" "$tmp/json.md"
+"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/short.payload" \
+  "$tmp/json.md" "$nothing_shown"
 truncate -s 60 "$tmp/short.payload"
 short_status=0
 ( fields=(); read_parser_fields "$tmp/short.payload" review 7 3 ) || short_status=$?
@@ -8519,7 +8802,8 @@ short_status=0
   || error "MUT-REVIEW-PARSE-TRUNCATED: a payload that stopped arriving was read as a whole one"
 # The whole payload passes the same check, so the case above is about the truncation.
 expect MUT-REVIEW-PARSE-TRUNCATED "$(
-  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/whole.payload" "$tmp/json.md"
+  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/whole.payload" \
+    "$tmp/json.md" "$nothing_shown"
   fields=(); read_parser_fields "$tmp/whole.payload" review 7 3 && echo "${#fields[@]}"
 )" 22
 # A payload of another kind, and one whose declared count does not match what it carries, are both

@@ -184,23 +184,27 @@
 # compare the characters the comment is STORED as, where the reviewer writing it and the person
 # reading it both see what GitHub's renderer resolves them to -- and an ordinary bold correction,
 # `**VERDICT**: CHANGES_REQUIRED` prepended to a generated `PASS`, was READY and one merge call
-# where the plain words were a refusal and none. `scripts/pr-review-parse.py`'s `reader_spelling`
-# closes that: a backslash escape, a character reference and an emphasis run around or inside the
-# token are resolved the way `markdown-it-py` 3.0.0 resolves them, `markup_regions` reads the code
-# spans and links that wrap a label WHOLE -- `` `VERDICT`: `` and `[VERDICT](url):`, each of them
-# READY with one merge call before it -- and what only the reader sees becomes a `manual:` blocker
-# rather than a refusal: MANUAL costs attention, a wrong READY costs a merge. AND BOTH FORMS ARE
-# ASKED, the frontier form with its own two verdict lines exempt, which is the same correction in
-# the form every review here is posted in.
+# where the plain words were a refusal and none.
 #
-# WHAT IS LEFT, all fixtured in .github/scripts/test-pr-ready-audit.sh and owned by
-# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`: INLINE RAW HTML is still not
-# read, and neither is a sentence whose TWO delimiter runs a renderer answers differently --
-# measured at 19 in 400,000 random strings, every one of them holding a `*` or `_` run, and 0 with
-# such runs taken out of the generator. FOUR SHAPES ARE READ WIDER than a renderer reads them --
-# an unpaired delimiter run, the inside of a code span or code block, a link reference definition,
-# and a bracket pair nested inside a link's text -- each costing a `manual:` line where a reader
-# sees no token.
+# THE READING IS NOT DERIVED NOW. IT IS FETCHED. The third `gh api` call above returns `body_html`,
+# GitHub's own rendering of this comment, and `scripts/pr-review-parse.py` reduces that to the text
+# it shows: tags dropped, a boundary where a reader sees one. Four rounds answered the same
+# question by transcribing a renderer's inline rules instead -- delimiter runs, an entity table,
+# code spans, links, reference definitions, block prefixes, raw HTML tags -- and each round's
+# repair introduced defects of its own. Measured over the 685 comments this repository held on
+# 2026-09-21: the two readings report the same tokens on every one, and the rendering closes the
+# last case the transcription could not read as well as five it read wider than a renderer.
+#
+# WITHOUT THE RENDERING THE AUDIT REFUSES. `review-rendering-missing` above, and the parser refuses
+# a comment whose rendering shows nothing; neither falls back to the stored characters, because
+# that fall back is the defect. The cost is stated plainly: the merge path now depends on one more
+# API call, and an outage BLOCKS a pull request rather than merging it.
+#
+# WHAT IS LEFT, fixtured in .github/scripts/test-pr-ready-audit.sh and owned by
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/`: the rendering is GitHub's at
+# the moment it is fetched, so a comment edited between the review and the audit is read as it
+# stands then; and a tag the reduction cannot classify is reported as a `manual:` blocker rather
+# than read, which is a refusal to guess and not a reading.
 #
 # NEITHER SCAN IS A TRUST BOUNDARY AND NEITHER IS CLAIMED TO BE ONE: the verdict object is the
 # authority for what a review says, and the property this audit rests on is the one stated above --
@@ -249,8 +253,9 @@ p3_tolerance=3
 review_parser="$audit_dir/pr-review-parse.py"
 review_python="$(command -v python3 || command -v python || true)"
 
-# run_review_parser SUBCOMMAND INPUT OUT: read INPUT with scripts/pr-review-parse.py and leave its
-# flat NUL-separated result in OUT. SUBCOMMAND is `review` or `ledger`.
+# run_review_parser SUBCOMMAND OUT INPUT...: read the INPUTs with scripts/pr-review-parse.py and
+# leave its flat NUL-separated result in OUT. SUBCOMMAND is `review`, which takes the comment and
+# GITHUB'S OWN RENDERING of it, or `ledger`, which takes the pull request body.
 #
 # ITS EXIT STATUS IS THE WHOLE CONTRACT. The parser builds its result in memory, renders it,
 # checks every field for the record separator, writes the payload to a neighbour of OUT, flushes
@@ -265,7 +270,9 @@ review_python="$(command -v python3 || command -v python || true)"
 # review judged by whichever reader happened to be available. 127 is the status the caller reports.
 run_review_parser() {
   [[ -n "$review_python" ]] || return 127
-  "$review_python" "$review_parser" "$1" --nul --out "$3" "$2"
+  local subcommand="$1" out="$2"
+  shift 2
+  "$review_python" "$review_parser" "$subcommand" --nul --out "$out" "$@"
 }
 
 # read_parser_fields FILE TAG HEAD-COUNT PER-RECORD: fills the global array `fields` from the
@@ -963,24 +970,48 @@ audit_one() {
     # Spelled out rather than written as a range, for the reason `valid_login` spells its set out.
     blockers+=("review-id-unreadable")
   else
-    local parse_file parse_status=0 at_status=0 body_status=0 stray="-" where i
+    local parse_file shown_file parse_status=0 at_status=0 body_status=0 shown_status=0
+    local shown_text stray="-" where i
     review_file="$(mktemp)"
     parse_file="$(mktemp)"
-    # Both fetches checked. `gh ... > "$review_file"` and `review_at="$(gh ...)"` failed closed
+    shown_file="$(mktemp)"
+    # Every fetch checked. `gh ... > "$review_file"` and `review_at="$(gh ...)"` failed closed
     # only because `set -e` was watching, and `set -e` is watching nothing the moment either is
     # rewritten into a condition -- which is how four of the defects in this file were introduced.
     # What the audit does when it cannot read the review is stated here instead.
     review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')" || at_status=$?
     gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file" || body_status=$?
-    if ((at_status != 0 || body_status != 0)); then
+    # AND THE COMMENT AS A READER IS SHOWN IT, which is what the two scans over its prose read.
+    # `body_html` is GitHub's own rendering of this comment, returned by the same endpoint under
+    # the rendering media type, and it is the third call this review costs. It could be the first:
+    # `application/vnd.github.full+json` returns `created_at`, `body` and `body_html` together, and
+    # the audit would then have to take three values out of one JSON document -- which means either
+    # a jq this file does not otherwise need or a second program between the fetch and the answer.
+    # Three calls whose statuses are three separate answers is the cheaper thing to be sure of.
+    gh api "repos/$repo/issues/comments/$review_id" \
+      -H 'Accept: application/vnd.github.html+json' --jq '.body_html' > "$shown_file" \
+      || shown_status=$?
+    # WITHOUT THE RENDERING THIS AUDIT DOES NOT PROCEED. The scans exist because the characters a
+    # comment is stored as are not what its reviewer and its reader see, so reading the characters
+    # alone when the rendering is missing is the defect itself, arriving quietly. And it would
+    # arrive quietly: `--jq '.body_html'` against an answer that carries no such field -- the media
+    # type dropped, the endpoint changed -- prints ONE NEWLINE and exits 0.
+    #
+    # The emptiness is read by the shell, not by a command: `$(< file)` on a file it cannot read is
+    # an empty string, and so is a blank rendering, and both are this blocker. A `grep` here would
+    # have a third answer, and its failure would be one of the two.
+    shown_text="$(< "$shown_file")"
+    if ((at_status != 0 || body_status != 0 || shown_status != 0)); then
       blockers+=("review-fetch-failed")
+    elif [[ -z "${shown_text//[$' \t\n\r']/}" ]]; then
+      blockers+=("review-rendering-missing")
     else
       # ONE PARSER, ONE SUCCESS CONDITION, and this is the whole of the audit's side of it: run
       # it, and if its status is not 0 there is no result to read. Format detection is inside it,
       # so a detection that failed cannot choose a parser -- and the two forms do not agree about
       # the same review, so choosing between them on a failed read is choosing a verdict. Nothing
       # below re-derives, re-scans or repairs anything the parser emitted.
-      run_review_parser review "$review_file" "$parse_file" || parse_status=$?
+      run_review_parser review "$parse_file" "$review_file" "$shown_file" || parse_status=$?
       if ((parse_status != 0)); then
         blockers+=("review-parse-failed:$parse_status")
       elif ! read_parser_fields "$parse_file" review 7 3; then
@@ -1013,7 +1044,7 @@ audit_one() {
         done
       fi
     fi
-    rm -f "$review_file" "$parse_file"
+    rm -f "$review_file" "$parse_file" "$shown_file"
 
     # A review that does not say which commit it reviewed cannot be checked against the head.
     [[ -z "$reviewed" ]] && blockers+=("review-records-no-reviewed-sha")
@@ -1147,7 +1178,7 @@ audit_one() {
   if ((ledger_body_status != 0)); then
     blockers+=("ledger-lookup-failed")
   else
-    run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
+    run_review_parser ledger "$ledger_file" "$body_file" || ledger_status=$?
     if ((ledger_status != 0)); then
       blockers+=("ledger-parse-failed:$ledger_status")
     elif ! read_parser_fields "$ledger_file" ledger 2 2; then
