@@ -965,7 +965,7 @@ audit_one() {
     blockers+=("no-review")
   elif [[ ! "$review_id" =~ ^[0123456789]+$ ]]; then
     # The third answer this channel can carry. A comment id is a number, it is the last thing
-    # between here and two API paths built from it, and a value that is neither empty nor a
+    # between here and three API paths built from it, and a value that is neither empty nor a
     # number is a lookup that returned something nobody has checked -- not a review to fetch.
     # Spelled out rather than written as a range, for the reason `valid_login` spells its set out.
     blockers+=("review-id-unreadable")

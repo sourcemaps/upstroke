@@ -7660,7 +7660,7 @@ done
 # AND THE EXEMPTION IS WHAT MAKES IT SHIPPABLE. This form's verdict IS a `VERDICT:` line and its
 # template writes TWO of them -- a bold summary near the top and the authoritative one at the end.
 # Asking "does a reader see such a line" would report EVERY REVIEW EVER POSTED: measured over the
-# 684 comments this repository held on 2026-09-21, 250 carry this form's marker, 241 of them write
+# 685 comments this repository held on 2026-09-21, 250 carry this form's marker, 241 of them write
 # exactly two `VERDICT:` lines and 8 more write three or more. So what is reported is A LINE A READER SEES
 # AND THE COMMENT DOES NOT WRITE -- more of them in some reading than in the characters -- and the
 # control below is a whole ordinary prose review, two verdict lines and all, that must stay READY
@@ -8099,7 +8099,7 @@ expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [quoted finding citation sta
 #    CommonMark does not, so a reading that takes `*` and `_` runs and not `~` runs showed the token
 #    to a reader and none of it to this scan. At `196ecd1a`: stray none, READY and ONE `gh pr merge`
 #    call, where `**VERDICT**:` in its place was MANUAL with none.
-# 2. GITHUB'S OWN EDITOR STORES `\r\n` -- 7 of the 684 comments this repository held on
+# 2. GITHUB'S OWN EDITOR STORES `\r\n` -- 7 of the 685 comments this repository held on
 #    2026-09-21. `BLANK_LINE` asked for `\n[ \t]*\n`, which no such comment holds, so one had NO
 #    BLANK LINE AT ALL to this reading and every rule that stops at one ran to the end of it. THAT
 #    WAS HARMLESS AT `196ecd1a`, WHOSE DEFINITION PATTERN COULD CROSS ONE LINE ENDING AND NO MORE,

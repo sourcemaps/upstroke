@@ -5,7 +5,7 @@ disposition: deferred
 category: security-trust
 pr: 286
 reviewed_sha: 196ecd1a6f0932126251cc7aa1dae5de2e0d260a
-location: scripts/pr-review-parse.py:638
+location: scripts/pr-review-parse.py:636
 
 provenance: pre_existing
 first_bad:

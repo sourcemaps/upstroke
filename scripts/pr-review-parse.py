@@ -931,7 +931,7 @@ def stray_summary(outside, shown, contradicting_verdict=False):
     verdict is an object, so it writes no verdict line and every occurrence a reader sees is
     reported; the PROSE form's verdict IS a line and its own template writes two, and each of those
     is exempt BY BEING WRITTEN. Measured over the 685 comments this repository held on
-    2026-09-21, 250 carry that form's marker, 241 of them write exactly two `VERDICT:` lines and 9
+    2026-09-21, 250 carry that form's marker, 241 of them write exactly two `VERDICT:` lines and 8
     more write three or more; reporting the mere presence of one would report every one of them.
 
     AND A TAG THIS READING CANNOT PLACE IS REPORTED TOO. `Rendering` classifies each tag as one a
