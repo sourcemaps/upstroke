@@ -625,6 +625,14 @@ fn the_fence_rule_names_a_deny_that_could_forbid_and_excuses_one_that_could_not(
             vec![("src/a/mod.rs", DENY), ("src/a/b/c.rs", ALLOW)],
         ),
         (
+            "a module under a `lib.rs` allows",
+            vec![("src/lib.rs", DENY), ("src/a.rs", ALLOW)],
+        ),
+        (
+            "a module under a `main.rs` allows",
+            vec![("src/main.rs", DENY), ("src/a/b.rs", ALLOW)],
+        ),
+        (
             "one attribute fences three lints and the child allows one of them",
             vec![
                 (

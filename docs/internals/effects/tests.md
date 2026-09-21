@@ -346,7 +346,8 @@ two ever part, the census says so instead of measuring less.
 
 The rule on trees small enough to read: the refusal names the file that
 dropped to `deny`; each excuse -- a child's allowance, a grandchild's under a
-`mod.rs`, the file's own per-site expectation -- excuses; an allowance beside
+`mod.rs`, a module's under the `lib.rs` or the `main.rs` it sits beside, the
+file's own per-site expectation -- excuses; an allowance beside
 the fence, above it, under a directory whose name merely starts the same way,
 or of another lint, does not; and each spelling the file-level reader misses
 is still reported.
