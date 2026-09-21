@@ -879,6 +879,13 @@ one description.
 `After`: the rename happened and nothing has been appended,
 which is exactly the P5b prefix.
 
+## `fn drive_into_the_kill(which: &str, fixture: &Fixture) -> !` › `"p4plan" => {`
+
+`RunDir.WritePlan`'s after phase: the plan's bytes are written and P5's open of the log has not
+run. Not a row of `KILL_PREFIXES`, whose `p4` and `p5` kill before the plan and after the log's
+creation; `a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_private_half_first`
+launches it.
+
 ## `fn drive_into_the_kill(which: &str, fixture: &Fixture) -> !` › `hooks.faults().tear_the_first_line(EventSite::AppendFirst);`
 
 The other durable shape of a kill inside the first append:
@@ -1496,3 +1503,27 @@ Nothing committed is left in the log, so there is no event to replay, and a cens
 still retains the husk possibly committed. Its fixture is built with `Fixture::at` inside a
 `rundir::scratch_tree` tree the witness holds, reclaimed when the witness returns and when it
 unwinds (#292's review round 6).
+
+## `fn a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_private_half_first() {`
+
+Gate 5's audit, row 80: `RunDir.WritePlan`/after had no witness. The only husk planted with a plan
+and no log (`startup::tests::bound_husk_without_commit_record_reclaimed_private_then_public`)
+carries no `run.lock` and no private skeleton, so its census reads `rundir::is_running`'s
+absent-file branch, and no fault sat next to the coordinate: `p4` kills before the plan and `p5`
+after the log's creation. The `p4plan` arm of `create_kill_child` kills `create_run` itself at the
+coordinate, so the husk is the creator's own: the marker published, `run.lock` (and on Unix the
+cleanup lease file) taken at P2 by the real acquisition and released by the death, the private
+half with its owner record and its five skeleton directories, the pre-flight settled, the plan's
+bytes on disk, and no log, because P5 opens the log after the plan. Both directories are compared
+by their whole listing, so nothing else is there either, and `rundir::is_running` reads the lock
+file standing unheld.
+
+The authority's disposition for a husk before the commit record is the census's reclaim of both
+halves. `census_run_dirs` performs it here: it proves the private half the creator's, removes it
+through `RunDir.RemovePrivateHusk` and then the public directory through
+`RunDir.RemovePublicHusk`, in that order and both to completion, and no run directory is left. No
+event log is involved: the prefix holds none (asserted by the listing) and the census appends
+nothing, so there is no event to replay. `startup::tests` carries the same prefix built through
+the funnels, with the error at the coordinate returned rather than fatal. Its fixture is built
+with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds, reclaimed when the
+witness returns and when it unwinds.

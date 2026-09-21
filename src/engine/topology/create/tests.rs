@@ -2373,6 +2373,13 @@ fn drive_into_the_kill(which: &str, fixture: &Fixture) -> ! {
         "p3astaged" => kill_before(RunDirSite::PublishOwnerRecord),
         "p3b" => probes.kill_shell = true,
         "p4" => probes.kill_agent = true,
+        "p4plan" => {
+            hooks.faults().arm_phase(
+                EffectSiteId::RunDir(RunDirSite::WritePlan),
+                HookPhase::After,
+                Injection::Kill,
+            );
+        }
         "p5" => kill_before(RunDirSite::StageCommitRecord),
         "p5b" => {
             hooks.faults().arm_phase(
@@ -4526,5 +4533,88 @@ fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open
             Some(RunDirOutcome::Retained(RetainReason::PossiblyCommitted))
         ),
         "the husk is still retained possibly committed after the open: {report:?}"
+    );
+}
+
+#[test]
+fn a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_private_half_first() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill-p4-plan-written")
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
+    kill_the_creation(&fixture.root, "p4plan");
+
+    let public = fixture.public();
+    let private = fixture.private();
+    let mut left_in_public = vec![MARKER.to_owned(), PLAN.to_owned(), "run.lock".to_owned()];
+    if cfg!(unix) {
+        left_in_public.push("cleanup.lock".to_owned());
+    }
+    left_in_public.sort();
+    assert_eq!(
+        names_in(&public),
+        left_in_public,
+        "the marker, the lock files P2 took and the plan, and no log: P5's open never ran"
+    );
+    assert_eq!(
+        std::fs::read(public.join(PLAN)).expect("the plan was written"),
+        normalized_plan(),
+        "the kill came after the plan's bytes were written"
+    );
+    let mut left_in_private = vec![
+        OWNER_RECORD.to_owned(),
+        "transcripts".to_owned(),
+        "reviews".to_owned(),
+        "settings".to_owned(),
+        "gates".to_owned(),
+        "gate-worktrees".to_owned(),
+    ];
+    left_in_private.sort();
+    assert_eq!(
+        names_in(&private),
+        left_in_private,
+        "the owner record and the private skeleton, and no commit record"
+    );
+    assert!(
+        !crate::rundir::is_running(&public),
+        "the death released the run lock, and its file stands unheld"
+    );
+    assert_eq!(
+        crate::rundir::classify_run_dir(&public),
+        crate::rundir::RunDirClass::Husk
+    );
+
+    let mut hooks = TestHooks::new();
+    let report = census_of(&fixture, &mut hooks);
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::ReclaimedBothHalves)
+        ),
+        "the next census proves the husk its creator's and reclaims both halves: {report:?}"
+    );
+    let removals = [
+        EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+        EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+    ];
+    assert_eq!(
+        hooks.first_execution_order(&removals),
+        removals,
+        "the private half first, through the proof-token funnel, then the public directory"
+    );
+    assert!(
+        removals
+            .iter()
+            .all(|site| hooks.observed(*site, HookPhase::After)),
+        "and both removals completed"
+    );
+    assert!(
+        std::fs::symlink_metadata(&private).is_err() && std::fs::symlink_metadata(&public).is_err(),
+        "both halves are gone, the plan and the released lock with the public one"
+    );
+    assert!(
+        crate::rundir::run_dir_names(&fixture.repo).is_empty(),
+        "no run directory is left for the next command to step around"
     );
 }
