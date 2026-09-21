@@ -275,6 +275,88 @@ found an attribute in.
 A file listed with a non-empty `allows` and no attribute is a stale entry;
 a scan that found nothing is a scan that proves nothing.
 
+## `fn module_directory(path: &str) -> &str {`
+
+The directory a module file's out-of-line children live in, by the path
+convention and by nothing else: `a/b.rs` answers `a/b`, and `a/mod.rs`,
+`lib.rs` and `main.rs` answer the directory they sit in. It resolves no
+`#[path]`; what that costs is stated under
+`fences_that_deny_where_forbid_would_compile`.
+
+## `fn governed_deny_lists_written_anywhere(source: &str) -> Vec<BTreeSet<&'static str>> {`
+
+Every `deny(..)` list naming a governed lint in use, **anywhere in the file
+and read with all of rustc's whitespace removed**, one set per list.
+
+Deliberately not `file_level_lint_state`. That reader wants `#`, `!` and `[`
+written together, which is the omission `PR7-WRAPPERS-EMPTY-DOMAIN` records as
+executed, so a fence respelled `# ![deny(..)]` reads there as no fence at all
+and a pin built on it alone would pass the edit it exists to refuse. With the
+whitespace gone the three spellings that reader misses are the spelling it
+reads. Comments and strings are blanked first, so the fixtures in this file
+are not fences. It over-reads on purpose: a `cfg_attr(.., deny(..))` and an
+outer `#[deny(..)]` on an item are lists too, and neither exists in the tree.
+
+## `fn fences_that_deny_where_forbid_would_compile(sources: &[(String, String)]) -> Vec<String> {`
+
+**The rule, derived from the tree and from no list of files.** A `deny(..)`
+list is one fence. It is excused only where writing `forbid` in its place
+would not compile: `forbid` is inherited down the module tree across file
+boundaries, and an `allow` or `expect` of a forbidden lint anywhere beneath
+it is `E0453`. So a fence is excused when `governed_allows` finds an
+allowance **of a lint that fence names** in the same file or in a module file
+below it, and otherwise it is reported, naming the file.
+
+Measured when this was added: with all 59 file-level fences flipped, clippy
+reports 15 `E0453` and every one is set by one of five files --
+`src/engine/mod.rs` over its four allowing children,
+`src/agent/proc/test_support/readiness.rs` over its own six per-site
+expectations, and `census.rs`, `exec.rs` and `resolve.rs` under
+`src/runner/container/` over their `tests.rs`. Those five are what the rule
+excuses at that head, by derivation; the other 54 forbid.
+
+**The excuse is per lint, because a file can be on both sides.** Eight of the
+54 allow one governed lint and fence another in a second attribute
+(`src/runner/container/view.rs` allows `disallowed_methods` and forbids the
+other two). The first form of this rule excused a file that carried any
+governed allowance, and the mutation matrix found it out: dropping each of
+those eight back to `deny` passed. An allowance of `disallowed_methods`
+excuses nothing about a fence of `disallowed_macros`.
+
+**What it does not demand.** The unit is the attribute, as the keyword is. A
+five-file residue follows: one attribute fencing three lints is excused
+whole by an allowance of one of them, so eight (file, lint) pairs across the
+five excused files could forbid if their attribute were split, and this rule
+does not ask for that.
+
+**What it does not see.** A fence that is deleted rather than weakened: the
+rule reads what is written and does not decide which files must fence. An
+allowance in a child reached by `#[path]` from outside the parent's
+directory excuses nothing, so the parent is reported and the remedy -- write
+`forbid` -- then fails to compile; that direction is loud. Likewise an
+excusing allowance spelled so that `governed_allows` cannot read it leaves
+the fence reported rather than excused.
+
+The other clause, a `deny` that `file_level_lint_state` reads and the sweep
+did not find, fires on nothing in the tree or the fixtures: the sweep is
+meant to read every spelling that reader does. It is there so that if the
+two ever part, the census says so instead of measuring less.
+
+## `fn the_fence_rule_names_a_deny_that_could_forbid_and_excuses_one_that_could_not() {`
+
+The rule on trees small enough to read: the refusal names the file that
+dropped to `deny`; each excuse -- a child's allowance, a grandchild's under a
+`mod.rs`, the file's own per-site expectation -- excuses; an allowance beside
+the fence, above it, under a directory whose name merely starts the same way,
+or of another lint, does not; and each spelling the file-level reader misses
+is still reported.
+
+## `fn every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile() {`
+
+The live tree. The floor on forbidding files is the sweep's own control: a
+reader regression that resolved no level anywhere would otherwise leave
+nothing to report and pass.
+
 ## `fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through_no_disguise() {`
 
 The scan refuses what it is for — driven with input that breaks each rule.
