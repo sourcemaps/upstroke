@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/connect/render.md`
 
-#![deny(clippy::disallowed_methods, clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_methods, clippy::disallowed_macros)]
 
 use std::fmt::Write as _;
 

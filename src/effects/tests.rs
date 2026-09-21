@@ -493,6 +493,259 @@ fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
     );
 }
 
+fn module_directory(path: &Path) -> PathBuf {
+    let heads_its_directory = path
+        .file_name()
+        .is_some_and(|file| file == "mod.rs" || file == "lib.rs" || file == "main.rs");
+    match path.parent() {
+        Some(directory) if heads_its_directory => directory.to_path_buf(),
+        _ => path.with_extension(""),
+    }
+}
+
+fn governed_deny_lists_written_anywhere(source: &str) -> Vec<BTreeSet<&'static str>> {
+    let text: String = blank_comments_and_strings(source)
+        .chars()
+        .filter(|character| !super::is_rustc_whitespace(*character))
+        .collect();
+    let used = governed_lints_in_use();
+    let mut lists = Vec::new();
+    let mut pieces = text.split("deny(");
+    let mut before = pieces.next().unwrap_or_default();
+    for piece in pieces {
+        let part_of_a_longer_word = before
+            .chars()
+            .next_back()
+            .is_some_and(|last| last.is_alphanumeric() || last == '_');
+        if !part_of_a_longer_word {
+            let list: BTreeSet<&'static str> = piece
+                .split(')')
+                .next()
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(normalize_lint)
+                .filter(|lint| used.contains(*lint))
+                .collect();
+            if !list.is_empty() {
+                lists.push(list);
+            }
+        }
+        before = piece;
+    }
+    lists
+}
+
+fn fences_that_deny_where_forbid_would_compile(sources: &[(String, String)]) -> Vec<String> {
+    let allowed: Vec<(&Path, BTreeSet<&'static str>)> = sources
+        .iter()
+        .map(|(path, source)| {
+            let lints: BTreeSet<&'static str> = governed_allows(source)
+                .iter()
+                .flat_map(|allow| allow.lints.iter())
+                .filter_map(|lint| normalize_lint(lint))
+                .collect();
+            (Path::new(path), lints)
+        })
+        .filter(|(_, lints)| !lints.is_empty())
+        .collect();
+    let mut wrong = Vec::new();
+    for (path, source) in sources {
+        let read: BTreeSet<&'static str> = USED_GOVERNED_LINTS
+            .iter()
+            .filter(|lint| {
+                crate::effects::lint_levels::file_level_lint_state(source, lint) == Some("deny")
+            })
+            .filter_map(|lint| normalize_lint(lint))
+            .collect();
+        let lists = governed_deny_lists_written_anywhere(source);
+        let swept: BTreeSet<&'static str> = lists.iter().flatten().copied().collect();
+        for lint in read.difference(&swept) {
+            wrong.push(format!(
+                "{path}: `file_level_lint_state` reads `deny` of `{lint}` and the sweep for a \
+                 written `deny(` found none, so the two disagree and this census measures nothing"
+            ));
+        }
+        let file = Path::new(path);
+        let below = module_directory(file);
+        let refused: BTreeSet<&'static str> = allowed
+            .iter()
+            .filter(|(other, _)| *other == file || other.starts_with(&below))
+            .flat_map(|(_, lints)| lints.iter().copied())
+            .collect();
+        for list in lists {
+            if !list.is_disjoint(&refused) {
+                continue;
+            }
+            wrong.push(format!(
+                "{path} fences {list:?} with `deny`, and no allowance of any of them sits in it \
+                 or in a module file below it, so `forbid` compiles here and would make an inner \
+                 `allow` E0453 instead of a level an attribute can reopen{}",
+                if list.is_subset(&read) {
+                    ""
+                } else {
+                    "; `file_level_lint_state` does not read this attribute as the file's level"
+                }
+            ));
+        }
+    }
+    wrong
+}
+
+#[test]
+fn the_fence_rule_names_a_deny_that_could_forbid_and_excuses_one_that_could_not() {
+    fn tree(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+            .collect()
+    }
+    const DENY: &str = "#![deny(clippy::disallowed_methods)]\nfn go() {}\n";
+    const FORBID: &str = "#![forbid(clippy::disallowed_methods)]\nfn go() {}\n";
+    const ALLOW: &str = "#![allow(clippy::disallowed_methods)]\nfn go() {}\n";
+
+    let named = fences_that_deny_where_forbid_would_compile(&tree(&[
+        ("src/a.rs", FORBID),
+        ("src/a/b.rs", DENY),
+        ("src/c.rs", ALLOW),
+    ]));
+    assert_eq!(named.len(), 1, "{named:#?}");
+    assert!(
+        named.iter().all(|line| line.starts_with("src/a/b.rs ")),
+        "the refusal names the file that dropped to `deny`: {named:#?}"
+    );
+
+    for (what, files) in [
+        ("every fence forbids", vec![("src/a.rs", FORBID)]),
+        (
+            "an out-of-line child allows",
+            vec![("src/a.rs", DENY), ("src/a/tests.rs", ALLOW)],
+        ),
+        (
+            "a grandchild under a `mod.rs` allows",
+            vec![("src/a/mod.rs", DENY), ("src/a/b/c.rs", ALLOW)],
+        ),
+        (
+            "a module under a `lib.rs` allows",
+            vec![("src/lib.rs", DENY), ("src/a.rs", ALLOW)],
+        ),
+        (
+            "a module under a `main.rs` allows",
+            vec![("src/main.rs", DENY), ("src/a/b.rs", ALLOW)],
+        ),
+        (
+            "one attribute fences three lints and the child allows one of them",
+            vec![
+                (
+                    "src/a.rs",
+                    "#![deny(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    \
+                     clippy::disallowed_macros\n)]\n",
+                ),
+                ("src/a/tests.rs", ALLOW),
+            ],
+        ),
+        (
+            "the file carries its own per-site expectation",
+            vec![(
+                "src/a.rs",
+                "#![deny(clippy::disallowed_methods)]\n\
+                 #[expect(clippy::disallowed_methods, reason = \"site 1 of 1\")]\nfn go() {}\n",
+            )],
+        ),
+        (
+            "`deny` is spelled only in a comment and a string",
+            vec![(
+                "src/a.rs",
+                "// #![deny(clippy::disallowed_methods)]\n\
+                 const F: &str = \"#![deny(clippy::disallowed_methods)]\";\n",
+            )],
+        ),
+        (
+            "the lint is not a governed one",
+            vec![("src/a.rs", "#![deny(clippy::indexing_slicing)]\n")],
+        ),
+    ] {
+        let named = fences_that_deny_where_forbid_would_compile(&tree(&files));
+        assert!(named.is_empty(), "{what}: {named:#?}");
+    }
+
+    for (what, files) in [
+        (
+            "a sibling's allowance is not below the fence",
+            vec![("src/a.rs", DENY), ("src/b.rs", ALLOW)],
+        ),
+        (
+            "a name that only starts like the fence's is not below it",
+            vec![("src/a.rs", DENY), ("src/ab/tests.rs", ALLOW)],
+        ),
+        (
+            "the parent's allowance is above the fence, which is what it fences against",
+            vec![("src/a.rs", ALLOW), ("src/a/b.rs", DENY)],
+        ),
+        (
+            "the file's own allowance is of another lint, in another attribute",
+            vec![(
+                "src/a.rs",
+                "#![allow(clippy::disallowed_methods)]\n#![deny(clippy::disallowed_macros)]\n",
+            )],
+        ),
+        (
+            "the allowance below is of another lint",
+            vec![
+                ("src/a.rs", "#![deny(clippy::disallowed_types)]\n"),
+                ("src/a/tests.rs", ALLOW),
+            ],
+        ),
+    ] {
+        let named = fences_that_deny_where_forbid_would_compile(&tree(&files));
+        assert_eq!(named.len(), 1, "{what}: {named:#?}");
+    }
+
+    for spelling in [
+        "# ![deny(clippy::disallowed_methods)]\n",
+        "#! [deny(clippy::disallowed_methods)]\n",
+        "#![deny (clippy::disallowed_methods)]\n",
+        "#![deny(\n    clippy::disallowed_types,\n    clippy :: disallowed_methods\n)]\n",
+        "#![cfg_attr(all(), deny(clippy::disallowed_methods))]\n",
+        "fn go() {}\n#[deny(clippy::disallowed_methods)]\nfn late() {}\n",
+    ] {
+        let named = fences_that_deny_where_forbid_would_compile(&tree(&[("src/a.rs", spelling)]));
+        assert_eq!(named.len(), 1, "{spelling:?}: {named:#?}");
+        assert!(
+            named.iter().all(|line| line.starts_with("src/a.rs ")),
+            "{spelling:?}: {named:#?}"
+        );
+    }
+
+    let mixed = "#![forbid(clippy::disallowed_types)]\n#![deny(clippy::disallowed_methods)]\n";
+    let named = fences_that_deny_where_forbid_would_compile(&tree(&[("src/a.rs", mixed)]));
+    assert_eq!(named.len(), 1, "{named:#?}");
+    assert!(
+        named
+            .iter()
+            .all(|line| line.contains("disallowed_methods") && !line.contains("disallowed_types")),
+        "only the lint still at `deny` is named: {named:#?}"
+    );
+}
+
+#[test]
+fn every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile() {
+    let sources = scanned_sources();
+    let forbidding = sources
+        .iter()
+        .filter(|(_, source)| {
+            USED_GOVERNED_LINTS.iter().any(|lint| {
+                crate::effects::lint_levels::file_level_lint_state(source, lint) == Some("forbid")
+            })
+        })
+        .count();
+    assert!(
+        forbidding > 0,
+        "no scanned file forbids a governed lint, so the sweep below is measuring nothing"
+    );
+    let wrong = fences_that_deny_where_forbid_would_compile(&sources);
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 #[test]
 fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through_no_disguise() {
     let on_a_function = "#[allow(clippy::disallowed_methods)]\nfn go() {}\n";

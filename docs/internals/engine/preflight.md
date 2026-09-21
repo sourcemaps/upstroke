@@ -7,7 +7,7 @@ the concurrency protocol also remains at its source sites under standards §10 a
 Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
 
-## `#![deny(`
+## `#![forbid(`
 
 **Fenced against an allow above it, and behaviour-preserving.** From #306
 until 2026-09-20 `src/engine/mod.rs` carried

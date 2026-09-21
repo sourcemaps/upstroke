@@ -53,7 +53,7 @@ the proof is grounded in the filesystem instead of in visibility. Forging
 one therefore requires writing a well-formed intent record at
 `<R>/containers/<name>.intent` — which is writing the intent.
 
-## `#![deny(`
+## `#![forbid(`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by

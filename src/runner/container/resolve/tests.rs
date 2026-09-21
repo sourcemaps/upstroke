@@ -3,7 +3,7 @@
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-#![deny(clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_macros)]
 
 #[cfg(test)]
 mod this_file_is_test_only {}

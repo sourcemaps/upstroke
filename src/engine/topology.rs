@@ -1,7 +1,7 @@
 //! Extended notes: `docs/internals/engine/topology.md`
 
 #![cfg_attr(not(test), allow(dead_code))]
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

@@ -41,7 +41,7 @@ the name `main` calls and `effects/wrappers.toml` classifies, delegating to
 `connect::render` and `connect`'s externally reachable surface is the same
 four functions the wrapper census already records.
 
-## `#![deny(clippy::disallowed_methods, clippy::disallowed_macros)]`
+## `#![forbid(clippy::disallowed_methods, clippy::disallowed_macros)]`
 
 The two effect denials are **restored** here rather than inherited. A lint
 level is scoped by the module tree and not by the file, so `super`'s

@@ -1,6 +1,6 @@
 //! Text boundaries for terminal output. Each payload is assembled before
 //! sanitation, and only the line builder appends layout newlines.
-#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_methods, clippy::disallowed_types)]
 
 /// One assembled line with control characters made visible or replaced by
 /// spaces. Clean text keeps its allocation. Persisted values are unchanged.

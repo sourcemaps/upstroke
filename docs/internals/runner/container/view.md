@@ -62,7 +62,7 @@ placement `src/events/log.rs` has: the funnel's declaration is in the module
 the packet names and the body is beside it.
 `decisions.effect_site_inventory.mechanism` (2).
 
-## `#![deny(clippy::disallowed_types, clippy::disallowed_macros)]`
+## `#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]`
 
 `PR6-LANEF-004`: the two lints this file does NOT allow are re-denied here,
 because the Container funnel's allow is an inner attribute and would

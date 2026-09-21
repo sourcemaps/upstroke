@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/validate/graph.md`
 
-#![deny(clippy::disallowed_methods)]
+#![forbid(clippy::disallowed_methods)]
 #![deny(clippy::indexing_slicing, clippy::unreachable)]
 
 use std::collections::{BTreeMap, BTreeSet};

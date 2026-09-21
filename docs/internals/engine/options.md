@@ -6,7 +6,7 @@ The code is the authority for what it does; this file is the whole of its prose,
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
 
-## `#![deny(`
+## `#![forbid(`
 
 **Fenced against an allow above it, and behaviour-preserving.** From #306
 until 2026-09-20 `src/engine/mod.rs` carried

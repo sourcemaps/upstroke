@@ -37,7 +37,7 @@ injection point at create, and
 `runner::container::tests::the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for`
 proves they can differ.
 
-## `#![deny(`
+## `#![forbid(`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by

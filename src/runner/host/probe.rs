@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/runner/host/probe.md`
 
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

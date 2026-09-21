@@ -51,7 +51,7 @@ but no caller may treat its answer as a promise about a later operation —
 and the fake can make `ListByLabel` reachable while `InspectImageById` is
 not, so the mixed state is constructible rather than merely conceded.
 
-## `#![deny(`
+## `#![forbid(`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by

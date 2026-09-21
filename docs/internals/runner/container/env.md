@@ -56,7 +56,7 @@ DESIGN.md:610 claims a container buys, and it is why
 [`super::exec::ContainerRunner`] are asserted to be **the same predicate**
 rather than two rules that happen to agree.
 
-## `#![deny(`
+## `#![forbid(`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by

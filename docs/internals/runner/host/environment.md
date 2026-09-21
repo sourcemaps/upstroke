@@ -17,7 +17,7 @@ stays in the parent, which is "the one list" `runner::container::env` reads.
 What lives here is the rule that decides *which* variables a request gets
 and in what order, and it performs no effect: the base is handed in.
 
-## `#![deny(`
+## `#![forbid(`
 
 **This child states its own lint level and inherits nothing.** A Rust lint
 level is scoped by the module tree and not by the file, so an out-of-line

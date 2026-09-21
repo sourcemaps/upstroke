@@ -2,7 +2,7 @@
 
 // `effects/allowlist.toml` row: a row records an allowance, and this module
 
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

@@ -61,7 +61,7 @@ fact — the production binary does not drive schema 4 yet.
 production callers and the allow stops being true rather than stops being
 convenient.
 
-## `#![deny(`
+## `#![forbid(`
 
 **Fenced against an allow above it, and behaviour-preserving.** From #306
 until 2026-09-20 `src/engine/mod.rs` carried
