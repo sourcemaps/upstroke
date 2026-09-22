@@ -834,6 +834,12 @@ impl Primitive {
     /// only Git child is [`WorkspaceManager::revalidate`]'s enumeration
     /// *before* the hook. What a primitive does before its `Before` hook is
     /// outside this table, as it is outside [`Self::acted_through`].
+    ///
+    /// **Private**, where [`Self::acted_through`] is `pub(crate)`: this half
+    /// is read by this module and its own suite and by nothing else, and a
+    /// `pub(crate) fn` here joins the effect-classification domain
+    /// `effects/wrappers.toml` records, which is a governance record this
+    /// declaration has no business in.
     #[cfg_attr(
         not(test),
         expect(
@@ -844,7 +850,7 @@ impl Primitive {
                       `no_primitive_acts_through_a_git_working_directory_the_table_does_not_name`)"
         )
     )]
-    pub(crate) fn git_working_dirs(self) -> &'static [GitWorkingDirectory] {
+    fn git_working_dirs(self) -> &'static [GitWorkingDirectory] {
         use GitWorkingDirectory as G;
         match self {
             Self::CreateExecutionRoot
@@ -1833,7 +1839,7 @@ impl WorkspaceManager {
                       `no_primitive_acts_through_a_git_working_directory_the_table_does_not_name`)"
         )
     )]
-    pub(crate) fn git_discovery_paths(
+    fn git_discovery_paths(
         &self,
         primitive: Primitive,
         slot: Option<&Slot>,
