@@ -174,7 +174,7 @@ B's rendering was PASS, READY and ONE `gh pr merge` call, with neither the comme
 reviewed sha changing. One fetch under `application/vnd.github.full+json` is one version.
 
 **Measured.** Over the 685 comments this repository held on 2026-09-21T20:49:34Z, **0 of 685 change
-any field** between `7767c71c` and round seven's head. Over the 126 documents the gate ships a
+any field** between `7767c71c` and round seven's head. Over the 130 documents the gate ships a
 recorded rendering for, **5 change and every one of them GAINS a token**; the five are the three
 rows above plus the second `<pre>` row in the frontier form and a second quotation row.
 
@@ -212,10 +212,16 @@ has to be:
 
 The third is not something a reviewer writes. It is not "a quotation of the protocol", which is
 what round seven closed: a quotation is SHOWN, so it is spent on the occurrence a reader sees in
-it. It is an occurrence written where a reader sees nothing, whose line is exactly the correction's
-line. **There is no instance of it in the 685 comments this repository holds** -- measured by
-parsing every one at both heads, 0 of 685 differ -- and none in the gate's 126 documents but the
-two fixtures that exist to record it.
+it. It is an occurrence written where a reader sees NOTHING, whose line is exactly the correction's
+line.
+
+**AND ITS PRECONDITION IS MEASURED ABSENT.** The shape needs a comment that WRITES a `VERDICT:`
+its rendering does not SHOW. Counted directly over the 685 comments this repository held on
+2026-09-21T20:49:34Z -- `PROSE_VERDICT` occurrences in each comment's characters against the same
+in `shown_reading(body_html).text` -- **335 carry one in either reading and 0 hold more in the
+characters than the rendering shows.** Not one review ever posted here writes a verdict line a
+reader is not shown, so not one could have spent an unseen occurrence on a correction. The gate's
+130 documents carry none either, but for the two fixtures that exist to record this.
 
 **A weaker sentence that is true, in place of round six's.** Round six wrote "none of the four is a
 reading that shows a reader a severity and reports none". That is still true OF A SEVERITY -- the
