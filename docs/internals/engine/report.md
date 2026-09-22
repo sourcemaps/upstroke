@@ -9,7 +9,7 @@ These notes preserve the module comments after the status repairs. Item headings
 The remaining write! assembles a ledger cell into String, whose fmt::Write
 implementation cannot return Err. The discard does not hide an I/O error.
 
-## `#![deny(`
+## `#![forbid(`
 
 **Fenced against an allow above it, and behaviour-preserving.** From #306
 until 2026-09-20 `src/engine/mod.rs` carried

@@ -4,7 +4,7 @@
 // registers native pipe creation, mode-setting and I/O in this module.
 
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-#![deny(clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::io;
 use std::process::{Child, Command, Stdio};

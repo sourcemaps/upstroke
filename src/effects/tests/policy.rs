@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/effects/tests/policy.md`
 
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

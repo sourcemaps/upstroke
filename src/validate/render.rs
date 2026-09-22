@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/validate/render.md`
 
-#![deny(clippy::disallowed_methods)]
+#![forbid(clippy::disallowed_methods)]
 
 use crate::capacity;
 use crate::config::Config;

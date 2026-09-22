@@ -34,7 +34,7 @@
 // governed primitive, so all three are DENIED and this module takes no
 // `effects/allowlist.toml` row: a row records an allowance, and this module
 // takes none.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

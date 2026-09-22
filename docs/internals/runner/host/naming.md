@@ -24,7 +24,7 @@ the execute bit are both read, and the memoisation that makes the answer
 per-boundary rather than per-spawn is the parent's, in
 `HostRunner::program_for`.
 
-## `#![deny(`
+## `#![forbid(`
 
 **This child states its own lint level and inherits nothing.** A Rust lint
 level is scoped by the module tree and not by the file, so an out-of-line

@@ -21,9 +21,9 @@ plan.normalized.json
 # Python bytecode. `scripts/` holds the parser the ready audit runs, and anything that IMPORTS it
 # rather than running it leaves a `__pycache__` beside it -- so the rule is here as well as
 # suppressed at the gate that drives it (`PYTHONDONTWRITEBYTECODE=1` in
-# `.github/scripts/test-pr-ready-audit.sh`). A build artifact under an instrument path is not a file
-# to clean up after; nothing should write it and nothing should be able to commit it. The rule is
-# the fix and the artifact is only its first symptom, which is why this is here even though no
-# invocation on this branch imports the parser.
+# `.github/scripts/test-pr-ready-audit.sh`, exported to every python it starts and set again on
+# the decoder probe, the one invocation there that imports the parser). A build artifact under an
+# instrument path is not a file to clean up after; nothing should write it and nothing should be
+# able to commit it. The rule is the fix and the artifact is only its first symptom.
 __pycache__/
 *.pyc

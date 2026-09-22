@@ -25,7 +25,7 @@ site per role by file, and `src/runner/host.rs` is the pinned file -- the
 same kind of pin that keeps `Contained`'s mint and the reserved-key
 vocabulary in the parent. Construction is pinned; execution is not.
 
-## `#![deny(`
+## `#![forbid(`
 
 **This child states its own lint level and inherits nothing.** A Rust lint
 level is scoped by the module tree and not by the file, so an out-of-line

@@ -40,7 +40,7 @@ engine's own point in its own order, and only the *decision* about what
 their result means is shared — the same split `ShellGate::command` makes
 for a gate's command.
 
-## `#![deny(`
+## `#![forbid(`
 
 **Fenced against an allow above it, and behaviour-preserving.** From #306
 until 2026-09-20 `src/engine/mod.rs` carried

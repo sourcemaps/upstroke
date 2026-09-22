@@ -87,7 +87,7 @@
 // a print macro appearing in this file is a build error and not a style note.
 // `decisions.effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-#![deny(clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::fs;
 use std::io;
