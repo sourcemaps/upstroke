@@ -5,10 +5,10 @@ disposition: deferred
 category: security-trust
 pr: 7
 reviewed_sha: 9bb177ea59e1f97b8f3b3282c19519a31e1253a4
-location: src/effects.rs:666
+location: src/effects/tests.rs:749
 provenance: pre_existing
 first_bad:
-guard: project owner — the post-v0.2 pass over PR3's layer, with `PR7-WRAPPERS-EMPTY-DOMAIN`, whose class this is; the guard that would make the shape fail closed is proposed below and not built
+guard: project owner — the post-v0.2 pass over PR3's layer, with `PR7-WRAPPERS-EMPTY-DOMAIN`, whose class the residue is; the guard that makes the roll-call shape fail closed is built (2026-09-22) and what remains is the pinned per-lint residue below
 ---
 
 ## Failure sequence
@@ -68,57 +68,82 @@ at the fenced head `eb18f22dac5356a0ea1eaa06a3135b8450fce85d`, with the tree has
   `9bb177ea` bytes with the bypass patch applied: clippy exits **0** (`B1-*.log`) — run 4's result,
   reproduced by this lane.
 
-**The enumeration, re-derived at `9bb177ea` and at the fenced head** (`enumerate.py`, over `CLASSIFIED_MODULES`,
-`effects/allowlist.toml` and each file's leading inner attributes read the way `file_level_lint_state` reads them;
-and `throwaway-enumeration-test.rs`, the same question put to the tree's own reader): 54 classified modules, 30 in
-the carve-out, 24 outside it; classified modules carrying neither an allowance nor any file-level fence of a
-governed lint: **2 at `9bb177ea`** (these two), **2 at `958d3aa4`**, `origin/master` after #315, whose only change is a findings file, and **0 at the fenced head**, confirmed by the tree's own reader through a throwaway test appended to `src/effects/tests.rs` for one run and discarded: 54, 30, 24, no file with neither, and 31 file-and-lint pairs, the same 31 the script lists (`T1-reader-enumeration-at-eb18f22d.log`). Every other classified
-module outside the carve-out forbids all three governed lints at file level, none with `deny`.
+**The enumeration, re-derived at `9bb177ea` and at the fenced head, and corrected on 2026-09-22.** The fence change
+enumerated `CLASSIFIED_MODULES` against `effects/allowlist.toml` and each file's leading inner attributes read the way
+`file_level_lint_state` reads them (`enumerate.py`, and `throwaway-enumeration-test.rs`, the same question put to the
+tree's own reader): 54 classified modules, 30 in the carve-out, 24 outside; classified modules carrying neither an
+allowance nor any file-level fence, **2 at `9bb177ea`** (these two), 2 at `958d3aa4`, **0 at the fenced head**
+(`~/orch-pr10/fence-q5-evidence/`). Both reviews of #316 re-derived the same numbers. **All of them took the allowlist
+row as the allowance leg**, and the row is not what v17 words the carve-out by: *"the files that carry a file-level
+allowance of a governed lint"*. Read from the file, the carve-out is **29**, not 30, and the class had a **third**
+instance: `src/agent/bin.rs` records `allows = ["clippy::disallowed_methods"]` for an **outer attribute on its inline
+`#[cfg(test)] mod tests`** (`src/agent/bin.rs:97`; its row says so, *"the allow is an outer attribute on that test
+module, so production remains governed"*), and states nothing at file level, so its production region took all three
+governed lints from `-D warnings` alone — exactly where `src/capacity.rs` was — at `9bb177ea`, at the fenced head, and
+at `de6d6434`. The guard below, run once at `de6d6434` before anything was fenced, named it and nothing else
+(`~/orch-pr10/guard-decision-evidence/H0-guard-at-de6d6434-unfenced.log`: 1 classified module stating no governed
+lint at file level, `src/agent/bin.rs`; 32 file-and-lint pairs stated at no level, the 31 of the fence change plus
+`src/agent/bin.rs`/`clippy::disallowed_methods`; 29 classified modules carrying a file-level allowance against 30
+rows). Not executed in `bin.rs`: the mechanism is byte for byte run 4's, and `bin.rs` differs from `capacity.rs` at
+`9bb177ea` in nothing the mechanism reads.
 
-`location` moved from `src/capacity.rs:1` to `src/effects.rs:666`, the `CLASSIFIED_MODULES` roll-call, because
-what remains is a property of the roll-call and not of either file.
+**Fenced on 2026-09-22 with the guard**: `src/agent/bin.rs` carries `#![deny(clippy::disallowed_methods)]` — `deny`,
+because the test module's allow of that lint makes `forbid` `E0453` — and `#![forbid(clippy::disallowed_types,
+clippy::disallowed_macros)]`, the shape `src/runner/container/view.rs` already has for a lint it allows beside two it
+does not. The `deny` is excused by `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` because the
+allowance sits in the file; for `disallowed_methods` the file joins the excused set and the route through its
+allowance is `PR7-WRAPPERS-EMPTY-DOMAIN`'s, as it was before.
 
-**What the fence change does not close — the class, in this file's own words.** A classified module can still
-arrive carrying neither an allowance nor a fence, and nothing will catch it.
-`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` judges the files that *have* a fence;
-`every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist` judges the files that *have* an allowance;
-`CLASSIFIED_MODULES` is a hand-maintained roll-call (`PR5-…`, filed as
-`P2_correctness_202609031102_classified-modules-is-a-hand-maintained-roll-call.md`), and no test asks of each entry
-whether it is in one of those two sets. Two ways the shape comes back, neither executed here: a module added to the
-roll-call with `allows = []` and no fence, or an existing entry whose allowance is dropped without a fence taking its
-place — `effects/allowlist.toml` says of `src/capacity.rs` that it "can be dropped from this list at any time
-without weakening anything", and dropping an allowance today obliges nobody to add a fence. Run 4 offered three
-remedies — fence the two, widen the carve-out, or add the guard that makes the shape fail closed — and the owner
-chose the first; the guard is under "What the change that takes this up should do".
+**The guard, built.** Two tests in `src/effects/tests.rs`, one helper, one pinned constant, reading the tree at run
+time with no list of files (`~/orch-pr10/guard-decision-evidence/`, indexed by its `README.md`):
 
-**One level down, measured by enumeration and not executed: the same shape per lint, inside the carve-out.** Over
-the 30 classified modules that carry an allowance, **31 file-and-lint pairs in 21 files** have a governed lint that
-is neither allowed by the file's row nor forbidden by its prologue (`enumerate-at-head.txt`): `src/interaction.rs`,
-for one, allows `disallowed_methods` and `disallowed_macros`, fences nothing, and so takes its level of
-`disallowed_types` from `-D warnings` exactly as these two files took all three. By v17's wording those files are
-inside the carve-out, so the pairs are `PR7-WRAPPERS-EMPTY-DOMAIN`'s; but that finding's sentence *"open in the 45
-files that carry an allowance … for the lint each allows"* under-states by these 31, which are open for a lint the
-file does not allow. Not fenced by the 2026-09-22 change: whether `forbid` of the unallowed lint compiles in each is
-a measurement (four of the 21 sit under `src/engine/mod.rs`, whose fence must stay `deny`), and it is outside the
-remedy the owner authorised.
+- `every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint`: for every entry of
+  `CLASSIFIED_MODULES`, the file's prologue states at least one used governed lint at file level — `forbid`, `deny`, or
+  a recorded `allow`/`expect` — as `file_level_lint_state` reads it. **The allowance leg is what the file states, not
+  what the row records.** At `de6d6434` with the two fenced files put back to their `9bb177ea` bytes it fails naming
+  exactly `src/capacity.rs` and `src/runner/invocation.rs` (`F1-*.log`); with an undeclared, unfenced, unallowed file
+  appended to `CLASSIFIED_MODULES` it fails naming exactly that file (`F2-*.log`); at the head with `bin.rs` fenced
+  it passes (`H1-*.log`).
+- `the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink`: the (module, lint) pairs stated at no
+  level are counted and asserted equal to `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES`, **29** at this head,
+  all inside the carve-out: the 31 of the fence change less `bin.rs`'s three, plus `bin.rs`'s `disallowed_methods`
+  which is now `deny`. The `forbid` of `disallowed_macros` removed from `src/runner/container/view.rs` fails at 30
+  naming that pair (`F3-*.log`); the constant lowered by one fails at 29 against 28, and raised by one at 29 against
+  30, each with its reading stated (`F4b-*.log`, `F5-*.log`). A count and not a list: a table of 29 pairs in an instrument is a second roll-call, and the change
+  that fences a pair lowers one number.
 
-Nothing in the tree is wrong *today* by this route: no such macro exists in any classified module. What is filed is
-that the carve-out does not bound the class, and that after the two fences nothing bounds it either.
+**What the guard closes, in this file's own words.** A classified module can no longer arrive carrying neither an
+allowance nor a fence, and an existing entry can no longer drop its allowance without a fence taking its place: both
+are a red test at the next `cargo test`, not a gate run's discovery. `effects/allowlist.toml`'s sentence that
+`src/capacity.rs` "can be dropped from this list at any time without weakening anything" is now checked rather than
+promised.
+
+**What remains, and it is the residue and not the class.** The **29 pairs**: 19 carve-out files that allow one or two
+governed lints and state nothing about the rest — `src/interaction.rs` allows methods and macros and says nothing of
+`disallowed_types`, `src/engine/{attempt,coordinator,resume}.rs` allow methods and inherit `src/engine/mod.rs`'s
+`deny` of the other two, which a child's inner `allow` lowers — each listed by the pin's own failure message and by
+`H0-*.log`. By v17's wording they are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open
+in the 45 files that carry an allowance … for the lint each allows"* under-states by them. Whether `forbid` of the
+unstated lint compiles in each is a measurement, and it is outside the remedy this file's guard was built for. **Two
+things the guard does not reach, each its own finding**: a module absent from the roll-call altogether
+(`W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`), and the **50 production and test files outside the roll-call
+that state no governed lint at file level and inherit no statement** — 34 under `src/topology/` and `src/runner/`,
+16 elsewhere — where the same silence stands unjudged
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`, filed with the guard).
+
+`location` is the pinned constant, because what remains is the number it holds.
 
 ## What the change that takes this up should do
 
 Owner, as the ledger records it: project owner — the post-v0.2 pass over PR3's layer, the pass that owns
-`PR7-WRAPPERS-EMPTY-DOMAIN`. Two things, separable:
+`PR7-WRAPPERS-EMPTY-DOMAIN`. One thing, and it is the fence work the guard now counts:
 
-1. **The guard, which is the cheap part and is not built.** A test asserting, for every entry of
-   `CLASSIFIED_MODULES` and every lint of `USED_GOVERNED_LINTS`, that the file either forbids the lint at file
-   level (`file_level_lint_state == Some("forbid")`) or records an allowance of it in `effects/allowlist.toml`.
-   At the fenced head its file-level form — no classified module with neither — holds with zero exceptions and no
-   list, and would have named `src/capacity.rs` and `src/runner/invocation.rs` at `9bb177ea`. Its per-lint form
-   needs the 31 pairs above fenced first, or excused by name until they are. Either form makes the next unfenced,
-   unallowed module a red test rather than a gate run's discovery. It is a CI-contract test under `src/effects/`,
-   an instrument, so it is the owner's to authorise. A module missing from the roll-call altogether is the
-   hand-maintained-roll-call finding's, not this one's.
-2. **The 31 pairs**: flip each unallowed lint to `forbid` in its file and compile, as the fence change did for 59
-   files and this one for two; keep `deny` where `forbid` does not compile and let
-   `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` say which.
+1. **The 29 pairs**: in each of the 19 files, state the unstated lint — `forbid` where it compiles, `deny` where an
+   allowance below it makes `forbid` `E0453`, and let
+   `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` say which — and lower
+   `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES` by the pairs closed, in the same change. Four of the 19 sit
+   under `src/engine/mod.rs`, whose own fence must stay `deny`; the children can still `forbid` a lint no allowance
+   below them names. When the constant reaches 0, delete it and the ratchet, make
+   `every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint` refuse any unstated pair
+   rather than a fully silent module, and delete this file: the class is then closed for the roll-call at both
+   granularities, and what is left is the roll-call finding's and the silence outside it.
