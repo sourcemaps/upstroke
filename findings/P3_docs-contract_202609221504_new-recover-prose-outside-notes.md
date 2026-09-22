@@ -107,8 +107,10 @@ each of those revisions and at `75839093` the module has no trailing comment, no
 and no comment-shaped text inside a literal, so the count is the whole of its prose beside the
 one `//!` pointer. The set difference between `1c94cbfc` and `75839093`, and between `2b24a377`
 and the head, is 26 lines added and none removed, and the 26 are exactly the five sites above.
-The 193 are pre-existing and outside this finding, bound by `standards/SWEEP.md`'s activation
-rule when a change next rewrites them. This finding is the 26 lines round 3 added.
+The 193 are pre-existing and outside this finding: `MAINTAINING.md` step 5 counts a pre-existing
+finding as not relevant to the change, and #311 wrote none of them. §13 has no transitional rule
+(`standards/SWEEP.md`'s activation rule scopes §6 and §7 only), so they stand under §13 in full,
+for the §13 pass the guard names. This finding is the 26 lines round 3 added.
 
 **Consequence.** None in execution. A reader of the code pays for prose the standard put in the
 notes, and there are now two copies of each contract: a change to the matrices or the promotion
