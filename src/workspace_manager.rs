@@ -765,9 +765,16 @@ pub(crate) enum Primitive {
 /// One change closes both — directory-handle-relative operations (`openat`,
 /// `unlinkat` against a descriptor held from the check) — and that is what a
 /// writer this boundary does not cover would need.
+// `allow` and not `#[expect]`, which §16 otherwise asks for: `dead_code` fires
+// for these three on stable and does not fire for two of them on the 1.85 MSRV
+// (measured -- `cargo +1.85.0 check --locked --all-targets --all-features`
+// reports `this lint expectation is unfulfilled` at the enum and at
+// `git_working_dirs`, which CI's `RUSTFLAGS: -D warnings` makes an error on all
+// three platforms), so an expectation cannot be fulfilled on both legs and
+// `allow` is the only level that says the same thing to each.
 #[cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
         reason = "the half of the table the walk does not read: it is the declaration of \
                   what is *not* walked, held to the code by the suite instead \
@@ -842,7 +849,7 @@ impl Primitive {
     /// declaration has no business in.
     #[cfg_attr(
         not(test),
-        expect(
+        allow(
             dead_code,
             reason = "the half of the table the walk does not read: it is the declaration of \
                       what is *not* walked, held to the code by the suite instead \
@@ -1831,7 +1838,7 @@ impl WorkspaceManager {
     /// reason: a skipped path is exactly an unexamined one.
     #[cfg_attr(
         not(test),
-        expect(
+        allow(
             dead_code,
             reason = "the half of the table the walk does not read: it is the declaration of \
                       what is *not* walked, held to the code by the suite instead \
