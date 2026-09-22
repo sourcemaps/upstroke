@@ -121,3 +121,78 @@ Two things, and they are separable.
    unclassifiable after the fact. Either print the panic where a cancellation cannot eat it
    (`--nocapture`, or `RUST_TEST_NOCAPTURE` on the macOS leg), or accept that cancelled jobs are
    holes in any "no failure of shape X occurred" claim and say so wherever such a claim is made.
+
+## The hold's persistence, measured, and the bounded wait that replaces the single observation (2026-09-22)
+
+The single observation at the end of `a_host_integration_reaper_holds_the_runs_cleanup_lease` is
+now a bounded wait (`fix-P2/correctness_a-cancelled-job-hides-which-assertion-failed`). Nothing
+above it changed: the first assertion is still the genuine reaper-startup failure this file
+distinguishes from the hold, and the two after it are untouched.
+
+**What holds the lease, and for how long.** Under this finding's own recipe — two full
+`cargo test --all-targets --all-features` suites run concurrently on one Linux box, each on its
+own target directory: the merge base `9bb177ea` untouched beside a copy of it whose last
+observation, when it found the lock held, polled every 10 ms until it was free and read
+`/proc/locks` and its descendants' descriptor tables while it waited — eight rounds, load average
+30 to 35:
+
+| round | instrumented copy: first observation | free again by the next observation, after | merge base, untouched |
+|---|---|---|---|
+| 1 | held | 50 ms | ok |
+| 2 | free | — | ok |
+| 3 | held | 68 ms | **FAILED** at the single observation |
+| 4 | held | 38 ms | ok |
+| 5 | free | — | ok |
+| 6 | held | 24 ms | ok |
+| 7 | free | — | **FAILED** at the single observation |
+| 8 | free | — | ok |
+
+The hold was present at the first observation in **4 of 8** instrumented runs, and the merge base
+failed the single observation **2 of 8** times, at this same assertion — 6 of 16 suite runs, the
+same phenomenon as the 3 of 4 above at a larger n. **Every hold was gone within about a
+millisecond**: the wall-clock figures are the instrumentation's own cost, the second observation
+found the lock free every time, a raw `flock` probe 0.2 ms after the first observation still
+failed with `EWOULDBLOCK` (three of three, v1), and a read of `/proc/locks` about a millisecond
+after it listed nothing for the inode (four of four, v1 and v2; the matcher verified against a live
+`flock -s`). Nothing that lives long enough to be named held it.
+
+The holder is not the reaper. `Supervisor::finish` waits for it without a bound
+(`ReaperEnding::AcknowledgedExit`, `src/agent/proc.rs`), and its exit releases its shared hold
+before the drive returns. What outlives the reaper is a **copy of the run's lease descriptor**:
+`WorkspaceManager::update_ref` keeps the lease open in this process for the life of each
+`git update-ref` child (`rundir::hold_cleanup_lease_for_child`), the drive's last ref writes are
+inside its final step microseconds before the observation, a child another test thread forks in
+that window inherits the open file description, and the shared `flock` lasts until that child
+closes it — a reaper, guard or probe in its own `close_inherited_fds`, an `exec` at `CLOEXEC` — a
+scheduler quantum under load. That is the "forked child of another test" guessed at above, and its
+hold is milliseconds, not the lifetime of a process.
+
+**The bound.** `RELEASE_BOUND` is 20 s: the bound `wait_for_cleanup_hold_release` already gives the
+eighteen other observations of this lease in the same module (the ledger's post-drop observation
+and the finalization matrix's resumes), so one number governs one condition throughout the file;
+some ten thousand times the millisecond tail, 300 times even the 68 ms wall-clock figure; and paid
+only by a failing run, since a passing one returns at its first free observation. Five seconds
+would clear the tail as surely and add a second bound for the same condition; sixty would only
+delay a real red. The wait is not a quarantine: with a `sleep 30` child holding the lease through
+the production inheritance path, the test fails after 20.03 s with *"the hold outlived the reaper
+that took it: the run's cleanup.lock was still held after the full 20s bound, every one of 401
+observations over 20.031098878s finding it held"*; with the same child holding it for 2 s the test
+passes after 1.9 s. A future red therefore says how long it waited of what bound, which is the
+reading a single observation could not give.
+
+**What this does not fix, and why the disposition stays `deferred`.**
+
+- The inheritance is not closed. Every fork-without-exec in this process during a ref write still
+  inherits the lease descriptor; the wait tolerates the hold, it does not remove it.
+- The neighbour is untouched and was seen **9 times in these 16 suite runs** (7 in
+  `repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`, 2
+  in `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`; 3 on the untouched
+  merge base): a production resume through `drive_as` refused with *"still has a process of its
+  own alive … and that process holds the run's cleanup lease; refusing overlapping engine
+  ownership"* — `RunLock::acquire`'s exclusive probe reading the same inherited hold at one
+  instant. A wait inside one test cannot reach it; the change that closes the inheritance does.
+- The classification gap (a cancelled job destroys the assertion) is as recorded above and untouched.
+
+`PR125-CLOSE-MACOS-READY-RED-CAUSE-UNKNOWN`: the `:8356` shape now has a Linux mechanism and a
+measured duration, so the sighting in that row's confirmation window is no longer unclassified in
+kind; whether that reads as sufficient is the owner's, and the row is not edited here.
