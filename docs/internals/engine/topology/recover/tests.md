@@ -860,6 +860,12 @@ still holding its worktree and intent, the residue asked for, and
 `run_finished` durable. What terminal finalization then has to act on,
 with nothing yet done to it.
 
+## `struct FinishedPlanting` › `surplus_candidate_pin: bool,`
+
+Whether the planting carries alpha's candidate-prepared pin as declared damage
+(`with_a_candidate_pin_no_crash_leaves`). `plant_finished_run_with` leaves it false;
+`finalization_effects` expects the pin's deletion in the cleanup order only where it is true.
+
 ## `struct PlantedAnswerFiles {`
 
 A published answer and a writer's `.partial` beside it, planted under
@@ -890,6 +896,64 @@ record-then-create helper (`plant_report_leftover`); in round 9 a directory
 made by hand at the fixed `.report-staging/`; in round 8 a regular file
 under a name `rundir::report_staging_name` produced — so that both branches
 of the report site are held to reclaiming it.
+
+Since the second repair round of #311 the planting completes alpha's promotion through its
+cleanup. `plant_queued_candidate` and `publish_alpha` write alpha's candidate-prepared pin beside
+`task_candidate_created` and leave it standing with no generation worktree, and the planting
+prunes it (`prune_the_planted_candidate_pins`): a finished run is planted with its candidates ref
+and no candidate-prepared pin, which is what `reclaim_after_creation` leaves before
+`promote_candidate` returns. Until then the pin stood. The second review of that change
+(`4231db05`) executed the consequence on the kill matrix Gate 5's audit credits for 26 registry
+rows: the pin stood at 19 of the Complete half's 26 boundaries, alpha's worktree and intent
+absent, and each of those 19 fresh-process resumes deleted it (`Ref.DeleteCandidatePin`), a repair
+of damage the cell's kill had not left. A census of that site over the 568 topology tests at
+`4231db05`, one process per test, read the same 19 in the resume children; and of the 137
+deletions finalization's sweep made across 17 tests, every one was of a pin test code had written,
+none of a pin `pin_candidate` made (`~/orch-pr10/clause2-evidence-r2/census/`).
+
+## `fn with_a_candidate_pin_no_crash_leaves(planted: FinishedPlanting) -> FinishedPlanting {`
+
+**Declared damage: a candidate-prepared pin no crash leaves.** This writes alpha's
+candidate-prepared pin back beside a finished run whose planting completed alpha's promotion, and
+marks the planting (`surplus_candidate_pin`). Production's order leaves no such state:
+`TopologyRun::promote_candidate` returns only after `reclaim_after_creation` has deleted the pin; a
+crash inside it leaves no `run_finished`; every resume of an unfinished log runs
+`finish_promotions`, which prunes an orphan pin and completes a promotion a standing pin leaves
+unfinished, before the loop can close the run; and `TopologyRun::close_run` is the only emitter of
+`run_finished`. Finalization's sweep of `candidate-prepared/` refs is therefore defensive, and a
+test that needs the sweep to find something has to plant damage. It is planted here, by name, and
+nowhere silently: in the two tests that fault and kill the sweep over it,
+`a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`
+and `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`, and in
+the four behaviour tests that assert on the sweep (`resume_finalizes_halted_then_refuses` and the
+three report-barrier tests); in neither finalization matrix. **A test that plants it constructs no
+crash's prefix and earns no exactness credit under ST-07's first obligation**, and none of the six
+that plant it is cited by the sequential registry, by `coverage.rs` or by Gate 5's audit. (The
+second repair round of #311 planted it at the two `Ref.DeleteCandidatePin` cells of each matrix;
+the third review read those cells as credited evidence, the registry and `coverage.rs` naming the
+error-return matrix for rows 41 and 42 and the audit having selected the kill matrix for them, and
+the third round moved them out.) What it holds is the sweep's
+behaviour: that the step runs after the prepared pins and before the candidates refs, that a fault
+or a kill inside it converges on the next resume, and that no pin of either family is pruned
+before the report is durable. The exact constructions of `Ref.DeleteCandidatePin` before and after
+are the two kills inside the promotion
+(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`), which the cited test runs
+at both phases as its two cells of the site.
+
+Measured over the 570 topology tests at `ae673768`, one process per test
+(`~/orch-pr10/clause2-evidence-r2/census/at-ae673768/`): the loop's own `close_run` reached
+finalization's sweep 32 times in 25 tests and found no candidate-prepared pin in any of them;
+recovery step (b) reached it 239 times and found one only in the seven tests that plant it here.
+That is what the suite shows, not a proof over every history.
+
+The helper first asserts that no candidate-prepared pin stands, so it cannot pass over a planting
+that left one.
+
+## `fn candidate_pins_on_disk(fixture: &Fixture) -> Vec<String> {`
+
+The `candidate-prepared/` refs Git lists under `refs/upstroke/` (`upstroke_refs_on_disk`): the
+on-disk reading the finalization matrices take before the fault and at the boundary the next
+resume reads.
 
 ## `fn plant_report_leftover(fixture: &Fixture) -> PathBuf {`
 
@@ -938,6 +1002,13 @@ appended. Until PR10 the slice implemented the refusal only —
 PR7's eleven rows — and the test asserted the other half's absence, no
 `report.json` and no `RunDir.WriteReport`; the name is the packet's and was
 kept so the row and the test still correspond.
+
+## `fn resume_finalizes_halted_then_refuses()` › `let planted = with_a_candidate_pin_no_crash_leaves(plant_finished_run(`
+
+The candidate-prepared pin this test reads standing before the resume and pruned by step (iv)
+after it is declared damage (`with_a_candidate_pin_no_crash_leaves`), as the staging orphan and
+the unlistable registration beside it are: the test holds what finalization does to a pin it
+finds, and constructs no crash's prefix.
 
 ## `fn resume_rebuilds_runner_from_record_and_warns_on_config_drift() {`
 
@@ -1034,10 +1105,32 @@ An intent this run's *creator* incarnation left behind, in the recorded
 root. It is dead by construction: the run lock is exclusive, so only one
 incarnation of a run is ever live, and this process is a different one.
 
+## `struct ProbeDiesLeaving<'a> {`
+
+A `RunnerPreflight` for a resume that ends in its pre-flight probe: `certify` runs the residue
+the witness hands it (what a launch that died part way leaves) and then refuses, so the command
+ends at step (c) of the recovery order with nothing cleaned up. The refusal stands in for the
+death; the residue is planted, not left by a launch.
+
 ## `fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()`
 
+Rows 153 to 158 and 161 to 168 of Gate 5's audit, the container launch and release coordinates.
+The gate's third run found each cell's container state exact and the run around it not: the state
+was planted beside `Fixture::healthy`'s published creation marker and labelled with the creator's
+incarnation, where a probe container beside a committed run is left by a *resume* that died in its
+`RunnerPreflight` probe, whose census had already removed the marker (the census precedes
+`PreflightCertified::certify`). So each cell's state is now left by the run's first resume,
+`FIRST_RESUMER`: that resume runs `run_recovery_order` for real, its census removes the creator's
+marker through `RunDir.RemoveMarker` (asserted on its harness), and its pre-flight seam
+(`ProbeDiesLeaving`) plants the cell's state under that incarnation and refuses. What stands
+before the credited resume is asserted: the marker gone; no execution root, no integration ref and
+no `run_resumed`, because the probe precedes all three; no process holding the run; and the cell's
+intent, view and container. The next resume, a different incarnation over the real refs, reclaims
+the state in its container census and enters no `RunDir.RemoveMarker`; the execution root and the
+integration ref are its own to create, once each, because no resume of the run had reached them.
+
 The states a container launch or release can leave between its funnels,
-each left by the creator incarnation of a run with a log and resumed over:
+each left by the dead incarnation of a run with a log and resumed over:
 nothing; the intent alone (between `Container.WriteIntent` and the mount, or
 after the view's unmount); the intent and the view with no container (before
 `Container.Create`, or after `Container.Remove`); and the intent, the view and
@@ -2956,7 +3049,10 @@ integration ref at the base, and the log through `task_candidate_created`.
 ## `fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {`
 
 ALPHA's queued candidate on the base — its objects, refs and events —
-leaving the integration ref wherever it is.
+leaving the integration ref wherever it is. Its refs are the candidates ref and the
+candidate-prepared pin, and the pin is left standing: the finalization witnesses take it through
+`plant_finished_run_with` as the residue their cleanup order prunes. A witness of a state a
+completed promotion left prunes it (`prune_the_planted_candidate_pins`).
 
 ## `fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {`
 
@@ -2986,6 +3082,86 @@ The `RecordingRefs` double every other resume here supplies answers
 "absent" to the startup repair whatever the repository holds, which is
 exactly how a resume that refused its own published head stayed green
 (`pr8-triage.md` C1). A publication test resumes through this.
+
+## `fn resume_as_certified_by(`
+
+`resume_as` with the pre-flight seam a parameter, for the one witness whose resume has to end in
+its probe (`ProbeDiesLeaving`). `resume_as` passes `AlwaysCertifies`, as it always did.
+
+## `const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";`
+
+The incarnation that resumes a run first in the witnesses below and then dies: neither the
+creator nor `RESUMER`, so the resume a witness credits is a different incarnation from the one
+whose work it recovers.
+
+## `fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag: &str) -> usize {`
+
+`Fixture::build` plants P6: `run_started` durable, the creator's marker still published, no
+integration ref and no execution root. A creator never steps, and a resume's census removes the
+marker before that resume appends anything, so no crash leaves a dispatch, a queued candidate, a
+rejection or a prepared transaction beside a published marker or a missing root. The gate's third
+run graded the witnesses that planted such events on the fixture near-exact for it (report §8.4,
+"the recover fixture's P6 hybrid"): their credited resume removed the marker, and at some rows
+recreated the root, besides performing the row's action.
+
+This is the setup resume that report asks for. `FIRST_RESUMER` resumes the fixture through
+`run_recovery_order` over the real refs and its handle is dropped: the marker is removed, the
+execution root and the integration ref are created, `run_resumed` is the log's second line and no
+process holds the run (all asserted). A witness plants the dead incarnation's work after it, so the
+planted events follow a `run_resumed`, as a stepping incarnation's do. Returns the number of
+durable events, for `kinds_after`.
+
+Two simplifications remain and are the fixture's, not this helper's: `Fixture::manager` derives the
+manager under the creator's incarnation, so an intent planted through it names the creator (the
+recovery never reads an intent's incarnation), and the planted run carries no `run.lock` or private
+skeleton from its creation (a resume opens or creates the lock file and reads neither).
+
+## `fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {`
+
+The on-disk half of the exactness claim, asserted after the plant and before the credited
+recovery: no creation marker (published or staged), the execution root a directory, the
+integration ref present, and no candidate-prepared pin under the run's refs (`git for-each-ref`,
+filtered to `candidate-prepared`). With these standing, a resume has no marker to remove, no root
+to recreate, no ref to create and no pin to delete.
+
+## `fn prune_the_planted_candidate_pins(fixture: &Fixture, keys: &[TaskKey], tag: &str) {`
+
+Completes a planted candidate's promotion through its cleanup. `plant_queued_candidate_events` and
+`plant_published_beta_editing` write each candidate's candidate-prepared pin beside its candidates
+ref and leave it standing. A promotion `TopologyRun::promote_candidate` completed leaves no
+such pin: `reclaim_after_creation` deletes it, expected-old, before it removes the generation
+worktree and the loop continues, so a pin beside `task_candidate_created` and no generation
+worktree is a state no crash leaves. Nor is the pin inert: `candidate::recovery_for` reads it as
+an unfinished promotion and `finish_promotions` deletes it, which the frontier review of this
+change's first head (`523dac5f`) found in the five witnesses below as `Ref.DeleteCandidatePin`
+entries their coordinates' crashes would not have left. Each of the five prunes the pins its plant
+left, by name, as Git does (`update-ref -d` with the pinned commit as the old value), and asserts
+the prefix complete after.
+
+Since the second repair round the finished-run planting completes alpha's promotion the same way
+(`plant_finished_run_with`), and the finalization tests that need the sweep to find a pin plant
+one as declared damage (`with_a_candidate_pin_no_crash_leaves`); until then those tests took the
+shared plants' pin as residue, which is why the first round left the plants alone. The shared
+plants still write the pin. The five witnesses above prune what those plants write and fail by
+name when nothing was written, so a plant that stopped writing it would change five witnesses two
+reviews graded established; and the behaviour tests that resume over those plants in their setup
+have `finish_promotions` delete the pin there, with no exactness claimed of them (59 tests at `ae673768`). Of the witnesses Gate 5's
+audit selected, only the finalization kill matrix let a credited recovery delete a planted pin;
+the others that meet one, and #305's three other staging-path kills, lose it to an earlier resume
+before their credited crash (rows 1, 2, 43, 58, 112, 126, 127, 159 and 160; the census and the
+boundary probes under `~/orch-pr10/clause2-evidence-r2/`). What
+is left is the deferred finding `PR311-SHARED-PLANTS-WRITE-A-CANDIDATE-PIN-NO-CRASH-LEAVES`: a
+witness credited over one of those plants has to complete it here and hold its recovery to
+`assert_no_repair_of_the_creation_prefix`, and nothing forces it to.
+
+## `fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {`
+
+The executed half: the credited recovery's harness holds no entry into `RunDir.RemoveMarker`,
+`Worktree.CreateExecutionRoot`, `Ref.CreateIntegration` or `Ref.DeleteCandidatePin`. The first
+three are the repairs the gate's exactness listing (`audit/exactness/resumes-per-witness.py`) reads
+a hybrid prefix by; the fourth is the cleanup `finish_promotions` performs for a candidate-prepared
+pin a plant left standing (`prune_the_planted_candidate_pins`), asserted so that a plant which
+leaves one again fails here rather than passing with a recovery that repaired it.
 
 ## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
 
@@ -3083,7 +3259,16 @@ A hook bundle for a child that will be killed: it forwards to the harness
 bundle and writes, in order, every sync of the log file and every entry
 into the integration compare-and-swap to a report file the parent reads
 after the kill — the durability oracle carried across the process
-boundary, since the child's ledger dies with it.
+boundary, since the child's ledger dies with it. It also writes a `repair <site>` line for every
+entry into `RunDir.RemoveMarker` (`ReportingRunDir`), `Worktree.CreateExecutionRoot`,
+`Ref.CreateIntegration` or `Ref.DeleteCandidatePin`, so the parent's comparison of the whole
+report also holds that the killed incarnation's resume repaired nothing of the creation's prefix
+and deleted no candidate-prepared pin.
+
+## `struct ReportingRunDir {`
+
+The run-directory half of `ReportingHooks`: the production adapter on the shared harness, with an
+entry into `RunDir.RemoveMarker` written to the report.
 
 ## `fn two_crash_kill_child() {` › `let repo_root = PathBuf::from(`
 
@@ -3103,6 +3288,16 @@ contains merge_prepared, the ref is at proposed_sha, and the next resume
 appends task_merged — on a real repository, with the sync ledger as the
 durability oracle: in-process for the first crash, reported across the
 process boundary for the second.
+
+Rows 33 and 34 of Gate 5's audit (`Ref.CompareAndSwapIntegration` before and after). The run is
+resumed once first (`the_runs_first_resume_by_an_incarnation_that_then_dies`), so the queued
+candidate and the unsynced `merge_prepared` follow a `run_resumed` and stand beside no creation
+marker and an execution root: the gate's third run graded both rows near-exact because the
+incarnation that issued the swap had first removed the marker and recreated the root. The queued
+candidate's pin is pruned after the plant (`prune_the_planted_candidate_pins`), so what the killed
+child resumes over is what a completed promotion leaves. The child's report is compared whole, and
+it would carry a `repair` line for any of the four sites; the third resume's harness is held to
+the same (`assert_no_repair_of_the_creation_prefix`).
 
 ## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
 
@@ -3130,6 +3325,17 @@ The next resume records the merge it finds done, with no second swap.
 (a1). No CAS is issued, the command ends resumably having done nothing,
 and after the loss of the unsynced line the before-append order holds:
 the candidate is still queued, and the next incarnation integrates it.
+
+Rows 98 and 133 of Gate 5's audit (`Event.OpenLog`'s `SyncPrefix` error return, and
+`Lock.ProbeCleanupExclusive`/after). The run is resumed once first, so the queued candidate and the
+unsynced line stand beside no creation marker; the gate's third run graded both rows near-exact
+because the converging resume removed the marker and recreated the root. The queued candidate's
+pin is pruned after the plant (`prune_the_planted_candidate_pins`). The converging resume is
+made here on a harness of its own rather than inside `drive_observing`: it enters none of the
+four repairs `assert_no_repair_of_the_creation_prefix` names, and it is observed taking
+`Lock.AcquireRun` and repeating
+`Lock.ProbeCleanupExclusive`, before and after, which row 133's reading had inferred from the
+resume's success.
 
 ## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `lose_unsynced_writes(&fixture, durable);`
 
@@ -3444,7 +3650,10 @@ removed (M4) or made blocking (M5) still passed.
 
 Publish BETA's candidate fast at sequence 0 — the candidate on the base,
 `merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
-legitimately moved past the base. Needs a two-task fixture.
+legitimately moved past the base. Needs a two-task fixture. Like
+`plant_queued_candidate_events`, it leaves BETA's candidate-prepared pin standing beside the
+candidates ref; a witness of a state a completed promotion left prunes it
+(`prune_the_planted_candidate_pins`).
 
 ## `fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {`
 
@@ -4057,6 +4266,14 @@ byte-identical, and only then is the answer published. Both incarnations end
 with their log replayed twice to the driven run's fold (`drive_observing`,
 `assert_log_replays_twice_equal`).
 
+Row 122 of Gate 5's audit (`Answer.StageWrite`/before) is the first drive: the open question with
+no answer file, resumed over, and the run parked. The gate's third run graded it near-exact because
+that drive's resume removed the creation marker standing beside the planted rejection. The run is
+now resumed once before the rejection is planted, both candidates' pins are pruned after the plant
+(`prune_the_planted_candidate_pins`), the first drive runs on a harness of its own and enters none
+of the four repairs `assert_no_repair_of_the_creation_prefix` names, and the log is replayed twice
+after it parks, where the pair the row had was the one made after the second drive.
+
 `T-ANSWER` through the production reader: with no answer file the run
 hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
@@ -4120,6 +4337,33 @@ is cleared, the question is closed, and the file is retained byte for byte (R21)
 with the file still on disk ingests nothing, the log still holds exactly one `question_answered`
 for the repair, and it replays twice to equal states.
 
+## `fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal()`
+
+Row 15 of Gate 5's audit, `Worktree.WriteStagingIntent`/before: beta published and the integration
+head moved, alpha's candidate queued at the old base, and nothing of the staging path on disk (no
+staging intent, no staging worktree, no prepared pin for the next sequence, all asserted). The
+resume and its first step take the staging path from there, through the staging intent, the
+staging add, the pick and the pin, and the candidate integrates under sequence 1 on the moved
+head; the log then replays twice to equal states. The gate's third run graded the row near-exact
+because the queue was planted on the P6 fixture and the credited resume removed the creation
+marker and recreated the execution root before the step. The run is now resumed once before the
+queue is planted (`the_runs_first_resume_by_an_incarnation_that_then_dies`), both candidates' pins
+are pruned after the plant (`prune_the_planted_candidate_pins`), the prefix is asserted complete,
+and the credited resume and step enter none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names.
+
+## `fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()`
+
+Rows 18 and 57 of Gate 5's audit, `Worktree.AddStaging`/after and `Object.ProposalCherryPick`/before,
+which are one durable state: the sequence's staging intent and its worktree at the integration
+head with nothing picked into it (`classify_object_residue` answers `None`). The resume reclaims
+the worktree and its intent as stale residue, creates no pin and leaves the candidate queued, and
+the next step stages again and integrates the candidate under sequence 1. Near-exact in the gate's
+third run for the P6 fixture's marker, which the credited resume removed; the run is now resumed
+once before the queue and the staging worktree are planted, both candidates' pins are pruned after
+the plant (`prune_the_planted_candidate_pins`), and the credited resume enters none of the four
+repairs `assert_no_repair_of_the_creation_prefix` names.
+
 ## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
 
 The kill child of the two candidate-sequence witnesses below.
@@ -4155,8 +4399,10 @@ after `Object.CandidateWriteTree` writes the tree. In the judge's gates snapshot
 `Snapshot.WriteIntent`, and before and after `Snapshot.Add`. In the candidate sequence: before
 `Object.CandidateCommitTree` writes the candidate commit and at its `IdUnread` point (the object
 written and its id not yet read; a point is armed in kill mode on the shared harness), before and
-after `Ref.PinCandidatePrepared` pins the written commit, and before and after
-`Ref.CreateCandidates` creates the candidates ref. Reaching the panic means the kill did not land.
+after `Ref.PinCandidatePrepared` pins the written commit, before and after
+`Ref.CreateCandidates` creates the candidates ref, and, since the second repair round of #311,
+before and after `Ref.DeleteCandidatePin` deletes the pin inside `reclaim_after_creation`.
+Reaching the panic means the kill did not land.
 
 ## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
 
@@ -4311,6 +4557,50 @@ before its `run_resumed`, leaves the candidates ref at the recorded commit, prun
 reclaims the worktree and intent. The next step integrates the candidate at that commit, the log
 holds one queue position across the kill and the recovery, and it replays twice to equal states.
 
+## `fn a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(phase: HookPhase) {`
+
+`Ref.DeleteCandidatePin` before and after (registry rows 41 and 42, `fault_row: t_cand_ref`),
+constructed where a candidate-prepared pin stands by production's own hand: inside the promotion.
+The kill child resumes the healthy run and takes one step with an editing worker, so the pin is
+the one `pin_candidate` made, and the death is a real kill inside `reclaim_after_creation` during
+`TopologyRun::promote_candidate`, at the phase the argument names.
+
+The prefix, asserted before the recovery: `candidate_prepared` and `task_candidate_created`
+durable and nothing after them; the candidates ref at the recorded commit; the pin at that commit
+before its deletion and gone after it, and Git listing no other candidate-prepared pin; the commit
+reachable either way, because R11 holds it, so in this transaction the deletion releases nothing
+to Git and the after phase's tabled `ReclaimReleased` finds nothing to reclaim; the generation's
+worktree and intent standing, since the deletion precedes the reclaim; the generation `Closed`;
+and `recovery_for` reading the standing pin as an unfinished promotion and the deleted one as
+nothing owed.
+
+The recovery is the next incarnation's `run_recovery_order`. From the before prefix step (f)
+finishes the promotion: the resume enters `Ref.DeleteCandidatePin` once, at both phases, and
+`recovered.finished` names alpha. From the after prefix it enters the site at neither phase and
+finishes nothing, and the closed generation's worktree is reclaimed all the same. In both the
+resume creates no candidates ref, appends its `run_resumed` and no second
+`task_candidate_created`, leaves no pin, no worktree, no Git registration and no intent, and
+classifies again as owing nothing. The recovered log replays twice equal; the candidate then
+integrates on the next step, the integration ref at the commit the dead incarnation created, one
+queue position across the kill and the recovery, and the log replays twice equal again.
+
+Until this witness the two coordinates' only kill construction was the finalization matrix's
+pair of cells, over a pin no crash leaves (`with_a_candidate_pin_no_crash_leaves`); the Gate 5
+audit's own note on row 41 reads that cell as built "not in the candidate-promotion transaction
+that t_cand_ref names". Since the third repair round of #311
+`kill_after_report_before_each_cleanup_step`, the test the sequential registry and `coverage.rs`
+cite for rows 41 and 42, runs this witness at both phases as its two cells of the site, so the
+citation's observation record holds this construction and no finalization cell over a planted
+pin; the two tests below run it on its own.
+
+## `fn a_kill_before_the_candidate_pin_is_deleted_is_finished_by_the_next_resume_which_deletes_it_once()`
+
+The before phase: the pin stands, and the next resume deletes it once.
+
+## `fn a_kill_after_the_candidate_pin_is_deleted_is_adopted_by_the_next_resume_which_deletes_nothing()`
+
+The after phase: the deletion is durable, and the next resume adopts it.
+
 ## `fn a_kill_after_the_candidate_pin_is_settled_interrupted_by_the_next_resume_which_prunes_the_orphan_pin()`
 
 Row 40 of Gate 5's audit, `Ref.PinCandidatePrepared`/after, which the gate's run 3 regraded: the
@@ -4330,12 +4620,20 @@ accepted, pinning its own candidate and pruning that pin with its promotion.
 Gate 5's strict re-audit, row 96: `Event.OpenLog`'s `TruncateTornTail` point in error-return mode had
 no committed witness. The coverage test fires it on a bare log and drives nothing.
 
-A committed run with an open generation gets an unterminated final line, and the resume is armed
-to fail at the point. The open truncates the torn tail, the point answers the error, and the
+The run is resumed once and that incarnation dies writing its first event: the log is
+`run_started`, `run_resumed` and an unterminated final line, beside no creation marker, with the
+execution root and the integration ref standing. Until Gate 5's third run the torn line followed a
+dispatch planted on the P6 fixture, which that run graded near-exact: a dispatch beside a published
+marker is a state no crash leaves, and the converging resume removed the marker and recreated the
+root. The dispatch is gone rather than moved after the first resume, because a torn append after a
+dispatch is the attempt's start, which the generation's worktree precedes. Both resumes go through
+the real refs. The resume is armed to fail at the point. The open truncates the torn tail, the point answers the error, and the
 barrier stops at the open. The refusal names the point and says the run is resumable. What the
 refusal leaves is the registry's residue for the point, R21 with the unterminated final line
 truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
-event: nothing derived from the log was acted on. The next resume repeats the barrier: it opens
+event: nothing derived from the log was acted on, and the refused resume's harness holds no site
+but its locks and the open. The next resume enters none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names and repeats the barrier: it opens
 and proves the prefix, and has nothing left to truncate because the refused open's truncation
 stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
 states.
@@ -4493,6 +4791,17 @@ kill took is settled interrupted after the planted one. A further step re-verifi
 and publishes it under the next sequence, and the log replays twice to equal states.
 
 
+## `fn integration_ref_reflog(fixture: &Fixture) -> Vec<String> {`
+
+The integration ref's reflog, one new value per entry, as Git reports it. The ref lives under
+`refs/upstroke/`, where Git keeps a reflog only under `core.logAllRefUpdates=always`, which the
+witness below sets on its scratch repository before anything writes the ref.
+
+## `fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {`
+
+Every ref under `refs/upstroke/` with its value, as `git for-each-ref` lists them: what the
+repository holds, read without the engine.
+
 ## `fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(`
 
 Rows 31 and 32 of Gate 5's audit, `Ref.CreateIntegration` before and after, and row 68,
@@ -4501,10 +4810,17 @@ integration ref (P8), with nothing durable between the two (`create.rs`, `p8_cre
 takes the `MarkerRemoved` state directly), so a creation killed after its marker's removal leaves
 row 68's prefix and row 31's alike. `Fixture::healthy` is the committed run with its marker still
 standing (P6); the prefix is built through the funnels whose phases it ends at: `rundir::remove_marker`
-under the production adapter, and for row 32 also the refs seam's `create_zero_old` under the
-production effects adapter, so the run's log is exactly its committed prefix, the marker is gone,
-the ref exists only when its creation was performed, and nothing a later step does (the execution
-root) is on disk. `kill_after_run_started_creates_integration_ref` and
+under the production adapter, and for row 32 also P8's own body, `ensure_integration_ref`, over
+the real `WorkspaceManager` under the production effects adapter, so the run's log is exactly its
+committed prefix, the marker is gone, the ref exists only when its creation was performed, and
+nothing a later step does (the execution root) is on disk. **The ref is a Git ref in the fixture's
+repository.** Until the gate's third run it was `RecordingRefs`, an in-memory double read through
+the resume's `IntegrationRefs` seam, and that run graded both rows near-exact for it (report §8.4).
+The prefix is read three ways before the resume: through the manager's `direct_ref_target`, which
+is what the recovery reads; through `git for-each-ref` over the run's namespace, which lists that
+ref and no other; and, after the resume, through the ref's reflog, which holds one entry at the
+recorded base whether the prefix or the resume created it. The resume is `resume_with_real_refs`,
+whose refs seam is the manager. `kill_after_run_started_creates_integration_ref` and
 `a_resume_adopts_an_integration_ref_already_at_the_recorded_base` resume `Fixture::healthy` with its
 marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
 enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
@@ -4929,6 +5245,12 @@ the run lock's release. `Lock.Release` is last and its "done" is the lock
 being free, which the guard's drop also achieves: the fault at it is
 survivable, so a resume faulted there still reaches the refusal.
 
+Each effect also says whether a planting holds its residue (`planted`). Every effect's residue
+is planted by `plant_finished_run_with` but one: the candidate-prepared pin's deletion has
+residue only in a planting that declared it (`with_a_candidate_pin_no_crash_leaves`), so it is
+part of the expected order in the two declared-pin tests, which fault and kill the sweep, and at
+no cell of either matrix, whose plantings declare nothing and which skip the site.
+
 ## `fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectS…`
 
 Every cell of the finalization matrix: both hook phases of every effect's
@@ -4945,11 +5267,42 @@ through the funnel from a drop; the funnel's after phase can. A fault
 at the release itself is absorbed (`RunLock::release` discards the
 funnel's error), so it leaves every earlier effect done.
 
+An effect whose residue the planting does not hold is not placed in the order: it is asserted
+done, as it was before the fault, and never the faulted one. For the candidate-prepared pin at
+every cell of either matrix, that is the assertion that no such pin stands after the fault; the
+site's own two cells are driven by the declared-pin tests, whose plantings hold it.
+
+## `fn fault_at_a_finalization_cell_and_converge(`
+
+One cell of the error-return finalization matrix, over a planting the caller made: the fault
+injected at the cell, the faulted resume's refusal and what it left (`assert_finalization_order`),
+the next resume finalizing and refusing (`assert_finalized`), and the third resume's fresh branch,
+as the section on `kill_after_report_before_each_cleanup_step` describes cell by cell. The
+candidate-prepared pin's two readings follow the planting's own declaration
+(`surplus_candidate_pin`): Git lists one before the fault, and the next resume enters
+`Ref.DeleteCandidatePin` once when the fault came before its deletion, only where the planting
+declared the damage; over the matrix's plantings both read zero at every cell. Split out of the
+matrix in the third repair round of #311 so the sweep's own cells could move to a test nothing
+cites without a second copy of the cell.
+
 ## `fn kill_after_report_before_each_cleanup_step() {`
 
 `kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
-every finalization site, before and after the effect, for Complete and
-for Halted — 26 and 24 cells, the report's two sites among them. The
+every finalization site but the candidate-prepared pin's, before and after the effect, for
+Complete and for Halted — 24 and 22 cells, the report's two sites among them, counted by the
+test — each driven by `fault_at_a_finalization_cell_and_converge` over a planting that declares
+no damage. Since the second repair round of #311 the finished run's planting completes alpha's
+promotion, and since the third round the test asserts at every cell that no candidate-prepared
+pin stands before the fault and that the next resume enters `Ref.DeleteCandidatePin` at no cell.
+Its two cells of that site are the two kills inside the promotion,
+`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume` at both phases, run under
+this test's name because `coverage.rs` and the sequential registry (rows 41 and 42, `fault_row:
+t_cand_ref`) cite it for both phases of the site: what its observation record holds for the site
+is the promotion's own crash, resumed by the next incarnation, and no cell over a planted pin.
+(The second round drove the two cells here over a pin planted as declared damage; the third
+review graded that a credited construction carrying damage no crash leaves, so those cells moved
+to `a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`,
+which nothing cites.) The
 faulted resume ends there with the log untouched and exactly the effects
 before the fault done; the next resume finalizes the rest and refuses; a
 third finds nothing to do — it finds the report current, takes its
@@ -4991,6 +5344,17 @@ inside the removal's site: a rollback of a synced deletion is not a shape
 the fault model admits, and the order is
 `a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`'s to
 guard.
+
+## `fn a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges()`
+
+The two `Ref.DeleteCandidatePin` cells of the error-return matrix, at Complete and at Halted, over
+a pin planted as declared damage (`with_a_candidate_pin_no_crash_leaves`), driven by
+`fault_at_a_finalization_cell_and_converge`: a fault before the sweep leaves the pin standing
+beside the deleted prepared pin and the next resume deletes it once; a fault after it leaves the
+pin gone and the next resume deletes nothing; either way the cleanup order holds around the sweep
+and the third resume runs no ref site again. Cited by nothing: it holds the sweep's behaviour and
+constructs no crash's prefix (the section on `with_a_candidate_pin_no_crash_leaves`). Until the
+third repair round of #311 these four cells ran inside the matrix the registry cites for the site.
 
 ## `fn a_checkouts_deletion_is_made_durable_before_its_intent_i…`
 
@@ -5208,6 +5572,10 @@ the one thing of the report's protocol left is the record of the staging
 directory the publication removed, which outlives the refused barrier as
 the fix requires, and the converging finalization reclaims it.
 
+Of the two pin families the candidate-prepared one is declared damage since the second repair
+round of #311 (`with_a_candidate_pin_no_crash_leaves`, called on the planting): the test holds
+that neither family is pruned behind an unproven name, and constructs no crash's prefix.
+
 ## `fn a_report_rename_without_directory_sync_is_proven_before_…`
 
 The crash lens's restart case, at Complete and at Halted: a rename whose
@@ -5229,7 +5597,16 @@ staged or renamed nothing. The dead writer's staged report the planting
 leaves is reclaimed before the fault is armed, as in
 `a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`
 and for its reason: the reclaim's own barrier would otherwise refuse the
-faulted finalization before the rename this test is about.
+faulted finalization before the rename this test is about. The
+candidate-prepared pin among "both pin families" is declared damage here too
+(`with_a_candidate_pin_no_crash_leaves`).
+
+## `fn fresh_report_hook_errors_stop_cleanup_and_retry()` › `let planted = with_a_candidate_pin_no_crash_leaves(planted);`
+
+The third of the report-barrier tests that read "a prepared pin and a candidate-prepared pin stand
+to be pruned" before they fault the report's sites. The candidate-prepared one is declared damage
+(`with_a_candidate_pin_no_crash_leaves`): what is held is that an error at any of the fresh
+branch's four coordinates stops cleanup with both families standing, not a crash's prefix.
 
 ## `const FINALIZATION_CHILD_BOUND: Duration = Duration::from_s…`
 
@@ -5295,8 +5672,10 @@ for the resume child's (`r1/at-5eb16256/non-unicode-kill-report.log`,
 The next resume of a finalization kill cell, in a process of its own. It
 resumes the planted run once through the harness bundle `resume` uses,
 `HarnessTopologyHooks` with a recording durability ledger. It then writes
-one JSON object to the report file, with three fields:
+one JSON object to the report file, with four fields:
 
+- `candidate_pin_deletions`: how many times the resume entered
+  `Ref.DeleteCandidatePin` (its before phase, counted on the harness);
 - `refusal`: the resume's error message, or null when it continued;
 - `continued`: the `Recovered` it returned when it did;
 - `released_through_the_funnel`: whether `Lock.Release` was observed at
@@ -5330,6 +5709,12 @@ its report. Returns the refusal it reported and whether the release was
 observed at both phases. A resume that continued past a finished run fails
 here, naming what it returned.
 
+## `fn candidate_pin_deletions_of_the_fresh_resume(planted: &FinishedPlanting, tag: &str) -> u64 {`
+
+Reads `candidate_pin_deletions` from the report the resume child left, after
+`resume_in_a_fresh_process` has read the rest: what the kill matrix holds each cell's credited
+recovery to. A report without the field fails the cell, quoting it.
+
 ## `fn a_kill_inside_finalization_after_the_execution_root_is_r…`
 
 T-FINALIZE with a real process death inside finalization: the child
@@ -5350,15 +5735,30 @@ the restart runs in a process of its own as well
 (`resume_in_a_fresh_process`), and the release at both phases is read from
 that child's report.
 
+## `fn kill_at_a_finalization_cell_and_converge(`
+
+One cell of the kill matrix, over a planting the caller made: the kill child, what its death left
+read against the cleanup order, the fresh-process resume, `assert_finalized` and the replay pair,
+as the section on `kill_at_every_finalization_cell` lists. The candidate-prepared pin's readings
+follow the planting's declaration as in `fault_at_a_finalization_cell_and_converge`, the deletion
+count read from the resume child's report (`candidate_pin_deletions_of_the_fresh_resume`). Split
+out of the matrix in the third repair round of #311, for the same reason as its error-return twin.
+
 ## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
 
 The ST-18 matrix executed as kills. The child is killed at every cell of
-`finalization_sites(outcome)`: both hook phases of every effect's site, in
-effect order, 26 at Complete and 24 at Halted asserted as exact counts, the
-cells `kill_after_report_before_each_cleanup_step` drives with error
-returns. Each cell plants a finished run with every kind of residue, kills
-the child there (`kill_inside_finalization`) and requires, in order:
+`finalization_sites(outcome)` but the candidate-prepared pin's two: both hook phases of every
+other effect's site, in effect order, 24 at Complete and 22 at Halted asserted as exact counts,
+the cells `kill_after_report_before_each_cleanup_step` drives with error returns. Each cell
+plants a finished run with every kind of residue a crash leaves finalization and no
+candidate-prepared pin, which the matrix asserts at every cell (Gate 5's audit selected this test
+for rows 41 and 42, and until the third repair round of #311 its two cells of that site ran over a
+pin planted as declared damage; they are `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s
+now, which nothing cites); kills the child there (`kill_inside_finalization`, through
+`kill_at_a_finalization_cell_and_converge`) and requires, in order:
 
+- before the kill, Git listing no candidate-prepared pin; and at the boundary the next resume
+  reads, none;
 - the log untouched by the death, and the answer files byte-identical;
 - `assert_finalization_order` over what the death left: every effect before
   the cell done, the cell's own effect done only at its after phase, nothing
@@ -5367,6 +5767,9 @@ the child there (`kill_inside_finalization`) and requires, in order:
   (`resume_in_a_fresh_process`), finalizing what is left and refusing, with
   the report "regenerated" when the death came before its publication and
   "already current" when it came after;
+- that resume entering `Ref.DeleteCandidatePin` at no cell
+  (`candidate_pin_deletions_of_the_fresh_resume`), so what a cell's recovery
+  repairs is what the kill at that cell left;
 - `assert_finalized`, and the log still untouched;
 - the report naming the runner `run_started` recorded, and the run lock
   released through its funnel, at both phases, by that resume;
@@ -5402,7 +5805,8 @@ process attempted any report write at all. It passed both halves at
 pruned"* (`r1/at-5eb16256/unkeyed-memory.log`). The path-keyed recipe fails
 there too (`path-keyed-memory.log`).
 
-The matrix fails at the cell named under four more recipes, all under
+The matrix fails at the cell named under three more recipes, and a fourth
+moved to the declared-pin kill test in the third repair round of #311, all under
 `~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`:
 
 - `finalize-fresh-branch-skips-cleanup`, a resume that reads a current
@@ -5410,7 +5814,18 @@ The matrix fails at the cell named under four more recipes, all under
 - `finalize-reads-a-missing-report-as-current`:
   `…/RunDir.WriteReport/before`;
 - `finalize-skips-candidate-pins-once-prepared-pins-are-gone`:
-  `…/Ref.DeletePreparedPin/after`;
+  `…/Ref.DeletePreparedPin/after` until the second repair round of #311, over
+  the pin the planting then left at every cell; since then
+  `…/Ref.DeleteCandidatePin/before`, the declared cell, where the fresh resume
+  is held to deleting the pin once and the recipe deletes none
+  (`~/orch-pr10/clause2-evidence-r2/mutations/`, row H4, with the other five
+  recipes of this list and the last re-run unchanged as rows H1 to H6); since
+  the third round that cell is
+  `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s,
+  which dies there on the same count (`~/orch-pr10/clause2-evidence-r3/mutations/`,
+  row H4: `Halted/Ref.DeleteCandidatePin/before`, `left: 0 right: 1`, its
+  error-return twin the same), and the matrix, with no candidate-prepared pin
+  at any cell, survives the recipe, as stated in advance;
 - `remove-execution-root-refuses-an-absent-root`, a removal that refuses a
   root the dead child already removed: `…/Worktree.RemoveExecutionRoot/after`.
 
@@ -5428,14 +5843,22 @@ took 6.44 s (`r1/matrix/timing-error-matrix-alone-5eb16256.log`). About
 `os._exit` and a `SIGKILL` of itself take 0.00 s, and `core_pattern` names
 a pipe helper (`matrix/abort-cost-on-this-box.log`).
 
+## `fn a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume()`
+
+The two `Ref.DeleteCandidatePin` cells of the kill matrix, at Complete and at Halted, over a pin
+planted as declared damage, driven by `kill_at_a_finalization_cell_and_converge`: the child killed
+before the sweep leaves the pin standing and the fresh resume deletes it once; killed after it,
+the pin is gone and the fresh resume deletes nothing. Cited by nothing, for the reason the
+error-return twin gives.
+
 ## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
 
-The Complete half of the kill matrix: 26 cells, the candidates ref's
+The Complete half of the kill matrix: 24 cells, the candidates ref's
 deletion among them.
 
 ## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
 
-The Halted half: 24 cells. One test per outcome, so the two halves run in
+The Halted half: 22 cells. One test per outcome, so the two halves run in
 parallel.
 
 ## `fn kill_after_run_finished_before_report() {`
