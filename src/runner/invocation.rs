@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/runner/invocation.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::fmt;
 
 use serde::de::Error as _;
