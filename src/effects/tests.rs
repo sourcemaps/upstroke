@@ -746,6 +746,105 @@ fn every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;
+
+struct UnstatedLint {
+    path: String,
+    lint: &'static str,
+    level: Option<&'static str>,
+}
+
+impl UnstatedLint {
+    fn describe(&self) -> String {
+        match self.level {
+            Some(level) => format!("{}: `{}` is `{level}` at file level", self.path, self.lint),
+            None => format!("{}: `{}` is stated at no level", self.path, self.lint),
+        }
+    }
+}
+
+fn governed_lints_no_classified_module_states_at_file_level() -> Vec<UnstatedLint> {
+    let sources: BTreeMap<String, String> = scanned_sources().into_iter().collect();
+    let mut unstated = Vec::new();
+    for path in super::CLASSIFIED_MODULES {
+        let Some(source) = sources.get(*path) else {
+            panic!(
+                "{path} is in `CLASSIFIED_MODULES` and the scan of src/ and examples/ did not \
+                 read it"
+            );
+        };
+        for lint in USED_GOVERNED_LINTS {
+            let level = crate::effects::lint_levels::file_level_lint_state(source, lint);
+            if matches!(level, Some("forbid" | "deny" | "allow" | "expect")) {
+                continue;
+            }
+            unstated.push(UnstatedLint {
+                path: (*path).to_owned(),
+                lint,
+                level,
+            });
+        }
+    }
+    unstated
+}
+
+#[test]
+fn every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint() {
+    let unstated = governed_lints_no_classified_module_states_at_file_level();
+    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for entry in &unstated {
+        *per_file.entry(entry.path.as_str()).or_default() += 1;
+    }
+    assert!(
+        per_file.len() < super::CLASSIFIED_MODULES.len(),
+        "no classified module states a governed lint at file level, so this census is \
+         measuring nothing"
+    );
+    let neither: Vec<&str> = per_file
+        .iter()
+        .filter(|(_, count)| **count == USED_GOVERNED_LINTS.len())
+        .map(|(path, _)| *path)
+        .collect();
+    assert!(
+        neither.is_empty(),
+        "each of these classified modules carries neither a file-level fence nor a file-level \
+         allowance of any governed lint, so every governed lint takes its level in it from \
+         `-D warnings` alone, which an inner `allow` the placement scan does not read -- \
+         macro-written, or spelled apart -- lowers: the shape Gate 5's fourth run executed in \
+         src/capacity.rs and src/runner/invocation.rs \
+         (`G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`). Write \
+         `#![forbid(clippy::disallowed_methods, clippy::disallowed_types, \
+         clippy::disallowed_macros)]` in its prologue, `deny` for a lint an allowance below \
+         it needs (`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` says \
+         which), or the module-level allow {ALLOWLIST_TOML} records:\n{neither:#?}"
+    );
+}
+
+#[test]
+fn the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink() {
+    let unstated = governed_lints_no_classified_module_states_at_file_level();
+    let listed: Vec<String> = unstated.iter().map(UnstatedLint::describe).collect();
+    let pinned = UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES;
+    let direction = if unstated.len() > pinned {
+        "a classified module leaves a governed lint's level unstated that was stated before, \
+         or arrived leaving one unstated, or the pin was lowered below what the tree states; \
+         fence the pair -- `forbid`, or `deny` where an allowance below it makes `forbid` \
+         E0453 -- record its allowance, or restore the pin"
+    } else {
+        "a pair was fenced or recorded; lower `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES` \
+         to the count found, so the residue only ever shrinks"
+    };
+    assert_eq!(
+        unstated.len(),
+        pinned,
+        "{} governed-lint pairs in classified modules are stated at no file level against \
+         {pinned} pinned: {direction}. Each pair takes its level from `-D warnings` alone, or \
+         from a parent's `deny`, and either is lowered by an inner `allow` the placement scan \
+         does not read; a `forbid` is not. The pairs:\n{listed:#?}",
+        unstated.len()
+    );
+}
+
 #[test]
 fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through_no_disguise() {
     let on_a_function = "#[allow(clippy::disallowed_methods)]\nfn go() {}\n";

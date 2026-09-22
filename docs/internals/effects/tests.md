@@ -358,6 +358,94 @@ The live tree. The floor on forbidding files is the sweep's own control: a
 reader regression that resolved no level anywhere would otherwise leave
 nothing to report and pass.
 
+## `const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;`
+
+The per-lint residue of `G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`,
+pinned so that it can only shrink: file-and-lint pairs over
+`CLASSIFIED_MODULES` x `USED_GOVERNED_LINTS` whose lint is stated at no level
+in the file's own prologue. Each is inside the carve-out -- a file that allows
+one or two governed lints and says nothing about the rest -- and for the
+unstated lint the file is exactly where `src/capacity.rs` was at `9bb177ea`.
+A count and not a list, on purpose: a list of 29 pairs in an instrument is a
+second roll-call, and the fence change that closes a pair should lower one
+number, not edit a table. Lower it in the change that fences or records a
+pair; `the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink`
+names every pair either way.
+
+## `struct UnstatedLint {`
+
+One (module, lint) pair whose level the module's prologue does not state:
+`level` is what `file_level_lint_state` read, `None` for silence and `warn`
+for the one keyword that is a statement without being a fence or an
+allowance.
+
+## `fn governed_lints_no_classified_module_states_at_file_level() -> Vec<UnstatedLint> {`
+
+**Derived from the tree and the roll-call, from no list of files.** For every
+entry of `CLASSIFIED_MODULES` and every lint of `USED_GOVERNED_LINTS`, the
+file's leading inner attributes are read by `file_level_lint_state`, and
+`forbid`, `deny`, `allow` and `expect` each count as a statement. The three
+readers that already exist then judge each statement: a `deny` that could be
+`forbid` is refused by
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`; an
+`allow` or `expect` is bound to `effects/allowlist.toml` by
+`every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist`; a
+`forbid` needs no judge, because rustc refuses every downgrade beneath it as
+`E0453`. What none of the three asked was whether each roll-call entry had
+made a statement at all, and that is the whole of what this reads.
+
+The allowance leg is what the file states, not what the allowlist records.
+The two agree for every row but one: `src/agent/bin.rs` records
+`allows = [clippy::disallowed_methods]` for an outer attribute on its inline
+`mod tests`, so its production region carried no allowance and no fence, and
+every enumeration that took the row as the carve-out -- Gate 5's fourth run,
+#316 and both of its reviews -- counted it as carved out. Read from the file
+it was the third module of the finding's class, and the first run of this
+census at `de6d6434` named it.
+
+A roll-call entry the scan did not read is a panic, not a skip: the scan
+walks `src/` and `examples/`, so a path outside both would be a module this
+census could never judge.
+
+## `fn every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint() {`
+
+**The class of `G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`, refused.** A
+classified module whose prologue states none of the three governed lints
+takes every one of them from `-D warnings` alone, and an inner `allow` the
+placement scan does not read -- written by a macro, or with its tokens spelled
+apart -- lowers that level; Gate 5's fourth run executed exactly this in
+`src/capacity.rs` and `src/runner/invocation.rs`, and #316 fenced the two
+without building the guard. The floor is the census's own control: were no
+classified module fully stated, the test would be reporting on a reader that
+resolves nothing.
+
+Held both ways at `de6d6434` (`~/orch-pr10/guard-decision-evidence/`): with
+the two fenced files put back to their `9bb177ea` bytes it names exactly
+those two; with an undeclared, unfenced, unallowed file appended to
+`CLASSIFIED_MODULES` it names exactly that file; at the head with
+`src/agent/bin.rs` fenced it passes.
+
+**What it does not catch, by construction.** A module absent from
+`CLASSIFIED_MODULES` (`W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`);
+a lint left unstated in a module that states another, which is the pin
+below; a route through a lint a file allows, or through a `deny` that cannot
+be `forbid` (`PR7-WRAPPERS-EMPTY-DOMAIN`); and every production file outside
+the roll-call, where the same silence stands unjudged
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`).
+
+## `fn the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink() {`
+
+The pin on the per-lint residue. The count is asserted equal, not bounded,
+so a pair fenced is a red test until the constant is lowered and a pair
+opened is a red test that names it -- a module that arrives stating two
+lints and not the third, or a carve-out file that drops a `forbid` it had.
+Held both ways at `de6d6434`: the `forbid` of `clippy::disallowed_macros`
+removed from `src/runner/container/view.rs` fails at 30 naming that pair;
+the constant lowered by one fails at 29 against 28 and raised by one at 29
+against 30, each with its reading stated. An exact pin can be offset -- one pair fenced and another
+opened in the same change is the same count -- which is why the test above
+holds the fully silent case on its own and why the message lists every pair.
+
 ## `fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through_no_disguise() {`
 
 The scan refuses what it is for — driven with input that breaks each rule.
