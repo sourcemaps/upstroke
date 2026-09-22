@@ -32,7 +32,10 @@ Where that resume is a witness's **credited** recovery, the witness is inexact u
 obligation. That is the defect PR #311's two review rounds found and the pull request repaired
 where it bit: round 1 in the five witnesses of rows 15, 18, 33, 34, 57, 98, 122 and 133, which now
 prune the pins their plants leave; round 2 in the finalization kill matrix (19 of the 26 cells
-Gate 5's audit credits to it), whose planting now completes the promotion. The helper bodies are
+Gate 5's audit credits to it), whose planting now completes the promotion; round 3 moved the pin
+the matrices then planted as declared damage at their two `Ref.DeleteCandidatePin` cells out of
+both, into two tests nothing cites, and made the cited test's two cells of that site the
+promotion kills, so no credited test plants the pin at all. The helper bodies are
 identical on `a738abcb`, the pull request's base (the round-2 regression lens's hash comparison).
 
 **What remains.** The helpers still write the pin. Executed on this box at `ae673768`, the

@@ -922,15 +922,23 @@ crash inside it leaves no `run_finished`; every resume of an unfinished log runs
 unfinished, before the loop can close the run; and `TopologyRun::close_run` is the only emitter of
 `run_finished`. Finalization's sweep of `candidate-prepared/` refs is therefore defensive, and a
 test that needs the sweep to find something has to plant damage. It is planted here, by name, and
-nowhere silently: at the two `Ref.DeleteCandidatePin` cells of each finalization matrix, and in
+nowhere silently: in the two tests that fault and kill the sweep over it,
+`a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`
+and `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`, and in
 the four behaviour tests that assert on the sweep (`resume_finalizes_halted_then_refuses` and the
-three report-barrier tests). **A cell or a test that plants it constructs no crash's prefix and
-earns no exactness credit under ST-07's first obligation.** What it holds is the sweep's
+three report-barrier tests); in neither finalization matrix. **A test that plants it constructs no
+crash's prefix and earns no exactness credit under ST-07's first obligation**, and none of the six
+that plant it is cited by the sequential registry, by `coverage.rs` or by Gate 5's audit. (The
+second repair round of #311 planted it at the two `Ref.DeleteCandidatePin` cells of each matrix;
+the third review read those cells as credited evidence, the registry and `coverage.rs` naming the
+error-return matrix for rows 41 and 42 and the audit having selected the kill matrix for them, and
+the third round moved them out.) What it holds is the sweep's
 behaviour: that the step runs after the prepared pins and before the candidates refs, that a fault
 or a kill inside it converges on the next resume, and that no pin of either family is pruned
 before the report is durable. The exact constructions of `Ref.DeleteCandidatePin` before and after
 are the two kills inside the promotion
-(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`).
+(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`), which the cited test runs
+at both phases as its two cells of the site.
 
 Measured over the 570 topology tests at `ae673768`, one process per test
 (`~/orch-pr10/clause2-evidence-r2/census/at-ae673768/`): the loop's own `close_run` reached
@@ -4579,7 +4587,11 @@ queue position across the kill and the recovery, and the log replays twice equal
 Until this witness the two coordinates' only kill construction was the finalization matrix's
 pair of cells, over a pin no crash leaves (`with_a_candidate_pin_no_crash_leaves`); the Gate 5
 audit's own note on row 41 reads that cell as built "not in the candidate-promotion transaction
-that t_cand_ref names".
+that t_cand_ref names". Since the third repair round of #311
+`kill_after_report_before_each_cleanup_step`, the test the sequential registry and `coverage.rs`
+cite for rows 41 and 42, runs this witness at both phases as its two cells of the site, so the
+citation's observation record holds this construction and no finalization cell over a planted
+pin; the two tests below run it on its own.
 
 ## `fn a_kill_before_the_candidate_pin_is_deleted_is_finished_by_the_next_resume_which_deletes_it_once()`
 
@@ -5236,7 +5248,8 @@ survivable, so a resume faulted there still reaches the refusal.
 Each effect also says whether a planting holds its residue (`planted`). Every effect's residue
 is planted by `plant_finished_run_with` but one: the candidate-prepared pin's deletion has
 residue only in a planting that declared it (`with_a_candidate_pin_no_crash_leaves`), so it is
-part of the expected order at the two `Ref.DeleteCandidatePin` cells and at no other.
+part of the expected order in the two declared-pin tests, which fault and kill the sweep, and at
+no cell of either matrix, whose plantings declare nothing and which skip the site.
 
 ## `fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectS…`
 
@@ -5256,23 +5269,40 @@ funnel's error), so it leaves every earlier effect done.
 
 An effect whose residue the planting does not hold is not placed in the order: it is asserted
 done, as it was before the fault, and never the faulted one. For the candidate-prepared pin at
-every cell but its own two, that is the assertion that no such pin stands after the fault.
+every cell of either matrix, that is the assertion that no such pin stands after the fault; the
+site's own two cells are driven by the declared-pin tests, whose plantings hold it.
+
+## `fn fault_at_a_finalization_cell_and_converge(`
+
+One cell of the error-return finalization matrix, over a planting the caller made: the fault
+injected at the cell, the faulted resume's refusal and what it left (`assert_finalization_order`),
+the next resume finalizing and refusing (`assert_finalized`), and the third resume's fresh branch,
+as the section on `kill_after_report_before_each_cleanup_step` describes cell by cell. The
+candidate-prepared pin's two readings follow the planting's own declaration
+(`surplus_candidate_pin`): Git lists one before the fault, and the next resume enters
+`Ref.DeleteCandidatePin` once when the fault came before its deletion, only where the planting
+declared the damage; over the matrix's plantings both read zero at every cell. Split out of the
+matrix in the third repair round of #311 so the sweep's own cells could move to a test nothing
+cites without a second copy of the cell.
 
 ## `fn kill_after_report_before_each_cleanup_step() {`
 
 `kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
-every finalization site, before and after the effect, for Complete and
-for Halted — 26 and 24 cells, the report's two sites among them, counted
-by the test. Since the second repair round of #311 each cell's planting
-holds a candidate-prepared pin only where the cell is one of the two at
-`Ref.DeleteCandidatePin`, and there as declared damage
-(`with_a_candidate_pin_no_crash_leaves`): before the fault every planted
-effect's residue stands, the unplanted one's does not, and Git lists
-exactly that many candidate-prepared pins; and the next resume enters
-`Ref.DeleteCandidatePin` once at the declared cell whose fault came
-before the deletion and at no other cell. `coverage.rs` and the
-sequential registry cite this test for both phases of that site, which
-the two declared cells still reach. The
+every finalization site but the candidate-prepared pin's, before and after the effect, for
+Complete and for Halted — 24 and 22 cells, the report's two sites among them, counted by the
+test — each driven by `fault_at_a_finalization_cell_and_converge` over a planting that declares
+no damage. Since the second repair round of #311 the finished run's planting completes alpha's
+promotion, and since the third round the test asserts at every cell that no candidate-prepared
+pin stands before the fault and that the next resume enters `Ref.DeleteCandidatePin` at no cell.
+Its two cells of that site are the two kills inside the promotion,
+`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume` at both phases, run under
+this test's name because `coverage.rs` and the sequential registry (rows 41 and 42, `fault_row:
+t_cand_ref`) cite it for both phases of the site: what its observation record holds for the site
+is the promotion's own crash, resumed by the next incarnation, and no cell over a planted pin.
+(The second round drove the two cells here over a pin planted as declared damage; the third
+review graded that a credited construction carrying damage no crash leaves, so those cells moved
+to `a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`,
+which nothing cites.) The
 faulted resume ends there with the log untouched and exactly the effects
 before the fault done; the next resume finalizes the rest and refuses; a
 third finds nothing to do — it finds the report current, takes its
@@ -5314,6 +5344,17 @@ inside the removal's site: a rollback of a synced deletion is not a shape
 the fault model admits, and the order is
 `a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`'s to
 guard.
+
+## `fn a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges()`
+
+The two `Ref.DeleteCandidatePin` cells of the error-return matrix, at Complete and at Halted, over
+a pin planted as declared damage (`with_a_candidate_pin_no_crash_leaves`), driven by
+`fault_at_a_finalization_cell_and_converge`: a fault before the sweep leaves the pin standing
+beside the deleted prepared pin and the next resume deletes it once; a fault after it leaves the
+pin gone and the next resume deletes nothing; either way the cleanup order holds around the sweep
+and the third resume runs no ref site again. Cited by nothing: it holds the sweep's behaviour and
+constructs no crash's prefix (the section on `with_a_candidate_pin_no_crash_leaves`). Until the
+third repair round of #311 these four cells ran inside the matrix the registry cites for the site.
 
 ## `fn a_checkouts_deletion_is_made_durable_before_its_intent_i…`
 
@@ -5694,21 +5735,30 @@ the restart runs in a process of its own as well
 (`resume_in_a_fresh_process`), and the release at both phases is read from
 that child's report.
 
+## `fn kill_at_a_finalization_cell_and_converge(`
+
+One cell of the kill matrix, over a planting the caller made: the kill child, what its death left
+read against the cleanup order, the fresh-process resume, `assert_finalized` and the replay pair,
+as the section on `kill_at_every_finalization_cell` lists. The candidate-prepared pin's readings
+follow the planting's declaration as in `fault_at_a_finalization_cell_and_converge`, the deletion
+count read from the resume child's report (`candidate_pin_deletions_of_the_fresh_resume`). Split
+out of the matrix in the third repair round of #311, for the same reason as its error-return twin.
+
 ## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
 
 The ST-18 matrix executed as kills. The child is killed at every cell of
-`finalization_sites(outcome)`: both hook phases of every effect's site, in
-effect order, 26 at Complete and 24 at Halted asserted as exact counts, the
-cells `kill_after_report_before_each_cleanup_step` drives with error
-returns. Each cell plants a finished run with every kind of residue a crash
-leaves finalization, and at the two `Ref.DeleteCandidatePin` cells a
-candidate-prepared pin as declared damage
-(`with_a_candidate_pin_no_crash_leaves`); kills the child there
-(`kill_inside_finalization`) and requires, in order:
+`finalization_sites(outcome)` but the candidate-prepared pin's two: both hook phases of every
+other effect's site, in effect order, 24 at Complete and 22 at Halted asserted as exact counts,
+the cells `kill_after_report_before_each_cleanup_step` drives with error returns. Each cell
+plants a finished run with every kind of residue a crash leaves finalization and no
+candidate-prepared pin, which the matrix asserts at every cell (Gate 5's audit selected this test
+for rows 41 and 42, and until the third repair round of #311 its two cells of that site ran over a
+pin planted as declared damage; they are `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s
+now, which nothing cites); kills the child there (`kill_inside_finalization`, through
+`kill_at_a_finalization_cell_and_converge`) and requires, in order:
 
-- before the kill, Git listing a candidate-prepared pin at those two cells
-  only; and at the boundary the next resume reads, none but the declared one
-  a kill before its deletion left;
+- before the kill, Git listing no candidate-prepared pin; and at the boundary the next resume
+  reads, none;
 - the log untouched by the death, and the answer files byte-identical;
 - `assert_finalization_order` over what the death left: every effect before
   the cell done, the cell's own effect done only at its after phase, nothing
@@ -5717,8 +5767,7 @@ candidate-prepared pin as declared damage
   (`resume_in_a_fresh_process`), finalizing what is left and refusing, with
   the report "regenerated" when the death came before its publication and
   "already current" when it came after;
-- that resume entering `Ref.DeleteCandidatePin` once at the declared cell
-  whose kill came before the deletion and at no other cell
+- that resume entering `Ref.DeleteCandidatePin` at no cell
   (`candidate_pin_deletions_of_the_fresh_resume`), so what a cell's recovery
   repairs is what the kill at that cell left;
 - `assert_finalized`, and the log still untouched;
@@ -5756,7 +5805,8 @@ process attempted any report write at all. It passed both halves at
 pruned"* (`r1/at-5eb16256/unkeyed-memory.log`). The path-keyed recipe fails
 there too (`path-keyed-memory.log`).
 
-The matrix fails at the cell named under four more recipes, all under
+The matrix fails at the cell named under three more recipes, and a fourth
+moved to the declared-pin kill test in the third repair round of #311, all under
 `~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`:
 
 - `finalize-fresh-branch-skips-cleanup`, a resume that reads a current
@@ -5769,7 +5819,13 @@ The matrix fails at the cell named under four more recipes, all under
   `…/Ref.DeleteCandidatePin/before`, the declared cell, where the fresh resume
   is held to deleting the pin once and the recipe deletes none
   (`~/orch-pr10/clause2-evidence-r2/mutations/`, row H4, with the other five
-  recipes of this list and the last re-run unchanged as rows H1 to H6);
+  recipes of this list and the last re-run unchanged as rows H1 to H6); since
+  the third round that cell is
+  `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s,
+  which dies there on the same count (`~/orch-pr10/clause2-evidence-r3/mutations/`,
+  row H4: `Halted/Ref.DeleteCandidatePin/before`, `left: 0 right: 1`, its
+  error-return twin the same), and the matrix, with no candidate-prepared pin
+  at any cell, survives the recipe, as stated in advance;
 - `remove-execution-root-refuses-an-absent-root`, a removal that refuses a
   root the dead child already removed: `…/Worktree.RemoveExecutionRoot/after`.
 
@@ -5787,14 +5843,22 @@ took 6.44 s (`r1/matrix/timing-error-matrix-alone-5eb16256.log`). About
 `os._exit` and a `SIGKILL` of itself take 0.00 s, and `core_pattern` names
 a pipe helper (`matrix/abort-cost-on-this-box.log`).
 
+## `fn a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume()`
+
+The two `Ref.DeleteCandidatePin` cells of the kill matrix, at Complete and at Halted, over a pin
+planted as declared damage, driven by `kill_at_a_finalization_cell_and_converge`: the child killed
+before the sweep leaves the pin standing and the fresh resume deletes it once; killed after it,
+the pin is gone and the fresh resume deletes nothing. Cited by nothing, for the reason the
+error-return twin gives.
+
 ## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
 
-The Complete half of the kill matrix: 26 cells, the candidates ref's
+The Complete half of the kill matrix: 24 cells, the candidates ref's
 deletion among them.
 
 ## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
 
-The Halted half: 24 cells. One test per outcome, so the two halves run in
+The Halted half: 22 cells. One test per outcome, so the two halves run in
 parallel.
 
 ## `fn kill_after_run_finished_before_report() {`
