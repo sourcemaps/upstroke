@@ -2588,10 +2588,10 @@ fn every_path_a_primitive_acts_through_refuses_a_link_planted_at_the_before_hook
         "every primitive was driven: {driven_primitives:?}"
     );
     // The pinned count: the table's paths, resolved. Scaffolding is five
-    // paths and Registration three, so the fourteen primitives resolve to
+    // paths and Registration three, so the sixteen primitives resolve to
     // twelve root cases, four intent, five add, ten Git working directory,
-    // five removal and three ref cases.
-    let expected_total = 39;
+    // five removal, two commit-tree and three ref cases.
+    let expected_total = 41;
     assert_eq!(
         driven + skipped,
         expected_total,
@@ -2621,6 +2621,8 @@ fn every_primitive() -> Vec<Primitive> {
         P::CandidateWriteTree,
         P::ProposalCherryPick,
         P::RepairMaterialize,
+        P::SnapshotCommitTree,
+        P::CandidateCommitTree,
         P::CreateRef,
         P::CompareAndSwapRef,
         P::DeleteRef,
@@ -2638,12 +2640,14 @@ fn every_primitive() -> Vec<Primitive> {
             | P::CandidateWriteTree
             | P::ProposalCherryPick
             | P::RepairMaterialize
+            | P::SnapshotCommitTree
+            | P::CandidateCommitTree
             | P::CreateRef
             | P::CompareAndSwapRef
             | P::DeleteRef => {}
         }
     }
-    assert_eq!(all.len(), 14, "one entry per variant");
+    assert_eq!(all.len(), 16, "one entry per variant");
     all
 }
 
@@ -2655,6 +2659,9 @@ struct SubstitutionCase {
     registration: Option<PathBuf>,
     site: EffectSiteId,
     refname: String,
+    /// The tree of `head`, for the two commit-tree primitives: read here so
+    /// that `run` spawns nothing of its own between the plant and the call.
+    tree: String,
 }
 
 impl SubstitutionCase {
@@ -2703,7 +2710,12 @@ impl SubstitutionCase {
                     )
                     .expect("the ref to move or delete");
             }
-            P::CreateExecutionRoot | P::RemoveExecutionRoot | P::WriteIntent | P::CreateRef => {}
+            P::CreateExecutionRoot
+            | P::RemoveExecutionRoot
+            | P::WriteIntent
+            | P::SnapshotCommitTree
+            | P::CandidateCommitTree
+            | P::CreateRef => {}
         }
         let site = match primitive {
             P::CreateExecutionRoot => EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
@@ -2717,6 +2729,8 @@ impl SubstitutionCase {
             P::CandidateWriteTree => EffectSiteId::Object(ObjectSite::CandidateWriteTree),
             P::ProposalCherryPick => EffectSiteId::Object(ObjectSite::ProposalCherryPick),
             P::RepairMaterialize => EffectSiteId::Object(ObjectSite::RepairMaterialize),
+            P::SnapshotCommitTree => EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+            P::CandidateCommitTree => EffectSiteId::Object(ObjectSite::CandidateCommitTree),
             P::CreateRef => EffectSiteId::Ref(RefSite::CreateCandidates),
             P::CompareAndSwapRef => EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
             P::DeleteRef => EffectSiteId::Ref(RefSite::DeleteCandidatePin),
@@ -2725,6 +2739,8 @@ impl SubstitutionCase {
             primitive,
             P::CreateExecutionRoot
                 | P::RemoveExecutionRoot
+                | P::SnapshotCommitTree
+                | P::CandidateCommitTree
                 | P::CreateRef
                 | P::CompareAndSwapRef
                 | P::DeleteRef
@@ -2733,6 +2749,7 @@ impl SubstitutionCase {
         } else {
             Some(slot)
         };
+        let tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
         Self {
             fixture,
             primitive,
@@ -2740,6 +2757,7 @@ impl SubstitutionCase {
             registration,
             site,
             refname,
+            tree,
         }
     }
 
@@ -2752,6 +2770,41 @@ impl SubstitutionCase {
                 self.registration.as_deref(),
             )
             .expect("the table resolves for a case built for it")
+    }
+
+    /// The other half of the table for this case.
+    fn discovery_paths(&self) -> Vec<(PathBuf, Leaf)> {
+        self.fixture
+            .manager
+            .git_discovery_paths(self.primitive, self.slot.as_ref())
+            .expect("the table resolves for a case built for it")
+    }
+
+    /// A second slot's checkout, added beside the case's own: the working
+    /// directory no primitive's table names. `None` before the execution
+    /// root exists, which is the one case that cannot have one.
+    fn sibling_checkout(&self) -> Option<PathBuf> {
+        if self.primitive == Primitive::CreateExecutionRoot {
+            return None;
+        }
+        let sibling = self.fixture.add_task(&mut NoHooks, "sibling", 1);
+        Some(self.fixture.manager.slot_path(&sibling))
+    }
+
+    /// Where `candidate` is for this case, or `None` when this case has no
+    /// such directory to poison — an unbuilt execution root, or a slot whose
+    /// checkout the primitive has not created yet.
+    fn candidate_path(&self, candidate: Candidate, sibling: Option<&Path>) -> Option<PathBuf> {
+        let manager = &self.fixture.manager;
+        let present = |path: PathBuf| path.is_dir().then_some(path);
+        match candidate {
+            Candidate::ManagedBase => present(self.fixture.base.clone()),
+            Candidate::SlotCheckout => present(manager.slot_path(self.slot.as_ref()?)),
+            Candidate::SiblingCheckout => present(sibling?.to_path_buf()),
+            Candidate::SlotParent => present(manager.execution_root().join("tasks")),
+            Candidate::ExecutionRoot => present(manager.execution_root().to_path_buf()),
+            Candidate::PrivateRoot => present(self.fixture.private.clone()),
+        }
     }
 
     fn run(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
@@ -2767,9 +2820,17 @@ impl SubstitutionCase {
             P::WriteIntent => manager.write_intent(hooks, slot_of()),
             P::RemoveIntent => manager.remove_intent(hooks, slot_of()),
             P::AddWorktree => manager.add_worktree(hooks, slot_of(), head).map(drop),
+            // The verdict is folded in: a case asks whether the primitive
+            // did its work, and a `VerifyFailure` is a report that it could
+            // not. The walked cases are unaffected — their refusal is the
+            // outer `Err` and arrives before any verdict.
             P::VerifyWorktree => manager
                 .verify_worktree(hooks, slot_of(), &Quiescence::AtBase(head.clone()))
-                .map(drop),
+                .and_then(|verdict| {
+                    verdict.map_err(|failure| UpstrokeError::Git {
+                        message: format!("the worktree is not quiescent: {failure:?}"),
+                    })
+                }),
             P::RemoveWorktree => manager.remove_worktree(hooks, slot_of()),
             P::CandidateStage => manager.candidate_stage(hooks, slot_of(), &[]),
             P::CandidateWriteTree => manager.candidate_write_tree(hooks, slot_of()).map(drop),
@@ -2777,6 +2838,12 @@ impl SubstitutionCase {
                 .proposal_cherry_pick(hooks, slot_of(), side)
                 .map(drop),
             P::RepairMaterialize => manager.repair_materialize(hooks, slot_of(), side).map(drop),
+            P::SnapshotCommitTree => manager
+                .snapshot_commit_tree(hooks, &self.tree, head)
+                .map(drop),
+            P::CandidateCommitTree => manager
+                .candidate_commit_tree(hooks, &self.tree, head, "candidate")
+                .map(drop),
             P::CreateRef => {
                 manager.create_ref_zero_old(hooks, RefSite::CreateCandidates, &self.refname, head)
             }
@@ -2915,6 +2982,361 @@ fn a_registration_admin_directory_exchanged_at_the_before_hook_refuses_the_workt
         path.exists(),
         "and the checkout was not deleted either: every check runs first"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The other half of the table: Git's repository-discovery paths
+// ---------------------------------------------------------------------------
+
+/// Bytes that are neither a Git directory nor a `gitdir:` file. Measured on
+/// git 2.43: a child whose working directory holds one of these as its `.git`
+/// exits `128` with `fatal: invalid gitfile format: <path>`, so a primitive
+/// that runs a child in that directory fails with it and one that runs none
+/// there does not notice.
+const NOT_A_REPOSITORY: &[u8] = b"not a git repository\n";
+
+/// A second repository holding the same objects as the fixture's base, for a
+/// planted discovery link to land in: a clone, so a commit or a ref written
+/// through the link names objects the victim really holds.
+fn victim_clone(fixture: &Fixture, name: &str) -> PathBuf {
+    let victim = fixture.root.join(name);
+    let base = fixture.base.to_string_lossy().into_owned();
+    let into = victim.to_string_lossy().into_owned();
+    git(
+        &fixture.root,
+        &["clone", "-q", "--no-hardlinks", &base, &into],
+    );
+    victim
+}
+
+/// Every object the repository at `repo` holds, packed or loose.
+fn all_objects(repo: &Path) -> String {
+    git(
+        repo,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    )
+}
+
+/// The finding's own sequence, executed: `create_ref_zero_old` prechecks
+/// against the managed base, its `Before` hook renames `<base>/.git` away and
+/// plants `<base>/.git -> <victim>/.git`, the in-funnel walk passes — the base
+/// is still a real directory and `hooks-none` is untouched — and
+/// `git update-ref` follows the link, creates the ref in the victim and
+/// returns success with the managed repository unchanged.
+///
+/// **This asserts the boundary, not a repair.** It is the measurement behind
+/// [`GitWorkingDirectory`]'s trust-boundary statement, and it holds on the
+/// code before this pull request exactly as it does after: the walk does not
+/// cover `<base>/.git` and this pull request does not make it. The day a
+/// change closes the redirect is the day this test fails and the statement on
+/// [`GitWorkingDirectory`] stops being true; both move together.
+#[test]
+#[cfg(unix)]
+fn the_ref_funnel_follows_a_git_discovery_link_planted_at_the_before_hook() {
+    let fixture = Fixture::created("discovery-redirect");
+    let victim = victim_clone(&fixture, "victim-repo");
+    let refname = "refs/upstroke/test/redirect".to_owned();
+    let dot_git = fixture.base.join(".git");
+    let moved = fixture.base.join(".git.moved-away");
+    let mut hooks = SubstituteAtBefore {
+        site: EffectSiteId::Ref(RefSite::CreateCandidates),
+        target: dot_git.clone(),
+        moved: moved.clone(),
+        victim: victim.join(".git"),
+        file_link: false,
+    };
+
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut hooks,
+            RefSite::CreateCandidates,
+            &refname,
+            &fixture.head,
+        )
+        .expect("the walk passes: the base is a real directory and hooks-none is untouched");
+
+    // Restore the managed repository to ask it where the ref went.
+    fs::remove_file(&dot_git).expect("the planted link");
+    fs::rename(&moved, &dot_git).expect("the real git directory back");
+    let in_base = git_out(
+        &fixture.base,
+        &["rev-parse", "--verify", "--quiet", &refname],
+    );
+    let in_victim = git_out(&victim, &["rev-parse", "--verify", "--quiet", &refname]);
+    assert!(
+        !in_base.status.success(),
+        "the ref must be absent from the managed repository: {}",
+        String::from_utf8_lossy(&in_base.stdout).trim()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&in_victim.stdout).trim(),
+        fixture.head,
+        "and present in the repository the planted link named"
+    );
+}
+
+/// The two commit-tree funnels had no [`Primitive`] variant, so no in-funnel
+/// walk ran for them: `revalidate` proved the managed base a real directory
+/// *before* the `Before` hook and nothing proved it again, and a base
+/// exchanged for a link at the hook was followed — the commit landing in the
+/// repository the link named. They are in the table now, and the walk they
+/// inherit refuses the exchange.
+///
+/// Witnessed against the unrepaired code: with the `revalidate_acted_through`
+/// call removed from `commit_tree`, `snapshot_commit_tree` returns `Ok` and
+/// the object it names is one the victim holds and the managed repository
+/// does not.
+#[test]
+fn the_commit_tree_funnels_refuse_a_base_exchanged_at_the_before_hook() {
+    for (site, label) in [
+        (ObjectSite::SnapshotCommitTree, "snapshot"),
+        (ObjectSite::CandidateCommitTree, "candidate"),
+    ] {
+        let fixture = Fixture::created(&format!("commit-tree-base-{label}"));
+        let victim = victim_clone(&fixture, "victim-repo");
+        let objects_before = all_objects(&victim);
+        let tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+        let mut hooks = SubstituteAtBefore {
+            site: EffectSiteId::Object(site),
+            target: fixture.base.clone(),
+            moved: fixture.root.join("base-moved-away"),
+            victim: victim.clone(),
+            file_link: false,
+        };
+
+        let error = match site {
+            ObjectSite::SnapshotCommitTree => fixture
+                .manager
+                .snapshot_commit_tree(&mut hooks, &tree, &fixture.head)
+                .expect_err("the in-funnel walk sees the exchanged base"),
+            _ => fixture
+                .manager
+                .candidate_commit_tree(&mut hooks, &tree, &fixture.head, "candidate")
+                .expect_err("the in-funnel walk sees the exchanged base"),
+        };
+        let message = refusal_of(&error);
+        assert!(
+            message.contains("the managed base is not a real directory")
+                && message.contains(&fixture.base.display().to_string()),
+            "{label}: the refusal must name its reason and the base: {message}"
+        );
+        assert_eq!(
+            all_objects(&victim),
+            objects_before,
+            "{label}: no object was written into the repository the link named"
+        );
+    }
+}
+
+/// One substitution per Git repository-discovery path the table names for a
+/// primitive, planted at the `Before` hook exactly as the walked cases are.
+/// Generated from `every_primitive` and
+/// [`WorkspaceManager::git_discovery_paths`], and the assertion is the
+/// boundary [`GitWorkingDirectory`] states: the walk does **not** refuse
+/// these paths. A path that moves under the walk fails here, and has to move
+/// out of this half of the table with it.
+///
+/// The link is to a clone of the managed repository, so a primitive that
+/// follows it fails or succeeds on a real repository rather than on rubble;
+/// the assertion is about the refusal, and holds either way. `<slot>/.git` is
+/// a file, and a symlink is what replaces a file, so those cases run on the
+/// Unix legs and are counted as skipped on Windows.
+#[test]
+fn every_git_discovery_path_the_table_names_is_outside_the_walk() {
+    let mut driven = 0_usize;
+    let mut skipped = 0_usize;
+    for primitive in every_primitive() {
+        let count = SubstitutionCase::new(primitive).discovery_paths().len();
+        for index in 0..count {
+            let case = SubstitutionCase::new(primitive);
+            let (target, _) = case.discovery_paths()[index].clone();
+            let existing = fs::symlink_metadata(&target).ok().map(|m| m.file_type());
+            let file_link = existing.is_some_and(|kind| kind.is_file());
+            if file_link && cfg!(windows) {
+                skipped += 1;
+                continue;
+            }
+            let victim = victim_clone(&case.fixture, &format!("victim-{index}"));
+            let mut hooks = SubstituteAtBefore {
+                site: case.site,
+                target: target.clone(),
+                moved: case.fixture.root.join(format!("moved-away-{index}")),
+                victim: victim.join(".git"),
+                file_link,
+            };
+
+            if let Err(error) = case.run(&mut hooks) {
+                let message = refusal_of(&error);
+                assert!(
+                    !(message.contains("symlink or reparse point")
+                        && message.contains(&target.display().to_string())),
+                    "{primitive:?}: the walk refused {}, which the table names as a path it \
+                     does not cover: {message}",
+                    target.display()
+                );
+            }
+            driven += 1;
+        }
+    }
+    // The pinned count: the managed base resolves to one path, the common
+    // git dir, since that is what `<base>/.git` is; a slot checkout resolves
+    // to two, its own `.git` and the common git dir. Four primitives name no
+    // working directory, seven name the base alone (7), four a slot checkout
+    // alone (8), and `VerifyWorktree` names both (2). The five `<slot>/.git`
+    // paths are the file links, so they are the Windows skips.
+    assert_eq!(
+        (driven, skipped),
+        if cfg!(windows) { (12, 5) } else { (17, 0) },
+        "the table generated {driven} driven and {skipped} skipped cases; a working directory \
+         added to or dropped from `Primitive::git_working_dirs` changes this number"
+    );
+}
+
+/// The omission the table could not see: a primitive that acts through a Git
+/// working directory the table does not name.
+///
+/// One cell per primitive and candidate directory. At the `Before` hook the
+/// candidate's `.git` is renamed aside and replaced by [`NOT_A_REPOSITORY`],
+/// so a Git child running there exits `128`; the table predicts the outcome
+/// and the cell asserts it. A primitive that grows a Git child in a directory
+/// `Primitive::git_working_dirs` does not name fails its "still succeeds"
+/// cell, and one that stops running a child in a directory the table names
+/// fails its "fails" cell.
+///
+/// **The managed base cannot be probed this way for a primitive that runs a
+/// child in a slot checkout**, and those cells are skipped rather than
+/// guessed: a linked worktree's git dir *is* `<base>/.git/worktrees/<name>`,
+/// so renaming `<base>/.git` aside disables the slot's children too and the
+/// probe cannot tell the two apart. Every other cell is driven.
+#[test]
+fn no_primitive_acts_through_a_git_working_directory_the_table_does_not_name() {
+    let mut driven = 0_usize;
+    let mut skipped = 0_usize;
+    let mut absent = 0_usize;
+    for primitive in every_primitive() {
+        for candidate in Candidate::ALL {
+            let case = SubstitutionCase::new(primitive);
+            let sibling = case.sibling_checkout();
+            let Some(target) = case.candidate_path(*candidate, sibling.as_deref()) else {
+                absent += 1;
+                continue;
+            };
+            let named = candidate.named_by(primitive);
+            if *candidate == Candidate::ManagedBase
+                && primitive
+                    .git_working_dirs()
+                    .contains(&GitWorkingDirectory::SlotCheckout)
+            {
+                skipped += 1;
+                continue;
+            }
+            let mut hooks = PoisonAtBefore {
+                site: case.site,
+                target: target.clone(),
+            };
+
+            let outcome = case.run(&mut hooks);
+            if named {
+                assert!(
+                    outcome.is_err(),
+                    "{primitive:?}: the table names {candidate:?} as a working directory of its \
+                     Git children, and a child cannot have run in {} with no repository there",
+                    target.display()
+                );
+            } else {
+                outcome.unwrap_or_else(|error| {
+                    panic!(
+                        "{primitive:?}: the table does not name {candidate:?}, so nothing this \
+                         primitive does may depend on a repository at {}: {}",
+                        target.display(),
+                        refusal_of(&error)
+                    )
+                });
+            }
+            driven += 1;
+        }
+    }
+    assert_eq!(
+        (driven, skipped, absent),
+        (78, 5, 13),
+        "the matrix is sixteen primitives over {} candidates; a candidate or a working directory \
+         added to or dropped from the table changes these numbers",
+        Candidate::ALL.len()
+    );
+}
+
+/// A directory a Git child of some funnel might run in: the two the table
+/// names, and the ones it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Candidate {
+    /// [`GitWorkingDirectory::ManagedBase`].
+    ManagedBase,
+    /// [`GitWorkingDirectory::SlotCheckout`], the case's own slot.
+    SlotCheckout,
+    /// Another slot's checkout: named by no primitive, and the shape a new
+    /// funnel is likeliest to reach for.
+    SiblingCheckout,
+    /// `tasks/`, the slot's parent.
+    SlotParent,
+    /// The execution root.
+    ExecutionRoot,
+    /// The authorized private root.
+    PrivateRoot,
+}
+
+impl Candidate {
+    const ALL: &'static [Self] = &[
+        Self::ManagedBase,
+        Self::SlotCheckout,
+        Self::SiblingCheckout,
+        Self::SlotParent,
+        Self::ExecutionRoot,
+        Self::PrivateRoot,
+    ];
+
+    /// Whether `primitive`'s table names this candidate as a working
+    /// directory of its Git children.
+    fn named_by(self, primitive: Primitive) -> bool {
+        let named = primitive.git_working_dirs();
+        match self {
+            Self::ManagedBase => named.contains(&GitWorkingDirectory::ManagedBase),
+            Self::SlotCheckout => named.contains(&GitWorkingDirectory::SlotCheckout),
+            Self::SiblingCheckout | Self::SlotParent | Self::ExecutionRoot | Self::PrivateRoot => {
+                false
+            }
+        }
+    }
+}
+
+/// A `Before` hook that leaves `target` a directory with no repository in it:
+/// `.git` renamed aside where there was one, and [`NOT_A_REPOSITORY`] written
+/// in its place.
+struct PoisonAtBefore {
+    site: EffectSiteId,
+    target: PathBuf,
+}
+
+impl EffectHooks for PoisonAtBefore {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == self.site && phase == HookPhase::Before {
+            let dot_git = self.target.join(".git");
+            if fs::symlink_metadata(&dot_git).is_ok() {
+                fs::rename(&dot_git, self.target.join(".git.moved-away"))
+                    .expect("move the real git directory aside");
+            }
+            fs::write(&dot_git, NOT_A_REPOSITORY).expect("plant a non-repository");
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The reviewer's P2 sequence for the add, by name: `intents/` exchanged for
