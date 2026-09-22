@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/capacity.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
