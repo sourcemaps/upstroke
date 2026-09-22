@@ -20681,12 +20681,189 @@ fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {
     );
 }
 
+/// One cell of the error-return finalization matrix, driven over `planted`: the fault
+/// injected at the cell ends the resume with the log untouched and exactly the effects before
+/// the fault done; the next resume finalizes the rest and refuses; a third finds the report
+/// current, takes its directory barrier through the report's two sites, writes nothing and
+/// runs no other site again. The candidate-prepared pin's two readings follow the planting's
+/// own declaration (`surplus_candidate_pin`): one stands before the fault, and the next resume
+/// deletes one when the fault came before its deletion, only where the planting declared the
+/// damage.
+fn fault_at_a_finalization_cell_and_converge(
+    planted: &FinishedPlanting,
+    outcome: &RunOutcome,
+    (site, phase): (EffectSiteId, HookPhase),
+    tag: &str,
+) {
+    let declared = planted.surplus_candidate_pin;
+    let fixture = &planted.fixture;
+    assert!(
+        finalization_effects(outcome)
+            .iter()
+            .filter(|effect| !effect
+                .sites
+                .contains(&EffectSiteId::Lock(LockSite::Release)))
+            .all(|effect| (effect.planted)(planted) != (effect.done)(planted)),
+        "{tag}: the residue each step prunes is there to be pruned, and nothing stands \
+         where the plant left none"
+    );
+    assert_eq!(
+        candidate_pins_on_disk(fixture).len(),
+        usize::from(declared),
+        "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
+    );
+    let before = fixture.log_bytes();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+
+    let faulted = harness();
+    let mut armed = ArmedFinalization::new(&faulted, (site, phase));
+    let (result, _) = resume_with(fixture, &mut armed, &given);
+    let error = message(&result.expect_err("the fault ends the command"));
+    let survivable = site == EffectSiteId::Lock(LockSite::Release);
+    if survivable {
+        assert!(
+            error.contains("already finished as") && error.contains("finalized"),
+            "{tag}: the release's fault is absorbed and the resume refuses: {error}"
+        );
+    } else {
+        assert!(
+            !error.contains("already finished"),
+            "{tag}: the faulted resume did not reach the refusal: {error}"
+        );
+    }
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the armed site was reached, or the fault proved nothing"
+    );
+    assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
+    planted
+        .answer_files
+        .assert_untouched(&format!("{tag}: after the fault"));
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: the run's cleanup lease is still held"
+    );
+    assert_finalization_order(planted, &faulted, outcome, (site, phase), tag);
+
+    let second = harness();
+    let (result, _) = resume(fixture, &second, &given);
+    let text = message(&result.expect_err("the next resume finalizes then refuses"));
+    if survivable {
+        assert!(text.contains("already current"), "{tag}: {text}");
+    } else {
+        assert!(
+            text.contains("already finished as") && text.contains("finalized"),
+            "{tag}: {text}"
+        );
+    }
+    assert_eq!(
+        second.lock().unwrap_or_else(PoisonError::into_inner).count(
+            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            HookPhase::Before
+        ),
+        u32::from(declared && phase == HookPhase::Before),
+        "{tag}: the next resume deletes a candidate-prepared pin only where the cell \
+         declared one and the fault came before its deletion"
+    );
+    assert_finalized(planted, outcome, tag);
+    assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
+
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: the run's cleanup lease is still held"
+    );
+    let report_bytes = std::fs::read(fixture.public().join("report.json"))
+        .expect("the report the second resume left current");
+    let leftover = plant_report_leftover(fixture);
+    let staging = leftover
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    let third = harness();
+    let (result, _) = resume(fixture, &third, &given);
+    let text = message(&result.expect_err("a finalized run refuses again"));
+    assert!(text.contains("already current"), "{tag}: {text}");
+    let seen = third.lock().unwrap_or_else(PoisonError::into_inner);
+    for site in [
+        EffectSiteId::RunDir(RunDirSite::WriteReport),
+        EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
+    ] {
+        for phase in [HookPhase::Before, HookPhase::After] {
+            assert!(
+                seen.observed(site, phase),
+                "{tag}: a converged finalization finds the report current and takes its \
+                 directory barrier through `{site}` ({phase}), the fresh branch's since \
+                 round 5"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read(fixture.public().join("report.json")).expect("the report stands"),
+        report_bytes,
+        "{tag}: and writes nothing: the report is byte-identical"
+    );
+    assert!(
+        !leftover.exists(),
+        "{tag}: the staged file a dead writer left before this resume is gone after the \
+         fresh branch"
+    );
+    assert!(
+        !staging.exists(),
+        "{tag}: the directory its record names is gone after the fresh branch"
+    );
+    assert!(
+        !rundir::report_staging_record(&fixture.private()).exists(),
+        "{tag}: the record naming that directory is gone after the fresh branch"
+    );
+    assert!(
+        !planted.report_leftover.exists()
+            && rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
+                .expect("listed")
+                .is_empty(),
+        "{tag}: nothing was staged, and the staged report a dead writer left before this \
+         resume is reclaimed on the fresh branch too"
+    );
+    for site in [
+        EffectSiteId::Worktree(WorktreeSite::Remove),
+        EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
+        EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
+        EffectSiteId::Ref(RefSite::DeletePreparedPin),
+        EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+        EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
+    ] {
+        assert!(
+            !seen.touched(site),
+            "{tag}: a converged finalization runs `{site}` again"
+        );
+    }
+    assert!(
+        seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        "{tag}: a converged finalization still releases the run lock through the funnel"
+    );
+    planted
+        .answer_files
+        .assert_untouched(&format!("{tag}: after the repeated finalization"));
+    assert_objects_kept(planted, &format!("{tag}: after the repeated finalization"));
+}
+
 #[test]
 fn kill_after_report_before_each_cleanup_step() {
-    use crate::topology::effects::LockSite;
     for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
         let mut cells = 0;
         for (site, phase) in finalization_sites(&outcome) {
+            if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
+                // Not a cell of this matrix. A finished run's planting completes alpha's
+                // promotion, so finalization finds no candidate-prepared pin to sweep, and a
+                // cell that faults the sweep has to plant a pin no crash leaves: the declared-pin
+                // test below does, by name, and claims no prefix by it. This site's two cells
+                // are the two kills inside the promotion, after the loop.
+                continue;
+            }
             let tag = format!("{outcome:?}/{site}/{phase}");
             let planted = plant_finished_run_with(
                 &format!("finalize-kill-{}-{}", cells, outcome_short(&outcome)),
@@ -20702,176 +20879,61 @@ fn kill_after_report_before_each_cleanup_step() {
                     prepared_pin: true,
                 },
             );
-            let sweeps_a_candidate_pin = site == EffectSiteId::Ref(RefSite::DeleteCandidatePin);
-            let planted = if sweeps_a_candidate_pin {
-                with_a_candidate_pin_no_crash_leaves(planted)
-            } else {
-                planted
-            };
+            assert!(
+                !planted.surplus_candidate_pin
+                    && candidate_pins_on_disk(&planted.fixture).is_empty(),
+                "{tag}: this matrix plants no damage: the finished run's planting completed \
+                 alpha's promotion, and no candidate-prepared pin stands"
+            );
             cells += 1;
-            let fixture = &planted.fixture;
-            assert!(
-                finalization_effects(&outcome)
-                    .iter()
-                    .filter(|effect| !effect
-                        .sites
-                        .contains(&EffectSiteId::Lock(LockSite::Release)))
-                    .all(|effect| (effect.planted)(&planted) != (effect.done)(&planted)),
-                "{tag}: the residue each step prunes is there to be pruned, and nothing stands \
-                 where the plant left none"
-            );
-            assert_eq!(
-                candidate_pins_on_disk(fixture).len(),
-                usize::from(sweeps_a_candidate_pin),
-                "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
-            );
-            let before = fixture.log_bytes();
-            let runtime = runtime_holding_the_record();
-            let certifies = AlwaysCertifies;
-            let given = Given::healthy(fixture, &runtime, &certifies);
-
-            let faulted = harness();
-            let mut armed = ArmedFinalization::new(&faulted, (site, phase));
-            let (result, _) = resume_with(fixture, &mut armed, &given);
-            let error = message(&result.expect_err("the fault ends the command"));
-            let survivable = site == EffectSiteId::Lock(LockSite::Release);
-            if survivable {
-                assert!(
-                    error.contains("already finished as") && error.contains("finalized"),
-                    "{tag}: the release's fault is absorbed and the resume refuses: {error}"
-                );
-            } else {
-                assert!(
-                    !error.contains("already finished"),
-                    "{tag}: the faulted resume did not reach the refusal: {error}"
-                );
-            }
-            assert!(
-                faulted
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .observed(site, phase),
-                "{tag}: the armed site was reached, or the fault proved nothing"
-            );
-            assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
-            planted
-                .answer_files
-                .assert_untouched(&format!("{tag}: after the fault"));
-            assert!(
-                wait_for_cleanup_hold_release(&fixture.public()),
-                "{tag}: the run's cleanup lease is still held"
-            );
-            assert_finalization_order(&planted, &faulted, &outcome, (site, phase), &tag);
-
-            let second = harness();
-            let (result, _) = resume(fixture, &second, &given);
-            let text = message(&result.expect_err("the next resume finalizes then refuses"));
-            if survivable {
-                assert!(text.contains("already current"), "{tag}: {text}");
-            } else {
-                assert!(
-                    text.contains("already finished as") && text.contains("finalized"),
-                    "{tag}: {text}"
-                );
-            }
-            assert_eq!(
-                second.lock().unwrap_or_else(PoisonError::into_inner).count(
-                    EffectSiteId::Ref(RefSite::DeleteCandidatePin),
-                    HookPhase::Before
-                ),
-                u32::from(sweeps_a_candidate_pin && phase == HookPhase::Before),
-                "{tag}: the next resume deletes a candidate-prepared pin only where the cell \
-                 declared one and the fault came before its deletion"
-            );
-            assert_finalized(&planted, &outcome, &tag);
-            assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
-
-            assert!(
-                wait_for_cleanup_hold_release(&fixture.public()),
-                "{tag}: the run's cleanup lease is still held"
-            );
-            let report_bytes = std::fs::read(fixture.public().join("report.json"))
-                .expect("the report the second resume left current");
-            let leftover = plant_report_leftover(fixture);
-            let staging = leftover
-                .parent()
-                .expect("the staged file is inside the staging directory")
-                .to_path_buf();
-            let third = harness();
-            let (result, _) = resume(fixture, &third, &given);
-            let text = message(&result.expect_err("a finalized run refuses again"));
-            assert!(text.contains("already current"), "{tag}: {text}");
-            let seen = third.lock().unwrap_or_else(PoisonError::into_inner);
-            for site in [
-                EffectSiteId::RunDir(RunDirSite::WriteReport),
-                EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
-            ] {
-                for phase in [HookPhase::Before, HookPhase::After] {
-                    assert!(
-                        seen.observed(site, phase),
-                        "{tag}: a converged finalization finds the report current and takes its \
-                         directory barrier through `{site}` ({phase}), the fresh branch's since \
-                         round 5"
-                    );
-                }
-            }
-            assert_eq!(
-                std::fs::read(fixture.public().join("report.json")).expect("the report stands"),
-                report_bytes,
-                "{tag}: and writes nothing: the report is byte-identical"
-            );
-            assert!(
-                !leftover.exists(),
-                "{tag}: the staged file a dead writer left before this resume is gone after the \
-                 fresh branch"
-            );
-            assert!(
-                !staging.exists(),
-                "{tag}: the directory its record names is gone after the fresh branch"
-            );
-            assert!(
-                !rundir::report_staging_record(&fixture.private()).exists(),
-                "{tag}: the record naming that directory is gone after the fresh branch"
-            );
-            assert!(
-                !planted.report_leftover.exists()
-                    && rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
-                        .expect("listed")
-                        .is_empty(),
-                "{tag}: nothing was staged, and the staged report a dead writer left before this \
-                 resume is reclaimed on the fresh branch too"
-            );
-            for site in [
-                EffectSiteId::Worktree(WorktreeSite::Remove),
-                EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
-                EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
-                EffectSiteId::Ref(RefSite::DeletePreparedPin),
-                EffectSiteId::Ref(RefSite::DeleteCandidatePin),
-                EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
-            ] {
-                assert!(
-                    !seen.touched(site),
-                    "{tag}: a converged finalization runs `{site}` again"
-                );
-            }
-            assert!(
-                seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
-                "{tag}: a converged finalization still releases the run lock through the funnel"
-            );
-            planted
-                .answer_files
-                .assert_untouched(&format!("{tag}: after the repeated finalization"));
-            assert_objects_kept(&planted, &format!("{tag}: after the repeated finalization"));
+            fault_at_a_finalization_cell_and_converge(&planted, &outcome, (site, phase), &tag);
         }
         assert_eq!(
             cells,
             if outcome == RunOutcome::Complete {
-                26
-            } else {
                 24
+            } else {
+                22
             },
-            "{outcome:?}: both phases of every effect's site, the report's two sites among them"
+            "{outcome:?}: both phases of every effect's site but the candidate-prepared pin's, \
+             the report's two sites among them"
         );
+    }
+    // `Ref.DeleteCandidatePin` before and after, registry rows 41 and 42 (`fault_row:
+    // t_cand_ref`), constructed where a candidate-prepared pin stands by production's own hand:
+    // a real kill inside `reclaim_after_creation` during a real `promote_candidate`, resumed by
+    // the next incarnation. `coverage.rs` and the registry cite this test for both phases of
+    // the site, so both run under its name.
+    a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
+    a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::After);
+}
+
+#[test]
+fn a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges()
+ {
+    let site = EffectSiteId::Ref(RefSite::DeleteCandidatePin);
+    for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
+        for phase in [HookPhase::Before, HookPhase::After] {
+            let tag = format!("{outcome:?}/{site}/{phase}");
+            let planted = with_a_candidate_pin_no_crash_leaves(plant_finished_run_with(
+                &format!(
+                    "finalize-fault-declared-pin-{}-{phase}",
+                    outcome_short(&outcome)
+                ),
+                outcome.clone(),
+                if outcome == RunOutcome::Complete {
+                    AlphaEnd::Published
+                } else {
+                    AlphaEnd::Queued
+                },
+                FinishedResidue {
+                    snapshot: true,
+                    staging: true,
+                    prepared_pin: true,
+                },
+            ));
+            fault_at_a_finalization_cell_and_converge(&planted, &outcome, (site, phase), &tag);
+        }
     }
 }
 
@@ -22549,9 +22611,101 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
     );
 }
 
+/// One cell of the kill matrix, driven over `planted`: a child killed at the cell inside a
+/// real finalization, what its death left read against the cleanup order, and the next resume
+/// in a fresh process finalizing the rest and refusing. The candidate-prepared pin's readings
+/// follow the planting's own declaration (`surplus_candidate_pin`), as in the error-return
+/// matrix's cell.
+fn kill_at_a_finalization_cell_and_converge(
+    planted: &FinishedPlanting,
+    outcome: &RunOutcome,
+    (site, phase): (EffectSiteId, HookPhase),
+    tag: &str,
+) {
+    let declared = planted.surplus_candidate_pin;
+    let pin_outlives_the_kill = declared && phase == HookPhase::Before;
+    let fixture = &planted.fixture;
+    let before = fixture.log_bytes();
+    assert_eq!(
+        candidate_pins_on_disk(fixture).len(),
+        usize::from(declared),
+        "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
+    );
+
+    let observed = kill_inside_finalization(planted, (site, phase), tag);
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "{tag}: the death appended nothing"
+    );
+    assert_eq!(
+        candidate_pins_on_disk(fixture).len(),
+        usize::from(pin_outlives_the_kill),
+        "{tag}: at the boundary the next resume reads, no candidate-prepared pin stands \
+         beside the completed promotion but the declared one a kill before its deletion left"
+    );
+    planted
+        .answer_files
+        .assert_untouched(&format!("{tag}: after the kill"));
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: the dead child's cleanup lease is still held"
+    );
+    assert_finalization_order(planted, &observed, outcome, (site, phase), tag);
+    let report_current = fixture.public().join("report.json").is_file();
+
+    let (text, released) = resume_in_a_fresh_process(planted, tag);
+    assert!(
+        text.contains(&format!("already finished as `{}`", outcome_short(outcome)))
+            && text.contains("finalized")
+            && text.contains(if report_current {
+                "already current"
+            } else {
+                "regenerated"
+            }),
+        "{tag}: the next resume finalizes then refuses, and writes the report only when the \
+         kill came before it: {text}"
+    );
+    assert_eq!(
+        candidate_pin_deletions_of_the_fresh_resume(planted, tag),
+        u64::from(pin_outlives_the_kill),
+        "{tag}: the fresh resume deletes no candidate-prepared pin but the declared one, so \
+         what it repairs is what the kill at this cell left"
+    );
+    assert_finalized(planted, outcome, &format!("{tag}: after the kill"));
+    assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
+    assert_eq!(
+        report_of(fixture).runner,
+        fixture.started.runner,
+        "{tag}: the report names the recorded runner"
+    );
+    assert!(
+        released,
+        "{tag}: the converging resume released the run lock through the funnel"
+    );
+    let once = replayed(fixture);
+    let twice = replayed(fixture);
+    assert_eq!(
+        once.state(),
+        twice.state(),
+        "{tag}: replay from disk twice equal"
+    );
+    assert_eq!(
+        once.finished(),
+        Some(outcome),
+        "{tag}: the replayed log ends as the run finished"
+    );
+}
+
 fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
     let mut cells = 0;
     for (site, phase) in finalization_sites(outcome) {
+        if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
+            // Not a cell of this matrix, for the reason the error-return matrix gives: the
+            // planting leaves no candidate-prepared pin, and a kill inside the sweep is driven
+            // over a declared one by the declared-pin test below.
+            continue;
+        }
         let tag = format!("{outcome:?}/{site}/{phase}");
         let planted = plant_finished_run_with(
             &format!("finalize-killed-{cells}-{}", outcome_short(outcome)),
@@ -22567,95 +22721,52 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
                 prepared_pin: true,
             },
         );
-        let sweeps_a_candidate_pin = site == EffectSiteId::Ref(RefSite::DeleteCandidatePin);
-        let planted = if sweeps_a_candidate_pin {
-            with_a_candidate_pin_no_crash_leaves(planted)
-        } else {
-            planted
-        };
-        let pin_outlives_the_kill = sweeps_a_candidate_pin && phase == HookPhase::Before;
+        assert!(
+            !planted.surplus_candidate_pin && candidate_pins_on_disk(&planted.fixture).is_empty(),
+            "{tag}: this matrix plants no damage: the finished run's planting completed alpha's \
+             promotion, and no candidate-prepared pin stands"
+        );
         cells += 1;
-        let fixture = &planted.fixture;
-        let before = fixture.log_bytes();
-        assert_eq!(
-            candidate_pins_on_disk(fixture).len(),
-            usize::from(sweeps_a_candidate_pin),
-            "{tag}: a candidate-prepared pin stands only where the cell declares the damage"
-        );
-
-        let observed = kill_inside_finalization(&planted, (site, phase), &tag);
-        assert_eq!(
-            fixture.log_bytes(),
-            before,
-            "{tag}: the death appended nothing"
-        );
-        assert_eq!(
-            candidate_pins_on_disk(fixture).len(),
-            usize::from(pin_outlives_the_kill),
-            "{tag}: at the boundary the next resume reads, no candidate-prepared pin stands \
-             beside the completed promotion but the declared one a kill before its deletion left"
-        );
-        planted
-            .answer_files
-            .assert_untouched(&format!("{tag}: after the kill"));
-        assert!(
-            wait_for_cleanup_hold_release(&fixture.public()),
-            "{tag}: the dead child's cleanup lease is still held"
-        );
-        assert_finalization_order(&planted, &observed, outcome, (site, phase), &tag);
-        let report_current = fixture.public().join("report.json").is_file();
-
-        let (text, released) = resume_in_a_fresh_process(&planted, &tag);
-        assert!(
-            text.contains(&format!("already finished as `{}`", outcome_short(outcome)))
-                && text.contains("finalized")
-                && text.contains(if report_current {
-                    "already current"
-                } else {
-                    "regenerated"
-                }),
-            "{tag}: the next resume finalizes then refuses, and writes the report only when the \
-             kill came before it: {text}"
-        );
-        assert_eq!(
-            candidate_pin_deletions_of_the_fresh_resume(&planted, &tag),
-            u64::from(pin_outlives_the_kill),
-            "{tag}: the fresh resume deletes no candidate-prepared pin but the declared one, so \
-             what it repairs is what the kill at this cell left"
-        );
-        assert_finalized(&planted, outcome, &format!("{tag}: after the kill"));
-        assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
-        assert_eq!(
-            report_of(fixture).runner,
-            fixture.started.runner,
-            "{tag}: the report names the recorded runner"
-        );
-        assert!(
-            released,
-            "{tag}: the converging resume released the run lock through the funnel"
-        );
-        let once = replayed(fixture);
-        let twice = replayed(fixture);
-        assert_eq!(
-            once.state(),
-            twice.state(),
-            "{tag}: replay from disk twice equal"
-        );
-        assert_eq!(
-            once.finished(),
-            Some(outcome),
-            "{tag}: the replayed log ends as the run finished"
-        );
+        kill_at_a_finalization_cell_and_converge(&planted, outcome, (site, phase), &tag);
     }
     assert_eq!(
         cells,
         if *outcome == RunOutcome::Complete {
-            26
-        } else {
             24
+        } else {
+            22
         },
-        "{outcome:?}: both phases of every effect's site, the report's two sites among them"
+        "{outcome:?}: both phases of every effect's site but the candidate-prepared pin's, the \
+         report's two sites among them"
     );
+}
+
+#[test]
+fn a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume() {
+    let site = EffectSiteId::Ref(RefSite::DeleteCandidatePin);
+    for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
+        for phase in [HookPhase::Before, HookPhase::After] {
+            let tag = format!("{outcome:?}/{site}/{phase}");
+            let planted = with_a_candidate_pin_no_crash_leaves(plant_finished_run_with(
+                &format!(
+                    "finalize-killed-declared-pin-{}-{phase}",
+                    outcome_short(&outcome)
+                ),
+                outcome.clone(),
+                if outcome == RunOutcome::Complete {
+                    AlphaEnd::Published
+                } else {
+                    AlphaEnd::Queued
+                },
+                FinishedResidue {
+                    snapshot: true,
+                    staging: true,
+                    prepared_pin: true,
+                },
+            ));
+            kill_at_a_finalization_cell_and_converge(&planted, &outcome, (site, phase), &tag);
+        }
+    }
 }
 
 #[test]
