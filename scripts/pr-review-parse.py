@@ -930,11 +930,13 @@ def bare_spans(shown):
 
     A CODE BLOCK IS NOT WHERE THE BARE FORM'S OBJECT IS, and since round seven reads `<pre>` this
     has to be said rather than assumed. The bare form has no fence -- that is the whole of what
-    makes it the bare form -- so an opener inside a code block is not it, and the last `}` of the
-    reading is the fenced verdict object's on every workflow review there has ever been. Taking
-    that one would narrow away every line of prose between a bare opener and the end of the
-    comment, unscanned. The code blocks are therefore blanked before the search, at their own
-    lengths, so the offsets this returns are still the reading's own.
+    makes it the bare form -- so an opener inside a code block is not it. And the closing brace
+    matters as much as the opener: `the_verdict_block` refuses a comment with anything but
+    whitespace after the block its verdict is read from, so on a FENCED review the object's own
+    last `}` is the last one in the reading, and a search that took it would run from a bare
+    opener somewhere in the prose to the end of the comment -- narrowing away every line between
+    them, unscanned. The code blocks are therefore blanked before the search, at their own lengths,
+    so the offsets this returns are still the reading's own.
     """
     prose = shown.text
     for start, end in shown.code:
@@ -1663,9 +1665,9 @@ def comment_result(args):
     `gh pr merge` call -- executed, with neither the comment id nor the reviewed sha changing.
 
     `Accept: application/vnd.github.full+json` returns `created_at`, `body` and `body_html`
-    TOGETHER, so one fetch is one version and there is no pair to disagree. It also puts the audit
-    back to the two calls per review it made before round six: the listing that finds the comment,
-    and this one.
+    TOGETHER, so one fetch is one version and there is no pair to disagree. It is also the FEWEST
+    calls this has ever cost: ONE addressed to the comment id, where `b0c8b8c9` made two and round
+    six made three. (The listing that finds the id is a call of its own and is unchanged.)
 
     THE SPLIT IS HERE RATHER THAN IN THE SHELL because what is split is the review itself. A body
     that reached the parser SHORT is a comment with a different verdict in it -- the class this

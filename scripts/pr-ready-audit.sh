@@ -986,8 +986,9 @@ audit_one() {
     # Two fetches did not: a reviewer editing the comment between them gave this audit VERSION A'S
     # BODY AND VERSION B'S RENDERING, and that pair was PASS, READY and one `gh pr merge` call
     # where each version alone blocked -- executed, with neither the comment id nor the reviewed
-    # sha changing. It is also one call fewer than the review cost before, and two rather than the
-    # three round six spent.
+    # sha changing. It is also the fewest calls this has ever cost: ONE addressed to the comment
+    # id, where `b0c8b8c9` made two and round six made three. The listing that finds the id is a
+    # call of its own and is unchanged.
     #
     # The fetch is checked. `gh ... > "$answer_file"` failed closed only because `set -e` was
     # watching, and `set -e` is watching nothing the moment it is rewritten into a condition --
