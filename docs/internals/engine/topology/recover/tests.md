@@ -3563,6 +3563,38 @@ infrastructure failure terminates merge_verification_unavailable
 `invariants[INV-23]`: a Runner that cannot run the process is a
 RunnerSpawnFailure outage. The fixture allows three deferrals.
 
+## `fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {` › `const RELEASE_BOUND: Duration = Duration::from_secs(20);`
+
+The last assertion is a bounded wait, not a single observation, and the
+three above it are unchanged: the first is a genuine reaper-startup
+failure and means the opposite of this one. `Supervisor::finish` waits
+for the gate's reaper without a bound (`ReaperEnding::AcknowledgedExit`),
+so by the time the drive returns the reaper that took this run's
+`cleanup.lock` has exited and its shared hold is gone. What one
+observation could still find held, under a whole parallel suite, is a
+copy of the run's lease descriptor: the ref funnel keeps the lease open
+in this process for the life of each `git update-ref` child
+(`rundir::hold_cleanup_lease_for_child`), a child another test thread
+forks in that window inherits the open file description, and the shared
+`flock` lasts until that child closes it, which a reaper, guard or probe
+does in its own `close_inherited_fds` and an `exec` does at `CLOEXEC`.
+
+Measured under the finding's recipe, two full suites concurrently on one
+box (`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`,
+2026-09-22): 4 of 8 instrumented suite runs found the hold at the first
+observation, and every one of them was gone within a millisecond, before
+a read of `/proc/locks` made right after it; the untouched merge base,
+run beside them, failed the single observation 2 of 8 times. The bound is
+the 20 s `wait_for_cleanup_hold_release` already gives the eighteen other
+observations of this lease in this module, some ten thousand times the
+longest hold measured, and a passing run pays for it only until its first
+free observation. A hold that never clears still fails, at the bound,
+with a message that says how long it waited of what bound, so a future
+red reads as "held for the whole bound" and not "held at one instant".
+Closing the inheritance is not done here, and the production
+`RunLock::acquire` probe, which reads the same inherited hold as
+`Refused` at `drive_as`'s resume, is out of this wait's reach.
+
 ## `fn a_paid_review_that_parks_is_charged_live_and_its_cost_replays() {`
 
 `PR8-R2-SPEND-REPLAY` from both ends, inside one incarnation: a 2.50
@@ -6035,15 +6067,32 @@ volume, and the volume map the run recorded at `run_started` is the one it ends 
 
 `cleanup.lock` is the reaper's Unix hold file beside the run lock.
 
+## `struct CleanupHoldPastBound {`
+
+What `wait_for_cleanup_hold_release_within` reports when the run's
+cleanup lease was still held at the end of its bound: the bound, how long
+it actually waited, and how many observations found the lease held. Its
+`Display` is the assertion message, which is what tells a hold that never
+cleared from one observed at a single instant.
+
+## `fn wait_for_cleanup_hold_release_within(`
+
+The bounded wait behind `wait_for_cleanup_hold_release`, with the bound a
+parameter and the failure reported rather than answered `false`: polls
+`rundir::observe_cleanup_hold` every 50 ms until it is free (`Ok`) or the
+bound has elapsed (`Err`).
+
 ## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
 
-Wait, bounded, for the run's cleanup lease to be free. A `git` child of
-the ref funnel holds the lease while it lives, through a descriptor made
-inheritable for it, and under a parallel suite a child another test
-thread forks in that window can inherit the descriptor and hold the
-lease until it exits. The wait is bounded so a hold that never clears
-still fails the assertion that follows it; the ledger's post-drop
-observation and the finalization matrix's resumes wait through it.
+Wait, bounded, for the run's cleanup lease to be free: twenty seconds
+through `wait_for_cleanup_hold_release_within`, answering only whether it
+was released. A `git` child of the ref funnel holds the lease while it
+lives, through a descriptor made inheritable for it, and under a parallel
+suite a child another test thread forks in that window can inherit the
+descriptor and hold the lease until it exits. The wait is bounded so a
+hold that never clears still fails the assertion that follows it; the
+ledger's post-drop observation and the finalization matrix's resumes wait
+through it.
 ## `fn process_local_of(`
 
 R3, R4, R13, R17, R22 and R28 as the live process sees them.
