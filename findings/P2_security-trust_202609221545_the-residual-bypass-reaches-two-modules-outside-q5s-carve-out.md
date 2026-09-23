@@ -19,15 +19,27 @@ guard: project owner — the post-v0.2 pass over PR3's layer, with `PR7-WRAPPERS
 
 Q5 was amended v16 -> v17 on 2026-09-22 to scope the wrapper classification's completeness to *"the modules it
 classifies — with the files that carry a file-level allowance of a governed lint excluded as an explicit carve-out
-… and the residual bypass **inside that carve-out** carried by a filed finding"*. The carve-out is the **45** files
-with a non-empty `allows` in `effects/allowlist.toml`. `effects::CLASSIFIED_MODULES` and `effects/wrappers.toml`
-classify **54** modules; **30** of them are in the carve-out, so the amendment's affirmative answer is over the
-remaining **24**.
+… and the residual bypass **inside that carve-out** carried by a filed finding"*. **Two scopes, and they are not the
+same set.** Run 4's receipt counted the carve-out by allowlist row: **45** rows with a non-empty `allows` in
+`effects/allowlist.toml`, of which **30** of the **54** modules `effects::CLASSIFIED_MODULES` and
+`effects/wrappers.toml` classify, leaving **24** for the amendment's affirmative answer — the historical receipt,
+kept as run 4 wrote it. v17's operative phrase is *"files that carry a file-level allowance of a governed lint"*, and
+read from the files (`file_level_lint_state` over every leading inner attribute) the carve-out at `9bb177ea` is
+**43** files (22 funnel rows, 21 legacy rows; `src/agent/bin.rs`'s row records an outer attribute on its inline
+test module and `src/agent/proc/test_support/readiness.rs`'s six per-site `#[expect]`, neither a file-level
+allowance), the classified split is **29 inside / 25 outside**, and **three** classified modules carried neither an
+allowance nor a fence — `src/capacity.rs`, `src/runner/invocation.rs` and `src/agent/bin.rs` — not two. Both
+of #314's fourth-round reviews derived the same figures independently at the frozen range
+(`G5R4R4-RECORD-01`, `~/orch-pr10/reviews/pr-g5r4r4/`), and they are re-derived here at #318's final head with a
+reader-faithful census (`~/orch-pr10/repair-318-r2-evidence/census/`): 187 scanned files, 51 rows, 45 non-empty,
+43 file-level allowance files, 29/25, and **0** classified modules with neither. The corrected scope is the
+affected one; the receipt is what run 4 measured.
 
-**At `9bb177ea`, `PR7-WRAPPERS-EMPTY-DOMAIN`'s class was open in two of those 24.** `src/capacity.rs` and
-`src/runner/invocation.rs` were classified modules that carry **no** file-level allowance — so they are outside the
-carve-out — and carried **no file-level fence of a governed lint** either, so #312's `deny`->`forbid` flip did not
-reach them and the three governed lints took their level from `-D warnings` alone, which an `allow` lowers.
+**At `9bb177ea`, `PR7-WRAPPERS-EMPTY-DOMAIN`'s class was open in three of those 25, and run 4 executed it in two.**
+`src/capacity.rs` and `src/runner/invocation.rs` were classified modules that carry **no** file-level allowance —
+so they are outside the carve-out — and carried **no file-level fence of a governed lint** either, so #312's
+`deny`->`forbid` flip did not reach them and the three governed lints took their level from `-D warnings` alone,
+which an `allow` lowers. `src/agent/bin.rs` stood the same way and is the second half of this section.
 
 Executed by run 4, the witness the reviews of #309 wrote, moved into those two files: a `macro_rules!` that emits
 `#[$level(clippy::disallowed_methods)] pub fn $name(..) { std::fs::write(..) }`, invoked with `allow` and a
@@ -75,8 +87,8 @@ tree's own reader): 54 classified modules, 30 in the carve-out, 24 outside; clas
 allowance nor any file-level fence, **2 at `9bb177ea`** (these two), 2 at `958d3aa4`, **0 at the fenced head**
 (`~/orch-pr10/fence-q5-evidence/`). Both reviews of #316 re-derived the same numbers. **All of them took the allowlist
 row as the allowance leg**, and the row is not what v17 words the carve-out by: *"the files that carry a file-level
-allowance of a governed lint"*. Read from the file, the carve-out is **29**, not 30, and the class had a **third**
-instance: `src/agent/bin.rs` records `allows = ["clippy::disallowed_methods"]` for an **outer attribute on its inline
+allowance of a governed lint"*. Read from the file, the classified carve-out is **29**, not 30 (and the whole
+carve-out 43 files, not 45 rows), and the class had a **third** instance: `src/agent/bin.rs` records `allows = ["clippy::disallowed_methods"]` for an **outer attribute on its inline
 `#[cfg(test)] mod tests`** (`src/agent/bin.rs:97`; its row says so, *"the allow is an outer attribute on that test
 module, so production remains governed"*), and states nothing at file level, so its production region took all three
 governed lints from `-D warnings` alone — exactly where `src/capacity.rs` was — at `9bb177ea`, at the fenced head, and
