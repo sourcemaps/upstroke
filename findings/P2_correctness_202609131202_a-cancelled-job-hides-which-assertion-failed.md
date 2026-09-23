@@ -475,3 +475,84 @@ added: the permanent regressions name only libc items already classified, and th
 witnesses that name others (`SYS_read`, `SYS_fstat`, `pthread_kill`) run as controls in a private
 clone and never in the tree. The inheritance, the refusal's holder list, the classification gap
 and the disposition are as the sections above leave them.
+
+## The transitions the one contract had left, taken up at their sites (2026-09-23, round five)
+
+The fourth round's independent reviews (`PR320-R4-MAIN-001`–`004`, `PR320-R4-REG-001`–`004`)
+witnessed four classes of defect in the same machinery, again none in production, and each
+witness was reproduced at `a632075a` before the repair. The fourth round's contract -- one owner,
+a failed observation reported, one absolute deadline per stage that nothing restarts -- was right
+and its application was incomplete at exactly the transitions the fourth reviews found: a retry
+loop *inside* an observation that the deadline could not see, a deadline consulted on one kind of
+answer and not on the others, and a cleanup error computed and then dropped. Each repair removes
+the retry or the condition at its site and moves nothing into a new layer: no thread, no
+supervisor, no new bound, no allowlist row, and two seams of the kind the readiness repair
+introduced (a clock parameter, a call parameter) so that the deadline and the mapping are driven
+directly.
+
+- **An observation is one `waitpid`, and the collection after a kill is bounded.** `wait_for`
+  had retried `EINTR` inside itself, so `ParkedFork::collect`'s poll could never reach its
+  deadline, and the collection after the kill blocked with no deadline at all
+  (`PR320-R4-MAIN-001`, `PR320-R4-REG-002`). `observe_child` is one `waitpid` with `WNOHANG`,
+  answered as it was -- ended, not ended, or the error, an interruption included -- and
+  `observed_within` polls it at a 5 ms tick until the child has ended or the bound runs out,
+  an interrupted observation costing the tick and nothing more; `collect` gives the child the
+  bound to end by itself, kills it, and then gives it the reap bound to be collected, and
+  answers an error naming the pid and the step -- an observation that failed otherwise, after
+  which nothing is killed; a kill the OS refused, the child left alive; a kill made and the
+  child not collected within the reap bound -- for the release to panic with and the drop to
+  print. `is_alive` makes an interrupted observation again within the reap bound and panics on
+  any other failure, answering neither alive nor ended
+  (`a_release_whose_every_observation_is_interrupted_ends_at_its_bounds_and_says_the_child_is_uncollected`,
+  `dropping_a_parked_fork_whose_every_observation_is_interrupted_returns_within_its_bounds`,
+  `a_liveness_observation_interrupted_for_the_whole_bound_fails_instead_of_answering`). The
+  errors say what was observed and no more: a kill that was sent is "sent", and a child that
+  read its release and ended by itself while every observation was interrupted is collected by
+  the test with its own status.
+- **The release is one write.** `release_and_reap` had written the release byte with
+  `write_all`, which retries an interruption inside itself before any collection begins
+  (`PR320-R4-REG-002`; a `UnixStream` write is a `sendto`, which the reviewers' policy
+  interrupted). `write_release` makes one attempt and answers what it answered; the socket is
+  dropped either way, so a child the byte did not reach reads EOF, and a child that reads
+  neither is killed at the bound (`a_release_write_is_one_attempt_whatever_the_writer_answers`,
+  the attempts counted through a writer that answers what the test says).
+- **One deadline, on progress and completion too.** `read_report_within` had looked at its
+  deadline only after a read that failed, so a report delivered in successful short reads was
+  accepted after it (`PR320-R4-MAIN-002`, `PR320-R4-REG-001`). `read_report_within_by` looks at
+  the deadline at the top of every turn -- before the completeness check and before every read
+  -- through the clock it is given, and `read_report_within` gives it the wall; the error names
+  how many bytes had arrived and what the last read answered
+  (`a_report_read_looks_at_its_deadline_before_every_turn_a_successful_short_read_included`,
+  `a_report_complete_only_after_its_deadline_is_not_accepted`, and on a real socket with the
+  constructor's tick
+  `a_report_arriving_slower_than_its_deadline_on_a_real_socket_is_timed_out_with_what_arrived`).
+- **A failed cleanup is said, in both owners.** `ParkedFork`'s drop had discarded
+  `release_and_reap`'s error, so a kill the OS refused left the child alive in silence; the
+  scenario owner's drop had printed only when the leader could not be collected, so a refused
+  group kill with a collectible leader printed nothing while a member of the group lived on
+  (`PR320-R4-MAIN-003`, `PR320-R4-REG-003`). Each drop now prints on stderr, the one channel a
+  drop has, what it could not do and the state that leaves: the parked fork's the error that
+  names the step; the scenario owner's one line saying whether the group was killed or refused,
+  whether the leader was collected and with what status or left uncollected, and whether the
+  killed group was observed empty -- a collected leader is called collected and is not the
+  group ended, and a refused kill is called refused. Both are read from a process of its own,
+  where the drop's stderr is the wrapper's pipe
+  (`dropping_a_parked_fork_whose_kill_the_os_refuses_says_so_and_what_is_left`,
+  `dropping_a_scenario_owner_whose_group_kill_the_os_refuses_reports_it_although_its_leader_was_collected`);
+  the member the refused kill could not end is ended by the test.
+- **The mapping is tested at the call.** The permanent regression of the `fstat` error mapping
+  had injected its failure above the mapping, so the shape the third round repaired -- every
+  failed `fstat` answered as absence -- survived every permanent test and was killed only by
+  the reviewers' seccomp witness (`PR320-R4-MAIN-004`, `PR320-R4-REG-004`).
+  `identity_answered_by` is the one place the call's answer is read, and
+  `identity_of_the_descriptor` is that with `fstat` as the call; the regression drives it with
+  the real `fstat` on the held number and on a number that is never open, and with a call that
+  fails with a real errno that is not `EBADF` -- a `waitpid` on this process's own pid,
+  `ECHILD` -- so the mapping runs on a nonzero answer with the kernel's errno and the restored
+  shape fails it
+  (`a_failed_identity_call_is_read_at_the_call_ebadf_as_absence_and_any_other_errno_as_the_error`).
+  No policy on `fstat` is needed for that, so no `SYS_fstat` row is added; the reviewers'
+  seccomp witness against the real function runs as a control in a private clone.
+
+The inheritance, the refusal's holder list, the classification gap and the disposition are as
+the sections above leave them.

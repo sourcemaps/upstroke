@@ -646,15 +646,18 @@ pub(crate) fn spawn_ready_helper(
 /// read with EOF and the child does not outlive it parked.
 ///
 /// Every stage that can block is bounded, and each bound starts when its
-/// stage does: the wait for the report by `READY_BOUND`; the reap after a
-/// release, or after a drop, by [`REAP_BOUND`] ([`Self::reap_bound`] lowers
-/// it), past which the child is killed and then collected, its status
-/// saying so. [`Self::is_alive`] asks the kernel whether the child has
-/// ended rather than the signal table whether its pid exists, and collects
-/// a child that has, so a zombie never reads as alive. Dropping this value
-/// releases and reaps the child, while unwinding too, and never panics
-/// doing it. [`Self::kept`] names the two descriptors the child holds
-/// above stdio.
+/// stage does: the wait for the report by `READY_BOUND`, one deadline the
+/// reads look at before every turn; the reap after a release, or after a
+/// drop, by [`REAP_BOUND`] ([`Self::reap_bound`] lowers it), past which
+/// the child is killed and then collected within the same bound again --
+/// every observation one `waitpid` with `WNOHANG` that nothing retries, and
+/// the release one write that is not made again. [`Self::is_alive`] asks
+/// the kernel whether the child has ended rather than the signal table
+/// whether its pid exists, and collects a child that has, so a zombie never
+/// reads as alive. Dropping this value releases and reaps the child, while
+/// unwinding too, never panics doing it, and says on stderr what it could
+/// not do and the state the child is left in. [`Self::kept`] names the two
+/// descriptors the child holds above stdio.
 #[cfg(unix)]
 pub(crate) struct ParkedFork {
     pid: libc::pid_t,
@@ -835,18 +838,45 @@ impl ParkedFork {
     /// runs or is stopped, and collects it once it has ended. A child found
     /// ended is collected here and its status kept for the release, so a
     /// zombie never reads as alive and the pid is never waited for twice.
+    /// An observation a signal interrupted observed nothing and is made
+    /// again, at the observation tick, within the reap bound of this call;
+    /// one that failed otherwise, or was interrupted for the whole bound,
+    /// answered neither alive nor ended, and this panics saying so rather
+    /// than answer either.
     pub(crate) fn is_alive(&self) -> bool {
         if self.ended.get().is_some() {
             return false;
         }
-        match wait_for(self.pid, libc::WNOHANG) {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                self.ended.set(Some(status));
-                false
+        let started = std::time::Instant::now();
+        loop {
+            match self.observe() {
+                Ok(Observed::NotEnded) => return true,
+                Ok(Observed::Ended(status)) => {
+                    self.ended.set(Some(status));
+                    return false;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    assert!(
+                        started.elapsed() < self.reap_bound,
+                        "waitpid({}, WNOHANG) was interrupted at every observation for {:?}: {error}",
+                        self.pid,
+                        self.reap_bound
+                    );
+                }
+                Err(error) => panic!("waitpid({}, WNOHANG): {error}", self.pid),
             }
-            Err(error) => panic!("waitpid({}, WNOHANG): {error}", self.pid),
+            std::thread::sleep(OBSERVE_TICK);
         }
+    }
+
+    /// One observation of the child, `waitpid` with `WNOHANG`, as the
+    /// kernel answers it: ended with its status, not ended -- running or
+    /// stopped -- or the error the call answered, an interruption included.
+    /// Nothing is retried here: the caller's loop, and its deadline, decide
+    /// whether another observation is made (`PR320-R4-MAIN-001`,
+    /// `PR320-R4-REG-002`).
+    fn observe(&self) -> std::io::Result<Observed> {
+        observe_child(self.pid)
     }
 
     /// Let the child go on to its exit, and reap it: its exit status, within
@@ -855,8 +885,10 @@ impl ParkedFork {
     /// # Panics
     ///
     /// When the release could not be written and the child then had to be
-    /// killed, or when the reap itself failed; whatever the kernel allowed
-    /// has been collected before the panic.
+    /// killed, or when the child could not be observed, killed or collected
+    /// within the bounds: the message names the pid, the step and the state
+    /// the child is left in, and whatever the kernel allowed has been
+    /// collected before the panic.
     pub(crate) fn release(mut self) -> std::process::ExitStatus {
         match self.release_and_reap() {
             Ok(status) => status,
@@ -865,24 +897,29 @@ impl ParkedFork {
     }
 
     /// The release and the reap, shared by [`Self::release`] and `Drop`: the
-    /// release byte is written -- a write that does not wait for the child
-    /// to read it, so a stopped child does not block it -- and the child is
-    /// then collected within the reap bound, killed first if it is still
-    /// there at the end. Never panics, so `Drop` can run it while unwinding.
+    /// release byte is written once ([`write_release`]) -- a write that
+    /// neither waits for the child to read it, so a stopped child does not
+    /// block it, nor is made again, so an interruption does not hold the
+    /// owner outside its bound -- this process's end of the socket is
+    /// dropped, so a child the byte did not reach reads EOF instead, and the
+    /// child is then collected within the reap bound, killed first if it is
+    /// still there at the end. Never panics, so `Drop` can run it while
+    /// unwinding.
     ///
     /// # Errors
     ///
-    /// The reap's own error, or the write's when the child then had to be
-    /// killed. A child that ended by itself, before or despite a failed
-    /// write, ended the way its status says, and that status is the answer.
+    /// The reap's own error ([`Self::collect`]), or the write's when the
+    /// child then had to be killed. A child that ended by itself, before or
+    /// despite a failed write, ended the way its status says, and that
+    /// status is the answer.
     fn release_and_reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        use std::io::Write as _;
-
         if let Some(status) = self.ended.get() {
             return Ok(status);
         }
         let written = match self.release.take() {
-            Some(mut release) => release.write_all(&[1]),
+            // The stream is dropped at the end of this arm: the EOF that
+            // releases a child the byte did not reach.
+            Some(mut release) => write_release(&mut release),
             None => Ok(()),
         };
         let (status, killed) = self.collect(self.reap_bound)?;
@@ -894,8 +931,30 @@ impl ParkedFork {
 
     /// Collect the child within `bound`, killing it first if it is still
     /// there at the end of it: its status, and whether the kill was needed.
-    /// Polled through `waitpid` with `WNOHANG` every 5 ms rather than blocked
-    /// on, so the bound is the bound whatever the child is doing.
+    /// Observed through `waitpid` with `WNOHANG` every [`OBSERVE_TICK`]
+    /// rather than blocked on, so the bound is the bound whatever the child
+    /// is doing and whatever the observations answer: one a signal
+    /// interrupted observed nothing and costs the tick, never a retry of its
+    /// own, and the collection after the kill is observed the same way,
+    /// within the reap bound from the kill, never blocked on
+    /// (`PR320-R4-MAIN-001`, `PR320-R4-REG-002`). `bound` is how long the
+    /// child is given to end by itself -- the reap bound after a release,
+    /// nothing at all when the constructor failed -- and the reap bound is
+    /// how long a killed child is given to be collected.
+    ///
+    /// # Errors
+    ///
+    /// Each names the pid, the step and what was observed -- the child
+    /// alive at the last observation, or unobserved with the last answer --
+    /// never more than was observed: a kill that was sent is a kill that
+    /// was sent, and a child that read its release and ended on its own
+    /// while its owner's observations were interrupted is a child that was
+    /// sent a signal it never received, which the collection of it says by
+    /// its status. So that a release can panic with it and a drop can print
+    /// it: an observation that failed otherwise than by interruption, after
+    /// which nothing is killed -- a pid that a failed observation cannot
+    /// prove uncollected is not this fork's to signal; a kill the OS refused;
+    /// or a kill sent and the child not collected within the reap bound of it.
     fn collect(
         &self,
         bound: std::time::Duration,
@@ -903,26 +962,90 @@ impl ParkedFork {
         if let Some(status) = self.ended.get() {
             return Ok((status, false));
         }
+        let before_the_kill = match self.observed_within(bound) {
+            Ok(Collected::Ended(status)) => return Ok((status, false)),
+            Ok(Collected::Outlasted(last)) => last,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "waitpid({}, WNOHANG): {error}; the child is left as it was, uncollected",
+                        self.pid
+                    ),
+                ));
+            }
+        };
+        // SAFETY: `kill` takes a pid and a signal by value. The pid is this
+        // fork's child, which no observation above collected -- each
+        // answered not ended, or nothing at all -- and so is still this
+        // process's uncollected child: it cannot have been reused.
+        if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "kill the parked child {} at the end of {bound:?}: {error}; the child is \
+                     left uncollected, {}",
+                    self.pid,
+                    match before_the_kill {
+                        None => String::from("alive at the last observation"),
+                        Some(last) => format!("unobserved, the last observation answering: {last}"),
+                    }
+                ),
+            ));
+        }
+        match self.observed_within(self.reap_bound) {
+            Ok(Collected::Ended(status)) => Ok((status, true)),
+            Ok(Collected::Outlasted(last)) => Err(std::io::Error::other(format!(
+                "the parked child {} was sent SIGKILL at the end of {bound:?} and not collected \
+                 within another {:?}; {}",
+                self.pid,
+                self.reap_bound,
+                match last {
+                    None => String::from("not ended at the last observation"),
+                    Some(last) => format!("unobserved, the last observation answering: {last}"),
+                }
+            ))),
+            Err(error) => Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "waitpid({}, WNOHANG) after the kill: {error}; the child was sent SIGKILL and \
+                     is left uncollected",
+                    self.pid
+                ),
+            )),
+        }
+    }
+
+    /// Observe the child every [`OBSERVE_TICK`] until it has ended or
+    /// `bound` runs out, from now: its status, kept for the release, or what
+    /// the last observation answered at the end of the bound -- nothing, or
+    /// the interruption. A `bound` of zero is one observation.
+    ///
+    /// # Errors
+    ///
+    /// An observation that failed otherwise than by interruption, as it was.
+    fn observed_within(&self, bound: std::time::Duration) -> std::io::Result<Collected> {
         let started = std::time::Instant::now();
+        // What the observation answered, set by every observation that did
+        // not end the loop before it is read.
+        let mut interrupted: Option<std::io::Error>;
         loop {
-            if let Some(status) = wait_for(self.pid, libc::WNOHANG)? {
-                self.ended.set(Some(status));
-                return Ok((status, false));
+            match self.observe() {
+                Ok(Observed::Ended(status)) => {
+                    self.ended.set(Some(status));
+                    return Ok(Collected::Ended(status));
+                }
+                Ok(Observed::NotEnded) => interrupted = None,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    interrupted = Some(error);
+                }
+                Err(error) => return Err(error),
             }
             if started.elapsed() >= bound {
-                // SAFETY: `kill` takes a pid and a signal by value. The pid is
-                // this fork's child, which every wait above found not yet
-                // ended and so left uncollected: it cannot have been reused.
-                if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let status = wait_for(self.pid, 0)?.ok_or_else(|| {
-                    std::io::Error::other("a blocking waitpid answered without a status")
-                })?;
-                self.ended.set(Some(status));
-                return Ok((status, true));
+                return Ok(Collected::Outlasted(interrupted));
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(OBSERVE_TICK);
         }
     }
 }
@@ -934,36 +1057,105 @@ impl Drop for ParkedFork {
         // status is `release`'s to return, and a panic here would abort a
         // test already unwinding through it. What a drop guarantees is what
         // `release_and_reap` does before it returns anything at all: the
-        // child is released and collected, killed first past the reap bound.
-        let _ = self.release_and_reap();
+        // child is released and collected, killed first past the reap bound,
+        // every step bounded. What it could not do is said on stderr, the
+        // one channel a drop has, with the error that names the step and the
+        // state the child is left in -- alive after a kill the OS refused,
+        // killed and not collected, or not observed -- rather than discarded
+        // with the value (`PR320-R4-MAIN-003`). Written through the handle:
+        // this file forbids the print macros (`PR6-LANEF-004`, the header),
+        // and this is its one stderr site, recorded as such. A stderr that
+        // cannot be written leaves a drop no channel at all.
+        if let Err(error) = self.release_and_reap() {
+            use std::io::Write as _;
+
+            let line = format!(
+                "[the parked child {} was left uncollected by its owner's drop: {error}]\n",
+                self.pid
+            );
+            if std::io::stderr().write_all(line.as_bytes()).is_err() {
+                // Nothing more can be said: the one channel a drop has is
+                // gone, and a panic here would abort a test already unwinding.
+            }
+        }
     }
 }
 
-/// `waitpid` on `pid` with `flags`, `EINTR` retried: `None` when `WNOHANG`
-/// found the child not yet ended, otherwise its status.
+/// What one observation of a child answered ([`observe_child`]).
 #[cfg(unix)]
-fn wait_for(
-    pid: libc::pid_t,
-    flags: libc::c_int,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
+#[derive(Clone, Copy, Debug)]
+enum Observed {
+    /// The child has ended, with this status, and is now collected.
+    Ended(std::process::ExitStatus),
+    /// The child has not ended: running, or stopped.
+    NotEnded,
+}
+
+/// What observing a child until a bound answered
+/// ([`ParkedFork::observed_within`]).
+#[cfg(unix)]
+#[derive(Debug)]
+enum Collected {
+    /// The child ended within the bound, with this status.
+    Ended(std::process::ExitStatus),
+    /// The child had not ended at the end of the bound; the last observation
+    /// answered nothing, or this interruption.
+    Outlasted(Option<std::io::Error>),
+}
+
+/// How often a child is observed while it is given time to end: the tick of
+/// [`ParkedFork::collect`], [`ParkedFork::observed_within`] and an
+/// interrupted [`ParkedFork::is_alive`].
+#[cfg(unix)]
+const OBSERVE_TICK: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// One `waitpid` on `pid` with `WNOHANG`, as it answers: the child ended
+/// with its status, not ended, or the error -- an interruption included --
+/// and nothing retried.
+///
+/// # Errors
+///
+/// What `waitpid` answered, as it was.
+#[cfg(unix)]
+fn observe_child(pid: libc::pid_t) -> std::io::Result<Observed> {
     use std::os::unix::process::ExitStatusExt as _;
 
     let mut status = 0;
-    loop {
-        // SAFETY: `waitpid` writes one int through `status`, which lives for
-        // the call, and takes the pid and the flags by value; the pid is a
-        // child of this process.
-        let answered = unsafe { libc::waitpid(pid, &mut status, flags) };
-        if answered == pid {
-            return Ok(Some(std::process::ExitStatus::from_raw(status)));
-        }
-        if answered == 0 {
-            return Ok(None);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+    // SAFETY: `waitpid` writes one int through `status`, which lives for
+    // the call, and takes the pid and the flags by value; the pid is a
+    // child of this process.
+    let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if answered == pid {
+        return Ok(Observed::Ended(std::process::ExitStatus::from_raw(status)));
+    }
+    if answered == 0 {
+        return Ok(Observed::NotEnded);
+    }
+    Err(std::io::Error::last_os_error())
+}
+
+/// The release byte, written once to `writer`: one attempt, made whatever
+/// it answers and never made again -- not on an interruption, not on a
+/// short write. A write that failed is answered as it was; what releases
+/// the child then is the EOF the caller's drop of the socket gives it, or
+/// the kill at the end of the reap bound. `write_all` would make an
+/// interrupted write again inside itself, outside every bound the owner
+/// keeps (`PR320-R4-REG-002`); the one byte cannot block, the socket's
+/// buffer being empty, so there is nothing a second attempt could wait for.
+///
+/// # Errors
+///
+/// The write's own error, or `WriteZero` for a write that answered fewer
+/// bytes than the one.
+#[cfg(unix)]
+pub(crate) fn write_release(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    match writer.write(&[1]) {
+        Ok(1) => Ok(()),
+        Ok(count) => Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("the release wrote {count} of 1 byte"),
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -1097,30 +1289,69 @@ fn decode_report(report: &[u8; REPORT_LEN]) -> (u8, libc::c_int, libc::c_int) {
 
 /// Read one report from `reader` before `deadline`: the nine bytes, or the
 /// error. One absolute deadline for the whole report, whatever the reads
-/// answer: a read that is interrupted, would block or times out -- the
-/// reader's own tick, [`READY_TICK`] on the handshake socket -- is made again
-/// against the same deadline and never a fresh one, and the bytes a short
-/// read did deliver are kept. `read_exact` would retry an interruption
-/// itself, each retry a fresh socket timeout, so a signal handled more often
-/// than the timeout would hold the caller for as long as the signals came
+/// answer, looked at before every turn: a read that is interrupted, would
+/// block or times out -- the reader's own tick, [`READY_TICK`] on the
+/// handshake socket -- is made again against the same deadline and never a
+/// fresh one; the bytes a short read did deliver are kept and the next read
+/// is made against the same deadline too; and a report complete only after
+/// the deadline is not accepted, so progress and completion cross the one
+/// deadline exactly as interruptions do (`PR320-R4-MAIN-002`,
+/// `PR320-R4-REG-001`). `read_exact` would retry an interruption itself,
+/// each retry a fresh socket timeout, so a signal handled more often than
+/// the timeout would hold the caller for as long as the signals came
 /// (`PR320-R3-MAIN-004`). EOF before the report is the child gone before it
 /// reported: an error saying how much arrived.
 ///
 /// # Errors
 ///
-/// `TimedOut` once the deadline has passed, `UnexpectedEof` for a reader
-/// that ended early, and any other error the reader answered, as it was.
+/// `TimedOut` once the deadline has passed, saying how many bytes had
+/// arrived and what the last read answered; `UnexpectedEof` for a reader
+/// that ended early; and any other error the reader answered, as it was.
 #[cfg(unix)]
 pub(crate) fn read_report_within(
     reader: &mut impl std::io::Read,
     deadline: std::time::Instant,
 ) -> std::io::Result<[u8; REPORT_LEN]> {
+    read_report_within_by(reader, deadline, std::time::Instant::now)
+}
+
+/// [`read_report_within`] with `now` in place of `Instant::now`: the clock
+/// the deadline is read against, once at the top of every turn, so that a
+/// test drives what the clock answers between reads rather than arranging
+/// it with a scheduler -- the seam `readiness::await_signal_by` gives its
+/// wait, for the same reason.
+///
+/// # Errors
+///
+/// As [`read_report_within`].
+#[cfg(unix)]
+pub(crate) fn read_report_within_by(
+    reader: &mut impl std::io::Read,
+    deadline: std::time::Instant,
+    mut now: impl FnMut() -> std::time::Instant,
+) -> std::io::Result<[u8; REPORT_LEN]> {
     let mut report = [0_u8; REPORT_LEN];
     let mut filled = 0_usize;
+    let mut reads = 0_u32;
+    let mut last: Option<std::io::Error> = None;
     loop {
+        if now() >= deadline {
+            let answered = match (reads, last.as_ref()) {
+                (0, _) => String::from("no read was made"),
+                (_, None) => String::from("the last read delivered bytes"),
+                (_, Some(error)) => format!("the last read answered: {error}"),
+            };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "the report deadline passed with {filled} of {REPORT_LEN} bytes read; {answered}"
+                ),
+            ));
+        }
         let Some(rest) = report.get_mut(filled..).filter(|rest| !rest.is_empty()) else {
             return Ok(report);
         };
+        reads += 1;
         match reader.read(rest) {
             Ok(0) => {
                 return Err(std::io::Error::new(
@@ -1128,7 +1359,10 @@ pub(crate) fn read_report_within(
                     format!("the child's end closed after {filled} of {REPORT_LEN} report bytes"),
                 ));
             }
-            Ok(count) => filled += count,
+            Ok(count) => {
+                filled += count;
+                last = None;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -1137,15 +1371,7 @@ pub(crate) fn read_report_within(
                         | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                if std::time::Instant::now() >= deadline {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!(
-                            "the report deadline passed with {filled} of {REPORT_LEN} bytes read; \
-                             the last read answered: {error}"
-                        ),
-                    ));
-                }
+                last = Some(error);
             }
             Err(error) => return Err(error),
         }
