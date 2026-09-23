@@ -4673,12 +4673,93 @@ fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
     );
 }
 
+/// How long a lease observed after its holder's release may keep reading
+/// held before the observation fails: a sibling's fork-to-exec window is
+/// milliseconds, so this is ten thousand times the hold it tolerates, and it
+/// is paid only by a failing run.
+#[cfg(unix)]
+const LEASE_RELEASE_BOUND: Duration = Duration::from_secs(20);
+
+/// What [`lease_released_within`] reports when the lease still read held at
+/// the end of its bound: the bound, the time actually waited and how many
+/// observations found it held, which is what tells a hold that never cleared
+/// from one observed at a single instant.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct LeaseHeldPastBound {
+    bound: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for LeaseHeldPastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the run's cleanup.lock was still held after the full {:?} bound, every one of {} \
+             observations over {:?} finding it held",
+            self.bound, self.observations, self.waited
+        )
+    }
+}
+
+/// Observe the run's cleanup lease every 50 ms until it reads free or
+/// `bound` runs out: how long that took and how many observations it was, or
+/// the report of a hold that outlasted the bound. The observation is
+/// `observe_cleanup_hold`, production's own read.
+#[cfg(unix)]
+fn lease_released_within(
+    public: &Path,
+    bound: Duration,
+) -> Result<(Duration, u32), LeaseHeldPastBound> {
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
+        if !observe_cleanup_hold(public, &mut NoHooks) {
+            return Ok((started.elapsed(), observations));
+        }
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(LeaseHeldPastBound {
+                bound,
+                waited,
+                observations,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether `fd` is closed in this process: `F_GETFD` on it answers `EBADF`.
+#[cfg(unix)]
+fn descriptor_is_closed(fd: libc::c_int) -> bool {
+    // SAFETY: `fcntl` with `F_GETFD` reads a flag of this process's descriptor
+    // table and touches no memory.
+    let refused = unsafe { libc::fcntl(fd, libc::F_GETFD) == -1 };
+    refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+}
+
 /// The pre-spawn half without a spawn: the descriptor returned is a live
 /// shared hold, and dropping it releases the lease. A caller whose spawn
 /// fails therefore leaves nothing held.
+///
+/// The release is this process's own, and it is proved as its own: the
+/// number the hold had is closed once it is dropped. The lease reading free
+/// is then observed until it does or `LEASE_RELEASE_BOUND` runs out, because
+/// under a whole parallel suite a `fork` another thread makes while the hold
+/// is open carries a copy of it to that child's `exec`, and one observation
+/// made right after the drop can land inside that window and read the copy
+/// (`a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor`,
+/// which constructs it). A lease still held at the end of the bound fails
+/// this test with the bound and the observations in the message
+/// (`a_copy_that_outlasts_the_bound_still_fails_the_release_observation`).
 #[cfg(unix)]
 #[test]
 fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
+    use std::os::fd::AsRawFd as _;
+
     let root = scratch("childlease-unspawned");
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000001");
     fs::create_dir_all(&public).expect("the run's public directory");
@@ -4687,10 +4768,226 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
         .expect("take the shared hold")
         .expect("Unix hands the child a hold");
     assert!(observe_cleanup_hold(&public, &mut NoHooks), "held");
+    let descriptor = hold.as_raw_fd();
     drop(hold);
     assert!(
-        !observe_cleanup_hold(&public, &mut NoHooks),
-        "released with the descriptor"
+        descriptor_is_closed(descriptor),
+        "this process's own descriptor {descriptor} is closed by the drop"
+    );
+    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND) {
+        panic!("released with the descriptor: {held}");
+    }
+}
+
+/// Why the observation above is bounded. A copy of this process's descriptor
+/// carried by a sibling's fork keeps the lease after the descriptor itself is
+/// closed: the fork is `ParkedFork::holding`, a child of this process parked
+/// in its `pre_exec` with that one descriptor and its socket, whose pid comes
+/// from inside that window, so it is known alive and holding. The single
+/// observation the test above used to make reads held; the bounded one reads
+/// free once the fork is released, and not before.
+#[cfg(unix)]
+#[test]
+fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-sibling-copy");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000003");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let descriptor = hold.as_raw_fd();
+    let parked = ParkedFork::holding(descriptor);
+    let holder = parked.pid();
+    assert!(parked.is_alive(), "the parked fork {holder} is alive");
+    assert_eq!(parked.kept()[0], descriptor, "and it kept the lease copy");
+    drop(hold);
+    assert!(
+        descriptor_is_closed(descriptor),
+        "this process's own descriptor {descriptor} is closed by the drop"
+    );
+    assert!(
+        observe_cleanup_hold(&public, &mut NoHooks),
+        "one observation right after the drop reads the lease held: the copy in fork {holder}'s \
+         exec window"
+    );
+
+    let released = parked.release_after(Duration::from_millis(300));
+    let observed = lease_released_within(&public, LEASE_RELEASE_BOUND);
+    let returned_at = Instant::now();
+    let (released_at, status) = released.join();
+    let (waited, observations) = observed.expect("the lease reads free once the fork is released");
+    assert!(
+        returned_at >= released_at,
+        "the observation returned before fork {holder} released the copy: it did not wait"
+    );
+    assert!(
+        observations >= 2,
+        "the first observation read the copy and a later one read free: {observations} \
+         observations over {waited:?}"
+    );
+    assert!(
+        status.success(),
+        "the released fork exec'd `true`: {status:?}"
+    );
+}
+
+/// The bound is a bound: a copy that outlasts it fails the observation with
+/// the bound and the count in the message, and the observation never turns a
+/// missing release into success.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-past-bound");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000005");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let descriptor = hold.as_raw_fd();
+    let parked = ParkedFork::holding(descriptor);
+    let holder = parked.pid();
+    drop(hold);
+    assert!(
+        descriptor_is_closed(descriptor),
+        "this process's own descriptor {descriptor} is closed by the drop"
+    );
+
+    let held = lease_released_within(&public, Duration::from_millis(300))
+        .expect_err("a copy alive past the bound is reported, not waited into success");
+    assert!(
+        held.waited >= held.bound && held.observations >= 2,
+        "the observation ran its whole bound: {held}"
+    );
+    assert!(
+        held.to_string()
+            .contains("still held after the full 300ms bound"),
+        "{held}"
+    );
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the holder {holder} is alive and holding after the report"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exec'd `true`: {status:?}"
+    );
+    lease_released_within(&public, LEASE_RELEASE_BOUND)
+        .expect("and the lease reads free once the fork has exited");
+}
+
+/// What the parked fork holds, and what it does not: the lease copy and its
+/// socket, and not a sentinel this process had open at the fork. The
+/// sentinel is one end of a socket pair. With this process's copy of that end
+/// closed, a read on the other end answers EOF only when nobody holds a copy,
+/// so EOF is the proof the fork closed its inherited one; the control, a raw
+/// `fork` that closes nothing, shows the same read unable to answer while
+/// that child lives. On Linux the child's descriptor table is read from
+/// `/proc` as well: exactly stdio, the socket and the lease, and the lease
+/// entry names `cleanup.lock`.
+#[cfg(unix)]
+#[test]
+fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-sentinel");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000004");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("bound the sentinel read");
+    let sentinel_number = sentinel.as_raw_fd();
+
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    let [lease_number, socket_number] = parked.kept();
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the parked fork {holder} holds the lease"
+    );
+    assert!(
+        sentinel_number != lease_number && sentinel_number != socket_number,
+        "the sentinel {sentinel_number} is neither kept descriptor"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let mut entries: Vec<(libc::c_int, PathBuf)> =
+            std::fs::read_dir(format!("/proc/{holder}/fd"))
+                .expect("the child's descriptor table")
+                .map(|entry| {
+                    let entry = entry.expect("an entry of the table");
+                    let number = entry
+                        .file_name()
+                        .to_string_lossy()
+                        .parse()
+                        .expect("a descriptor number");
+                    (number, std::fs::read_link(entry.path()).unwrap_or_default())
+                })
+                .collect();
+        entries.sort();
+        let numbers: Vec<libc::c_int> = entries.iter().map(|(number, _)| *number).collect();
+        let mut expected = vec![0, 1, 2, lease_number, socket_number];
+        expected.sort_unstable();
+        assert_eq!(
+            numbers, expected,
+            "the child's table is stdio, the lease copy and the socket: {entries:?}"
+        );
+        let lease_target = &entries
+            .iter()
+            .find(|(number, _)| *number == lease_number)
+            .expect("the lease entry")
+            .1;
+        assert!(
+            lease_target.ends_with("cleanup.lock"),
+            "the kept descriptor is the run's lease: {lease_target:?}"
+        );
+    }
+    drop(sentinel);
+    let mut byte = [0_u8; 1];
+    let read = observer.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0)),
+        "with this process's copy of the sentinel closed the read answers EOF, so no copy of it \
+         survives in fork {holder}: {read:?}"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exec'd `true`: {status:?}"
+    );
+
+    let (sentinel, mut observer) =
+        std::os::unix::net::UnixStream::pair().expect("a second sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(150)))
+        .expect("bound the control read");
+    let sleeper = fork_a_sleeper(600);
+    drop(sentinel);
+    let read = observer.read(&mut byte);
+    assert!(
+        read.is_err(),
+        "a fork that closed nothing still holds the sentinel, so the read cannot answer EOF \
+         while it lives: {read:?}"
+    );
+    let mut status = 0;
+    // SAFETY: `sleeper` is the child this test forked, and nothing else waits on it.
+    unsafe { libc::waitpid(sleeper, &mut status, 0) };
+    let read = observer.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0)),
+        "and answers EOF once that fork has exited: {read:?}"
     );
 }
 
