@@ -1676,14 +1676,27 @@ unit of the budget, not a diagnosis of those runs.
 **Why thirty seconds.** A chosen margin, not a measurement: several hundred
 times the healthy life measured here, some twenty-five times the longest
 daemon latency measured under load (the 1.2 s `docker start`, which this
-wait does not even include), in the range of this suite's other bounds
+wait does not even include), and in the range of this suite's other bounds
 (twenty seconds for the cleanup lease in `engine::topology::recover::tests`,
-sixty for the lock-probe child below), and paid only by a failing test. A
-red at this bound says the daemon answered *running* for thirty seconds —
-the message says how long it waited and how many times it asked — and no
-more: on its own it does not tell a busy box from a daemon that has stopped
-reporting exits, and a red whose elapsed time far exceeds the budget says an
-observation, not the loop, took the time.
+sixty for the lock-probe child below). It is not a cost paid only by a
+failing test: a wait that gives up has spent at least the budget, and a wait
+that ends in a terminal observation has spent however long that observation
+took to arrive — the whole budget or more, since a terminal observation that
+completes after the budget is still the answer. The test below that accepts
+an exit observed 100 ms into a 20 ms budget holds that with the fake, and
+so does the helper at its real constants: handed one observation that takes
+31 s to answer `Exited`, it returned `Exited` after 31.0 s (an independent
+review control of 2026-09-23). A red at this bound says that every
+observation the wait made found the container running and that the check
+after the last of them found thirty seconds spent — the message says how
+long it waited and how many times it asked — and no more: on its own it
+does not tell a busy box from a daemon that has stopped reporting exits,
+and its elapsed time and count cannot apportion that time between the
+observations, the pauses and the scheduler, so an overshoot, however large,
+does not say which of them took it. A 34 µs observation followed by a
+160 ms scheduling gap before the check, and a 100 ms pause slept in full
+across a 20 ms budget, each report the whole overshoot as time waited
+(independent review controls of 2026-09-23, with the fake).
 
 `decisions.tests_acceptance.determinism` forbids sleeps in the deterministic
 suite, whose runtime is [`FakeRuntime`] and whose liveness is simulated; this
