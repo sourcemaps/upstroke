@@ -754,20 +754,28 @@ fn is_whole_file_test_module(path: &str) -> bool {
     })
 }
 
-fn attribute_stack_is_configured_out_of_the_production_build(blanked: &str, line: usize) -> bool {
-    let start: usize = blanked
-        .split_inclusive('\n')
-        .take(line.saturating_sub(1))
-        .map(str::len)
-        .sum();
+use super::census_domain::{Predicate, entails_test, parse_predicate};
+use super::lint_levels::top_level_arguments;
+
+struct StackedAttribute<'a> {
+    start: usize,
+    end: usize,
+    line: usize,
+    name: &'a str,
+    text: &'a str,
+    stack: usize,
+}
+
+fn attributes_in_stacks(blanked: &str) -> Vec<StackedAttribute<'_>> {
     let bytes = blanked.as_bytes();
-    let mut at = start;
-    loop {
-        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+    let mut found = Vec::new();
+    let mut at = 0;
+    let mut stack = 0;
+    let mut previous_end: Option<usize> = None;
+    while let Some(byte) = bytes.get(at) {
+        if *byte != b'#' {
             at += 1;
-        }
-        if bytes.get(at) != Some(&b'#') {
-            return false;
+            continue;
         }
         let open = if bytes.get(at + 1) == Some(&b'!') {
             at + 2
@@ -775,22 +783,152 @@ fn attribute_stack_is_configured_out_of_the_production_build(blanked: &str, line
             at + 1
         };
         if bytes.get(open) != Some(&b'[') {
-            return false;
+            at += 1;
+            continue;
         }
         let Some(close) = super::matching(bytes, open, b'[', b']') else {
-            return false;
+            break;
         };
-        let attribute: String = blanked
-            .get(open + 1..close)
-            .unwrap_or_default()
-            .chars()
-            .filter(|character| !super::is_rustc_whitespace(*character))
-            .collect();
-        if attribute == "cfg(test)" {
-            return true;
+        let contiguous = previous_end.is_some_and(|end| {
+            blanked
+                .get(end..at)
+                .is_some_and(|gap| gap.bytes().all(|byte| byte.is_ascii_whitespace()))
+        });
+        if !contiguous {
+            stack += 1;
         }
+        let text = blanked.get(open + 1..close).unwrap_or_default().trim();
+        let name = text
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .next()
+            .unwrap_or_default();
+        found.push(StackedAttribute {
+            start: at,
+            end: close + 1,
+            line: blanked.get(..at).unwrap_or_default().matches('\n').count() + 1,
+            name,
+            text,
+            stack,
+        });
+        previous_end = Some(close + 1);
         at = close + 1;
     }
+    found
+}
+
+fn cfg_predicate(attribute: &StackedAttribute<'_>) -> Option<Predicate> {
+    let body = attribute
+        .text
+        .get(attribute.name.len()..)?
+        .trim_start()
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    let written = match attribute.name {
+        "cfg" => body,
+        "cfg_attr" => top_level_arguments(body).into_iter().next()?,
+        _ => return None,
+    };
+    parse_predicate(written.trim()).ok()
+}
+
+fn stack_entails_test(attributes: &[StackedAttribute<'_>], stack: usize) -> bool {
+    let predicates: Vec<Predicate> = attributes
+        .iter()
+        .filter(|attribute| attribute.stack == stack && attribute.name == "cfg")
+        .filter_map(cfg_predicate)
+        .collect();
+    entails_test(&Predicate::All(predicates))
+}
+
+fn skip_whitespace(bytes: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    at
+}
+
+fn test_only_module_spans(
+    blanked: &str,
+    attributes: &[StackedAttribute<'_>],
+) -> Vec<(usize, usize)> {
+    let bytes = blanked.as_bytes();
+    let mut spans = Vec::new();
+    let mut seen = BTreeSet::new();
+    for attribute in attributes {
+        if !seen.insert(attribute.stack) || !stack_entails_test(attributes, attribute.stack) {
+            continue;
+        }
+        let end = attributes
+            .iter()
+            .filter(|other| other.stack == attribute.stack)
+            .map(|other| other.end)
+            .max()
+            .unwrap_or(attribute.end);
+        let mut cursor = skip_whitespace(bytes, end);
+        if bytes.get(cursor..).is_some_and(|rest| {
+            rest.starts_with(b"pub")
+                && rest
+                    .get(3)
+                    .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'(')
+        }) {
+            cursor = skip_whitespace(bytes, cursor + 3);
+            if bytes.get(cursor) == Some(&b'(') {
+                let Some(close) = super::matching(bytes, cursor, b'(', b')') else {
+                    continue;
+                };
+                cursor = skip_whitespace(bytes, close + 1);
+            }
+        }
+        if !bytes.get(cursor..).is_some_and(|rest| {
+            rest.starts_with(b"mod") && rest.get(3).is_some_and(u8::is_ascii_whitespace)
+        }) {
+            continue;
+        }
+        cursor = skip_whitespace(bytes, cursor + 3);
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            cursor += 1;
+        }
+        cursor = skip_whitespace(bytes, cursor);
+        if bytes.get(cursor) != Some(&b'{') {
+            continue;
+        }
+        if let Some(close) = super::matching(bytes, cursor, b'{', b'}') {
+            spans.push((cursor, close + 1));
+        }
+    }
+    spans
+}
+
+fn allowance_compiles_in_no_production_build(
+    attributes: &[StackedAttribute<'_>],
+    test_only_spans: &[(usize, usize)],
+    line: usize,
+) -> bool {
+    let Some(own) = attributes.iter().find(|attribute| {
+        attribute.line == line
+            && (attribute.text.contains("allow") || attribute.text.contains("expect"))
+    }) else {
+        return false;
+    };
+    if test_only_spans
+        .iter()
+        .any(|(from, to)| (*from..*to).contains(&own.start))
+    {
+        return true;
+    }
+    let mut predicates: Vec<Predicate> = attributes
+        .iter()
+        .filter(|attribute| attribute.stack == own.stack && attribute.name == "cfg")
+        .filter_map(cfg_predicate)
+        .collect();
+    if own.name == "cfg_attr" {
+        predicates.extend(cfg_predicate(own));
+    }
+    entails_test(&Predicate::All(predicates))
 }
 
 fn governed_allows_in_the_production_build(
@@ -802,10 +940,12 @@ fn governed_allows_in_the_production_build(
         return BTreeSet::new();
     }
     let blanked = blank_comments_and_strings(source);
+    let attributes = attributes_in_stacks(&blanked);
+    let test_only_spans = test_only_module_spans(&blanked, &attributes);
     governed_allows(&production_code(source))
         .into_iter()
         .filter(|allow| {
-            !attribute_stack_is_configured_out_of_the_production_build(&blanked, allow.line)
+            !allowance_compiles_in_no_production_build(&attributes, &test_only_spans, allow.line)
         })
         .flat_map(|allow| allow.lints.into_iter())
         .filter_map(|lint| normalize_lint(&lint))
@@ -924,6 +1064,117 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             )],
             vec![],
         ),
+        (
+            "the inline test module is gated by `cfg(all(test))`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(all(test))]\n#[allow(clippy::disallowed_methods)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "`cfg(all(test))` written after the allowance",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[allow(clippy::disallowed_methods)]\n#[cfg(all(test))]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "`cfg(all(test, unix))`: a test module on one platform, a production module on none",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(all(test, unix))]\n#[allow(clippy::disallowed_methods)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "`cfg(any(test))`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(any(test))]\n#[allow(clippy::disallowed_methods)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "two `cfg` attributes on the module, `cfg(test)` and `cfg(unix)`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(test)]\n#[cfg(unix)]\n#[allow(clippy::disallowed_methods)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "the allowance itself is applied only under `cfg_attr(test, ..)`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg_attr(test, allow(clippy::disallowed_methods))]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "a per-site expectation applied only under `cfg_attr(test, ..)`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg_attr(test, expect(clippy::disallowed_methods))]\nfn t() {{}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an item no build compiles, `cfg(any())`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(any())]\n#[allow(clippy::disallowed_methods)]\nmod never {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an inner allowance inside a module gated by `cfg(all(test, unix))`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(all(test, unix))]\nmod tests {{\n    #![allow(clippy::disallowed_methods)]\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an inner allowance in a module nested inside one gated by `cfg(all(test, unix))`",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(all(test, unix))]\npub(crate) mod tests {{\n    mod deeper {{\n        \
+                     #![allow(clippy::disallowed_methods)]\n    }}\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "a `cfg(not(not(test)))` module is a test module however it is spelled",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(not(not(test)))]\n#[allow(clippy::disallowed_methods)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
     ] {
         let found = named(&files, &test_modules);
         assert_eq!(found.len(), 1, "{what}: {found:#?}");
@@ -988,6 +1239,67 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             )],
             vec![],
         ),
+        (
+            "a `cfg(not(test))` module is production code",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(not(test))]\n#[allow(clippy::disallowed_methods)]\nmod production {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an allowance applied under `cfg_attr(not(test), ..)` is a production allowance",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg_attr(not(test), allow(clippy::disallowed_methods))]\nmod m {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "`cfg(all())` holds in every build",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(all())]\n#[allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "`cfg(any(test, unix))` holds in a production build on one platform",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(any(test, unix))]\n#[allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an inner allowance inside a `cfg(unix)` module",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(unix)]\nmod m {{\n    #![allow(clippy::disallowed_methods)]\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "a feature predicate is decided by no valuation read here, so the allowance stays \
+             production",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(feature = \"x\")]\n#[allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
     ] {
         let found = named(&files, &test_modules);
         assert!(found.is_empty(), "{what}: {found:#?}");
@@ -1031,15 +1343,50 @@ struct UnstatedLint {
     path: String,
     lint: &'static str,
     level: Option<&'static str>,
+    inherited: Option<(String, &'static str)>,
 }
 
 impl UnstatedLint {
     fn describe(&self) -> String {
-        match self.level {
+        let stated = match self.level {
             Some(level) => format!("{}: `{}` is `{level}` at file level", self.path, self.lint),
             None => format!("{}: `{}` is stated at no level", self.path, self.lint),
+        };
+        match &self.inherited {
+            Some((ancestor, level)) => {
+                format!("{stated}; the production build inherits `{level}` from {ancestor}")
+            }
+            None => format!("{stated}; the production build takes it from `-D warnings` alone"),
         }
     }
+}
+
+fn ancestor_module_files(path: &str, sources: &BTreeMap<String, String>) -> Vec<String> {
+    let Some(module) = path
+        .strip_prefix("src/")
+        .and_then(|under| under.strip_suffix(".rs"))
+    else {
+        return Vec::new();
+    };
+    let mut segments: Vec<&str> = module.split('/').collect();
+    if segments.last() == Some(&"mod") {
+        segments.pop();
+    }
+    let mut ancestors = Vec::new();
+    for depth in (0..segments.len()).rev() {
+        let candidates = if depth == 0 {
+            vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()]
+        } else {
+            let prefix = segments.get(..depth).unwrap_or_default().join("/");
+            vec![format!("src/{prefix}.rs"), format!("src/{prefix}/mod.rs")]
+        };
+        ancestors.extend(
+            candidates
+                .into_iter()
+                .find(|candidate| sources.contains_key(candidate)),
+        );
+    }
+    ancestors
 }
 
 fn governed_lints_no_classified_module_states_at_file_level() -> Vec<UnstatedLint> {
@@ -1052,15 +1399,25 @@ fn governed_lints_no_classified_module_states_at_file_level() -> Vec<UnstatedLin
                  read it"
             );
         };
+        let ancestors = ancestor_module_files(path, &sources);
         for lint in USED_GOVERNED_LINTS {
             let level = crate::effects::lint_levels::file_level_lint_state(source, lint);
             if matches!(level, Some("forbid" | "deny" | "allow" | "expect")) {
                 continue;
             }
+            let inherited = ancestors.iter().find_map(|ancestor| {
+                sources
+                    .get(ancestor)
+                    .and_then(|above| {
+                        crate::effects::lint_levels::file_level_lint_state(above, lint)
+                    })
+                    .map(|level| (ancestor.clone(), level))
+            });
             unstated.push(UnstatedLint {
                 path: (*path).to_owned(),
                 lint,
                 level,
+                inherited,
             });
         }
     }
@@ -1117,9 +1474,11 @@ fn the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink() {
         unstated.len(),
         pinned,
         "{} governed-lint pairs in classified modules are stated at no file level against \
-         {pinned} pinned: {direction}. Each pair takes its level from `-D warnings` alone, or \
-         from a parent's `deny`, and either is lowered by an inner `allow` the placement scan \
-         does not read; a `forbid` is not. The pairs:\n{listed:#?}",
+         {pinned} pinned: {direction}. The pin counts what each prologue states, not which \
+         pairs are lowerable: a pair's level in the production build is an ancestor's `forbid`, \
+         which no inner `allow` lowers, an ancestor's `deny`, which one the placement scan does \
+         not read lowers, or `-D warnings` alone, which one lowers too; each pair below says \
+         which. The pairs:\n{listed:#?}",
         unstated.len()
     );
 }
@@ -5194,7 +5553,9 @@ fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {
 
 #[test]
 fn the_file_level_lint_reader_answers_what_rustc_does() {
-    use crate::effects::lint_levels::{Resolution, file_level_lint_resolution};
+    use crate::effects::lint_levels::{
+        Resolution, file_level_lint_resolution, file_level_lint_worlds,
+    };
 
     const BODY: &str = "pub fn go(p: &std::path::Path) { let _ = std::fs::write(p, \"x\"); }\n";
     const LINT: &str = "clippy::disallowed_methods";
@@ -5240,16 +5601,27 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         (output.status.success(), diagnostics)
     }
 
-    fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {
-        if resolution.refused_downgrade {
+    fn predict_world(
+        level: Option<&'static str>,
+        refused_downgrade: bool,
+    ) -> (bool, Vec<&'static str>, bool) {
+        if refused_downgrade {
             return (false, Vec::new(), true);
         }
-        match resolution.level {
+        match level {
             Some("allow" | "expect") => (true, Vec::new(), false),
             None | Some("warn") => (true, vec!["warning"], false),
             Some("deny" | "forbid") => (false, vec!["error"], false),
             other => panic!("the reader answered `{other:?}`, which nothing predicts"),
         }
+    }
+
+    fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {
+        assert!(
+            !resolution.undecided,
+            "a row of the decided table left the reader undecided: {resolution:?}"
+        );
+        predict_world(resolution.level, resolution.refused_downgrade)
     }
 
     let scratch = scratch_dir("levels");
@@ -5332,6 +5704,65 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
             "#![cfg_attr(not(test), allow(dead_code), forbid(clippy::disallowed_methods))]\n",
         ),
         (
+            "cfg_attr_not_test_deny_then_nested_allow",
+            "#![cfg_attr(not(test), deny(clippy::disallowed_methods), \
+             cfg_attr(not(test), allow(clippy::disallowed_methods)))]\n",
+        ),
+        (
+            "cfg_attr_not_test_forbid_then_nested_allow",
+            "#![cfg_attr(not(test), forbid(clippy::disallowed_methods), \
+             cfg_attr(not(test), allow(clippy::disallowed_methods)))]\n",
+        ),
+        (
+            "cfg_attr_nested_not_test_forbid",
+            "#![cfg_attr(not(test), cfg_attr(not(test), forbid(clippy::disallowed_methods)))]\n",
+        ),
+        (
+            "deny_then_cfg_attr_not_test_nested_test_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![cfg_attr(not(test), cfg_attr(test, allow(clippy::disallowed_methods)))]\n",
+        ),
+        (
+            "deny_then_cfg_attr_test_nested_not_test_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![cfg_attr(test, cfg_attr(not(test), allow(clippy::disallowed_methods)))]\n",
+        ),
+        (
+            "cfg_attr_not_test_deny_and_allow_in_one",
+            "#![cfg_attr(not(test), deny(clippy::disallowed_methods), \
+             allow(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_test_deny_then_allow",
+            "#![cfg_attr(test, deny(clippy::disallowed_methods))]\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "cfg_attr_all_not_test_forbid",
+            "#![cfg_attr(all(not(test)), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_any_test_or_not_test_forbid",
+            "#![cfg_attr(any(test, not(test)), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_not_not_test_forbid",
+            "#![cfg_attr(not(not(test)), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_all_empty_forbid",
+            "#![cfg_attr(all(), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_any_empty_forbid",
+            "#![cfg_attr(any(), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "deny_then_cfg_attr_any_empty_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![cfg_attr(any(), allow(clippy::disallowed_methods))]\n",
+        ),
+        (
             "prose_decoy",
             "//! `#![allow(clippy::disallowed_methods)]` is written here in prose.\n\
              #![deny(clippy::disallowed_methods)]\n",
@@ -5383,6 +5814,116 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         observed_shapes.len()
     );
 
+    let undecided: &[(&str, &str, bool)] = &[
+        (
+            "deny_then_cfg_attr_unix_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![cfg_attr(unix, allow(clippy::disallowed_methods))]\n",
+            true,
+        ),
+        (
+            "deny_then_cfg_attr_windows_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![cfg_attr(windows, allow(clippy::disallowed_methods))]\n",
+            true,
+        ),
+        (
+            "cfg_attr_unix_forbid",
+            "#![cfg_attr(unix, forbid(clippy::disallowed_methods))]\n",
+            true,
+        ),
+        (
+            "cfg_attr_unix_forbid_then_deny",
+            "#![cfg_attr(unix, forbid(clippy::disallowed_methods))]\n\
+             #![deny(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "forbid_then_cfg_attr_unix_allow",
+            "#![forbid(clippy::disallowed_methods)]\n\
+             #![cfg_attr(unix, allow(clippy::disallowed_methods))]\n",
+            true,
+        ),
+        (
+            "cfg_attr_feature_forbid",
+            "#![cfg_attr(feature = \"not(test)\", forbid(clippy::disallowed_methods))]\n",
+            true,
+        ),
+        (
+            "cfg_attr_nested_unix_forbid",
+            "#![cfg_attr(not(test), cfg_attr(unix, forbid(clippy::disallowed_methods)))]\n",
+            true,
+        ),
+        (
+            "cfg_attr_missing_predicate",
+            "#![cfg_attr(, forbid(clippy::disallowed_methods))]\n",
+            false,
+        ),
+        (
+            "cfg_attr_split_token_predicate",
+            "#![cfg_attr(not(te st), forbid(clippy::disallowed_methods))]\n",
+            false,
+        ),
+        (
+            "cfg_attr_not_with_two_arguments",
+            "#![cfg_attr(not(test, unix), forbid(clippy::disallowed_methods))]\n",
+            false,
+        ),
+        (
+            "cfg_attr_unbalanced_predicate",
+            "#![cfg_attr(not(test, forbid(clippy::disallowed_methods))]\n",
+            false,
+        ),
+    ];
+    for (tag, prologue, compiles) in undecided {
+        let source = format!("{prologue}{BODY}");
+        let resolution = file_level_lint_resolution(&source, LINT);
+        assert!(
+            resolution.level.is_none() && !resolution.refused_downgrade,
+            "`{tag}`: the reader claimed a level no single production valuation decides: \
+             {resolution:?}"
+        );
+        assert!(
+            resolution.undecided || !*compiles,
+            "`{tag}`: a prologue rustc compiles under one valuation and not another is \
+             undecided, not silently one of them: {resolution:?}"
+        );
+        assert_eq!(
+            file_level_lint_resolution(&source.replace('\n', "\r\n"), LINT),
+            resolution,
+            "`{tag}` reads differently under CRLF"
+        );
+        let worlds = file_level_lint_worlds(&source, LINT);
+        let (built, diagnostics) = compile(&scratch, tag, &source);
+        let fired: Vec<String> = diagnostics
+            .iter()
+            .filter(|(_, code)| code == LINT)
+            .map(|(level, _)| level.clone())
+            .collect();
+        let rejected = diagnostics.iter().any(|(_, code)| code == "E0453");
+        if *compiles {
+            assert!(
+                worlds.len() > 1,
+                "`{tag}`: the reader refused to decide a prologue every valuation agrees on: \
+                 {worlds:?}"
+            );
+            assert!(
+                worlds.iter().any(|&(level, refused_downgrade)| {
+                    predict_world(level, refused_downgrade)
+                        == (built, fired.iter().map(String::as_str).collect(), rejected)
+                }),
+                "`{tag}`: clippy-driver on this host did built={built} fired={fired:?} \
+                 E0453={rejected}, which no production valuation the reader enumerated \
+                 predicts: {worlds:?}; all diagnostics {diagnostics:?}"
+            );
+        } else {
+            assert!(
+                !built,
+                "`{tag}`: clippy-driver compiled a predicate the reader could not read; the \
+                 reader's refusal would have hidden a level: all diagnostics {diagnostics:?}"
+            );
+        }
+    }
+
     let deny_then_allow = format!(
         "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n{BODY}"
     );
@@ -5391,6 +5932,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         Resolution {
             level: Some("allow"),
             refused_downgrade: false,
+            undecided: false,
         },
         "deny then allow is effectively allow"
     );
@@ -5402,6 +5944,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         Resolution {
             level: Some("forbid"),
             refused_downgrade: true,
+            undecided: false,
         },
         "a forbid cannot be weakened; the attempt is E0453 and not a level"
     );

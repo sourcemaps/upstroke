@@ -2081,7 +2081,7 @@ pub(crate) mod census_domain {
         matches!(decide_without_test(predicate), Some(false))
     }
 
-    fn decide_without_test(predicate: &Predicate) -> Option<bool> {
+    pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {
         match predicate {
             Predicate::Test => Some(false),
             Predicate::Other(_) => None,
@@ -2211,39 +2211,108 @@ pub(crate) mod census_domain {
 
 #[cfg(test)]
 pub(crate) mod lint_levels {
+    use std::collections::BTreeSet;
+
+    use super::census_domain::{decide_without_test, parse_predicate};
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct Resolution {
         pub(crate) level: Option<&'static str>,
         pub(crate) refused_downgrade: bool,
+        pub(crate) undecided: bool,
     }
+
+    pub(crate) type World = (Option<&'static str>, bool);
 
     #[must_use]
     pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {
+        let worlds = file_level_lint_worlds(source, lint);
+        let mut agreed = worlds.iter();
+        match (agreed.next(), agreed.next()) {
+            (Some(&(level, refused_downgrade)), None) => Resolution {
+                level,
+                refused_downgrade,
+                undecided: false,
+            },
+            _ => Resolution {
+                level: None,
+                refused_downgrade: false,
+                undecided: true,
+            },
+        }
+    }
+
+    struct Statement {
+        level: &'static str,
+        conditions: Vec<String>,
+    }
+
+    const MOST_UNDECIDED_PREDICATES: usize = 12;
+
+    #[must_use]
+    pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {
+        let statements = lint_statements_in_the_prologue(source, lint);
+        let variables: Vec<&str> = statements
+            .iter()
+            .flat_map(|statement| statement.conditions.iter().map(String::as_str))
+            .collect::<BTreeSet<&str>>()
+            .into_iter()
+            .collect();
+        let mut worlds = BTreeSet::new();
+        if variables.len() > MOST_UNDECIDED_PREDICATES {
+            return worlds;
+        }
+        for assignment in 0_u64..(1_u64 << variables.len()) {
+            let holds = |condition: &String| {
+                variables
+                    .iter()
+                    .position(|variable| *variable == condition.as_str())
+                    .is_some_and(|index| assignment & (1_u64 << index) != 0)
+            };
+            let mut level = None;
+            let mut refused_downgrade = false;
+            for statement in &statements {
+                if !statement.conditions.iter().all(holds) {
+                    continue;
+                }
+                if level == Some("forbid") {
+                    if matches!(statement.level, "allow" | "warn" | "expect") {
+                        refused_downgrade = true;
+                    }
+                } else {
+                    level = Some(statement.level);
+                }
+            }
+            worlds.insert((level, refused_downgrade));
+        }
+        worlds
+    }
+
+    fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {
         const LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
         let blanked = super::blank_comments_and_strings(source);
         let bytes = blanked.as_bytes();
-        let mut resolution = Resolution {
-            level: None,
-            refused_downgrade: false,
-        };
+        let mut statements = Vec::new();
         let mut at = 0;
-        while at < bytes.len() {
-            if bytes[at].is_ascii_whitespace() {
+        while let Some(byte) = bytes.get(at) {
+            if byte.is_ascii_whitespace() {
                 at += 1;
                 continue;
             }
-            if bytes[at] != b'#' || bytes.get(at + 1) != Some(&b'!') {
-                return resolution;
+            if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {
+                return statements;
             }
             let open = at + 2;
             if bytes.get(open) != Some(&b'[') {
-                return resolution;
+                return statements;
             }
             let Some(close) = super::matching(bytes, open, b'[', b']') else {
-                return resolution;
+                return statements;
             };
-            let attribute = blanked[open + 1..close].trim();
-            for statement in statements_in_the_production_build(attribute) {
+            let attribute = blanked.get(open + 1..close).unwrap_or_default().trim();
+            let mut applied = Vec::new();
+            statements_in_the_production_build(attribute, &mut Vec::new(), &mut applied);
+            for (statement, conditions) in applied {
                 for level in LEVELS {
                     let Some(rest) = statement.strip_prefix(level) else {
                         continue;
@@ -2258,52 +2327,57 @@ pub(crate) mod lint_levels {
                     if !list.split(',').any(|entry| names_lint(entry.trim(), lint)) {
                         continue;
                     }
-                    if resolution.level == Some("forbid") {
-                        if matches!(level, "allow" | "warn" | "expect") {
-                            resolution.refused_downgrade = true;
-                        }
-                    } else {
-                        resolution.level = Some(match level {
-                            "allow" => "allow",
-                            "expect" => "expect",
-                            "warn" => "warn",
-                            "deny" => "deny",
-                            _ => "forbid",
-                        });
-                    }
+                    statements.push(Statement { level, conditions });
                     break;
                 }
             }
             at = close + 1;
         }
-        resolution
+        statements
     }
 
-    fn statements_in_the_production_build(attribute: &str) -> Vec<&str> {
-        let Some(rest) = attribute.strip_prefix("cfg_attr") else {
-            return vec![attribute];
-        };
-        let Some(body) = rest
-            .trim_start()
-            .strip_prefix('(')
+    fn statements_in_the_production_build<'a>(
+        attribute: &'a str,
+        conditions: &mut Vec<String>,
+        into: &mut Vec<(&'a str, Vec<String>)>,
+    ) {
+        let name_end = attribute
+            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .unwrap_or(attribute.len());
+        if attribute.get(..name_end) != Some("cfg_attr") {
+            into.push((attribute, conditions.clone()));
+            return;
+        }
+        let Some(body) = attribute
+            .get(name_end..)
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('('))
             .and_then(|body| body.strip_suffix(')'))
         else {
-            return Vec::new();
+            return;
         };
         let mut arguments = top_level_arguments(body).into_iter();
-        let predicate: String = arguments
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter(|character| !super::is_rustc_whitespace(*character))
-            .collect();
-        match predicate.as_str() {
-            "not(test)" => arguments.map(str::trim).collect(),
-            _ => Vec::new(),
+        let written = arguments.next().unwrap_or_default().trim();
+        let variable = match parse_predicate(written) {
+            Ok(predicate) => match decide_without_test(&predicate) {
+                Some(true) => None,
+                Some(false) => return,
+                None => Some(predicate.render()),
+            },
+            Err(_) => Some(format!("cfg_attr({written})")),
+        };
+        let pushed = variable.is_some();
+        conditions.extend(variable);
+        for argument in arguments {
+            statements_in_the_production_build(argument.trim(), conditions, into);
+        }
+        if pushed {
+            conditions.pop();
         }
     }
 
-    fn top_level_arguments(body: &str) -> Vec<&str> {
+    #[must_use]
+    pub(crate) fn top_level_arguments(body: &str) -> Vec<&str> {
         let mut parts = Vec::new();
         let mut depth = 0_usize;
         let mut quoted = false;
