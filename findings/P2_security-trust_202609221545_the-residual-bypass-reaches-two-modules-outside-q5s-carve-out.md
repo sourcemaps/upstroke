@@ -87,12 +87,39 @@ lint at file level, `src/agent/bin.rs`; 32 file-and-lint pairs stated at no leve
 rows). Not executed in `bin.rs`: the mechanism is byte for byte run 4's, and `bin.rs` differs from `capacity.rs` at
 `9bb177ea` in nothing the mechanism reads.
 
-**Fenced on 2026-09-22 with the guard**: `src/agent/bin.rs` carries `#![deny(clippy::disallowed_methods)]` — `deny`,
-because the test module's allow of that lint makes `forbid` `E0453` — and `#![forbid(clippy::disallowed_types,
-clippy::disallowed_macros)]`, the shape `src/runner/container/view.rs` already has for a lint it allows beside two it
-does not. The `deny` is excused by `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` because the
-allowance sits in the file; for `disallowed_methods` the file joins the excused set and the route through its
-allowance is `PR7-WRAPPERS-EMPTY-DOMAIN`'s, as it was before.
+**Fenced on 2026-09-22 with the guard, and re-fenced on 2026-09-23 after #318's first review executed a write through
+the fence.** The 2026-09-22 shape was `#![deny(clippy::disallowed_methods)]` — `deny`, because the inline test module's
+allow of that lint makes an unconditional `forbid` `E0453` — beside `#![forbid(clippy::disallowed_types,
+clippy::disallowed_macros)]`, and the `deny` was excused by `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`
+because the allowance sits in the file. **Executed at `e851b6768715a1869a0c67e383e28f8f58eb0090` by #318's MAIN
+reviewer** (`~/orch-pr10/reviews/pr-318r1/main-evidence/boundary-*`): run 4's mechanism, a `macro_rules!` in `bin.rs`
+emitting `#[allow(clippy::disallowed_methods)] pub fn ..(..) { std::fs::write(..) }`, called from production
+`engine::topology::integrate::prepared_pin_ref`, wrote 58 verified bytes while `cargo clippy --all-targets
+--all-features -- -D warnings` exited **0** and **193** effects tests passed, both roll-call guards included; the same
+macro emitting `deny` was refused at the write. So a `deny` that only a test-only allowance excuses is the class's
+third shape: it is a statement the guard counts, and it is a level an inner `allow` reopens.
+
+**Re-fenced (#318, 2026-09-23)**: `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]` — `forbid` in every
+build without `cfg(test)`, which is the lib target CI's three clippy legs check and the binary links; the lib test
+target, the only build in which the inline `#[cfg(test)] mod tests` and its allow exist, carries no `forbid` and keeps
+`-D warnings`' level for the lint. The inline test allowance is untouched. Measured on the repaired tree with the
+reviewer's own patch (`~/orch-pr10/repair-318-r2-evidence/controls-tree/`): clippy over all targets exits **101** with
+`error[E0453]: allow(clippy::disallowed_methods) incompatible with previous forbid` at the macro's attribute, the
+`forbid` quoted from line 3 (`B1-boundary-allow-clippy.log`); the macro emitting `deny` is refused at the write as before
+(`B2-*`); a written allow and a spaced `#[allow (..)]` on a production `fn` are `E0453` too (`controls/c08`, `c09`).
+**What the lint gate refuses, `cargo test` still compiles** (`B1-boundary-allow-test-alltargets.log`, rc 0, the witness
+written): rustc resolves no `clippy::` lint, so it enforces neither the lint nor `E0453` for it (`controls/c15`–`c18`),
+for this fence exactly as for every `forbid` #312 and #316 wrote and every denial in `clippy.toml`; the lint gate — local
+gate 2, CI's three `lint` legs — is where every effect denial in this tree is enforced, and it is where this route is
+closed. The lib test target alone (`cargo test --lib`) compiles the generated allow (`L1-*`): that is the shape's stated
+limit. `file_level_lint_state` reads a `cfg_attr(not(test), ..)` inner attribute as the production build's statement
+(`the_file_level_lint_reader_answers_what_rustc_does` compiles the new spellings), so the guard counts the pair stated and
+the pin below stays 29. The class this shape names — a file-level `deny` every allowance below which is test code, so
+the production build could `forbid` — was measured tree-wide at **11** more pairs in four files outside the roll-call
+(`src/runner/container/census.rs`, `exec.rs`, `resolve.rs`; `src/engine/mod.rs` for `disallowed_types` and
+`disallowed_macros`), the bypass executed in each at its `deny` (`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/`),
+and all four fenced the same way in #318; `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` refuses the shape
+tree-wide from then on (`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`, fixed in #318 and recorded in its ledger).
 
 **The guard, built.** Two tests in `src/effects/tests.rs`, one helper, one pinned constant, reading the tree at run
 time with no list of files (`~/orch-pr10/guard-decision-evidence/`, indexed by its `README.md`):
@@ -118,8 +145,10 @@ are a red test at the next `cargo test`, not a gate run's discovery. `effects/al
 `src/capacity.rs` "can be dropped from this list at any time without weakening anything" is now checked rather than
 promised.
 
-**What remains, and it is the residue and not the class.** The **29 pairs**: 19 carve-out files that allow one or two
-governed lints and state nothing about the rest — `src/interaction.rs` allows methods and macros and says nothing of
+**What remains, and it is the residue and not the class.** The **29 pairs**: 20 carve-out files that allow one or two
+governed lints and state nothing about the rest (the count is the guard's own, from the pin's failure message —
+`~/orch-pr10/reviews/pr-318r1/main-evidence/residue-prose-durable.log`, 29 pairs across 20 files, three of them under
+`src/engine/`; corrected on 2026-09-23 from a hand count of 19 and four) — `src/interaction.rs` allows methods and macros and says nothing of
 `disallowed_types`, `src/engine/{attempt,coordinator,resume}.rs` allow methods and inherit `src/engine/mod.rs`'s
 `deny` of the other two, which a child's inner `allow` lowers — each listed by the pin's own failure message and by
 `H0-*.log`. By v17's wording they are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open
@@ -138,12 +167,15 @@ that state no governed lint at file level and inherit no statement** — 34 unde
 Owner, as the ledger records it: project owner — the post-v0.2 pass over PR3's layer, the pass that owns
 `PR7-WRAPPERS-EMPTY-DOMAIN`. One thing, and it is the fence work the guard now counts:
 
-1. **The 29 pairs**: in each of the 19 files, state the unstated lint — `forbid` where it compiles, `deny` where an
-   allowance below it makes `forbid` `E0453`, and let
-   `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` say which — and lower
-   `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES` by the pairs closed, in the same change. Four of the 19 sit
-   under `src/engine/mod.rs`, whose own fence must stay `deny`; the children can still `forbid` a lint no allowance
-   below them names. When the constant reaches 0, delete it and the ratchet, make
+1. **The 29 pairs**: in each of the 20 files, state the unstated lint — `forbid` where it compiles,
+   `cfg_attr(not(test), forbid(..))` where only test code below makes `forbid` `E0453`, `deny` where a production
+   allowance below does, and let `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` and
+   `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` say which — and lower
+   `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES` by the pairs closed, in the same change. Three of the 20 —
+   `src/engine/attempt.rs`, `src/engine/coordinator.rs` and `src/engine/resume.rs` — sit under `src/engine/mod.rs`
+   (`src/engine/preflight.rs` forbids all three and contributes no pair), whose own fence must stay `deny` for
+   `disallowed_methods`, which those three allow; the children can still `forbid` a lint no allowance below them
+   names. When the constant reaches 0, delete it and the ratchet, make
    `every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint` refuse any unstated pair
    rather than a fully silent module, and delete this file: the class is then closed for the roll-call at both
    granularities, and what is left is the roll-call finding's and the silence outside it.

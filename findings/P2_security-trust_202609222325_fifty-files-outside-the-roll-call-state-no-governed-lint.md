@@ -45,12 +45,15 @@ and nothing more.
   `assemble.rs`, `drafts.rs`, `hints.rs`, `sections.rs`), `src/catalog.rs`, `src/error.rs`, `src/ir.rs`,
   `src/ladder.rs`, `src/observations.rs`, `src/ulid.rs`.
 
-Three of the 16 are declaring modules that hold no code
-(`a_declaring_module_holds_declarations_and_re_exports_and_nothing_else` covers `src/engine/mod.rs`; whether it covers
-`src/lib.rs`, `src/agent/mod.rs`, `src/plan/mod.rs` and `src/topology/mod.rs` is that test's domain to state), and a
-module that holds no code hosts no wrapper. The rest hold production code, and a production `fn` anywhere in the crate
-is a name a topology body can reference. Where the file is also outside `CLASSIFIED_MODULES` — every one of the 50 —
-the classification census does not read it either, so unlike `src/capacity.rs` at `9bb177ea` a wrapper there needs no
+One of the 16, `src/lib.rs`, is a declaring module that holds no code, and `src/topology/mod.rs` among the 34 is
+another; a module that holds no code hosts no wrapper.
+`a_declaring_module_holds_declarations_and_re_exports_and_nothing_else` reads `ENGINE_FACADE`, `src/engine/mod.rs`,
+and no other file, so it holds neither of them to that shape. The other 14 of the 16 hold production code —
+`src/agent/mod.rs` has `probe_workspace` and `probe_request`, `src/plan/mod.rs` has `detect` and the `PlanAdapter`
+trait, `src/runner/mod.rs` (among the 34) the `CommandSpec`, `AgentId`, `RunnerError` and `HarnessHooks` bodies,
+`src/effects.rs` its readers — and a production `fn` anywhere in the crate is a name a topology body can reference
+(corrected 2026-09-23 from #318's first review; the first filing called three of the 16 declaration-only). Where the
+file is also outside `CLASSIFIED_MODULES` — every one of the 50 — the classification census does not read it either, so unlike `src/capacity.rs` at `9bb177ea` a wrapper there needs no
 macro to escape a literal-name census: nothing asks for its name at all. That half is
 `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`'s and is not re-filed here; what this file records is the lint
 level.
@@ -75,9 +78,16 @@ Owner, as the ledger records it: project owner — the post-v0.2 pass over PR3's
    The same in `src/plan/mod.rs` reaches its seven; `src/runner/policy.rs`, `src/catalog.rs`, `src/error.rs`,
    `src/ir.rs`, `src/ladder.rs`, `src/observations.rs` and `src/ulid.rs` each take their own. `src/lib.rs`,
    `src/agent/mod.rs`, `src/runner/mod.rs` and `src/effects.rs` have allowances beneath them (`src/agent/claude.rs`,
-   `src/runner/host.rs`, `src/effects/tests.rs`, and through `lib.rs` every allowing file), so `forbid` is `E0453`
-   there and `deny` is what they can state; three of the four hold no code, and `src/effects.rs` then joins the
-   `deny`-excused set of `PR7-WRAPPERS-EMPTY-DOMAIN`.
+   `src/runner/host.rs`, `src/effects/tests.rs`, and through `lib.rs` every allowing file), so an unconditional
+   `forbid` is `E0453` there. Only `src/lib.rs` holds no code: `src/agent/mod.rs`, `src/runner/mod.rs` and
+   `src/effects.rs` hold production code, so at `deny` all three would join the `deny`-excused set of
+   `PR7-WRAPPERS-EMPTY-DOMAIN`. Where the allowances beneath are test code only — `src/effects.rs` over
+   `src/effects/tests.rs` — the production build can still `forbid`: `#![cfg_attr(not(test), forbid(..))]`, the shape
+   #318 gave `src/agent/bin.rs`, `src/runner/container/{census,exec,resolve}.rs` and `src/engine/mod.rs`
+   (`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`, fixed there), which `file_level_lint_state` reads as the
+   production build's statement and `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` demands of every
+   file-level `deny`; `src/agent/mod.rs` and `src/runner/mod.rs` have production allowances beneath them and stay
+   `deny` for the lints those allow (corrected 2026-09-23; the first filing said three of the four hold no code).
 2. **The tree-wide form of the guard.** Once the 50 state a level,
    `every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint` should read every file
    `scanned_sources()` walks rather than `CLASSIFIED_MODULES`, with an inherited `forbid` counting for a child — the
