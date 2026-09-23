@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/agent/bin.md`
 
-#![deny(clippy::disallowed_methods)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use std::path::PathBuf;

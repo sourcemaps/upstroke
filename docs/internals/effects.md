@@ -2210,6 +2210,50 @@ Ordered, and `forbid` is sticky. A weaker level after a
 `forbid` is `E0453`, which is the file not compiling rather
 than a level; anything else replaces what came before it.
 
+## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `for statement in statements_in_the_production_build(attribute) {`
+
+An inner attribute states what it applies in the production build. For
+every attribute but `cfg_attr` that is the attribute itself; for a
+`cfg_attr` it is what its predicate applies, and the predicate is read
+below.
+
+## `pub(crate) mod lint_levels` › `fn statements_in_the_production_build(attribute: &str) -> Vec<&str> {`
+
+**The valuation this reader answers for is the production build's**: the
+lib target every clippy leg checks and the binary links, compiled without
+`cfg(test)`. `#![cfg_attr(not(test), forbid(L))]` is therefore read as
+`forbid(L)`, and `#![cfg_attr(test, allow(L))]` as no statement at all.
+Any other predicate — a platform's, a feature's — is read as no statement
+either: an attribute that holds on one leg of CI and not another is not
+the file's level, and the safe direction is the loud one (a census told
+the file states nothing when it states something on some platform). The
+sweep in `governed_deny_lists_written_anywhere` still reads a `deny(`
+inside such an attribute and reports the disagreement.
+
+Why the reader learned this: `src/agent/bin.rs`'s inline `#[cfg(test)]
+mod tests` allows `disallowed_methods`, so an unconditional `forbid` is
+`E0453` at the lib test target (measured by both of #318's first reviews)
+and the file carried `deny` — a level a macro-generated `allow` in its
+production region lowered, executed by #318's MAIN review
+(`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`). The repair is a
+`forbid` that exists in every build the test module does not, and a
+reader that did not read it would have counted the pair unstated. The same
+shape was then found and executed in `src/runner/container/census.rs`,
+`exec.rs` and `resolve.rs` and under `src/engine/mod.rs`, and fenced the
+same way (`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`).
+
+Measured, not reasoned: every row of
+`effects::tests::the_file_level_lint_reader_answers_what_rustc_does` is
+compiled by `clippy-driver` without `--test`, which is exactly this
+valuation, and the `cfg_attr` rows are among them. Several attributes in
+one `cfg_attr` are read in order, as rustc expands them.
+
+## `pub(crate) mod lint_levels` › `fn top_level_arguments(body: &str) -> Vec<&str> {`
+
+`cfg_attr`'s arguments, split at the commas that are not inside
+parentheses, brackets, braces or a string: the predicate first, then
+each attribute it applies.
+
 ## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
 
 The inner attributes a file, or an inline module's body, opens with: the raw

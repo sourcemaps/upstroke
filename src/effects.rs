@@ -2243,38 +2243,85 @@ pub(crate) mod lint_levels {
                 return resolution;
             };
             let attribute = blanked[open + 1..close].trim();
-            for level in LEVELS {
-                let Some(rest) = attribute.strip_prefix(level) else {
-                    continue;
-                };
-                let Some(list) = rest
-                    .trim_start()
-                    .strip_prefix('(')
-                    .and_then(|body| body.strip_suffix(')'))
-                else {
-                    continue;
-                };
-                if !list.split(',').any(|entry| names_lint(entry.trim(), lint)) {
-                    continue;
-                }
-                if resolution.level == Some("forbid") {
-                    if matches!(level, "allow" | "warn" | "expect") {
-                        resolution.refused_downgrade = true;
+            for statement in statements_in_the_production_build(attribute) {
+                for level in LEVELS {
+                    let Some(rest) = statement.strip_prefix(level) else {
+                        continue;
+                    };
+                    let Some(list) = rest
+                        .trim_start()
+                        .strip_prefix('(')
+                        .and_then(|body| body.strip_suffix(')'))
+                    else {
+                        continue;
+                    };
+                    if !list.split(',').any(|entry| names_lint(entry.trim(), lint)) {
+                        continue;
                     }
-                } else {
-                    resolution.level = Some(match level {
-                        "allow" => "allow",
-                        "expect" => "expect",
-                        "warn" => "warn",
-                        "deny" => "deny",
-                        _ => "forbid",
-                    });
+                    if resolution.level == Some("forbid") {
+                        if matches!(level, "allow" | "warn" | "expect") {
+                            resolution.refused_downgrade = true;
+                        }
+                    } else {
+                        resolution.level = Some(match level {
+                            "allow" => "allow",
+                            "expect" => "expect",
+                            "warn" => "warn",
+                            "deny" => "deny",
+                            _ => "forbid",
+                        });
+                    }
+                    break;
                 }
-                break;
             }
             at = close + 1;
         }
         resolution
+    }
+
+    fn statements_in_the_production_build(attribute: &str) -> Vec<&str> {
+        let Some(rest) = attribute.strip_prefix("cfg_attr") else {
+            return vec![attribute];
+        };
+        let Some(body) = rest
+            .trim_start()
+            .strip_prefix('(')
+            .and_then(|body| body.strip_suffix(')'))
+        else {
+            return Vec::new();
+        };
+        let mut arguments = top_level_arguments(body).into_iter();
+        let predicate: String = arguments
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|character| !super::is_rustc_whitespace(*character))
+            .collect();
+        match predicate.as_str() {
+            "not(test)" => arguments.map(str::trim).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn top_level_arguments(body: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0_usize;
+        let mut quoted = false;
+        let mut from = 0;
+        for (at, byte) in body.bytes().enumerate() {
+            match byte {
+                b'"' => quoted = !quoted,
+                b'(' | b'[' | b'{' if !quoted => depth += 1,
+                b')' | b']' | b'}' if !quoted => depth = depth.saturating_sub(1),
+                b',' if !quoted && depth == 0 => {
+                    parts.push(body.get(from..at).unwrap_or_default());
+                    from = at + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(body.get(from..).unwrap_or_default());
+        parts
     }
 
     #[must_use]

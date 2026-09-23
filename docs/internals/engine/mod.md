@@ -6,7 +6,7 @@ The code is the authority for what it does; this file is the whole of its prose,
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
 
-## `#![deny(`
+## `#![deny(clippy::disallowed_methods)]`
 
 **This file allows nothing, and that is what it is for.** Everything written
 in it -- a private `fn`, an inline `mod x { .. }` at any depth -- is visible to
@@ -43,9 +43,37 @@ defined in [`coordinator`](coordinator.md), `resume`, `resume_with`,
 section already, both classified -- and this file re-exports the six public
 names, so every public path is what it was. The allow, its row and its entry in
 `FROZEN_LEGACY_ALLOWLIST` are gone, and this file carries the fence its
-children carry instead: all three governed lints denied at file level, so that
+children carry instead: every governed lint stated at file level, so that
 its level is stated here rather than left to the crate root and the command
 line.
+
+**The three lints are stated at three levels, and the split is measured, not
+chosen.** `disallowed_methods` is `deny`: [`attempt`](attempt.md),
+[`coordinator`](coordinator.md) and [`resume`](resume.md) allow it at file
+level in production code, so a `forbid` here is `E0453` in every build.
+`disallowed_types` is `forbid` in the production build only,
+`#![cfg_attr(not(test), forbid(clippy::disallowed_types))]`: the one
+allowance of it below this file is `src/engine/tests.rs`, a whole-file test
+module, so the lib target every clippy leg checks can forbid it while the lib
+test target, the only build that module exists in, keeps `-D warnings`' level.
+`disallowed_macros` is `forbid` outright: nothing below allows it. Until
+2026-09-23 all three were one `deny` attribute, excused wholesale by the
+children's allowance of one of them, and #318 executed the reason that is not
+enough: a `macro_rules!` in `attempt.rs` -- which states nothing for the
+other two lints and inherited this file's `deny` of both -- emitting a
+`#[allow(clippy::disallowed_macros)]` function that calls `eprintln!` and a
+`#[allow(clippy::disallowed_types)]` function returning a
+`std::process::Command`, both called from the production body of
+`prepared_pin_ref` in [`topology::integrate`](topology/integrate.md), passed
+clippy over all targets and the whole effects suite, and ran
+(`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-engine-*`). With
+the split above, the same patch is two `E0453`s at the generated attributes,
+the `forbid` quoted from this file (`controls-final/PX2-engine-clippy.log`).
+`disallowed_methods` stays a `deny` the same macro could lower in a child
+that states nothing for it -- `attempt.rs` again -- and that is
+`PR7-WRAPPERS-EMPTY-DOMAIN`'s class, excused by production allowances, not
+this change's. `effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day either conditional `forbid` goes back to `deny`.
 
 **And it holds no code.** Its leading attributes, `mod x;` declarations and
 `use` re-exports are all this file may contain. The same guard refuses

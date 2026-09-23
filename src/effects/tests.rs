@@ -19,8 +19,8 @@ use super::{
     ALLOWLIST_TOML, CLIPPY_TOML, DENIAL_CONTROL, DENIAL_FIXTURES, EFFECT_SITES_JSON,
     FROZEN_LEGACY_ALLOWLIST, FUNNEL_MODULES_JSON, REGENERATE, RESIDUE_CLASSES_JSON,
     TOPOLOGY_MODULES, USED_GOVERNED_LINTS, WRAPPERS_TOML, blank_comments,
-    blank_comments_and_strings, governed_allows, legacy_growth, normalize_lint, production_region,
-    topology_modules_among,
+    blank_comments_and_strings, governed_allows, legacy_growth, normalize_lint, production_code,
+    production_region, topology_modules_among,
 };
 use crate::topology::effects::{EffectSiteId, effect_sites, effect_sites_json};
 
@@ -744,6 +744,285 @@ fn every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile() {
     );
     let wrong = fences_that_deny_where_forbid_would_compile(&sources);
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+fn is_whole_file_test_module(path: &str) -> bool {
+    path.strip_prefix("src/").is_some_and(|under_src| {
+        WHOLE_FILE_TEST_MODULES
+            .iter()
+            .any(|module| module.to_string_lossy().replace('\\', "/") == under_src)
+    })
+}
+
+fn attribute_stack_is_configured_out_of_the_production_build(blanked: &str, line: usize) -> bool {
+    let start: usize = blanked
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum();
+    let bytes = blanked.as_bytes();
+    let mut at = start;
+    loop {
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        if bytes.get(at) != Some(&b'#') {
+            return false;
+        }
+        let open = if bytes.get(at + 1) == Some(&b'!') {
+            at + 2
+        } else {
+            at + 1
+        };
+        if bytes.get(open) != Some(&b'[') {
+            return false;
+        }
+        let Some(close) = super::matching(bytes, open, b'[', b']') else {
+            return false;
+        };
+        let attribute: String = blanked
+            .get(open + 1..close)
+            .unwrap_or_default()
+            .chars()
+            .filter(|character| !super::is_rustc_whitespace(*character))
+            .collect();
+        if attribute == "cfg(test)" {
+            return true;
+        }
+        at = close + 1;
+    }
+}
+
+fn governed_allows_in_the_production_build(
+    path: &str,
+    source: &str,
+    is_test_module: &dyn Fn(&str) -> bool,
+) -> BTreeSet<&'static str> {
+    if is_test_module(path) {
+        return BTreeSet::new();
+    }
+    let blanked = blank_comments_and_strings(source);
+    governed_allows(&production_code(source))
+        .into_iter()
+        .filter(|allow| {
+            !attribute_stack_is_configured_out_of_the_production_build(&blanked, allow.line)
+        })
+        .flat_map(|allow| allow.lints.into_iter())
+        .filter_map(|lint| normalize_lint(&lint))
+        .collect()
+}
+
+fn denies_the_production_build_could_forbid(
+    sources: &[(String, String)],
+    is_test_module: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let allowed: Vec<(&Path, BTreeSet<&'static str>)> = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                Path::new(path),
+                governed_allows_in_the_production_build(path, source, is_test_module),
+            )
+        })
+        .filter(|(_, lints)| !lints.is_empty())
+        .collect();
+    let mut named = Vec::new();
+    for (path, source) in sources {
+        if is_test_module(path) {
+            continue;
+        }
+        let file = Path::new(path);
+        let below = module_directory(file);
+        for lint in USED_GOVERNED_LINTS {
+            if crate::effects::lint_levels::file_level_lint_state(source, lint) != Some("deny") {
+                continue;
+            }
+            let Some(bare) = normalize_lint(lint) else {
+                continue;
+            };
+            let excused = allowed.iter().any(|(other, lints)| {
+                (*other == file || other.starts_with(&below)) && lints.contains(bare)
+            });
+            if !excused {
+                named.push(format!(
+                    "{path}: `{lint}` is `deny` at file level, and every allowance of it in the \
+                     file or in a module file below it sits in test code, so \
+                     `#![cfg_attr(not(test), forbid({lint}))]` compiles in the production build \
+                     and would make an inner `allow` there E0453 instead of a level an attribute \
+                     can reopen"
+                ));
+            }
+        }
+    }
+    named
+}
+
+#[test]
+fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one_production_code_does()
+ {
+    fn tree(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+            .collect()
+    }
+    fn named(files: &[(&str, &str)], test_modules: &[&str]) -> Vec<String> {
+        denies_the_production_build_could_forbid(&tree(files), &|path| test_modules.contains(&path))
+    }
+    const DENY: &str = "#![deny(clippy::disallowed_methods)]\nfn go() {}\n";
+    const ALLOW: &str = "#![allow(clippy::disallowed_methods)]\nfn go() {}\n";
+    const INLINE_TEST_ALLOW: &str =
+        "#[cfg(test)]\n#[allow(clippy::disallowed_methods)]\nmod tests {\n    fn t() {}\n}\n";
+
+    for (what, files, test_modules) in [
+        (
+            "the shape src/agent/bin.rs carried at e851b676: the file's only allowance is an outer \
+             attribute on its inline `#[cfg(test)]` module",
+            vec![("src/a.rs", &*format!("{DENY}{INLINE_TEST_ALLOW}"))],
+            vec![],
+        ),
+        (
+            "the attributes of the inline test module in the other order",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[allow(clippy::disallowed_methods)]\n#[cfg(test)]\nmod tests {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an inner allowance written inside the `#[cfg(test)]` module's braces",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(test)]\nmod tests {{\n    #![allow(clippy::disallowed_methods)]\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "the only allowance below is a whole-file test module",
+            vec![("src/a.rs", DENY), ("src/a/tests.rs", ALLOW)],
+            vec!["src/a/tests.rs"],
+        ),
+        (
+            "no allowance below at all",
+            vec![("src/a.rs", DENY)],
+            vec![],
+        ),
+        (
+            "a sibling's allowance is not below the fence",
+            vec![("src/a.rs", DENY), ("src/b.rs", ALLOW)],
+            vec![],
+        ),
+        (
+            "the file's own allowance is of another lint",
+            vec![(
+                "src/a.rs",
+                "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_types)]\n",
+            )],
+            vec![],
+        ),
+    ] {
+        let found = named(&files, &test_modules);
+        assert_eq!(found.len(), 1, "{what}: {found:#?}");
+        assert!(
+            found.iter().all(|line| line.starts_with("src/a.rs: ")),
+            "{what}: {found:#?}"
+        );
+    }
+
+    for (what, files, test_modules) in [
+        (
+            "the repair: `forbid` in the production build, the inline test allowance kept",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\n{INLINE_TEST_ALLOW}"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "every fence forbids",
+            vec![(
+                "src/a.rs",
+                "#![forbid(clippy::disallowed_methods)]\nfn go() {}\n",
+            )],
+            vec![],
+        ),
+        (
+            "a production child allows the lint, so `forbid` is E0453 in every build",
+            vec![("src/a.rs", DENY), ("src/a/b.rs", ALLOW)],
+            vec![],
+        ),
+        (
+            "the file's own production region allows the lint",
+            vec![(
+                "src/a.rs",
+                "#![deny(clippy::disallowed_methods)]\n#[allow(clippy::disallowed_methods)]\nfn go() {}\n",
+            )],
+            vec![],
+        ),
+        (
+            "a platform-gated allowance is production code on that platform",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(windows)]\n#[allow(clippy::disallowed_methods)]\nmod win {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "a whole-file test module that fences has no production region to forbid in",
+            vec![("src/a/tests.rs", DENY)],
+            vec!["src/a/tests.rs"],
+        ),
+        (
+            "a `deny` the file-level reader does not read is the sweep's, not this rule's",
+            vec![(
+                "src/a.rs",
+                "fn go() {}\n#[deny(clippy::disallowed_methods)]\nfn late() {}\n",
+            )],
+            vec![],
+        ),
+    ] {
+        let found = named(&files, &test_modules);
+        assert!(found.is_empty(), "{what}: {found:#?}");
+    }
+}
+
+#[test]
+fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {
+    let sources = scanned_sources();
+    let denying = sources
+        .iter()
+        .filter(|(_, source)| {
+            USED_GOVERNED_LINTS.iter().any(|lint| {
+                crate::effects::lint_levels::file_level_lint_state(source, lint) == Some("deny")
+            })
+        })
+        .count();
+    assert!(
+        denying > 0,
+        "no scanned file denies a governed lint at file level, so this census is measuring \
+         nothing"
+    );
+    let named = denies_the_production_build_could_forbid(&sources, &is_whole_file_test_module);
+    assert!(
+        named.is_empty(),
+        "{} file-level `deny` fence(s) of a governed lint could be `forbid` in the production \
+         build: in each, the production region compiles under a `deny` that an inner `allow` the \
+         placement scan does not read -- macro-written, or spelled apart -- lowers, the shape \
+         #318's first review executed a write through in src/agent/bin.rs and #318 then executed \
+         in src/runner/container/census.rs, exec.rs and resolve.rs and under src/engine/mod.rs \
+         before fencing all five. Write `#![cfg_attr(not(test), forbid(..))]` for the lint -- the \
+         test-only allowance below still compiles, because the lib test target carries no forbid \
+         -- or `forbid` where nothing below allows it at all. The pairs:\n{named:#?}",
+        named.len()
+    );
 }
 
 const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;
@@ -5021,6 +5300,36 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         (
             "deny_then_allow_bare",
             "#![deny(clippy::disallowed_methods)]\n#![allow(disallowed_methods)]\n",
+        ),
+        (
+            "cfg_attr_not_test_forbid",
+            "#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_not_test_deny",
+            "#![cfg_attr(not(test), deny(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_test_allow",
+            "#![cfg_attr(test, allow(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_test_forbid",
+            "#![cfg_attr(test, forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_not_test_forbid_then_allow",
+            "#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "allow_then_cfg_attr_not_test_forbid",
+            "#![allow(clippy::disallowed_methods)]\n\
+             #![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "cfg_attr_not_test_two_attributes",
+            "#![cfg_attr(not(test), allow(dead_code), forbid(clippy::disallowed_methods))]\n",
         ),
         (
             "prose_decoy",

@@ -62,6 +62,28 @@ and does not try. [`RunnerPreflight`] is the seam it consumes;
 `crate::runner::container::exec` and `crate::runner::host::run_shell_probe`
 are what implement it.
 
+## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods, clippy::disallowed_types))]`
+
+`PR6-LANEF-004`: the Container funnel's module-level allow is an inner
+attribute and a lint level is scoped by the module tree, so every
+out-of-line child of `runner::container` states its own level, enforced by
+`runner::container::tests::every_child_module_of_the_container_funnel_states_its_own_lint_level`.
+This file stated `deny` of all three until 2026-09-23, and #318 executed why
+a `deny` is not enough: a `macro_rules!` emitting an allowed `std::fs::write`
+wrapper at the bottom of the production region, called from the production
+body of `prepared_pin_ref` in `engine::topology::integrate`, passed clippy
+over all targets and the effects suite and wrote its bytes
+(`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-resolve-*`). The
+only allowances below this file are its whole-file `tests.rs`'s --
+`disallowed_methods` and `disallowed_types`, for the real Git repositories
+its fixtures build -- and that module exists in the lib test target alone, so
+both lints are `forbid` in every build without `cfg(test)` and the fixtures
+compile as they did; `disallowed_macros`, allowed by nothing below, is
+`forbid` outright. The same patch is `E0453` at the generated attribute
+(`controls-final/PX2-resolve-clippy.log`), and
+`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day the conditional `forbid` goes back to `deny`.
+
 ## `pub enum InspectionRefusal {`
 
 ---------------------------------------------------------------------------

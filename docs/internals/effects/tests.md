@@ -358,6 +358,105 @@ The live tree. The floor on forbidding files is the sweep's own control: a
 reader regression that resolved no level anywhere would otherwise leave
 nothing to report and pass.
 
+## `fn is_whole_file_test_module(path: &str) -> bool {`
+
+Whether a scanned path is one of the crate's whole-file test modules,
+by `cfg::WHOLE_FILE_TEST_MODULES`, the crate's one statement of that
+population (paths under `src/`, forward slashes on every host).
+
+## `fn attribute_stack_is_configured_out_of_the_production_build(blanked: &str, line: usize) -> bool {`
+
+Whether the attribute at `line` sits in a stack that carries
+`#[cfg(test)]` **after** it. `production_code` blanks a configured item
+from its `#[cfg(test)]` to its end, so an allowance written above that
+attribute on the same item survives the blanking and would read as
+production code; this reads forward from the surviving attribute over
+the rest of its stack. Only `cfg(test)`, whitespace removed: a platform
+predicate keeps the item in some production build, and an allowance
+there is a production allowance on that platform.
+
+## `fn governed_allows_in_the_production_build(path: &str, source: &str, is_test_module: &dyn Fn(&str) -> bool) -> BTreeSet<&'static str> {`
+
+The governed lints a file allows **in code the production build
+compiles**: none for a whole-file test module, and otherwise
+`governed_allows` over `production_code` -- every `#[cfg(test)]` item
+blanked -- less the allowances the stack check above finds. Read from
+the tree, from no list of files.
+
+## `fn denies_the_production_build_could_forbid(sources: &[(String, String)], is_test_module: &dyn Fn(&str) -> bool) -> Vec<String> {`
+
+**The rule the executed bypass of #318's first review asks for.** A
+file-level `deny` of a governed lint is a statement, and it is also a
+level an inner `allow` reopens -- one a macro writes, or one spelled so
+that `governed_allows` does not read it. `fences_that_deny_where_forbid_would_compile`
+excuses a `deny` wherever any allowance of the lint sits in the file or
+below it, because `forbid` would be `E0453` there in *some* build. This
+asks the narrower question of the production build alone: for each lint
+`file_level_lint_state` reads at `deny`, is there an allowance of it in
+production code, in the file or in a module file below it? If not,
+`#![cfg_attr(not(test), forbid(<lint>))]` compiles -- the lib test
+target, where the test-only allowances live, gets no forbid -- and the
+pair is named.
+
+Executed, in `src/agent/bin.rs` at `e851b676`: its `deny` of
+`disallowed_methods` was excused by the `#[allow]` on its inline
+`#[cfg(test)] mod tests`; the MAIN review's macro-generated `allow` on a
+production `fn` there, called from `engine::topology::integrate`, wrote
+its bytes while all-target clippy exited 0 and every governance test
+passed. The cfg-scoped `forbid` makes that `E0453` at the lint gate
+(`~/orch-pr10/repair-318-r2-evidence/controls-tree/B1-*`). The rule then
+named four more files outside the roll-call -- `src/runner/container/census.rs`,
+`exec.rs` and `resolve.rs`, and `src/engine/mod.rs` -- and #318 executed the
+same bypass in each before fencing it (`witnesses-prefix/PW2-*`,
+`controls-final/PX2-*`), so this rule is what names the shape so it is not
+written again.
+
+**What it does not claim.** It reads prologues and attribute stacks, not
+macro expansion: a generated `allow` is invisible to it as it is to the
+placement scan, and the refusal of one is clippy's `E0453` under the
+`forbid`, not this test's. A fence that is deleted rather than dropped to
+`deny` is the roll-call guard's. An allowance on a statement inside a
+function body, preceded on its line by code, reads as production; the
+placement scan already refuses it as below module level. And the
+enforcement is the lint gate's: rustc resolves no `clippy::` lint, so
+`cargo build` and `cargo test` compile a downgrade under this `forbid`
+exactly as they compile every other fence's violation
+(`~/orch-pr10/repair-318-r2-evidence/controls/c15`-`c18`).
+
+## `fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one_production_code_does() {`
+
+The rule on trees small enough to read. Named: bin.rs's shape at
+`e851b676`; the same stack with the attributes in the other order; an
+inner allowance inside the configured module's braces; a whole-file
+test child as the only allowance; no allowance at all; a sibling's; an
+allowance of another lint. Excused, or not the rule's: the repair
+itself; every fence forbids; a production child allows; the file's own
+production region allows; a platform-gated allowance; a whole-file test
+module that fences, which has no production region; and an outer
+`#[deny]` on an item, which the sweep names and this does not read.
+
+## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
+
+The live tree, refused outright, with the floor on denying files as the
+census's own control. It was a pin first: the rule measured **11** pairs in
+four files at #318's repaired head besides `src/agent/bin.rs` --
+`src/runner/container/census.rs`, `exec.rs` and `resolve.rs`, three lints
+each, excused only by their `tests.rs` children; `src/engine/mod.rs`,
+`disallowed_types` (excused only by `src/engine/tests.rs`) and
+`disallowed_macros` (excused by nothing) -- and the pin was 11 while they
+were being measured (`~/orch-pr10/repair-318-r2-evidence/controls-tree/N1-*`,
+the list in the test's own failure message). #318 then executed the bypass in
+each (`witnesses-prefix/PW2-*`: bytes written through the three container
+files' lowered `deny`, `eprintln!` reached and a `std::process::Command`
+built under the facade's) and fenced all four, so the set is empty and the
+count is asserted zero rather than pinned: a pair that arrives is a red test
+that names it, and there is no constant to lower. Held both ways at the final
+shape: `src/agent/bin.rs`, `src/runner/container/census.rs` and
+`src/engine/mod.rs` each put back to their `deny` fail naming exactly their
+pairs while clippy still passes on that shape, and every witness re-applied
+on the fenced files is `E0453` at the generated attribute
+(`controls-final/H0F-*`, `PX2-*`).
+
 ## `const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;`
 
 The per-lint residue of `G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`,
@@ -384,7 +483,9 @@ allowance.
 **Derived from the tree and the roll-call, from no list of files.** For every
 entry of `CLASSIFIED_MODULES` and every lint of `USED_GOVERNED_LINTS`, the
 file's leading inner attributes are read by `file_level_lint_state`, and
-`forbid`, `deny`, `allow` and `expect` each count as a statement. The three
+`forbid`, `deny`, `allow` and `expect` each count as a statement -- inside a
+`cfg_attr(not(test), ..)` too, which that reader resolves for the production
+build. The three
 readers that already exist then judge each statement: a `deny` that could be
 `forbid` is refused by
 `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`; an
@@ -2522,6 +2623,17 @@ Every row is a prologue. Nothing here says what it means.
 The qualified and bare spellings are one lint, and the order still
 decides. `normalize_lint` is the bridge, and rustc accepts the bare
 name (with a rename warning of its own, which this ignores).
+
+## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `(`
+
+The `cfg_attr` rows. `clippy-driver` compiles every fixture without
+`--test`, which is the production valuation the reader answers for:
+`not(test)` applies its attribute and `test` applies nothing; a `forbid`
+applied that way is `E0453` to a later `allow` exactly as a bare one is,
+an `allow` before it is replaced by it, and several attributes in one
+`cfg_attr` are read in order. No platform-conditional row, on purpose:
+its outcome would differ by host, and the parity here is with the host's
+compiler.
 
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `(`
 
