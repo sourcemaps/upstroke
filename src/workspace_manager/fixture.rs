@@ -610,6 +610,187 @@ pub(crate) fn spawn_ready_helper(
 }
 
 // -----------------------------------------------------------------------
+// A fork parked in its exec window, holding the run's lease
+// -----------------------------------------------------------------------
+
+/// A child of this process parked between `fork` and `exec`, holding every
+/// descriptor the process had open at its fork.
+///
+/// A `fork` copies the whole descriptor table, and `CLOEXEC` closes a copy
+/// only at the child's `exec`; between the two the child holds it. That
+/// window is what every spawn in this process has, and what a copy of a
+/// run's cleanup lease -- open in this process for the life of a ref write,
+/// `rundir::hold_cleanup_lease_for_child` -- is inherited through. This
+/// value makes one such window last as long as a test needs: the child
+/// writes its pid to a socket from inside its `pre_exec` and then blocks on a
+/// read of the same socket until [`Self::release`] writes to it, on which it
+/// goes on to `exec` `true` and exit. The pid arriving is the proof that the
+/// child is parked, alive and holding its inherited copies; nothing about it
+/// is inferred from a clock.
+///
+/// `Command::spawn` returns only once the child has exec'd, so the spawn
+/// happens on a thread of its own and the caller keeps the parent's thread.
+/// The child closes its inherited copy of the parent's socket end before it
+/// blocks, so the parent's death ends the read with EOF and the child does
+/// not outlive it parked; dropping this value releases and reaps the child.
+#[cfg(unix)]
+pub(crate) struct ParkedFork {
+    pid: libc::pid_t,
+    release: Option<std::os::unix::net::UnixStream>,
+    spawner: Option<std::thread::JoinHandle<std::io::Result<std::process::Child>>>,
+}
+
+#[cfg(unix)]
+impl ParkedFork {
+    /// Park a fork that holds a copy of the cleanup lease of the run whose
+    /// public directory is `public`, taken exactly as a ref write takes it.
+    ///
+    /// The copy is opened on a `Command` this never spawns, the fork is made
+    /// while the copy is open, and the copy is then closed: what remains is
+    /// the parked child's inherited descriptor, the shared `flock` with it.
+    pub(crate) fn holding_the_lease_of(public: &Path) -> Self {
+        let mut never_spawned = Command::new("true");
+        let copy = crate::rundir::hold_cleanup_lease_for_child(&mut never_spawned, public)
+            .expect("the run directory exists, so its lease can be taken")
+            .expect("Unix hands the child a hold");
+        let parked = Self::park();
+        drop(copy);
+        parked
+    }
+
+    /// Fork the child and wait until it reports itself parked.
+    fn park() -> Self {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let (mut release, child_end) =
+            std::os::unix::net::UnixStream::pair().expect("a socket pair for the park handshake");
+        release
+            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+            .expect("bound the wait for the child's pid");
+        let child_fd = child_end.as_raw_fd();
+        let parent_fd = release.as_raw_fd();
+        let spawner = std::thread::spawn(move || {
+            let mut command = Command::new("true");
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: the closure runs in the forked child before `exec` and
+            // calls only async-signal-safe syscalls -- `getpid`, `close`,
+            // `write` and `read` -- on descriptors the child inherited; it
+            // allocates nothing and touches no state of this process.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::close(parent_fd);
+                    let pid = libc::getpid().to_ne_bytes();
+                    if libc::write(child_fd, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let mut byte = [0_u8; 1];
+                    loop {
+                        let read = libc::read(child_fd, byte.as_mut_ptr().cast(), 1);
+                        if read >= 0 {
+                            return Ok(());
+                        }
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::EINTR) {
+                            return Err(error);
+                        }
+                    }
+                });
+            }
+            command.spawn()
+        });
+        let mut pid = [0_u8; 4];
+        release
+            .read_exact(&mut pid)
+            .expect("the parked child reports its pid from inside its exec window");
+        // The child holds its own copy now; this process's copy of its end
+        // is closed so the child's read can only be ended by `release`.
+        drop(child_end);
+        Self {
+            pid: libc::pid_t::from_ne_bytes(pid),
+            release: Some(release),
+            spawner: Some(spawner),
+        }
+    }
+
+    /// The parked child's pid.
+    pub(crate) fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    /// Whether the parked child can still be signalled.
+    pub(crate) fn is_alive(&self) -> bool {
+        // SAFETY: signal 0 delivers nothing; it asks whether the pid exists.
+        unsafe { libc::kill(self.pid, 0) == 0 }
+    }
+
+    /// Let the child go on to its `exec`, and reap it: its exit status.
+    pub(crate) fn release(mut self) -> std::process::ExitStatus {
+        self.release_and_reap()
+            .expect("the released child exec'd `true` and was reaped")
+    }
+
+    /// [`Self::release`] on another thread after `delay`, for a test that
+    /// must first start something the held lease makes wait; the instant of
+    /// the release and the child's status come back through the handle.
+    pub(crate) fn release_after(self, delay: std::time::Duration) -> ReleasedLater {
+        ReleasedLater(std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let at = std::time::Instant::now();
+            (at, self.release())
+        }))
+    }
+
+    fn release_and_reap(&mut self) -> Option<std::process::ExitStatus> {
+        use std::io::Write as _;
+        let mut release = self.release.take()?;
+        let written = release.write_all(&[1]);
+        let spawned = self
+            .spawner
+            .take()
+            .expect("the spawner thread is joined once")
+            .join()
+            .expect("the spawner thread ends");
+        if std::thread::panicking() {
+            return None;
+        }
+        written.expect("release the parked child");
+        let mut child = spawned.expect("the released child exec'd");
+        assert_eq!(
+            u32::try_from(self.pid).expect("a pid is non-negative"),
+            child.id(),
+            "the child that reported itself parked is the one that exec'd"
+        );
+        Some(child.wait().expect("reap the released child"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ParkedFork {
+    fn drop(&mut self) {
+        let _ = self.release_and_reap();
+    }
+}
+
+/// The handle [`ParkedFork::release_after`] returns.
+#[cfg(unix)]
+pub(crate) struct ReleasedLater(
+    std::thread::JoinHandle<(std::time::Instant, std::process::ExitStatus)>,
+);
+
+#[cfg(unix)]
+impl ReleasedLater {
+    /// When the release happened, and how the child ended.
+    pub(crate) fn join(self) -> (std::time::Instant, std::process::ExitStatus) {
+        self.0.join().expect("the releasing thread ends")
+    }
+}
+
+// -----------------------------------------------------------------------
 // The ambient controls over `refs/replace/*`
 // -----------------------------------------------------------------------
 

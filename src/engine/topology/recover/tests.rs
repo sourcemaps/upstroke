@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/recover/tests.md`
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -96,6 +97,9 @@ struct Fixture {
     started: RunStarted4,
     first_line: Vec<u8>,
     plan: Plan,
+    resume_attempts: Cell<u32>,
+    release_bound: Cell<Duration>,
+    hold_past_bound: Cell<Option<CleanupHoldPastBound>>,
 }
 
 #[derive(Default)]
@@ -269,6 +273,9 @@ impl Fixture {
             started,
             first_line,
             plan,
+            resume_attempts: Cell::new(0),
+            release_bound: Cell::new(RELEASE_BOUND),
+            hold_past_bound: Cell::new(None),
         }
     }
 
@@ -1165,6 +1172,7 @@ fn resume_with(
     let incarnation = IncarnationId(RESUMER.to_owned());
     let manager = fixture.manager();
     let mut warnings = Vec::new();
+    let past_bound = await_previous_incarnations_release(fixture);
     let outcome = fixture
         .derive(given.explicit_root.as_deref())
         .and_then(|root| {
@@ -1188,7 +1196,8 @@ fn resume_with(
                 hooks,
                 &mut warnings,
             )
-        });
+        })
+        .map_err(|error| refusal_after_an_expired_wait(error, past_bound));
     (outcome, warnings)
 }
 
@@ -2720,11 +2729,17 @@ fn resume_refused_while_reaper_hold_observed_then_succeeds() {
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
         let given = Given::healthy(&fixture, &runtime, &certifies);
+        let started = std::time::Instant::now();
         let (result, _) = resume(&fixture, &harness, &given);
+        let refused_after = started.elapsed();
         let text = message(&result.expect_err("a surviving reaper hold refuses"));
         assert!(
             text.contains("still has a process of its own alive"),
             "the refusal names the hold it observed: {text}"
+        );
+        assert!(
+            refused_after < Duration::from_secs(5),
+            "a first resume never waits for a hold it observes: refused after {refused_after:?}"
         );
         assert!(
             harness
@@ -6958,6 +6973,7 @@ fn resume_as_certified_by(
     let incarnation = IncarnationId(incarnation.to_owned());
     let manager = fixture.manager();
     let mut warnings = Vec::new();
+    let past_bound = await_previous_incarnations_release(fixture);
     let root = fixture.derive(None)?;
     run_recovery_order(
         root,
@@ -6979,6 +6995,7 @@ fn resume_as_certified_by(
         hooks,
         &mut warnings,
     )
+    .map_err(|error| refusal_after_an_expired_wait(error, past_bound))
 }
 
 const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";
@@ -9265,7 +9282,6 @@ fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {
          resume after the coordinator's death would take the exclusive side while the reaper \
          still reclaims the group: {observed:?}"
     );
-    const RELEASE_BOUND: Duration = Duration::from_secs(20);
     if let Err(held) = wait_for_cleanup_hold_release_within(&fixture.public(), RELEASE_BOUND) {
         panic!("the hold outlived the reaper that took it: {held}");
     }
@@ -11605,6 +11621,145 @@ fn a_surviving_ref_writer_of_the_dead_coordinator_refuses_the_resume_until_it_ex
         .expect("once the writer is gone the lock is stale and the publication completes");
     assert_publication_completed(&fixture, &planted, &lock);
     assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let fixture = Fixture::two_tasks("inherited-lease-copy");
+    plant_stale_verification(&fixture);
+    let first = drive(&fixture, &DriveSeams::default(), 1);
+    first
+        .progress
+        .first()
+        .expect("one step")
+        .as_ref()
+        .expect("the previous incarnation re-verified and published");
+    assert_eq!(
+        fixture.resume_attempts.get(),
+        1,
+        "the previous incarnation was this process's first resume of the run"
+    );
+
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let holder = parked.pid();
+    assert!(parked.is_alive(), "the parked fork {holder} is alive");
+    assert!(
+        rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "and its inherited copy alone holds the run's cleanup lease, this process having closed \
+         its own"
+    );
+    let released = parked.release_after(Duration::from_millis(300));
+    let resumed = resume_as(
+        &fixture,
+        "resumer-after-the-fork",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    let returned_at = std::time::Instant::now();
+    let (released_at, status) = released.join();
+    let (_, handle) =
+        resumed.expect("the next incarnation resumes once the parked fork's copy is released");
+    assert!(
+        returned_at >= released_at,
+        "the resume returned {:?} before the fork {holder} released the lease: it did not wait \
+         for the previous incarnation's release",
+        released_at - returned_at
+    );
+    assert!(
+        status.success(),
+        "the released fork exec'd `true`: {status:?}"
+    );
+    assert!(
+        fixture.hold_past_bound.get().is_none(),
+        "the wait ended inside its bound: {:?}",
+        fixture.hold_past_bound.get()
+    );
+    drop(handle);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let fixture = Fixture::two_tasks("lease-holder-past-bound");
+    plant_stale_verification(&fixture);
+    fixture.release_bound.set(Duration::from_millis(500));
+    let first = drive(&fixture, &DriveSeams::default(), 1);
+    first
+        .progress
+        .first()
+        .expect("one step")
+        .as_ref()
+        .expect("the previous incarnation re-verified and published");
+    let before = fixture.log_bytes();
+
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let holder = parked.pid();
+    assert!(
+        rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "the parked fork's copy holds the run's cleanup lease"
+    );
+    let started = std::time::Instant::now();
+    let error = resume_as(
+        &fixture,
+        "resumer-past-the-bound",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect_err("a holder still alive after the bound is refused by the resume itself");
+    let refused_after = started.elapsed();
+    let text = message(&error);
+    assert!(
+        text.contains("still has a process of its own alive") && text.contains(RUN_ID),
+        "the production refusal, naming the run: {text}"
+    );
+    assert!(
+        text.contains("still held after the full 500ms bound"),
+        "and the fixture's note that it waited the bound out first: {text}"
+    );
+    let held = fixture
+        .hold_past_bound
+        .get()
+        .expect("the wait recorded that it ran out");
+    assert!(
+        held.waited >= held.bound && held.observations >= 2,
+        "the wait ran its whole bound: {held}"
+    );
+    assert!(
+        refused_after >= Duration::from_millis(500),
+        "the bound was waited out before the resume was made: {refused_after:?}"
+    );
+    assert!(
+        parked.is_alive() && rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "the holder {holder} outlived the probe that refused: alive and holding after it"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "nothing was appended: resumable"
+    );
+
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exec'd `true`: {status:?}"
+    );
+    assert!(
+        !rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "released with the fork's exit"
+    );
+    let (_, handle) = resume_as(
+        &fixture,
+        "resumer-after-the-holder",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("with the holder gone the next incarnation resumes");
+    drop(handle);
 }
 
 #[test]
@@ -14416,6 +14571,9 @@ impl Fixture {
             started,
             first_line,
             plan,
+            resume_attempts: Cell::new(0),
+            release_bound: Cell::new(RELEASE_BOUND),
+            hold_past_bound: Cell::new(None),
         })
     }
 }
@@ -23944,6 +24102,7 @@ fn ledger_inventory(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct CleanupHoldPastBound {
     bound: Duration,
     waited: Duration,
@@ -23960,6 +24119,8 @@ impl std::fmt::Display for CleanupHoldPastBound {
         )
     }
 }
+
+const RELEASE_BOUND: Duration = Duration::from_secs(20);
 
 fn wait_for_cleanup_hold_release_within(
     public: &Path,
@@ -23985,7 +24146,38 @@ fn wait_for_cleanup_hold_release_within(
 }
 
 fn wait_for_cleanup_hold_release(public: &Path) -> bool {
-    wait_for_cleanup_hold_release_within(public, Duration::from_secs(20)).is_ok()
+    wait_for_cleanup_hold_release_within(public, RELEASE_BOUND).is_ok()
+}
+
+fn await_previous_incarnations_release(fixture: &Fixture) -> Option<CleanupHoldPastBound> {
+    let attempts = fixture.resume_attempts.get();
+    fixture.resume_attempts.set(attempts + 1);
+    if attempts == 0 {
+        return None;
+    }
+    let past_bound =
+        wait_for_cleanup_hold_release_within(&fixture.public(), fixture.release_bound.get()).err();
+    fixture.hold_past_bound.set(past_bound);
+    past_bound
+}
+
+fn refusal_after_an_expired_wait(
+    error: UpstrokeError,
+    past_bound: Option<CleanupHoldPastBound>,
+) -> UpstrokeError {
+    match (error, past_bound) {
+        (UpstrokeError::Refused { message }, Some(held))
+            if message.contains("holds the run's cleanup lease") =>
+        {
+            UpstrokeError::Refused {
+                message: format!(
+                    "{message} -- after the fixture had waited for the previous incarnation's \
+                     release: {held}"
+                ),
+            }
+        }
+        (error, _) => error,
+    }
 }
 
 fn process_local_of(
@@ -25015,6 +25207,7 @@ fn resume_holding_manager(
     let runtime = runtime_holding_the_record();
     let refs = RecordingRefs::absent(fixture);
     let mut warnings = Vec::new();
+    let past_bound = await_previous_incarnations_release(fixture);
     let root = fixture.derive(None)?;
     run_recovery_order(
         root,
@@ -25036,6 +25229,7 @@ fn resume_holding_manager(
         hooks,
         &mut warnings,
     )
+    .map_err(|error| refusal_after_an_expired_wait(error, past_bound))
 }
 
 #[test]
