@@ -9,6 +9,7 @@ use super::runtime::Settled;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::fake::absent_reason;
 use super::intent::{
@@ -3425,15 +3426,157 @@ fn real_docker_refuses_a_reference_it_does_not_hold_without_pulling() {
     );
 }
 
-fn wait_until_terminated(docker: &dyn ContainerRuntime, name: &str) -> Liveness {
-    for _ in 0..200 {
+const TERMINATION_BUDGET: Duration = Duration::from_secs(30);
+
+const TERMINATION_PAUSE: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+struct StillRunningPastBudget {
+    name: String,
+    budget: Duration,
+    pause: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+impl std::fmt::Display for StillRunningPastBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` is still running after {} observations over {:?}, the whole {:?} budget with \
+             {:?} between observations",
+            self.name, self.observations, self.waited, self.budget, self.pause
+        )
+    }
+}
+
+fn wait_until_terminated_within(
+    docker: &dyn ContainerRuntime,
+    name: &str,
+    budget: Duration,
+    pause: Duration,
+) -> Result<Liveness, StillRunningPastBudget> {
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
         let state = docker.observe(name).expect("reachable");
         if state.is_terminated() {
-            return state;
+            return Ok(state);
         }
-        std::thread::yield_now();
+        let waited = started.elapsed();
+        if waited >= budget {
+            return Err(StillRunningPastBudget {
+                name: name.to_owned(),
+                budget,
+                pause,
+                waited,
+                observations,
+            });
+        }
+        std::thread::sleep(pause);
     }
-    panic!("`{name}` is still running after 200 observations");
+}
+
+fn wait_until_terminated(docker: &dyn ContainerRuntime, name: &str) -> Liveness {
+    match wait_until_terminated_within(docker, name, TERMINATION_BUDGET, TERMINATION_PAUSE) {
+        Ok(state) => state,
+        Err(past_budget) => panic!("{past_budget}"),
+    }
+}
+
+fn observations_of(runtime: &FakeRuntime) -> usize {
+    runtime
+        .calls()
+        .into_iter()
+        .filter(|op| *op == RuntimeOp::Observe)
+        .count()
+}
+
+#[test]
+fn a_container_that_exits_after_a_delay_is_waited_for_by_the_clock_and_not_by_a_count() {
+    const NAME: &str = "upstroke-exits-later";
+    let runtime = FakeRuntime::new(ContainerTrace::recording());
+    runtime.add_image(IMAGE_ID, None);
+    runtime.seed_container(NAME, BTreeMap::new(), IMAGE_ID, IMAGE_ID, Liveness::Running);
+    let delay = Duration::from_millis(250);
+    let started = Instant::now();
+    let state = std::thread::scope(|scope| {
+        let exiting = scope.spawn(|| {
+            std::thread::sleep(delay);
+            runtime.set_container_state(NAME, Liveness::Exited);
+        });
+        let state = wait_until_terminated_within(
+            &runtime,
+            NAME,
+            Duration::from_secs(10),
+            Duration::from_millis(5),
+        )
+        .unwrap_or_else(|past_budget| panic!("{past_budget}"));
+        exiting.join().expect("the exiting thread panicked");
+        state
+    });
+    let waited = started.elapsed();
+    assert_eq!(state, Liveness::Exited);
+    assert!(
+        waited >= delay,
+        "the wait returned {state:?} after {waited:?}, before the container exited at {delay:?}"
+    );
+    let observations = observations_of(&runtime);
+    assert!(
+        observations >= 2,
+        "{observations} observation(s): the container was never observed running and then \
+         observed again"
+    );
+}
+
+#[test]
+fn a_container_that_never_exits_fails_the_wait_at_its_budget_and_the_message_says_how_long() {
+    const NAME: &str = "upstroke-never-exits";
+    let runtime = FakeRuntime::new(ContainerTrace::recording());
+    runtime.add_image(IMAGE_ID, None);
+    runtime.seed_container(NAME, BTreeMap::new(), IMAGE_ID, IMAGE_ID, Liveness::Running);
+    let never = NeverTerminates(&runtime);
+    let budget = Duration::from_millis(500);
+    let pause = Duration::from_millis(20);
+    let started = Instant::now();
+    let past_budget = wait_until_terminated_within(&never, NAME, budget, pause)
+        .expect_err("a container that never exits cannot be observed terminated");
+    let waited = started.elapsed();
+    assert!(
+        waited >= budget,
+        "the wait gave up after {waited:?}, inside its {budget:?} budget"
+    );
+    assert!(
+        past_budget.waited >= budget && past_budget.waited <= waited,
+        "the report says it waited {:?}; the caller measured {waited:?} against {budget:?}",
+        past_budget.waited
+    );
+    let observations = observations_of(&runtime);
+    assert_eq!(
+        usize::try_from(past_budget.observations).expect("a small count"),
+        observations,
+        "the report counts every observation made, and only those"
+    );
+    let most = usize::try_from(budget.as_millis() / pause.as_millis()).expect("a small count") + 1;
+    assert!(
+        (2..=most).contains(&observations),
+        "{observations} observations over {waited:?}: fewer than two and nothing was observed \
+         again after a pause; more than {most} and the pauses between observations were shorter \
+         than {pause:?}"
+    );
+    let message = past_budget.to_string();
+    for needle in [
+        NAME.to_owned(),
+        format!("{observations} observations"),
+        format!("{budget:?}"),
+        format!("{:?}", past_budget.waited),
+    ] {
+        assert!(
+            message.contains(&needle),
+            "{message:?} does not say {needle:?}"
+        );
+    }
 }
 
 #[test]
