@@ -9265,10 +9265,10 @@ fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {
          resume after the coordinator's death would take the exclusive side while the reaper \
          still reclaims the group: {observed:?}"
     );
-    assert!(
-        !rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
-        "the hold outlived the reaper that took it"
-    );
+    const RELEASE_BOUND: Duration = Duration::from_secs(20);
+    if let Err(held) = wait_for_cleanup_hold_release_within(&fixture.public(), RELEASE_BOUND) {
+        panic!("the hold outlived the reaper that took it: {held}");
+    }
 }
 
 #[test]
@@ -23944,17 +23944,48 @@ fn ledger_inventory(
     }
 }
 
-fn wait_for_cleanup_hold_release(public: &Path) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+struct CleanupHoldPastBound {
+    bound: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+impl std::fmt::Display for CleanupHoldPastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the run's cleanup.lock was still held after the full {:?} bound, every one of {} \
+             observations over {:?} finding it held",
+            self.bound, self.observations, self.waited
+        )
+    }
+}
+
+fn wait_for_cleanup_hold_release_within(
+    public: &Path,
+    bound: Duration,
+) -> Result<(), CleanupHoldPastBound> {
+    let started = std::time::Instant::now();
+    let mut observations = 0_u32;
     loop {
+        observations += 1;
         if !rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks) {
-            return true;
+            return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
-            return false;
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(CleanupHoldPastBound {
+                bound,
+                waited,
+                observations,
+            });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn wait_for_cleanup_hold_release(public: &Path) -> bool {
+    wait_for_cleanup_hold_release_within(public, Duration::from_secs(20)).is_ok()
 }
 
 fn process_local_of(
