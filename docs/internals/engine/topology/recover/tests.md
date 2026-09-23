@@ -73,6 +73,28 @@ worktree is cut at.
 
 The committed first line, without its newline.
 
+
+## `struct Fixture` › `resume_attempts: Cell<u32>,`
+
+How many times this process has tried to resume the run through one of the
+fixture's three trunks (`resume_with`, `resume_as_certified_by`,
+`resume_holding_manager`), counting refusals. Zero is a first resume, and a
+first resume never waits for the run's cleanup lease: every test that plants
+a hold and expects the immediate production refusal is a first resume. From
+one on, the trunk first waits for the previous incarnation's release
+(`await_previous_incarnations_release`).
+
+## `struct Fixture` › `release_bound: Cell<Duration>,`
+
+The bound of that wait: `RELEASE_BOUND` unless a test lowers it, as
+`a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation`
+does to show the expiry boundary in half a second rather than twenty.
+
+## `struct Fixture` › `hold_past_bound: Cell<Option<CleanupHoldPastBound>>,`
+
+What the most recent wait reported when it ran out, or `None` when it found
+the lease free inside its bound; a test asserting on the expiry reads it
+here rather than from a clock of its own.
 ## `struct Damage {`
 
 What a fixture may be built wrong in.
@@ -596,6 +618,12 @@ takes [`resume_holding`].
 
 [`resume`], with the hook bundle supplied — so a test can arm one.
 
+
+## `fn resume_with(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+The wait before a later resume, and the annotation of a refusal that follows
+an expired one. See `await_previous_incarnations_release`; the other two
+trunks carry the same two lines.
 ## `fn any_lock_site_ran(harness: &Arc<Mutex<HookHarness>>) -> Vec<&'static str> {`
 
 Whether any lock site ran — the R17 half of "no hold was taken".
@@ -1259,6 +1287,15 @@ recorded as `windows-gate-lint-level-gap`: a local
 `--target x86_64-pc-windows-msvc` check accepts code the guest does
 not, because only the guest sets the lint level.
 
+
+## `fn resume_refused_while_reaper_hold_observed_then_succeeds()` › `let started = std::time::Instant::now();`
+
+The refusal is timed: this is a first resume of the fixture, and a first
+resume never waits for the hold it observes (the directory planted at
+`cleanup.lock` makes the observation fail closed, so a wait here would run
+its whole bound). Five seconds is a quarter of `RELEASE_BOUND` and a hundred
+times the resume's own cost, so the assertion tells a wait from a slow box
+and fails a fixture that waited on a first attempt.
 ## `fn replayed(fixture: &Fixture) -> TopologyFold {`
 
 The fold alone; `replayed_with_events` for the observers that take the
@@ -3088,6 +3125,11 @@ exactly how a resume that refused its own published head stayed green
 `resume_as` with the pre-flight seam a parameter, for the one witness whose resume has to end in
 its probe (`ProbeDiesLeaving`). `resume_as` passes `AlwaysCertifies`, as it always did.
 
+
+## `fn resume_as_certified_by(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+As `resume_with`: the wait before a later resume, and the annotation of a
+refusal that follows an expired one.
 ## `const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";`
 
 The incarnation that resumes a run first in the witnesses below and then dies: neither the
@@ -3563,7 +3605,7 @@ infrastructure failure terminates merge_verification_unavailable
 `invariants[INV-23]`: a Runner that cannot run the process is a
 RunnerSpawnFailure outage. The fixture allows three deferrals.
 
-## `fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {` › `const RELEASE_BOUND: Duration = Duration::from_secs(20);`
+## `fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {` › `if let Err(held) = wait_for_cleanup_hold_release_within(&fixture.public(), RELEASE_BOUND) {`
 
 The last assertion is a bounded wait, not a single observation, and the
 three above it are unchanged: the first is a genuine reaper-startup
@@ -4014,6 +4056,45 @@ exits the kernel releases the lease, the lock is stale, and the next
 resume reclaims it and completes the publication. Its log then replays
 twice to the fold that resume's handle holds (`assert_log_replays_twice_equal`).
 
+
+## `fn a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes() {`
+
+The neighbour of `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`,
+constructed. The production refusal at a later `drive_as` — *"still has a
+process of its own alive … holds the run's cleanup lease"* — reads a copy of
+the run's lease descriptor: `WorkspaceManager::update_ref` keeps one open in
+this process for the life of each `git update-ref` child, a `fork` by any
+other thread copies it, and the copy holds the shared `flock` until that
+child's `exec` or its own close. Under a whole parallel suite the previous
+incarnation's last ref writes end about a millisecond before the next
+incarnation's first probe, and a sibling's fork window can outlast that.
+
+`workspace_manager::fixture::ParkedFork::holding_the_lease_of` makes one such
+copy last as long as the test says: a copy taken exactly as a ref write
+takes it, a child forked on another thread while the copy is open and parked
+in its `pre_exec` on a socket read, this process's copy closed. The child's
+pid arrives over the socket from inside the exec window, so *alive and
+holding* is observed, not inferred; `observe_cleanup_hold` then finds the
+lease held with only the parked child left to hold it. The fork is released
+300 ms later on a thread of its own, and the test asserts the order: the
+later resume returned only after the release, the released child exec'd
+`true`, and the wait ended inside its bound. Without the wait in the trunks
+the resume is refused with the fingerprint (`m1` and `m2` in the evidence);
+with it, the run's next incarnation resumes.
+
+## `fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {`
+
+The boundary the wait must not cross. With the bound lowered to 500 ms and
+the parked fork never released until after, the later resume is still made
+and still refused by production: the message is the refusal's own, naming
+the run, with the fixture's note appended that it waited the whole bound
+first (`refusal_after_an_expired_wait`); `hold_past_bound` records the
+expiry; the refusal took at least the bound; the holder is alive and holding
+after the refusal returned, so the probe that refused saw a live hold; and
+nothing was appended to the log. Released, the fork exits cleanly, the lease
+reads free and the next resume proceeds. A trunk that answered an expired
+wait with anything but the real resume fails here (`m4`), as does one that
+waited less than the bound (`m2`).
 ## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
 
 **A call census's needle is not satisfied by a longer name ending in it.**
@@ -6075,6 +6156,15 @@ it actually waited, and how many observations found the lease held. Its
 `Display` is the assertion message, which is what tells a hold that never
 cleared from one observed at a single instant.
 
+## `const RELEASE_BOUND: Duration = Duration::from_secs(20);`
+
+One number for one condition throughout the file: the bound
+`wait_for_cleanup_hold_release` gives the finalization and kill matrices'
+observations, the bound `a_host_integration_reaper_holds_the_runs_cleanup_lease`
+gives its last assertion, and the default bound of a later resume's wait.
+Some ten thousand times the millisecond an inherited copy lasts; paid only
+by a run that is failing.
+
 ## `fn wait_for_cleanup_hold_release_within(`
 
 The bounded wait behind `wait_for_cleanup_hold_release`, with the bound a
@@ -6084,7 +6174,7 @@ bound has elapsed (`Err`).
 
 ## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
 
-Wait, bounded, for the run's cleanup lease to be free: twenty seconds
+Wait, bounded, for the run's cleanup lease to be free: `RELEASE_BOUND`
 through `wait_for_cleanup_hold_release_within`, answering only whether it
 was released. A `git` child of the ref funnel holds the lease while it
 lives, through a descriptor made inheritable for it, and under a parallel
@@ -6093,6 +6183,30 @@ descriptor and hold the lease until it exits. The wait is bounded so a
 hold that never clears still fails the assertion that follows it; the
 ledger's post-drop observation and the finalization matrix's resumes wait
 through it.
+
+## `fn await_previous_incarnations_release(fixture: &Fixture) -> Option<CleanupHoldPastBound> {`
+
+The fixture's model of "the previous coordinator is gone". A production
+resume follows the death of another process and cannot inherit its
+descriptors; these tests resume in the process that drove the run, about a
+millisecond after its last ref write, while sibling threads fork, so the
+copies this process leaked into their exec windows are still held. Before a
+later resume — the fixture's second and every one after, counted in
+`resume_attempts` — this waits, bounded by `release_bound`, until the run's
+cleanup lease is observed free, and records in `hold_past_bound` what the
+wait found. It never decides the resume: the trunk makes the real resume
+whatever the wait found, and a refusal that follows an expired wait is the
+production refusal with the wait's report appended. A first resume returns
+at once, so the immediate-refusal tests keep their immediate refusal, and
+`resume_refused_while_reaper_hold_observed_then_succeeds` asserts it.
+
+## `fn refusal_after_an_expired_wait(`
+
+The annotation: a `Refused` whose message is the cleanup-lease refusal, after
+a wait that ran out, carries the bound and the observations that found the
+lease held, so a red reads as *"still held after the whole bound"* and never
+as *"held at one instant"*. Every other error passes through untouched, and
+so does the refusal when no wait preceded it.
 ## `fn process_local_of(`
 
 R3, R4, R13, R17, R22 and R28 as the live process sees them.
@@ -6277,6 +6391,11 @@ the resume's `assert_publishable` runs Git's enumeration before any step can rep
 derived after the tear refuses in `derive`: both are
 `PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`.
 
+
+## `fn resume_holding_manager(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+As `resume_with`: the wait before a later resume, and the annotation of a
+refusal that follows an expired one.
 ## `fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {`
 
 A torn add a killed conductor can leave: an open generation's own worktree, and nothing
