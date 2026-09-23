@@ -610,7 +610,7 @@ pub(crate) fn spawn_ready_helper(
 }
 
 // -----------------------------------------------------------------------
-// A fork parked in its exec window, holding the run's lease
+// A fork parked in its exec window, holding one descriptor
 // -----------------------------------------------------------------------
 
 /// A child of this process parked between `fork` and `exec`, holding the one
@@ -621,25 +621,35 @@ pub(crate) fn spawn_ready_helper(
 /// window is what every spawn in this process has, and what a copy of a
 /// run's cleanup lease -- open in this process for the life of a ref write,
 /// `rundir::hold_cleanup_lease_for_child` -- is inherited through. This
-/// value makes one such window last as long as a test needs: from inside its
-/// `pre_exec` the child closes every inherited descriptor except the one it
-/// keeps and its socket, so no other test's descriptor is held by it, writes
-/// its pid to the socket and then blocks on a read of the same socket until
-/// [`Self::release`] writes to it, on which it goes on to `exec` `true` and
-/// exit. The pid arriving is the proof that the child is parked, alive and
-/// holding its copy; nothing about it is inferred from a clock.
+/// value makes one such window last as long as a test needs. From inside its
+/// `pre_exec` the child closes every inherited descriptor above stdio except
+/// the one it keeps and its end of a socket, so it holds nothing of any other
+/// test's; writes its pid to the socket; and blocks on a read of the same
+/// socket until [`Self::release`] writes to it, on which it goes on to `exec`
+/// `true` and exit. The pid arriving is the proof that the child is parked,
+/// alive and holding its copy; nothing about it is inferred from a clock.
+/// [`Self::kept`] names the two descriptors it holds above stdio.
 ///
 /// `Command::spawn` returns only once the child has exec'd, so the spawn
 /// happens on a thread of its own and the caller keeps the parent's thread.
-/// The child closes its inherited copy of the parent's socket end before it
-/// blocks, so the parent's death ends the read with EOF and the child does
-/// not outlive it parked; dropping this value releases and reaps the child.
+/// The child's copy of the parent's socket end goes with the rest, so the
+/// parent's death ends the read with EOF and the child does not outlive it
+/// parked. Dropping this value releases and reaps the child, and the reap is
+/// bounded: a child not collected within [`REAP_BOUND`] of its release is
+/// killed and collected, and its status then says it was.
 #[cfg(unix)]
 pub(crate) struct ParkedFork {
     pid: libc::pid_t,
+    kept: libc::c_int,
+    socket: libc::c_int,
     release: Option<std::os::unix::net::UnixStream>,
     spawner: Option<std::thread::JoinHandle<std::io::Result<std::process::Child>>>,
 }
+
+/// How long [`ParkedFork::release`] waits for the released child to exit
+/// before it kills it.
+#[cfg(unix)]
+pub(crate) const REAP_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(unix)]
 impl ParkedFork {
@@ -656,14 +666,15 @@ impl ParkedFork {
         let copy = crate::rundir::hold_cleanup_lease_for_child(&mut never_spawned, public)
             .expect("the run directory exists, so its lease can be taken")
             .expect("Unix hands the child a hold");
-        let parked = Self::park(copy.as_raw_fd());
+        let parked = Self::holding(copy.as_raw_fd());
         drop(copy);
         parked
     }
 
-    /// Fork the child, keeping `kept` open in it, and wait until it reports
-    /// itself parked.
-    fn park(kept: libc::c_int) -> Self {
+    /// Park a fork that keeps `kept`, a descriptor open in this process, and
+    /// nothing else of this process's above stdio. Returns once the child has
+    /// reported itself parked.
+    pub(crate) fn holding(kept: libc::c_int) -> Self {
         use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
@@ -673,7 +684,10 @@ impl ParkedFork {
         release
             .set_read_timeout(Some(std::time::Duration::from_secs(60)))
             .expect("bound the wait for the child's pid");
-        let child_fd = child_end.as_raw_fd();
+        let socket = child_end.as_raw_fd();
+        // SAFETY: `sysconf` reads a process limit and touches no memory.
+        let open_max = libc::c_int::try_from(unsafe { libc::sysconf(libc::_SC_OPEN_MAX) })
+            .expect("a descriptor ceiling that fits");
         let spawner = std::thread::spawn(move || {
             let mut command = Command::new("true");
             command
@@ -682,31 +696,19 @@ impl ParkedFork {
                 .stderr(Stdio::null());
             // SAFETY: the closure runs in the forked child before `exec` and
             // calls only async-signal-safe syscalls -- `close_range` through
-            // `syscall`, `getpid`, `write` and `read` -- on descriptors the
-            // child inherited; it allocates nothing and touches no state of
-            // this process.
+            // `syscall` where Linux has it and `close` otherwise, `getpid`,
+            // `write` and `read` -- on descriptors the child inherited; it
+            // allocates nothing and touches no state of this process.
             unsafe {
                 command.pre_exec(move || {
-                    // Everything above stdio goes, except the kept copy and
-                    // this end of the socket (the other end included, so the
-                    // parent's death ends the read below with EOF).
-                    let mut keep = [child_fd as u32, kept as u32];
-                    keep.sort_unstable();
-                    let mut first = 3_u32;
-                    for fd in keep {
-                        if fd > first {
-                            libc::syscall(libc::SYS_close_range, first, fd - 1, 0_u32);
-                        }
-                        first = fd + 1;
-                    }
-                    libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32);
+                    close_above_stdio_except([socket, kept], open_max);
                     let pid = libc::getpid().to_ne_bytes();
-                    if libc::write(child_fd, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
+                    if libc::write(socket, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
                         return Err(std::io::Error::last_os_error());
                     }
                     let mut byte = [0_u8; 1];
                     loop {
-                        let read = libc::read(child_fd, byte.as_mut_ptr().cast(), 1);
+                        let read = libc::read(socket, byte.as_mut_ptr().cast(), 1);
                         if read >= 0 {
                             return Ok(());
                         }
@@ -728,6 +730,8 @@ impl ParkedFork {
         drop(child_end);
         Self {
             pid: libc::pid_t::from_ne_bytes(pid),
+            kept,
+            socket,
             release: Some(release),
             spawner: Some(spawner),
         }
@@ -738,21 +742,30 @@ impl ParkedFork {
         self.pid
     }
 
+    /// The two descriptors the child holds above stdio, by the numbers this
+    /// process opened them under, which the child's table shares: the one it
+    /// was forked to hold, then its socket end.
+    pub(crate) fn kept(&self) -> [libc::c_int; 2] {
+        [self.kept, self.socket]
+    }
+
     /// Whether the parked child can still be signalled.
     pub(crate) fn is_alive(&self) -> bool {
         // SAFETY: signal 0 delivers nothing; it asks whether the pid exists.
         unsafe { libc::kill(self.pid, 0) == 0 }
     }
 
-    /// Let the child go on to its `exec`, and reap it: its exit status.
+    /// Let the child go on to its `exec`, and reap it: its exit status,
+    /// within [`REAP_BOUND`] of the release or after a kill.
     pub(crate) fn release(mut self) -> std::process::ExitStatus {
         self.release_and_reap()
             .expect("the released child exec'd `true` and was reaped")
     }
 
     /// [`Self::release`] on another thread after `delay`, for a test that
-    /// must first start something the held lease makes wait; the instant of
-    /// the release and the child's status come back through the handle.
+    /// must first start something the held descriptor makes wait; the
+    /// instant of the release and the child's status come back through the
+    /// handle.
     pub(crate) fn release_after(self, delay: std::time::Duration) -> ReleasedLater {
         ReleasedLater(std::thread::spawn(move || {
             std::thread::sleep(delay);
@@ -765,23 +778,23 @@ impl ParkedFork {
         use std::io::Write as _;
         let mut release = self.release.take()?;
         let written = release.write_all(&[1]);
-        let spawned = self
-            .spawner
-            .take()
-            .expect("the spawner thread is joined once")
-            .join()
-            .expect("the spawner thread ends");
+        let spawned = self.spawner.take().and_then(|spawner| spawner.join().ok());
         if std::thread::panicking() {
+            if let Some(Ok(mut child)) = spawned {
+                let _ = reap_within(&mut child, REAP_BOUND);
+            }
             return None;
         }
         written.expect("release the parked child");
-        let mut child = spawned.expect("the released child exec'd");
+        let mut child = spawned
+            .expect("the spawner thread ends")
+            .expect("the released child exec'd");
         assert_eq!(
             u32::try_from(self.pid).expect("a pid is non-negative"),
             child.id(),
             "the child that reported itself parked is the one that exec'd"
         );
-        Some(child.wait().expect("reap the released child"))
+        Some(reap_within(&mut child, REAP_BOUND).expect("reap the released child"))
     }
 }
 
@@ -803,6 +816,72 @@ impl ReleasedLater {
     /// When the release happened, and how the child ended.
     pub(crate) fn join(self) -> (std::time::Instant, std::process::ExitStatus) {
         self.0.join().expect("the releasing thread ends")
+    }
+}
+
+/// Collect `child` within `bound`, killing it first if it is still there at
+/// the end of it; the status then carries the kill.
+#[cfg(unix)]
+fn reap_within(
+    child: &mut std::process::Child,
+    bound: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= bound {
+            child.kill()?;
+            return child.wait();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Close every descriptor of the calling process from 3 up to `open_max`
+/// except the two in `keep`: `close_range` per gap where Linux has it, one
+/// `close` per number elsewhere -- the shape `agent::proc`'s reaper uses in
+/// its own forked child.
+///
+/// # Safety
+///
+/// For the child of a `fork` before its `exec`, and nowhere else: it closes
+/// descriptors the caller does not own, and it is async-signal-safe only
+/// because it makes syscalls and nothing more.
+#[cfg(unix)]
+unsafe fn close_above_stdio_except(keep: [libc::c_int; 2], open_max: libc::c_int) {
+    let mut keep = keep;
+    keep.sort_unstable();
+    #[cfg(target_os = "linux")]
+    {
+        let _ = open_max;
+        let mut first = 3_u32;
+        for fd in keep {
+            let Ok(fd) = u32::try_from(fd) else {
+                continue;
+            };
+            if fd >= first {
+                if fd > first {
+                    // SAFETY: a raw syscall over a numeric range; see the fn's
+                    // own contract.
+                    unsafe { libc::syscall(libc::SYS_close_range, first, fd - 1, 0_u32) };
+                }
+                first = fd + 1;
+            }
+        }
+        // SAFETY: as above.
+        unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        for fd in 3..open_max {
+            if !keep.contains(&fd) {
+                // SAFETY: a numeric close in the forked child; see the fn's
+                // own contract.
+                unsafe { libc::close(fd) };
+            }
+        }
     }
 }
 
