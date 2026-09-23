@@ -5489,8 +5489,11 @@ fn assert_close_range_answers(errno: libc::c_int) {
 
 /// The sentinel proof under a named condition: with this process's copy of
 /// a socket end closed, the read on the other end answers EOF, so the parked
-/// fork holds no copy of it; the fork holds the lease, and is released.
-#[cfg(unix)]
+/// fork holds no copy of it; the fork holds the lease, and is released. Linux
+/// only, as its two callers are: the conditions are seccomp policies, and a
+/// Unix-wide helper with Linux-only callers is dead code on macOS, where
+/// `-D warnings` makes that a failed build.
+#[cfg(target_os = "linux")]
 fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::io::Read as _;
