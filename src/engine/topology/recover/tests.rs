@@ -11679,10 +11679,12 @@ fn a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnati
         &runtime_holding_the_record(),
         &mut HarnessTopologyHooks::new(harness()),
     );
-    let (released_at, status) = fixture.holder_released.get().expect(
-        "the later resume's wait observed the copy held and, from inside that observation, \
-         released the fork {holder}: without the wait there is no observation and no release",
-    );
+    let Some((released_at, status)) = fixture.holder_released.get() else {
+        panic!(
+            "the later resume's wait observed the copy held and, from inside that observation, \
+             released the fork {holder}: without the wait there is no observation and no release"
+        );
+    };
     assert_eq!(
         released_at, 1,
         "the wait's first observation read the copy held, so the release came after it and the \

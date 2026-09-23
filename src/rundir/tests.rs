@@ -5186,7 +5186,8 @@ fn stop_parked_child(pid: libc::pid_t) {
 /// the test's failure bound around a step that must itself be bounded, so a
 /// step that is not fails the test instead of hanging it. The thread's
 /// handle comes back with the answer, or with the timeout, for the caller to
-/// unblock and join.
+/// unblock and join; the thread's send is best effort by design, because a
+/// caller whose bound ran out reports that bound and not the late answer.
 #[cfg(unix)]
 fn on_a_thread_within<T: Send + 'static>(
     bound: Duration,
@@ -5197,9 +5198,10 @@ fn on_a_thread_within<T: Send + 'static>(
 ) {
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        sender
-            .send(act())
-            .expect("the test holds the receiver until the thread is joined");
+        if sender.send(act()).is_err() {
+            // The caller stopped waiting: its failure bound expired and it
+            // reports that, which is the outcome this late answer confirms.
+        }
     });
     (receiver.recv_timeout(bound), handle)
 }
