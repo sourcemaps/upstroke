@@ -613,20 +613,21 @@ pub(crate) fn spawn_ready_helper(
 // A fork parked in its exec window, holding the run's lease
 // -----------------------------------------------------------------------
 
-/// A child of this process parked between `fork` and `exec`, holding every
-/// descriptor the process had open at its fork.
+/// A child of this process parked between `fork` and `exec`, holding the one
+/// descriptor it was forked to hold.
 ///
 /// A `fork` copies the whole descriptor table, and `CLOEXEC` closes a copy
 /// only at the child's `exec`; between the two the child holds it. That
 /// window is what every spawn in this process has, and what a copy of a
 /// run's cleanup lease -- open in this process for the life of a ref write,
 /// `rundir::hold_cleanup_lease_for_child` -- is inherited through. This
-/// value makes one such window last as long as a test needs: the child
-/// writes its pid to a socket from inside its `pre_exec` and then blocks on a
-/// read of the same socket until [`Self::release`] writes to it, on which it
-/// goes on to `exec` `true` and exit. The pid arriving is the proof that the
-/// child is parked, alive and holding its inherited copies; nothing about it
-/// is inferred from a clock.
+/// value makes one such window last as long as a test needs: from inside its
+/// `pre_exec` the child closes every inherited descriptor except the one it
+/// keeps and its socket, so no other test's descriptor is held by it, writes
+/// its pid to the socket and then blocks on a read of the same socket until
+/// [`Self::release`] writes to it, on which it goes on to `exec` `true` and
+/// exit. The pid arriving is the proof that the child is parked, alive and
+/// holding its copy; nothing about it is inferred from a clock.
 ///
 /// `Command::spawn` returns only once the child has exec'd, so the spawn
 /// happens on a thread of its own and the caller keeps the parent's thread.
@@ -649,17 +650,20 @@ impl ParkedFork {
     /// while the copy is open, and the copy is then closed: what remains is
     /// the parked child's inherited descriptor, the shared `flock` with it.
     pub(crate) fn holding_the_lease_of(public: &Path) -> Self {
+        use std::os::fd::AsRawFd as _;
+
         let mut never_spawned = Command::new("true");
         let copy = crate::rundir::hold_cleanup_lease_for_child(&mut never_spawned, public)
             .expect("the run directory exists, so its lease can be taken")
             .expect("Unix hands the child a hold");
-        let parked = Self::park();
+        let parked = Self::park(copy.as_raw_fd());
         drop(copy);
         parked
     }
 
-    /// Fork the child and wait until it reports itself parked.
-    fn park() -> Self {
+    /// Fork the child, keeping `kept` open in it, and wait until it reports
+    /// itself parked.
+    fn park(kept: libc::c_int) -> Self {
         use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
@@ -670,7 +674,6 @@ impl ParkedFork {
             .set_read_timeout(Some(std::time::Duration::from_secs(60)))
             .expect("bound the wait for the child's pid");
         let child_fd = child_end.as_raw_fd();
-        let parent_fd = release.as_raw_fd();
         let spawner = std::thread::spawn(move || {
             let mut command = Command::new("true");
             command
@@ -678,12 +681,25 @@ impl ParkedFork {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             // SAFETY: the closure runs in the forked child before `exec` and
-            // calls only async-signal-safe syscalls -- `getpid`, `close`,
-            // `write` and `read` -- on descriptors the child inherited; it
-            // allocates nothing and touches no state of this process.
+            // calls only async-signal-safe syscalls -- `close_range` through
+            // `syscall`, `getpid`, `write` and `read` -- on descriptors the
+            // child inherited; it allocates nothing and touches no state of
+            // this process.
             unsafe {
                 command.pre_exec(move || {
-                    libc::close(parent_fd);
+                    // Everything above stdio goes, except the kept copy and
+                    // this end of the socket (the other end included, so the
+                    // parent's death ends the read below with EOF).
+                    let mut keep = [child_fd as u32, kept as u32];
+                    keep.sort_unstable();
+                    let mut first = 3_u32;
+                    for fd in keep {
+                        if fd > first {
+                            libc::syscall(libc::SYS_close_range, first, fd - 1, 0_u32);
+                        }
+                        first = fd + 1;
+                    }
+                    libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32);
                     let pid = libc::getpid().to_ne_bytes();
                     if libc::write(child_fd, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
                         return Err(std::io::Error::last_os_error());

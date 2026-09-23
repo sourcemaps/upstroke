@@ -4072,9 +4072,10 @@ incarnation's first probe, and a sibling's fork window can outlast that.
 `workspace_manager::fixture::ParkedFork::holding_the_lease_of` makes one such
 copy last as long as the test says: a copy taken exactly as a ref write
 takes it, a child forked on another thread while the copy is open and parked
-in its `pre_exec` on a socket read, this process's copy closed. The child's
-pid arrives over the socket from inside the exec window, so *alive and
-holding* is observed, not inferred; `observe_cleanup_hold` then finds the
+in its `pre_exec` on a socket read — every other inherited descriptor closed
+first, so no other test's is held with it — this process's copy closed. The
+child's pid arrives over the socket from inside the exec window, so *alive
+and holding* is observed, not inferred; `observe_cleanup_hold` then finds the
 lease held with only the parked child left to hold it. The fork is released
 300 ms later on a thread of its own, and the test asserts the order: the
 later resume returned only after the release, the released child exec'd
