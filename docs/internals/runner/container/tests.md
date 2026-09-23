@@ -1620,45 +1620,82 @@ A reference the runtime does not hold is **absent**, and nothing pulls it.
 
 ## `const TERMINATION_BUDGET: Duration = Duration::from_secs(30);`
 
-How long a real-Docker test waits for a container it started to be
-observed terminated: a wall-clock budget, measured from an `Instant`.
+How long a real-Docker test goes on asking the daemon about a container it
+started while the daemon reports it running: a wall-clock budget, measured
+from an `Instant` and tested after each observation that found the
+container running.
 
-Before 2026-09-23 the wait was **two hundred observations with a
-`yield_now` between them**, and its duration was whatever two hundred round
-trips to the daemon happened to take: `yield_now` cedes the processor only
-when another thread is runnable on it, so the loop had no lower bound in
-time and was shortest exactly when the box was least loaded. Measured on
-the build box (`docker` 29.7.2, `alpine:3.20`, `/bin/sh -c 'exit 0'`, the
-fixture of `real_docker_kill_on_an_already_exited_container_is_tolerated`):
-one observation — the `docker ps --all --filter name=… --format …` listing
-[`DockerCli::observe`] makes — takes 8 to 13 ms, so two hundred of them span
-about 1.6 to 2.4 s; the daemon needs 50 to 70 ms for the container's whole
-life on a quiet box, with tails of 0.8 s for the life and 1.2 s for the
-`docker start` alone while a full suite ran beside it. A container whose
-exit the daemon reports later than the two hundredth round trip failed the
-test though the property it asserts held a moment later, which is
-`PR274-DOCKER-TERMINATION-POLL-COUNTS-YIELDS-NOT-TIME`: four red baselines
-in its own table, three more on 2026-09-23 (#318's fourth and fifth gate
-attempts and a diagnostic that failed both callers at once), every one
-passing alone at the same head.
+**What the budget bounds, exactly.** An observation is synchronous: the
+`docker ps --all --filter name=… --format …` listing [`DockerCli::observe`]
+makes runs to completion through `Command::output()`, with no deadline of
+its own. The budget is consulted only between observations, after one that
+found the container running, so it bounds how long the wait keeps *asking*,
+not how long the wait *takes*: an observation in flight is never
+interrupted, a [`TERMINATION_PAUSE`] begun after an under-budget observation
+is slept in full, and a scheduling delay anywhere in between is not seen
+until the next check. The wait can therefore end past the budget by one
+observation, one pause and whatever the scheduler adds, and a terminal
+observation that completes after the budget is still the answer. What the
+budget cannot do is bound a daemon that does not answer: an observation
+that blocks, blocks the wait with it. The tests below hold each of these
+with the fake — a running observation that takes 100 ms against a 20 ms
+budget is the wait's only observation and is reported in full, and a
+terminal one that takes as long is accepted — and against the real daemon
+on the build box (2026-09-23, `docker` 29.7.2) a container running
+`sleep 120` was reported running for 947 observations over 30.005 s before
+the wait gave up with that report as its panic message. That measures a
+daemon that answers; a daemon that stops answering has not been measured,
+and the synchronous call path says this budget would not see it.
 
-Thirty seconds bounds a wedged daemon, not a healthy one: it is several
-hundred times the healthy life, some twenty-five times the longest tail
-measured under load and more than ten times what the failing runs needed,
-in the range of this suite's other bounds (twenty seconds for the cleanup
-lease in `engine::topology::recover::tests`, sixty for the lock-probe child
-below), and it is paid only by a failing test. A red at this bound reads as
-a daemon that is not reporting the exit, not as a busy box, and the message
-says how long it waited and how many times it asked.
+**What it replaced.** Before 2026-09-23 the wait was **two hundred
+observations with a `yield_now` between them**, and its duration was
+whatever two hundred round trips to the daemon happened to take:
+`yield_now` cedes the processor only when another thread is runnable on it,
+so the loop had no lower bound in time and was shortest exactly when the box
+was least loaded. Measured on the build box (`docker` 29.7.2, `alpine:3.20`,
+`/bin/sh -c 'exit 0'`, the fixture of
+`real_docker_kill_on_an_already_exited_container_is_tolerated`): one
+observation takes 8 to 13 ms on a quiet box and 10 to 16 ms beside a full
+suite, so two hundred of them span about 1.6 to 2.4 s; the daemon needs 50
+to 70 ms for the container's whole life on a quiet box, with tails of 0.8 s
+for the life and 1.2 s for the `docker start` alone in thirty lifecycles
+beside a suite; and in a hundred lifecycles, quiet and loaded, the exit was
+observed 70 to 160 ms after `docker start` returned, after 7 to 12
+observations — never on the first, and never near the two hundredth. Those
+are contemporary measurements of a healthy daemon. The runs that failed —
+`PR274-DOCKER-TERMINATION-POLL-COUNTS-YIELDS-NOT-TIME`'s four red baselines,
+and three more on 2026-09-23 (#318's fourth and fifth gate attempts and a
+diagnostic that failed both callers at once), every one passing alone at the
+same head — were not measured: how long each waited, how much longer its
+container would have needed, and why, are not established, and the 1.2 s
+`docker start` tail is spent before this wait begins, so it does not explain
+them either. A count of yields is a defect whatever the cause — the
+deterministic witness below fails it in microseconds — and the repair is the
+unit of the budget, not a diagnosis of those runs.
+
+**Why thirty seconds.** A chosen margin, not a measurement: several hundred
+times the healthy life measured here, some twenty-five times the longest
+daemon latency measured under load (the 1.2 s `docker start`, which this
+wait does not even include), in the range of this suite's other bounds
+(twenty seconds for the cleanup lease in `engine::topology::recover::tests`,
+sixty for the lock-probe child below), and paid only by a failing test. A
+red at this bound says the daemon answered *running* for thirty seconds —
+the message says how long it waited and how many times it asked — and no
+more: on its own it does not tell a busy box from a daemon that has stopped
+reporting exits, and a red whose elapsed time far exceeds the budget says an
+observation, not the loop, took the time.
 
 `decisions.tests_acceptance.determinism` forbids sleeps in the deterministic
 suite, whose runtime is [`FakeRuntime`] and whose liveness is simulated; this
 helper serves the real-Docker integration tests, whose producer is the daemon
 itself, and standards §12's readiness rule is the one that binds it: every
-wait is bounded, and the bound bounds a wedged producer rather than timing a
-healthy one. The count-bounded twin [`super::observe_terminated`] is
-production, asks its question after a `docker kill` whose return already
-means delivery, and is untouched.
+wait is bounded, and the bound bounds a producer that keeps answering
+*running* rather than timing a healthy one. A producer that stops answering
+at all is outside what a budget between synchronous observations can bound,
+which is why the paragraph above says so rather than promising it. The
+count-bounded twin [`super::observe_terminated`] is production, asks its
+question after a `docker kill` whose return already means delivery, and is
+untouched.
 
 ## `const TERMINATION_PAUSE: Duration = Duration::from_millis(25);`
 
@@ -1667,38 +1704,64 @@ interval at which the product's own supervisor asks the same daemon the same
 question. The pause is pacing, not synchronization — the oracle is the
 observation, and a container observed terminated returns at once — and with
 a round trip of about 10 ms it makes roughly thirty observations a second,
-some eight hundred and sixty over the whole budget instead of two hundred in
-two seconds.
+some nine hundred over the whole budget (947 measured) instead of two hundred
+in two seconds.
 
 ## `struct StillRunningPastBudget {`
 
-What the wait reports when the budget is spent: the container, how many
-observations were made, how long they spanned, and the budget and pause
-they were made under, so a red can be read for what it is. Its `Display` is
-the panic message of [`wait_until_terminated`].
+What the wait reports when the budget is found spent: the container, how
+many observations were made, how long they spanned, and the budget and pause
+they were made under, so a red can be read for what it is. `waited` is the
+wait's own elapsed time at the check that found the budget spent: at least
+the budget, and past it by however long the last observation, the pause
+before it and the scheduler took. Its `Display` is the panic message of
+[`wait_until_terminated`].
 
 ## `fn wait_until_terminated_within(`
 
-The bounded core, with the budget and the pause as arguments so the
-regression tests below can exercise both endings in well under a second.
-The first observation is made before any pause, the budget is checked after
-each observation that found the container running, and the pause sits
-strictly between observations: a container observed terminated returns
-without sleeping, and the wait never sleeps after the observation that
-spends the budget.
+The bounded core, with the budget and the pause as arguments so the tests
+below can exercise every ending in well under a second. The protocol, in
+order: observe; a terminal state returns at once, whatever the budget and
+without a pause; otherwise the elapsed time is read and, at or past the
+budget, the report is returned without a pause; otherwise the pause is slept
+in full and the loop observes again. So the first observation is made before
+any pause, the budget is checked only after a completed observation that
+found the container running, and an observation is never interrupted; the
+overshoot conditions stated under [`TERMINATION_BUDGET`] follow from this
+order, and the tests below hold each of them.
 
 ## `fn wait_until_terminated(docker: &dyn ContainerRuntime, name: &str) -> Liveness {`
 
-Poll a real container until it is no longer running, for at most
-[`TERMINATION_BUDGET`] with [`TERMINATION_PAUSE`] between observations, and
-fail with the elapsed time and the observation count when the budget is
-spent. Both callers keep their own terminal-state assertions.
+Poll a real container until it is observed terminated, checking
+[`TERMINATION_BUDGET`] after each observation that finds it running, with
+[`TERMINATION_PAUSE`] between observations, and fail with the elapsed time
+and the observation count when the budget is found spent. Both callers keep
+their own terminal-state assertions.
 
 ## `fn observations_of(runtime: &FakeRuntime) -> usize {`
 
 How many times the fake was asked to observe, read from its own trace: the
-oracle the two tests below hold the wait's report against, independent of
-the loop.
+oracle the tests below hold the wait's report against, independent of the
+loop.
+
+## `struct Scripted<'a, F>(&'a FakeRuntime, F);`
+
+The fake's container, answered through a script: every observation the wait
+makes is made on the fake, so its trace counts it, and the script is handed
+what the fake saw and answers for it — sleeping to play a slow daemon,
+answering *running* for a container that never exits, timestamping or
+signalling the observation. Standards §10 asks a concurrency test to force
+the disputed interleaving with a channel or a controlled fake rather than
+assume a start order; this is the controlled fake, and the tests below wire
+channels through it. The script is `Fn` and `Sync` because
+[`ContainerRuntime`] is `Send + Sync`, so what it records goes down a channel
+rather than into a cell. [`NeverTerminates`] above is the same shape with the
+*running* script fixed, kept for its own caller.
+
+## `fn a_running_container(name: &str) -> FakeRuntime {`
+
+The fake with one image and one container seeded running: the starting state
+of every test below.
 
 ## `fn a_container_that_exits_after_a_delay_is_waited_for_by_the_clock_and_not_by_a_count() {`
 
@@ -1706,28 +1769,93 @@ The finding's defect, as a deterministic witness. The fake answers an
 observation in microseconds, so the old loop's two hundred observations were
 spent in about a millisecond and a container that exits after 250 ms was
 "still running after 200 observations" every time; the wait now returns the
-exit the fake published after its delay. The thread that publishes it is the
-simulated container's life, joined inside the scope; the oracles are the
-state returned and the monotonic clock: the return cannot precede the exit
-it observed, so the wait is at least the delay, and the fake's trace shows
-the container observed running and then observed again.
+exit that is published after the delay.
+
+The protocol: the container is running; the script signals the first
+observation down a channel; the thread that plays the container's life waits
+for that signal, sleeps the delay, and only then publishes the exit into the
+fake. So the first observation finds the container running by construction,
+not by start order. The round-one form started the delay when the thread
+started, and a legal schedule that ran the publisher to completion before the
+wait's first observation let a correct wait return *exited* from one
+observation and fail `observations >= 2`
+(`PR319-MAIN-REGRESSION-START-ORDER`, `PR319-R1-REGRESSION-PUBLISHER-FIRST`,
+both reproduced by forcing that schedule).
+
+The oracles: the state returned; the first observation's own record, which
+must be *running*; the monotonic clock, read when the wait returns and before
+the publisher is joined, so the join's own time is not counted — the exit was
+published no earlier than the delay after the first observation, and the
+return cannot precede the exit it observed; and the fake's trace, which must
+hold a second observation because the first found the container running.
+Every wait in the setup is bounded: the publisher waits for the signal no
+longer than the wait's own budget and fails its premise if it never comes, so
+a wait that never observed cannot strand it, and the scope joins it before
+anything is asserted.
 
 ## `fn a_container_that_never_exits_fails_the_wait_at_its_budget_and_the_message_says_how_long() {`
 
-The bounded ending, at a 500 ms budget with a 20 ms pause over
-[`NeverTerminates`]. The wait gives up no earlier than its budget, the
-report's own `waited` lies between the budget and what the caller measured,
-and the report's count equals the fake's trace.
+The bounded ending, at a 500 ms budget with a 20 ms pause over a script that
+answers *running* to every observation and timestamps each. The wait gives up
+no earlier than its budget, the report's own `waited` lies between the budget
+and what the caller measured, the report's count equals both the fake's trace
+and the script's timestamps, and every message needle is present. Pacing is
+held against the timestamps themselves — two observations are never closer
+than the pause — rather than against a copy of the loop, and the count has
+the upper bound derived below.
 
-## `fn a_container_that_never_exits_fails_the_wait_at_its_budget_and_the_mess…` › `let most = usize::try_from(budget.as_millis() / pause.as_millis()).expect("a small count") + 1;`
+The count has no lower bound but one. A first observation, or a scheduling
+pause before the first check, can legitimately consume the whole budget, and
+the round-one form's `observations >= 2` rejected exactly that correct
+one-observation timeout (the second part of
+`PR319-MAIN-REGRESSION-START-ORDER`; reproduced with a first observation that
+takes 600 ms). The continuation that bound was after — a running container is
+observed again after a pause — is what the delayed-exit witness above holds,
+by construction.
 
-The pacing, bounded from both sides. Observation *k* is made no earlier than
-*(k − 1)* pauses after the first — `sleep` never wakes early — and the wait
-returns after the first observation at or past the budget, so at most
-`budget / pause + 1` observations fit; fewer than two means nothing was
-observed again after a pause. A loop that stopped sleeping would exceed the
-upper bound by orders of magnitude, and a loop that counted instead of
-timing would stop short of the budget.
+## `fn a_container_that_never_exits_fails_the_wait_at_its_budget_and_the_mess…` › `let most = budget.as_nanos().div_ceil(pause.as_nanos()) + 1;`
+
+The pacing bound. Observation *k* is made no earlier than *(k − 1)* pauses
+after the first — `sleep` never wakes early — and the wait returns after the
+first observation whose check finds the budget spent, so the check after
+observation *k − 1* found less than the budget, *(k − 2)* pauses fit inside
+the budget, and at most ⌈budget ⁄ pause⌉ + 1 observations fit. The ceiling,
+because a budget the pause does not divide leaves room for the observation
+that crosses it; the round-one form used the floor, right only because
+500 ms is a multiple of 20 ms. A loop that stopped sleeping would exceed this
+bound by orders of magnitude, and so would a loop that went on observing
+after the budget was spent; a loop that counted instead of timing stops short
+of the budget and fails the elapsed assertion above.
+
+## `fn a_terminal_first_observation_is_returned_at_once_without_a_pause_or_a_budget() {`
+
+Immediate termination: a container observed *exited* or *gone* on the first
+observation is returned from that observation, at a zero budget and with a
+60 s pause that is never paid, because the terminal check precedes both the
+budget and the pause. The count is exact by construction; the pause is held
+by the clock, and sixty seconds bounds a wedged runner, not a healthy return.
+
+## `fn a_first_observation_that_outlasts_the_budget_is_the_only_one_and_is_reported_in_full() {`
+
+A first observation that outlasts the budget: the script sleeps 100 ms before
+answering *running*, against a 20 ms budget. The observation is not
+interrupted; the check after it finds the budget spent; it is the wait's only
+observation; and the report's `waited` is the observation's whole duration,
+not the budget. This is the legitimate one-observation timeout the
+never-exits test must not reject, and the executable form of the first
+overshoot condition under [`TERMINATION_BUDGET`].
+
+## `fn a_terminal_observation_that_completes_past_the_budget_is_still_accepted() {`
+
+A terminal observation that completes past the budget: the script sleeps
+100 ms before answering *exited*, against a 20 ms budget, and the wait
+returns *exited* from that one observation. The budget is consulted only
+after a running observation, so a late exit is still the answer: the second
+overshoot condition under [`TERMINATION_BUDGET`]. The third — a pause begun
+inside the budget is slept in full — follows from the protocol and was
+measured in review (a 40 ms pause crossing a 10 ms budget, a 100 ms pause
+crossing 20 ms); it has no test of its own because the only assertion that
+would not also reject a scheduling pause is a conditional one.
 
 ## `fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {`
 
