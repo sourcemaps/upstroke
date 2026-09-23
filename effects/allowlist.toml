@@ -444,8 +444,12 @@ The startup census's test module (PR6 lane C), given an attribute of its own by 
 repair round F1 for the same reason as `src/runner/container/tests.rs`: it used \
 to inherit the funnel's allow through the module tree. It plants intents, views \
 and labelled containers for the census to classify and reclaim, which is what \
-needs `fs::write` and `fs::create_dir_all`; `census.rs` itself now carries \
-`#![deny(...)]` and reaches no denied primitive. `clippy::disallowed_types` and \
+needs `fs::write` and `fs::create_dir_all`; `census.rs` itself reaches no \
+denied primitive and, since #318 (2026-09-23), carries \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]` beside \
+`#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]` -- a \
+production fence this module's allowance cannot lower, where the `#![deny(...)]` \
+it carried before could be. `clippy::disallowed_types` and \
 `clippy::disallowed_macros` are re-denied here."""
 
 [[funnel]]
@@ -458,9 +462,12 @@ repair round F1 built the guard, so this file arrived with NO attribute of its \
 own and inherited the Container funnel's allow through the module tree — \
 `PR6-LANEF-004` reopening, caught by `runner::container::tests::every_child_\
 module_of_the_container_funnel_states_its_own_lint_level` and red on the merged \
-tree. `resolve.rs`, the PRODUCTION half, carries `#![deny(...)]` for all three \
-governed lints and reaches no denied primitive at all, so the build-error leg of \
-`mechanism` (1) holds for lane B's production code. \
+tree. `resolve.rs`, the PRODUCTION half, reaches no denied primitive at all \
+and, since #318 (2026-09-23), carries \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods, clippy::disallowed_types))]` \
+beside `#![forbid(clippy::disallowed_macros)]` -- it carried `#![deny(...)]` of \
+all three before -- so the build-error leg of `mechanism` (1) holds for lane \
+B's production code. \
 THE RESIDUAL, STATED RATHER THAN IMPLIED: this is the one child of \
 `src/runner/container/` that allows `clippy::disallowed_types` as well as \
 `clippy::disallowed_methods`, because its fixtures build real temporary Git \
@@ -482,8 +489,10 @@ allows = []
 packet = "effect_site_inventory.mechanism (2), by attachment: the `ContainerRunner`, declared beside src/runner/container.rs"
 review = """
 The `ContainerRunner` (PR6 lane A). Its PRODUCTION REGION performs no denied \
-effect at all and carries a file-level `#![deny(clippy::disallowed_methods, \
-disallowed_types, disallowed_macros)]`, so a container primitive called from a \
+effect at all and, since #318 (2026-09-23), carries a file-level \
+`#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]` beside \
+`#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]` -- a \
+`#![deny(...)]` of all three before -- so a container primitive called from a \
 lane's production code here is a build error — which is the guarantee \
 `PR6-LANEF-004` found had been inherited away. \
 THIS ROW ALLOWS NOTHING NOW, AND THAT IS A CHANGE. It carried \
@@ -512,8 +521,9 @@ covered by the outer allow that stood on its declaration in `exec.rs` while \
 stating nothing itself: that is `PR6-LANEF-004`, and `runner::container::tests::every_\
 child_module_of_the_container_funnel_states_its_own_lint_level` refuses a child \
 that does not state its own level. \
-THE ALLOWANCE IS NOT WIDER THAN WHAT MOVED. `exec.rs` carries a file-level \
-`#![deny(...)]` of all three governed lints and carried, while these bodies \
+THE ALLOWANCE IS NOT WIDER THAN WHAT MOVED. `exec.rs` fences all three \
+governed lints at file level (`#![deny(...)]` when these bodies moved out; \
+`forbid` in the production build since #318) and carried, while these bodies \
 were inline in it, an OUTER `#[allow(clippy::disallowed_methods)]` on the test \
 declaration, so the test region already had exactly this one lint allowed and \
 the other two denied. These same bodies made these same calls there; the move \
@@ -551,8 +561,8 @@ container name before the create for exactly that case (`reviews/FINDINGS.md` \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are RE-DENIED here \
 rather than inherited -- both measured at zero sites -- so a \
 `std::process::Command` or a `println!` in this file is still a build error. \
-The PRODUCTION region of `exec.rs` keeps its file-level deny and is untouched \
-by this row."""
+The PRODUCTION region of `exec.rs` keeps its own file-level fence -- `forbid` \
+in the production build since #318 -- and is untouched by this row."""
 
 [[funnel]]
 path = "src/runner/invocation.rs"

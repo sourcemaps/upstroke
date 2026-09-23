@@ -26,8 +26,10 @@ have.
 
 `PR6-LANEF-004`: this file states its level **of its own** rather than
 inheriting the Container funnel's inner `#![allow(...)]` through the module
-tree. `resolve.rs`, the production half, carries `#![deny(...)]` for all
-three and reaches no denied primitive at all.
+tree. `resolve.rs`, the production half, reaches no denied primitive at all
+and, since #318 (2026-09-23), forbids all three in the production build --
+`cfg_attr(not(test), forbid(..))` for the two lints this module allows, a
+plain `forbid` for `disallowed_macros`; it carried `#![deny(...)]` before.
 
 WHAT IT NEEDS THE ALLOW FOR, and the residual is stated rather than implied:
 it builds real temporary Git repositories (`std::process::Command` running
