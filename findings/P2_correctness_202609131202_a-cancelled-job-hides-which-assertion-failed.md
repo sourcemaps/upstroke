@@ -321,3 +321,48 @@ bounded from the moment each stage starts (the second review's `PR320-R1-MAIN-00
   sibling fork in its exec window is a third kind it does not name.
 - The constructed 0-of-10 and the natural 7-of-54 are different populations; neither is a rate
   for the suite after this change.
+
+## The test machinery's own assumptions, taken out one by one (2026-09-23, round three)
+
+The second round's independent reviews (`PR320-R2-MAIN-001`–`005`, `PR320-R2-REG-001`–`006`)
+witnessed five defects in the test machinery the second pull request added, none in production,
+and each witness was reproduced at `e5f944a6` before the repair. Each repair removes an assumption
+at the site that made it, with nothing new layered over it:
+
+- **An owned descriptor.** `descriptors_open_on` had made a `File` from every number `/dev/fd`
+  listed, a number another thread may close after the listing; it now `stat`s each entry — on
+  Linux the `/proc/self/fd` magic link, followed to the open file, on macOS the fdesc node's own
+  attributes, the underlying vnode's — a path operation with no descriptor borrowed or owned by a
+  number the fn did not open, the fn without `unsafe`.
+  `a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
+  constructs the window with the closing in the observation's hands.
+- **A completed close.** The parked fork's sweep had read `EINTR` as a close the kernel made; a
+  policy that answers `EINTR` makes none. The sweep now asks `fcntl` `F_GETFD` and takes `EBADF`
+  alone as closed, reporting anything else as a failed close, on which the constructor collects the
+  child and fails the setup
+  (`a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child`, a
+  Linux seccomp witness, saying nothing about an ordinary `EINTR`).
+- **A single observation.** The twin `a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation`
+  had observed the lease once, right after the identified holder's release; it now makes a second
+  parked copy beside the holder and observes within `RELEASE_BOUND`, releasing the sibling from
+  inside the first observation that reads its copy held. The production refusal after the expired
+  wait, the first-attempt behaviour, the unchanged log and the later real resume are as they were.
+- **A global EOF read as one child's.** The sentinel proofs had read the sentinel end once, 500 ms,
+  and attributed a copy still open to the fork under test; a sibling's fork carries a copy into
+  its own window exactly as it does the lease. `sentinel_closed_within` observes the read within
+  `LEASE_RELEASE_BOUND` with the same acknowledgement hook, the main test constructs the sibling
+  and releases it from inside the first read that finds a copy, the fork under test is proved by
+  its own `/proc` table on Linux, and a read past the bound says whose copy it was where the
+  platform can say.
+- **An unowned child.** `run_parked_fork_scenario` had spawned its scenario process before any
+  guard, joined its stderr without a bound and killed only the direct child at its deadline; a
+  stopped descendant holding the pipe hung it. The process is now owned from its spawn
+  (`ScenarioChild`: its own process group, non-blocking stderr drained in the poll loop, its exit
+  peeked before it is collected so the group can be killed while the id is still its own, a `Drop`
+  that kills the group and collects), with the group killed within a bound when a descendant
+  still holds the pipe (`a_scenario_that_never_ends_is_killed_at_the_bound_with_the_fork_it_left_stopped`,
+  `a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_and_kills_the_child`,
+  `a_panic_after_the_scenario_process_is_spawned_leaves_no_child_behind`).
+
+The inheritance, the refusal's holder list, the classification gap and the disposition are as the
+section above leaves them.

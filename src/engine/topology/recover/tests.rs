@@ -11721,11 +11721,17 @@ fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {
         .expect("the previous incarnation re-verified and published");
     let before = fixture.log_bytes();
 
+    // Two parked copies of the lease: the holder that outlives the bound, and
+    // a sibling -- a second fork in its own window -- whose copy outlasts the
+    // holder's release, which is the condition the observation after that
+    // release is bounded for.
     let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let sibling = ParkedFork::holding_the_lease_of(&fixture.public());
     let holder = parked.pid();
+    let sibling_pid = sibling.pid();
     assert!(
         rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
-        "the parked fork's copy holds the run's cleanup lease"
+        "the parked forks' copies hold the run's cleanup lease"
     );
     let started = std::time::Instant::now();
     let error = resume_as(
@@ -11770,12 +11776,39 @@ fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {
     let status = parked.release();
     assert!(
         status.success(),
-        "the released fork exec'd `true`: {status:?}"
+        "the released fork exited cleanly: {status:?}"
+    );
+    // The lease is still held, by the sibling's copy: observed within the
+    // bound with the sibling's release in the observation's hands, so that
+    // held, released, free is an order the observation acknowledged, and a
+    // single observation right after the holder's release -- which reads the
+    // sibling's copy -- is never made.
+    let mut sibling = Some(sibling);
+    let mut released = None;
+    let observed = wait_for_cleanup_hold_release_observing(
+        &fixture.public(),
+        RELEASE_BOUND,
+        &mut |observation| {
+            if let Some(sibling) = sibling.take() {
+                released = Some((observation, sibling.release()));
+            }
+        },
+    );
+    let (released_at, sibling_status) = released.expect(
+        "the observation after the holder's release read the sibling's copy held, and only then \
+         released the sibling",
+    );
+    assert_eq!(
+        released_at, 1,
+        "the sibling {sibling_pid} held its copy until the first observation had read it"
     );
     assert!(
-        !rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
-        "released with the fork's exit"
+        sibling_status.success(),
+        "the released sibling exited cleanly: {sibling_status:?}"
     );
+    if let Err(held) = observed {
+        panic!("released with the forks' exits: {held}");
+    }
     let (_, handle) = resume_as(
         &fixture,
         "resumer-after-the-holder",

@@ -4135,10 +4135,18 @@ expiry, and the time it waited is at least the bound — how many
 observations fit inside the bound is the scheduler's and is reported, not
 asserted; the refusal took at least the bound; the holder is alive and
 holding after the refusal returned, so the probe that refused saw a live
-hold; and nothing was appended to the log. Released, the fork exits cleanly, the lease
-reads free and the next resume proceeds. A trunk that answered an expired
-wait with anything but the real resume fails here (`m4`), as does one that
-waited less than the bound (`m2`).
+hold; and nothing was appended to the log. Released, the fork exits cleanly.
+The lease is still held then, by the second parked copy the test made
+beside the holder — a sibling fork's copy outlasting the holder's release,
+the condition an observation after a release is bounded for
+(`PR320-R2-MAIN-002`, `PR320-R2-REG-003`) — so the lease is observed through
+`wait_for_cleanup_hold_release_observing` within `RELEASE_BOUND`, the sibling
+released from inside the first observation that reads its copy held, and only
+once the lease reads free does the next resume proceed; a single observation
+right after the holder's release, which reads the sibling's copy, is never
+made. A trunk that answered an expired wait with anything but the real
+resume fails here (`m4`), as does one that waited less than the bound
+(`m2`).
 ## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
 
 **A call census's needle is not satisfied by a longer name ending in it.**

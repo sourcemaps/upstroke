@@ -994,8 +994,9 @@ fn descriptor_ceiling() -> libc::c_int {
 ///
 /// For the child of a `fork` of a threaded process, as its first act, and
 /// nowhere else: it calls only async-signal-safe syscalls -- `close`,
-/// `close_range` through `syscall`, `getpid`, `write`, `read`, `_exit` --
-/// on descriptors the child inherited, allocates nothing and takes no lock.
+/// `close_range` through `syscall`, `fcntl`, `getpid`, `write`, `read`,
+/// `_exit` -- on descriptors the child inherited, allocates nothing and
+/// takes no lock.
 #[cfg(unix)]
 unsafe fn park(kept: libc::c_int, socket: libc::c_int, ceiling: libc::c_int) -> ! {
     // SAFETY: the sweep's own contract, which is this fn's.
@@ -1106,11 +1107,19 @@ struct CloseFailed {
 /// those calls fails -- unavailable, `ENOSYS` before Linux 5.9; refused,
 /// `EPERM` under a seccomp policy; or anything else -- and on every other
 /// Unix, one `close` per number, each checked: `EBADF` is a number that was
-/// not open and `EINTR` a close the kernel made anyway, and any other
-/// failure stops the sweep and is reported with its number. The ceiling is
-/// the caller's ([`descriptor_ceiling`]), never `sysconf` alone, because a
-/// soft limit lowered after a descriptor was opened leaves that descriptor
-/// above `_SC_OPEN_MAX`.
+/// not open; `EINTR` is verified rather than trusted, because an errno says
+/// nothing about whether the close was made -- a policy that answers `EINTR`
+/// never makes it -- so the sweep asks `fcntl` with `F_GETFD`, and `EBADF`
+/// there is a number the kernel closed before it was interrupted, as Linux
+/// and macOS both do, while any other answer is a descriptor still open,
+/// reported as a failed close with `EINTR`
+/// (`rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child`);
+/// any other failure stops the sweep and is reported with its number. The
+/// forked child is single-threaded and opens nothing, so the number a close
+/// was asked about is the number the verification reads. The ceiling is the
+/// caller's ([`descriptor_ceiling`]), never `sysconf` alone, because a soft
+/// limit lowered after a descriptor was opened leaves that descriptor above
+/// `_SC_OPEN_MAX`.
 ///
 /// # Safety
 ///
@@ -1135,10 +1144,24 @@ unsafe fn close_above_stdio_except(
         }
         // SAFETY: a numeric close in the forked child; the fn's own contract.
         if unsafe { libc::close(descriptor) } == -1 {
-            let errno = errno();
-            if errno != libc::EBADF && errno != libc::EINTR {
-                return Err(CloseFailed { descriptor, errno });
+            let failed_with = errno();
+            if failed_with == libc::EBADF {
+                continue;
             }
+            if failed_with == libc::EINTR {
+                // SAFETY: `fcntl` with `F_GETFD` reads one flag of this
+                // process's own descriptor table and touches no memory;
+                // async-signal-safe, on the number the close was just asked
+                // about, which nothing in this child can have reused.
+                let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+                if flags == -1 && errno() == libc::EBADF {
+                    continue;
+                }
+            }
+            return Err(CloseFailed {
+                descriptor,
+                errno: failed_with,
+            });
         }
     }
     Ok(())

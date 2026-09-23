@@ -4673,7 +4673,8 @@ fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
     );
 }
 
-/// How long a lease observed after its holder's release may keep reading
+/// How long a lease observed after its holder's release -- or a sentinel end
+/// observed after this process's copy of it is closed -- may keep reading
 /// held before the observation fails: a sibling's fork-to-exec window is
 /// milliseconds, so this is ten thousand times the hold it tolerates, and it
 /// is paid only by a failing run.
@@ -4739,19 +4740,34 @@ fn lease_released_within(
 }
 
 /// Every descriptor of this process open on the file at `path`, by the
-/// identity of what it is open on -- device and inode, `fstat` through each
-/// number `/dev/fd` lists -- and never by number. A number closed by a drop
-/// is the next number any thread of this process opens, so a number that
-/// reads open is no evidence that the file it used to name is still held,
-/// and a number that reads closed is no evidence that nothing else of this
-/// process holds that file
-/// (`a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open`).
-/// A number closed between the listing and its `fstat` answers `EBADF` and
-/// is skipped; one reused for another file has that file's identity and is
-/// not counted. Sorted.
+/// identity of what it is open on -- device and inode -- and never by number.
+/// The listing is `/dev/fd` and the lookup is a `stat` of each entry: on
+/// Linux the entry is the `/proc/self/fd` magic link and `stat` follows it to
+/// the open file, deleted or not; on macOS the fdesc node answers with the
+/// underlying vnode's own attributes. A path operation, so the fn borrows and
+/// owns no descriptor by a number it did not open, and a number closed
+/// between the listing and its lookup answers `ENOENT` and is skipped
+/// (`a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
+/// constructs that window). A number closed by a drop is the next number any
+/// thread of this process opens, so a number that reads open is no evidence
+/// that the file it used to name is still held, and a number that reads
+/// closed is no evidence that nothing else of this process holds that file
+/// (`a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open`);
+/// one reused for another file has that file's identity and is not counted.
+/// Sorted.
 #[cfg(unix)]
 fn descriptors_open_on(path: &Path) -> Vec<libc::c_int> {
-    use std::os::fd::FromRawFd as _;
+    descriptors_open_on_observing(path, &mut |_| {})
+}
+
+/// [`descriptors_open_on`], with `on_listed` run for each number after it is
+/// listed and before it is looked up: the seam through which a test closes a
+/// listed number inside that window.
+#[cfg(unix)]
+fn descriptors_open_on_observing(
+    path: &Path,
+    on_listed: &mut dyn FnMut(libc::c_int),
+) -> Vec<libc::c_int> {
     use std::os::unix::fs::MetadataExt as _;
 
     let target = fs::metadata(path).expect("the file whose descriptors are counted exists");
@@ -4759,16 +4775,12 @@ fn descriptors_open_on(path: &Path) -> Vec<libc::c_int> {
     for entry in
         fs::read_dir("/dev/fd").expect("list this process's descriptor table through /dev/fd")
     {
-        let name = entry.expect("an entry of /dev/fd").file_name();
-        let Ok(number) = name.to_string_lossy().parse::<libc::c_int>() else {
+        let entry = entry.expect("an entry of /dev/fd");
+        let Ok(number) = entry.file_name().to_string_lossy().parse::<libc::c_int>() else {
             continue;
         };
-        // SAFETY: the `File` is never dropped, so this never closes a number
-        // it does not own; the one call made through it is `fstat`, which
-        // answers `EBADF` for a number closed in the meantime and reads
-        // nothing this thread has to own.
-        let borrowed = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(number) });
-        if let Ok(metadata) = borrowed.metadata() {
+        on_listed(number);
+        if let Ok(metadata) = fs::metadata(entry.path()) {
             if metadata.dev() == target.dev() && metadata.ino() == target.ino() {
                 open.push(number);
             }
@@ -4888,6 +4900,67 @@ fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lea
     );
     drop(hold);
     drop(unrelated);
+}
+
+/// Why the lookup is a `stat` of the entry and not a call through the number.
+/// A number listed by `/dev/fd` is another thread's to close at any moment
+/// after the listing, and a `File` made from a number that is no longer open
+/// is a broken contract whatever its `fstat` then answers. Constructed with
+/// the closing in the observation's hands: another thread owns a file, the
+/// scan reaches its number, and only then is that file closed and the close
+/// acknowledged; the lookup of that number finds nothing there, and the scan
+/// goes on to report this thread's own descriptor on the target and nothing
+/// else.
+#[cfg(unix)]
+#[test]
+fn a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan() {
+    use std::os::fd::AsRawFd as _;
+    use std::sync::mpsc;
+
+    let root = scratch("descriptor-scan-closed-in-window");
+    let target = root.join("target");
+    let held = File::create(&target).expect("the target, held open by this thread");
+    let (number_sender, number_receiver) = mpsc::channel();
+    let (close_sender, close_receiver) = mpsc::channel::<()>();
+    let (closed_sender, closed_receiver) = mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        let unrelated = File::open("/dev/null").expect("a file another thread owns");
+        number_sender
+            .send(unrelated.as_raw_fd())
+            .expect("the scanning thread waits for the number");
+        if close_receiver.recv().is_ok() {
+            drop(unrelated);
+            closed_sender
+                .send(())
+                .expect("the scanning thread waits for the acknowledgement");
+        }
+    });
+    let unrelated_number = number_receiver.recv().expect("the owner opened its file");
+    let mut closed_in_window = false;
+    let open = descriptors_open_on_observing(&target, &mut |listed| {
+        if listed == unrelated_number && !closed_in_window {
+            close_sender
+                .send(())
+                .expect("the owner waits to close its file");
+            closed_receiver
+                .recv()
+                .expect("the owner closed its file and said so");
+            closed_in_window = true;
+        }
+    });
+    drop(close_sender);
+    owner.join().expect("the owner thread ends");
+    assert!(
+        closed_in_window,
+        "the listing reached the owner's number {unrelated_number} while its file was open"
+    );
+    assert_eq!(
+        open,
+        vec![held.as_raw_fd()],
+        "the scan reports this thread's descriptor on the target and nothing for the number \
+         closed between its listing and its lookup"
+    );
+    drop(held);
 }
 
 /// Why the observation above is bounded. A copy of this process's descriptor
@@ -5012,27 +5085,206 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
         .expect("and the lease reads free once the fork has exited");
 }
 
+/// What [`sentinel_closed_within`] reports when a copy of the sentinel end
+/// was still open at the end of its bound: the bound, the time actually
+/// waited and how many reads found a copy open, which is what tells a copy
+/// that never closed from one observed at a single instant.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct SentinelHeldPastBound {
+    bound: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for SentinelHeldPastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a copy of the sentinel was still open after the full {:?} bound, every one of {} \
+             reads over {:?} finding one",
+            self.bound, self.observations, self.waited
+        )
+    }
+}
+
+/// Read `observer`, this process's end of a sentinel socket pair, every 50 ms
+/// until it answers EOF or `bound` runs out: how long that took and how many
+/// reads it was, or the report of a copy that outlasted the bound. EOF is the
+/// kernel's answer that no copy of the other end is open in any process, so
+/// it proves that the fork under test closed its inherited one only once
+/// every other copy is accounted for: a sibling's fork made while that end
+/// was open carries a copy into its own window exactly as it does the lease,
+/// which is why the read is observed within the bound the lease observations
+/// use and never at one instant. `on_held` runs after each read that found a
+/// copy open, with that read's number and before the bound is checked: how a
+/// test releases a holder only once this observation has seen its copy, so
+/// that held, released, EOF is an order the observation acknowledged rather
+/// than one a timer arranged. On Linux a report is paired by the caller with
+/// the fork under test's own table ([`sentinel_attribution`]), which says
+/// whose copy it was.
+#[cfg(unix)]
+fn sentinel_closed_within(
+    observer: &mut std::os::unix::net::UnixStream,
+    bound: Duration,
+    on_held: &mut dyn FnMut(u32),
+) -> Result<(Duration, u32), SentinelHeldPastBound> {
+    observer
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("bound each read of the sentinel");
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    let mut byte = [0_u8; 1];
+    loop {
+        observations += 1;
+        match observer.read(&mut byte) {
+            Ok(0) => return Ok((started.elapsed(), observations)),
+            Ok(_) => panic!("nothing writes to a sentinel, yet a read answered bytes"),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("read the sentinel: {error}"),
+        }
+        on_held(observations);
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(SentinelHeldPastBound {
+                bound,
+                waited,
+                observations,
+            });
+        }
+    }
+}
+
+/// The identity a fork's table is searched for when a sentinel read has not
+/// answered EOF within its bound: on Linux the `/proc` link of this process's
+/// descriptor, `socket:[<inode>]` for a socket end, read while the descriptor
+/// is still open.
+#[cfg(target_os = "linux")]
+fn sentinel_identity(number: libc::c_int) -> std::ffi::OsString {
+    std::fs::read_link(format!("/proc/self/fd/{number}"))
+        .expect("this process's own descriptor has a /proc entry")
+        .into_os_string()
+}
+
+/// On the Unixes without `/proc`, nothing here can name whose copy it is.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sentinel_identity(_number: libc::c_int) {}
+
+/// Whose copy a sentinel read that has not answered EOF is reading, as far as
+/// the platform can say: on Linux the fork under test's `/proc` table either
+/// holds a descriptor with the sentinel's identity or it does not, and the
+/// answer attributes the copy to that fork or explicitly to another process
+/// of this test binary -- a sibling's fork window -- rather than to whichever
+/// child the test happened to make.
+#[cfg(target_os = "linux")]
+fn sentinel_attribution(holder: libc::pid_t, sentinel: &std::ffi::OsStr) -> String {
+    let table = match std::fs::read_dir(format!("/proc/{holder}/fd")) {
+        Ok(entries) => entries,
+        Err(error) => return format!("fork {holder}'s table could not be read: {error}"),
+    };
+    let mut holds = false;
+    for entry in table {
+        let Ok(entry) = entry else {
+            return format!("fork {holder}'s table could not be listed to its end");
+        };
+        if std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == sentinel) {
+            holds = true;
+        }
+    }
+    if holds {
+        format!("fork {holder}'s table holds a copy of the sentinel {sentinel:?}")
+    } else {
+        format!(
+            "fork {holder}'s table holds no copy of the sentinel {sentinel:?}: the copy still open \
+             belongs to another process of this test binary, a fork made while the sentinel was \
+             open"
+        )
+    }
+}
+
+/// On the Unixes without `/proc`, nothing here can name whose copy it is.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sentinel_attribution(holder: libc::pid_t, _sentinel: &()) -> String {
+    format!("whether fork {holder} holds a copy cannot be read on this platform")
+}
+
+/// On Linux, the fork under test's own descriptor table, read from `/proc`:
+/// exactly stdio, its lease copy and its socket end, the lease entry naming
+/// `cleanup.lock`. The child-specific proof of what the fork holds, which no
+/// read of a sentinel from this process can be: EOF is a fact about every
+/// copy of an end at once.
+#[cfg(target_os = "linux")]
+fn assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+    holder: libc::pid_t,
+    lease_number: libc::c_int,
+    socket_number: libc::c_int,
+    under: &str,
+) {
+    let mut entries: Vec<(libc::c_int, PathBuf)> = std::fs::read_dir(format!("/proc/{holder}/fd"))
+        .expect("the child's descriptor table")
+        .map(|entry| {
+            let entry = entry.expect("an entry of the table");
+            let number = entry
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .expect("a descriptor number");
+            (number, std::fs::read_link(entry.path()).unwrap_or_default())
+        })
+        .collect();
+    entries.sort();
+    let numbers: Vec<libc::c_int> = entries.iter().map(|(number, _)| *number).collect();
+    let mut expected = vec![0, 1, 2, lease_number, socket_number];
+    expected.sort_unstable();
+    assert_eq!(
+        numbers, expected,
+        "{under}: the child's table is stdio, the lease copy and the socket: {entries:?}"
+    );
+    let lease_target = &entries
+        .iter()
+        .find(|(number, _)| *number == lease_number)
+        .expect("the lease entry")
+        .1;
+    assert!(
+        lease_target.ends_with("cleanup.lock"),
+        "{under}: the kept descriptor is the run's lease: {lease_target:?}"
+    );
+}
+
 /// What the parked fork holds, and what it does not: the lease copy and its
 /// socket, and not a sentinel this process had open at the fork, nor another
 /// run's lease. The sentinel is one end of a socket pair. With this process's
 /// copy of that end closed, a read on the other end answers EOF only when
-/// nobody holds a copy, so EOF is the proof the fork closed its inherited
-/// one. The control is a parked fork told to keep the sentinel instead: the
-/// same read cannot answer EOF while that child lives, and does once it is
-/// released -- a control that holds only what it was told to, where a raw
-/// `fork` that closes nothing would hold every descriptor of every concurrent
-/// test for as long as it slept. Another run's lease is open across that
-/// control's fork and this process's copy then dropped: the lease reads free
-/// -- within the bound the release test observes under, since a sibling's
-/// copy can be in its window here too -- while the control lives, because
-/// the control closed its copy. On Linux
-/// the child's descriptor table is read from `/proc` as well: exactly stdio,
-/// the socket and the lease, and the lease entry names `cleanup.lock`.
+/// nobody holds a copy, so EOF is the proof that no copy survives -- in the
+/// fork under test and in every other process alike, which is the point:
+/// under a whole parallel suite a sibling's fork made while the end was open
+/// carries a copy into its own window, exactly as it does the lease, and a
+/// single read made right after the drop can land inside that window and
+/// read the sibling's copy. So the read is observed within the bound the
+/// lease observations use, and the test constructs the sibling itself: a
+/// second parked fork told to keep only the sentinel, released from inside
+/// the first read that found a copy open, so that held, released, EOF is an
+/// order the observation acknowledged (the shape of
+/// `a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor`),
+/// while the fork under test is proved on its own account: on Linux its
+/// descriptor table, read from `/proc`, is exactly stdio, the socket and the
+/// lease, the lease entry naming `cleanup.lock`, and a read that has not
+/// answered EOF at the end of the bound says whether that fork holds a copy.
+/// The control is a parked fork told to keep a second sentinel: the read
+/// cannot answer EOF while that child lives -- on Linux its table shows the
+/// copy -- and answers it within the bound once the child is released; and
+/// another run's lease, open across that control's fork and this process's
+/// copy then dropped, reads free within the bound while the control lives,
+/// because the control closed its copy -- where a raw `fork` that closed
+/// nothing would hold every descriptor of every concurrent test for as long
+/// as it slept.
 #[cfg(unix)]
 #[test]
 fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     use crate::workspace_manager::fixture::ParkedFork;
-    use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
 
     let root = scratch("childlease-sentinel");
@@ -5040,10 +5292,10 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) =
         std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
-    observer
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .expect("bound the sentinel read");
     let sentinel_number = sentinel.as_raw_fd();
+    let identity = sentinel_identity(sentinel_number);
+    let sibling = ParkedFork::holding(sentinel_number);
+    let sibling_pid = sibling.pid();
 
     let parked = ParkedFork::holding_the_lease_of(&public);
     let holder = parked.pid();
@@ -5057,46 +5309,42 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
         "the sentinel {sentinel_number} is neither kept descriptor"
     );
     #[cfg(target_os = "linux")]
-    {
-        let mut entries: Vec<(libc::c_int, PathBuf)> =
-            std::fs::read_dir(format!("/proc/{holder}/fd"))
-                .expect("the child's descriptor table")
-                .map(|entry| {
-                    let entry = entry.expect("an entry of the table");
-                    let number = entry
-                        .file_name()
-                        .to_string_lossy()
-                        .parse()
-                        .expect("a descriptor number");
-                    (number, std::fs::read_link(entry.path()).unwrap_or_default())
-                })
-                .collect();
-        entries.sort();
-        let numbers: Vec<libc::c_int> = entries.iter().map(|(number, _)| *number).collect();
-        let mut expected = vec![0, 1, 2, lease_number, socket_number];
-        expected.sort_unstable();
-        assert_eq!(
-            numbers, expected,
-            "the child's table is stdio, the lease copy and the socket: {entries:?}"
-        );
-        let lease_target = &entries
-            .iter()
-            .find(|(number, _)| *number == lease_number)
-            .expect("the lease entry")
-            .1;
-        assert!(
-            lease_target.ends_with("cleanup.lock"),
-            "the kept descriptor is the run's lease: {lease_target:?}"
-        );
-    }
-    drop(sentinel);
-    let mut byte = [0_u8; 1];
-    let read = observer.read(&mut byte);
-    assert!(
-        matches!(read, Ok(0)),
-        "with this process's copy of the sentinel closed the read answers EOF, so no copy of it \
-         survives in fork {holder}: {read:?}"
+    assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+        holder,
+        lease_number,
+        socket_number,
+        "the fork under test",
     );
+    drop(sentinel);
+    let mut sibling = Some(sibling);
+    let mut released = None;
+    let observed = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |read| {
+        if let Some(sibling) = sibling.take() {
+            released = Some((read, sibling.release()));
+        }
+    });
+    let (released_at, sibling_status) = released
+        .expect("the first read found the sibling's copy open, and only then released the sibling");
+    assert_eq!(
+        released_at, 1,
+        "the sibling {sibling_pid} kept its copy until the first read had seen it"
+    );
+    assert!(
+        sibling_status.success(),
+        "the released sibling exited cleanly: {sibling_status:?}"
+    );
+    match observed {
+        Ok((waited, reads)) => assert!(
+            reads > released_at,
+            "the read that answered EOF came after the one that released the sibling: {reads} \
+             reads over {waited:?}"
+        ),
+        Err(held) => panic!(
+            "with this process's copy of the sentinel closed and the sibling released, the read \
+             answers EOF, so no copy of it survives in fork {holder}: {held}; {}",
+            sentinel_attribution(holder, &identity)
+        ),
+    }
     let status = parked.release();
     assert!(
         status.success(),
@@ -5105,9 +5353,7 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
 
     let (sentinel, mut observer) =
         std::os::unix::net::UnixStream::pair().expect("a second sentinel socket pair");
-    observer
-        .set_read_timeout(Some(Duration::from_millis(150)))
-        .expect("bound the control read");
+    let identity = sentinel_identity(sentinel.as_raw_fd());
     let unrelated_public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000007");
     fs::create_dir_all(&unrelated_public).expect("another run's public directory");
     let mut unrelated_command = std::process::Command::new("git");
@@ -5130,27 +5376,35 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
         ),
     }
     drop(sentinel);
-    let read = observer.read(&mut byte);
+    let held = sentinel_closed_within(&mut observer, Duration::from_millis(150), &mut |_| {})
+        .expect_err(
+            "a parked fork that kept the sentinel holds a copy of it, so the read cannot answer \
+             EOF while that child lives",
+        );
     assert!(
-        matches!(
-            read,
-            Err(ref error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.kind() == std::io::ErrorKind::TimedOut
-        ),
-        "a parked fork that kept the sentinel holds a copy of it, so the read cannot answer EOF \
-         while that child {keeper_pid} lives: {read:?}"
+        held.waited >= held.bound && keeper.is_alive(),
+        "the control {keeper_pid} lived through the whole bound: {held}"
     );
+    #[cfg(target_os = "linux")]
+    {
+        let attribution = sentinel_attribution(keeper_pid, &identity);
+        assert!(
+            attribution.contains("holds a copy of the sentinel"),
+            "and its table says so, which is the reading a report of the fork under test would \
+             give: {attribution}"
+        );
+    }
     let status = keeper.release();
     assert!(
         status.success(),
         "the released control exited cleanly: {status:?}"
     );
-    let read = observer.read(&mut byte);
-    assert!(
-        matches!(read, Ok(0)),
-        "and answers EOF once that fork has exited: {read:?}"
-    );
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "and answers EOF once that fork has exited: {held}; {}",
+            sentinel_attribution(keeper_pid, &identity)
+        );
+    }
 }
 
 /// Whether `pid` is no child of this process any more: `waitpid` with
@@ -5488,38 +5742,44 @@ fn assert_close_range_answers(errno: libc::c_int) {
 }
 
 /// The sentinel proof under a named condition: with this process's copy of
-/// a socket end closed, the read on the other end answers EOF, so the parked
-/// fork holds no copy of it; the fork holds the lease, and is released. Linux
-/// only, as its two callers are: the conditions are seccomp policies, and a
-/// Unix-wide helper with Linux-only callers is dead code on macOS, where
-/// `-D warnings` makes that a failed build.
+/// a socket end closed, the read on the other end answers EOF within the
+/// bound, so the parked fork holds no copy of it, and its `/proc` table is
+/// exactly stdio, the lease and its socket; the fork holds the lease, and is
+/// released. Linux only, as its two callers are: the conditions are seccomp
+/// policies, and a Unix-wide helper with Linux-only callers is dead code on
+/// macOS, where `-D warnings` makes that a failed build.
 #[cfg(target_os = "linux")]
 fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
     use crate::workspace_manager::fixture::ParkedFork;
-    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
 
     let root = scratch(tag);
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) =
         std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
-    observer
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .expect("bound the sentinel read");
+    let identity = sentinel_identity(sentinel.as_raw_fd());
     let parked = ParkedFork::holding_the_lease_of(&public);
     let holder = parked.pid();
+    let [lease_number, socket_number] = parked.kept();
     assert!(
         parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
         "{under}: the parked fork {holder} holds the lease"
     );
-    drop(sentinel);
-    let mut byte = [0_u8; 1];
-    let read = observer.read(&mut byte);
-    assert!(
-        matches!(read, Ok(0)),
-        "{under}: with this process's copy of the sentinel closed the read answers EOF, so no copy \
-         of it survives in fork {holder}: {read:?}"
+    assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+        holder,
+        lease_number,
+        socket_number,
+        under,
     );
+    drop(sentinel);
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "{under}: with this process's copy of the sentinel closed the read answers EOF, so no \
+             copy of it survives in fork {holder}: {held}; {}",
+            sentinel_attribution(holder, &identity)
+        );
+    }
     let status = parked.release();
     assert!(
         status.success(),
@@ -5552,53 +5812,549 @@ fn a_parked_fork_isolates_its_child_when_close_range_is_refused() {
     assert_a_parked_fork_isolates_a_sentinel("childlease-close-range-eperm", "close_range refused");
 }
 
+/// How long [`run_parked_fork_scenario`] gives the scenario process before
+/// it kills it: a bound on a scenario that wedges, never a measure of one
+/// that runs, which ends in well under a second.
+#[cfg(unix)]
+const SCENARIO_BOUND: Duration = Duration::from_secs(120);
+
+/// How long, once the scenario process has ended, its stderr may keep
+/// reading open before the processes of its group are killed for holding it:
+/// a scenario that ends leaves no process of its own behind, so its stderr
+/// answers EOF at once, and a copy still open after this is a descendant the
+/// scenario left stopped or parked, which is what the kill is for.
+#[cfg(unix)]
+const SCENARIO_GROUP_BOUND: Duration = Duration::from_secs(2);
+
 /// Run `parked_fork_isolation_kill_child` in a process of its own with the
-/// scenario named, bounded: its exit status and its stderr, or `None` and
-/// the stderr so far once it has been killed at the end of the bound. Its
-/// stdin is `/dev/null`; it owns nothing of this process but the pipe.
+/// scenario named, bounded: its exit status and its stderr, or `None` and the
+/// stderr so far once it has been killed at the end of [`SCENARIO_BOUND`].
+/// Its stdin is `/dev/null`; it owns nothing of this process but the pipe.
+/// The process is owned from its spawn ([`ScenarioChild`]): it leads a
+/// process group of its own, so the processes it forks are the group's and a
+/// kill reaches them; its stderr is read as it arrives and never joined; its
+/// exit is peeked before it is collected, so that the group can be killed
+/// while the group id is still its own; and a descendant that holds its
+/// stderr after it has ended is killed within [`SCENARIO_GROUP_BOUND`]. What
+/// the wrapper had to do is appended to the text it returns.
 #[cfg(unix)]
 fn run_parked_fork_scenario(scenario: &str) -> (Option<std::process::ExitStatus>, String) {
-    use std::io::Read as _;
+    run_parked_fork_scenario_within(scenario, SCENARIO_BOUND, |_| {})
+}
 
-    let exe = std::env::current_exe().expect("test binary");
-    let mut child = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "rundir::tests::parked_fork_isolation_kill_child",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", scenario)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn the scenario child");
-    let mut stderr = child.stderr.take().expect("the child's stderr is piped");
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        match stderr.read_to_string(&mut text) {
-            Ok(_) => text,
-            Err(error) => format!("{text}\n[the child's stderr could not be read: {error}]"),
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("poll the scenario child") {
-            break Some(status);
+/// [`run_parked_fork_scenario`] with `bound` in place of [`SCENARIO_BOUND`]
+/// and `once_owned` run with the scenario process's pid the moment it is
+/// owned: the seams through which the wrapper's own tests shorten its bound
+/// and unwind through it.
+#[cfg(unix)]
+fn run_parked_fork_scenario_within(
+    scenario: &str,
+    bound: Duration,
+    once_owned: impl FnOnce(libc::pid_t),
+) -> (Option<std::process::ExitStatus>, String) {
+    let mut owned = ScenarioChild::spawn(scenario);
+    once_owned(owned.pid());
+    let deadline = Instant::now() + bound;
+    let ended = loop {
+        owned.drain();
+        if owned.has_ended() {
+            break true;
         }
         if Instant::now() >= deadline {
-            child
-                .kill()
-                .expect("kill the scenario child the bound ended");
-            child
-                .wait()
-                .expect("reap the scenario child the bound ended");
-            break None;
+            break false;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    (status, reader.join().expect("the stderr reader ends"))
+    let status = if ended {
+        // The process has ended and is not yet collected, so its group id is
+        // still its own. Its stderr answers EOF once every copy of the pipe's
+        // write end is closed: at once, unless a process it forked holds one.
+        if !owned.drain_until_eof(SCENARIO_GROUP_BOUND) {
+            owned.note(&format!(
+                "a process of the scenario's group still held its stderr {SCENARIO_GROUP_BOUND:?} \
+                 after the scenario ended"
+            ));
+            owned.kill_group();
+            owned.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
+        }
+        Some(owned.collect())
+    } else {
+        owned.note(&format!("the scenario did not end within {bound:?}"));
+        owned.kill_group();
+        owned.collect();
+        owned.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
+        None
+    };
+    (status, owned.text())
+}
+
+/// The scenario process and every process it forks, owned from the spawn.
+/// The spawn puts it in a process group of its own, so a kill of the group
+/// reaches what it forked -- a parked fork it left stopped, which cannot read
+/// the EOF that would otherwise end it; its stderr is a pipe read without
+/// blocking, so what it wrote so far is always in hand and nothing is ever
+/// joined; and dropping this value with the process uncollected kills the
+/// group and collects the process, never panicking, so an unwinding caller
+/// leaves no child of this process behind and no descendant of the scenario
+/// stopped or parked. The kill always precedes the collection: a collected
+/// pid is a number the kernel may hand out again, and a group id with it.
+#[cfg(unix)]
+struct ScenarioChild {
+    child: std::process::Child,
+    stderr: std::process::ChildStderr,
+    text: Vec<u8>,
+    eof: bool,
+    notes: String,
+    collected: Option<std::process::ExitStatus>,
+}
+
+#[cfg(unix)]
+impl ScenarioChild {
+    /// Spawn the test binary on `parked_fork_isolation_kill_child` with
+    /// `scenario` named, in a group of its own, its stderr piped and made
+    /// non-blocking once the process is owned.
+    fn spawn(scenario: &str) -> Self {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let exe = std::env::current_exe().expect("test binary");
+        let mut child = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "rundir::tests::parked_fork_isolation_kill_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", scenario)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("spawn the scenario child");
+        let stderr = child.stderr.take().expect("the child's stderr is piped");
+        let owned = Self {
+            child,
+            stderr,
+            text: Vec::new(),
+            eof: false,
+            notes: String::new(),
+            collected: None,
+        };
+        // SAFETY: `fcntl` with `F_GETFL` reads the flags of this process's
+        // own descriptor, the pipe's read end, and touches no memory. Made
+        // once the process is owned, so a failure here unwinds through the
+        // owner's drop.
+        let flags = unsafe { libc::fcntl(owned.stderr.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(
+            flags,
+            -1,
+            "read the pipe's flags: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `fcntl` with `F_SETFL` sets those flags and touches no
+        // memory; the descriptor is this value's own.
+        let set = unsafe {
+            libc::fcntl(
+                owned.stderr.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            )
+        };
+        assert_ne!(
+            set,
+            -1,
+            "make the pipe non-blocking: {}",
+            std::io::Error::last_os_error()
+        );
+        owned
+    }
+
+    /// The scenario process's pid, which is also its group's id.
+    fn pid(&self) -> libc::pid_t {
+        libc::pid_t::try_from(self.child.id()).expect("a pid fits its type")
+    }
+
+    /// Read what the pipe holds now, without blocking: `true` once it has
+    /// answered EOF.
+    fn drain(&mut self) -> bool {
+        let mut buffer = [0_u8; 4096];
+        while !self.eof {
+            match self.stderr.read(&mut buffer) {
+                Ok(0) => self.eof = true,
+                Ok(count) => self
+                    .text
+                    .extend_from_slice(buffer.get(..count).unwrap_or_default()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    self.note(&format!("the scenario's stderr could not be read: {error}"));
+                    self.eof = true;
+                }
+            }
+        }
+        self.eof
+    }
+
+    /// Drain until the pipe answers EOF or `bound` runs out: whether it did.
+    fn drain_until_eof(&mut self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        loop {
+            if self.drain() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// [`Self::drain_until_eof`], noting a pipe still open at the end of the
+    /// bound: every process of the group is dead by then, so a copy still
+    /// open is held outside it, which nothing here owns.
+    fn drain_until_eof_or_note(&mut self, bound: Duration) {
+        if !self.drain_until_eof(bound) {
+            self.note(&format!(
+                "the scenario's stderr did not answer EOF within {bound:?} of the group's kill: a \
+                 process outside the group holds a copy"
+            ));
+        }
+    }
+
+    /// Whether the scenario process has ended, asked without collecting it
+    /// (`waitid` with `WNOWAIT`), so that the answer leaves its pid, and its
+    /// group's id, reserved for the kill that may follow.
+    fn has_ended(&self) -> bool {
+        // SAFETY: `zeroed` is a valid `siginfo_t`, and a zero `si_pid` after
+        // the call is `WNOHANG`'s "nothing yet". `waitid` writes one
+        // `siginfo_t` through the pointer, which lives for the call, and
+        // takes the id and the flags by value; the pid is this value's own
+        // child, uncollected.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let asked = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                libc::id_t::try_from(self.child.id()).expect("a pid fits an id"),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(
+            asked,
+            0,
+            "waitid(P_PID, {}, WEXITED | WNOHANG | WNOWAIT): {}",
+            self.child.id(),
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `si_pid` reads the union field a child report fills, and
+        // the zeroing above makes it readable when nothing was reported.
+        unsafe { info.si_pid() != 0 }
+    }
+
+    /// `SIGKILL` to the group, before any collection; what it did is noted.
+    fn kill_group(&mut self) {
+        match crate::workspace_manager::fixture::kill_process_group(&mut self.child) {
+            Ok(()) => self.note("the scenario's process group was killed"),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                self.note("the scenario's process group was already empty");
+            }
+            Err(error) => {
+                self.note(&format!(
+                    "the scenario's process group could not be killed: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Collect the scenario process: its status. After the kill, or after
+    /// [`Self::has_ended`] answered, so it does not block.
+    fn collect(&mut self) -> std::process::ExitStatus {
+        if let Some(status) = self.collected {
+            return status;
+        }
+        let status = self.child.wait().expect("collect the scenario child");
+        self.collected = Some(status);
+        status
+    }
+
+    fn note(&mut self, note: &str) {
+        self.notes.push_str("\n[");
+        self.notes.push_str(note);
+        self.notes.push(']');
+    }
+
+    /// The stderr read so far and the notes, as text.
+    fn text(&self) -> String {
+        let mut text = String::from_utf8_lossy(&self.text).into_owned();
+        text.push_str(&self.notes);
+        text
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScenarioChild {
+    fn drop(&mut self) {
+        // Best effort by nature, as `ParkedFork`'s drop is: a caller that is
+        // unwinding has nothing to answer to, and a panic here would abort
+        // it. A process already collected has had its group killed or shown
+        // empty; one not yet collected is killed with its group, before the
+        // collection, and collected.
+        if self.collected.is_none() {
+            let _ = crate::workspace_manager::fixture::kill_process_group(&mut self.child);
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// Every pid a scenario wrote to its stderr as `descendant=<pid>`, at least
+/// `expected` of them.
+#[cfg(unix)]
+fn descendants_named_in(text: &str, expected: usize) -> Vec<libc::pid_t> {
+    let named: Vec<libc::pid_t> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("descendant="))
+        .filter_map(|pid| pid.trim().parse().ok())
+        .collect();
+    assert!(
+        named.len() >= expected,
+        "the scenario named {expected} descendants before it was killed or exited: {text}"
+    );
+    named
+}
+
+/// Whether `pid` has ended, read from `/proc`: no entry, or one whose state
+/// is `Z` -- dead, and waiting for the process it was reparented to, which is
+/// not this one, to collect it.
+#[cfg(target_os = "linux")]
+fn has_ended_by_proc(pid: libc::pid_t) -> bool {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => panic!("read /proc/{pid}/stat: {error}"),
+        Ok(stat) => {
+            stat.rsplit(')')
+                .next()
+                .and_then(|after_comm| after_comm.split_whitespace().next())
+                == Some("Z")
+        }
+    }
+}
+
+/// Wait, bounded, for `pid` to have ended by [`has_ended_by_proc`]. A
+/// process still there at the end of the bound is the wrapper's failure, and
+/// it is killed before the test fails on it: it is not this process's child
+/// to collect, but it is not to be left running on the machine either.
+#[cfg(target_os = "linux")]
+fn assert_ended_within(pid: libc::pid_t, bound: Duration, what: &str) {
+    let started = Instant::now();
+    while !has_ended_by_proc(pid) {
+        if started.elapsed() >= bound {
+            // SAFETY: `kill` takes a pid and a signal by value; the pid was
+            // read from `/proc` as a live process a moment ago, the process
+            // the scenario named.
+            let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!(
+                "{what} {pid} was still running {bound:?} after the group was killed; killed by \
+                 the test now (kill answered {killed})"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A scenario that never ends is killed at the end of the wrapper's bound
+/// with every process of its group: the bound shortened to a second, the
+/// scenario parks a fork and stops it, spawns a child that holds its stderr,
+/// and waits to be killed. The wrapper returns `None` and the stderr the
+/// scenario wrote before the kill, within its own bounds and without joining
+/// anything; both processes the scenario left behind are dead -- the stopped
+/// fork, which could read neither a release nor an EOF, and the child that
+/// ran on holding the pipe; the scenario process is collected. The wrapper
+/// runs on a thread of its own with the test's failure bound around it, so a
+/// wrapper that blocked would fail this test rather than hang it, the test
+/// killing the group itself in that case so that the thread can end.
+#[cfg(unix)]
+#[test]
+fn a_scenario_that_never_ends_is_killed_at_the_bound_with_the_fork_it_left_stopped() {
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "park-a-stopped-fork-and-never-end",
+            Duration::from_secs(1),
+            |pid| pid_sender.send(pid).expect("the test waits for the pid"),
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the wrapper owned the scenario process and said which");
+    if answered.is_err() {
+        // SAFETY: `kill` takes a pid and a signal by value; the negative pid
+        // is the scenario's own group, which the wrapper made. Killed by the
+        // test only because the wrapper blocked past the test's bound, which
+        // is the defect this test holds, so that the wrapper can finish and
+        // the test fail rather than hang.
+        assert_eq!(
+            unsafe { libc::kill(-scenario_pid, libc::SIGKILL) },
+            0,
+            "kill the scenario's group {scenario_pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    running.join().expect("the wrapper's thread ends");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    assert!(
+        status.is_none(),
+        "a scenario killed at the bound has no status: {status:?}\n{text}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}"
+    );
+    assert!(
+        text.contains("the scenario did not end within 1s")
+            && text.contains("the scenario's process group was killed"),
+        "the wrapper says what it did: {text}"
+    );
+    let descendants = descendants_named_in(&text, 2);
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    #[cfg(target_os = "linux")]
+    for descendant in &descendants {
+        assert_ended_within(
+            *descendant,
+            Duration::from_secs(5),
+            "the process the scenario left behind",
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = descendants;
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving a child that holds its stderr and runs on: the wrapper
+/// returns that status and the stderr written before it, within its bounds,
+/// and the child is killed for holding the pipe after the scenario ended, so
+/// the wrapper never waits on a process that will not let go.
+#[cfg(unix)]
+#[test]
+fn a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_and_kills_the_child()
+{
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "exit-23-leaving-a-child-holding-stderr",
+            SCENARIO_BOUND,
+            |pid| {
+                pid_sender.send(pid).expect("the test waits for the pid");
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the wrapper owned the scenario process and said which");
+    if answered.is_err() {
+        // SAFETY: as in the test above: the scenario's own group, killed by
+        // the test only because the wrapper blocked past the test's bound.
+        assert_eq!(
+            unsafe { libc::kill(-scenario_pid, libc::SIGKILL) },
+            0,
+            "kill the scenario's group {scenario_pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    running.join().expect("the wrapper's thread ends");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(23),
+        "the scenario's own exit status is returned: {status:?}\n{text}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}"
+    );
+    assert!(
+        text.contains("still held its stderr 2s after the scenario ended")
+            && text.contains("the scenario's process group was killed"),
+        "the wrapper says what it did: {text}"
+    );
+    let descendants = descendants_named_in(&text, 1);
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    #[cfg(target_os = "linux")]
+    for descendant in &descendants {
+        assert_ended_within(
+            *descendant,
+            Duration::from_secs(5),
+            "the child holding stderr",
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = descendants;
+}
+
+/// A caller that unwinds after the scenario process is spawned leaves no
+/// child behind: the process is owned from its spawn, and the unwinding
+/// drops the owner, which kills the scenario's group and collects the
+/// process.
+#[cfg(unix)]
+#[test]
+fn a_panic_after_the_scenario_process_is_spawned_leaves_no_child_behind() {
+    let pid = std::cell::Cell::new(0);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_parked_fork_scenario_within(
+            "park-a-stopped-fork-and-never-end",
+            SCENARIO_BOUND,
+            |owned| {
+                pid.set(owned);
+                panic!("a setup step after the spawn fails");
+            },
+        )
+    }));
+    assert!(unwound.is_err(), "the closure unwound");
+    let pid = pid.get();
+    assert_ne!(
+        pid, 0,
+        "the scenario process was spawned before the unwinding"
+    );
+    if !is_reaped(pid) {
+        // Not this process's to leave behind: killed with its group and
+        // collected before the test fails.
+        // SAFETY: `kill` takes a pid and a signal by value; the negative pid
+        // is the scenario's own group. `waitpid` writes one int through
+        // `status`, which lives for the call.
+        assert_eq!(
+            unsafe { libc::kill(-pid, libc::SIGKILL) },
+            0,
+            "kill the scenario's group {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, 0) },
+            pid,
+            "collect the scenario process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        panic!(
+            "the unwinding dropped the scenario's owner, which kills and collects the scenario \
+             process: {pid} was still this process's child"
+        );
+    }
 }
 
 /// A descriptor above the soft limit -- opened, then the limit lowered
@@ -5632,11 +6388,12 @@ fn a_parked_fork_whose_sweep_cannot_close_a_descriptor_fails_before_announcing_t
     );
 }
 
-/// The child half of the two isolation witnesses that change state the whole
+/// The child half of the isolation witnesses that change state the whole
 /// process shares -- its soft descriptor limit, and a policy on `close`
-/// itself -- which no test may do in the suite's shared process. Re-invoked
-/// as a subprocess with the scenario named in
-/// `UPSTROKE_TEST_PARKED_FORK_SCENARIO`; exits 0 when the scenario's
+/// itself -- which no test may do in the suite's shared process, and of the
+/// scenario wrapper's own witnesses, which leave a process behind or never
+/// end. Re-invoked as a subprocess with the scenario named in
+/// `UPSTROKE_TEST_PARKED_FORK_SCENARIO`; a witness exits 0 when its
 /// assertions hold, and its stderr carries the reason when they do not.
 #[cfg(unix)]
 #[test]
@@ -5649,9 +6406,89 @@ fn parked_fork_isolation_kill_child() {
             a_descriptor_above_a_lowered_soft_limit_is_closed();
         }
         #[cfg(target_os = "linux")]
-        "a-close-that-fails" => a_close_that_fails_fails_the_setup_after_the_child_is_reaped(),
+        "a-close-that-fails" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EIO);
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-denied-with-eintr" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EINTR);
+        }
+        "park-a-stopped-fork-and-never-end" => park_a_stopped_fork_and_never_end(),
+        "exit-23-leaving-a-child-holding-stderr" => exit_leaving_a_child_holding_stderr(),
+        "hold-stderr-and-never-end" => loop {
+            std::thread::sleep(Duration::from_secs(1));
+        },
         other => panic!("no such scenario: {other}"),
     }
+}
+
+/// A scenario that never ends, in a process of its own, with two processes
+/// of its own behind it: a fork parked and then stopped, so that it can read
+/// neither its release nor an EOF, and a child that runs on holding the
+/// scenario's stderr ([`spawn_a_child_holding_stderr`]); each pid written to
+/// stderr for the parent to read. The scenario then waits to be killed. Both
+/// kinds, because the kernel ends a stopped member of a process group its
+/// leader's death orphans (`SIGHUP`, then `SIGCONT`), so the stopped fork
+/// alone would not tell a kill of the group from a kill of the scenario
+/// process; the running child is ended by nothing but a kill that reaches
+/// the group.
+#[cfg(unix)]
+fn park_a_stopped_fork_and_never_end() -> ! {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd());
+    stop_parked_child(parked.pid());
+    eprintln!("descendant={}", parked.pid());
+    let mut child = spawn_a_child_holding_stderr();
+    eprintln!("descendant={}", child.id());
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        child
+            .try_wait()
+            .expect("poll the child holding stderr, which lives until the group is killed");
+    }
+}
+
+/// This test binary on the `hold-stderr-and-never-end` scenario, its stderr
+/// inherited from the scenario process, in that process's group: a process
+/// that holds the scenario's stderr for as long as it lives, and lives until
+/// it is killed.
+#[cfg(unix)]
+fn spawn_a_child_holding_stderr() -> std::process::Child {
+    let exe = std::env::current_exe().expect("test binary");
+    std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "UPSTROKE_TEST_PARKED_FORK_SCENARIO",
+            "hold-stderr-and-never-end",
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the child that holds stderr")
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving behind a child that holds its stderr and runs on
+/// ([`spawn_a_child_holding_stderr`]), its pid written to stderr for the
+/// parent to read. A running child, not a stopped fork, because a stopped
+/// member of a process group that its leader's exit orphans is sent `SIGHUP`
+/// by the kernel and ends on its own; a child that runs on holding the pipe
+/// is ended by nothing but the wrapper. The child is abandoned on purpose:
+/// a scenario that exits without collecting what it spawned is the shape
+/// under test.
+#[cfg(unix)]
+fn exit_leaving_a_child_holding_stderr() -> ! {
+    let child = spawn_a_child_holding_stderr();
+    eprintln!("descendant={}", child.id());
+    std::process::exit(23)
 }
 
 /// In a process of its own: a sentinel copied to descriptor 128 by `dup2`,
@@ -5659,11 +6496,10 @@ fn parked_fork_isolation_kill_child() {
 /// above what `sysconf(_SC_OPEN_MAX)` reports; on Linux `close_range` is
 /// refused as well, so that the sweep by number, whose ceiling is in
 /// question, is what runs there too. The parked fork's sweep closes the
-/// sentinel: the read answers EOF.
+/// sentinel: the read answers EOF within the bound.
 #[cfg(unix)]
 fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     use crate::workspace_manager::fixture::ParkedFork;
-    use std::io::Read as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
     const HIGH: libc::c_int = 128;
@@ -5672,9 +6508,6 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) =
         std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
-    observer
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .expect("bound the sentinel read");
     let mut limits = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -5740,13 +6573,12 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     let parked = ParkedFork::holding_the_lease_of(&public);
     let holder = parked.pid();
     drop(high);
-    let mut byte = [0_u8; 1];
-    let read = observer.read(&mut byte);
-    assert!(
-        matches!(read, Ok(0)),
-        "the sentinel at descriptor {HIGH}, above the lowered soft limit of 64, was closed by \
-         fork {holder}'s sweep: {read:?}"
-    );
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "the sentinel at descriptor {HIGH}, above the lowered soft limit of 64, was closed by \
+             fork {holder}'s sweep: {held}"
+        );
+    }
     let status = parked.release();
     assert!(
         status.success(),
@@ -5754,14 +6586,34 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     );
 }
 
-/// In a process of its own: a policy that answers `EIO` to the `close` of
+/// A close the policy answers `EINTR` to, without making it, is verified and
+/// found not made: the parked fork's constructor fails, naming the descriptor
+/// and the error, after the child has been collected -- the helper never
+/// announces a child whose sentinel copy the sweep left open. In a process
+/// of its own, as the `EIO` witness is, because the policy is the thread's
+/// for good. A native Linux witness of a denied operation: it says nothing
+/// about an `EINTR` an ordinary Linux or macOS `close` answers, which the
+/// same verification reads as the close it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-denied-with-eintr");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// In a process of its own: a policy that answers `errno` to the `close` of
 /// one descriptor, the sentinel's, and `ENOSYS` to `close_range` so that the
 /// sweep reaches it. The parked fork's constructor fails, naming the
 /// descriptor and the error, and the child it forked has been collected
 /// before it fails: no child is announced that could not be isolated, and
-/// none is left behind.
+/// none is left behind. `EIO` is a close that failed; `EINTR` is the answer
+/// a policy gives without making the close, which the sweep verifies rather
+/// than trusts.
 #[cfg(target_os = "linux")]
-fn a_close_that_fails_fails_the_setup_after_the_child_is_reaped() {
+fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: libc::c_int) {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
@@ -5771,7 +6623,7 @@ fn a_close_that_fails_fails_the_setup_after_the_child_is_reaped() {
     let (sentinel, _observer) =
         std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
     let number = sentinel.as_raw_fd();
-    refuse_closing_on_this_thread(number, libc::EIO);
+    refuse_closing_on_this_thread(number, errno);
     assert_close_range_answers(libc::ENOSYS);
     let unwound = std::panic::catch_unwind(|| ParkedFork::holding_the_lease_of(&public));
     let payload = unwound
@@ -5788,7 +6640,7 @@ fn a_close_that_fails_fails_the_setup_after_the_child_is_reaped() {
         .expect("the panic carries a message");
     let expected = format!(
         "could not close inherited descriptor {number}: {}",
-        std::io::Error::from_raw_os_error(libc::EIO)
+        std::io::Error::from_raw_os_error(errno)
     );
     assert!(
         message.contains(&expected),
