@@ -153,7 +153,16 @@ pub(crate) fn read_published(signal: &Path) -> std::io::Result<Vec<String>> {
 }
 
 pub(crate) fn await_signal(signal: &Path, producer: &mut Child, bound: Duration) -> Waited {
-    let deadline = Instant::now() + bound;
+    await_signal_by(signal, producer, bound, &mut || Instant::now())
+}
+
+pub(crate) fn await_signal_by(
+    signal: &Path,
+    producer: &mut Child,
+    bound: Duration,
+    now: &mut dyn FnMut() -> Instant,
+) -> Waited {
+    let deadline = now() + bound;
     loop {
         if signal.exists() {
             return published(signal);
@@ -173,7 +182,7 @@ pub(crate) fn await_signal(signal: &Path, producer: &mut Child, bound: Duration)
                 return Waited::ProducerGone(format!("waiting on it failed: {error}"));
             }
         }
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return Waited::TimedOut(bound);
         }
         thread::sleep(POLL);

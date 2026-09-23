@@ -285,6 +285,18 @@ then exited between the stat above and this call, and
 a signal that is on disk is a signal however dead its
 producer now is.
 
+## `pub(crate) fn await_signal_by(`
+
+[`await_signal`] with `now` in place of `Instant::now`: the clock the
+wait reads, once for its deadline and then once per poll, before it
+sleeps. The seam through which the wait's bound is tested without the
+wall clock: a test that drives the clock reads which reading ended the
+wait, and a stall of the waiting thread between two readings changes no
+reading, where it changes every wall-clock duration
+(`agent::proc::tests::the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer`,
+after `PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). `await_signal` is this
+with the wall clock.
+
 ## `fn published(signal: &Path) -> Waited {`
 
 [`read_published`] as a [`Waited`].
