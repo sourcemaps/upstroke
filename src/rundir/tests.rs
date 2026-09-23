@@ -4748,8 +4748,13 @@ fn lease_released_within(
 /// The lookup owns nothing and has no precondition: a number closed between
 /// the listing and its lookup answers `EBADF` and is skipped
 /// (`a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
-/// constructs that window), and the scan opens and closes nothing, so no
-/// lock this process holds on a file it visits is touched. Not a `stat` of
+/// constructs that window), any other answer than an identity fails the scan
+/// with the number and the error -- a metadata read that failed is neither an
+/// absent descriptor nor a present one, and a scan that read it as absent
+/// would prove a release that never happened
+/// (`a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence`)
+/// -- and the scan opens and closes nothing, so no lock this process holds
+/// on a file it visits is touched. Not a `stat` of
 /// the `/dev/fd` entry, which was this fn's lookup before: on macOS that
 /// answers no open file's identity -- the native run of `1a1734cf` read an
 /// empty scan through it while the hold was open -- and on Linux it is a
@@ -4774,6 +4779,19 @@ fn descriptors_open_on_observing(
     path: &Path,
     on_listed: &mut dyn FnMut(libc::c_int),
 ) -> Vec<libc::c_int> {
+    descriptors_open_on_with(path, on_listed, &identity_of_the_descriptor)
+}
+
+/// [`descriptors_open_on_observing`] with `lookup` in place of
+/// [`identity_of_the_descriptor`]: the seam through which the scan's reading
+/// of a lookup's three answers -- an identity, a number not open, a read
+/// that failed -- is driven with answers a test chooses.
+#[cfg(unix)]
+fn descriptors_open_on_with(
+    path: &Path,
+    on_listed: &mut dyn FnMut(libc::c_int),
+    lookup: &dyn Fn(libc::c_int) -> std::io::Result<Option<libc::stat>>,
+) -> Vec<libc::c_int> {
     let target = identity_at(path).expect("the file whose descriptors are counted exists");
     let mut open = Vec::new();
     for entry in
@@ -4784,10 +4802,19 @@ fn descriptors_open_on_observing(
             continue;
         };
         on_listed(number);
-        if let Some(identity) = identity_of_the_descriptor(number) {
-            if identity.st_dev == target.st_dev && identity.st_ino == target.st_ino {
-                open.push(number);
+        match lookup(number) {
+            Ok(Some(identity)) => {
+                if identity.st_dev == target.st_dev && identity.st_ino == target.st_ino {
+                    open.push(number);
+                }
             }
+            // Closed between the listing and the lookup: nothing is open there.
+            Ok(None) => {}
+            Err(error) => panic!(
+                "the identity of descriptor {number} could not be read: {error}; a metadata read \
+                 that failed is neither an absent descriptor nor a present one, and the scan \
+                 does not answer through it"
+            ),
         }
     }
     open.sort_unstable();
@@ -4814,25 +4841,33 @@ fn identity_at(path: &Path) -> std::io::Result<libc::stat> {
 }
 
 /// The identity of what `number` is open on, its `fstat`, asked of the
-/// kernel through the number itself, or `None` for a number that is not
-/// open (`EBADF`). The call takes no ownership of the number and has no
-/// precondition on it: a number closed since it was listed is answered, not
-/// read through, and one closed and reused answers the new file's identity.
-/// Nothing is opened or closed, so no lock this process holds is touched --
-/// which a lookup that opened or duplicated the entry and then closed what
-/// it opened could not say, closing any descriptor of a file releasing every
-/// record lock the process holds on it.
+/// kernel through the number itself: `Ok(None)` for a number that is not
+/// open (`EBADF`, the one answer that means absence), and the error for any
+/// other failed read, which means neither absence nor identity and is the
+/// caller's to fail on -- an I/O or permission failure of the read is not a
+/// closed descriptor, and no retry is made. The call takes no ownership of
+/// the number and has no precondition on it: a number closed since it was
+/// listed is answered, not read through, and one closed and reused answers
+/// the new file's identity. Nothing is opened or closed, so no lock this
+/// process holds is touched -- which a lookup that opened or duplicated the
+/// entry and then closed what it opened could not say, closing any
+/// descriptor of a file releasing every record lock the process holds on it.
 #[cfg(unix)]
-fn identity_of_the_descriptor(number: libc::c_int) -> Option<libc::stat> {
+fn identity_of_the_descriptor(number: libc::c_int) -> std::io::Result<Option<libc::stat>> {
     let mut identity = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `fstat` takes the number by value and writes one `stat`
-    // through the pointer, which lives for the call; a number that is not
-    // open is answered with `EBADF` and nothing is written.
+    // through the pointer, which lives for the call; a call that answered
+    // nonzero wrote nothing that is read.
     if unsafe { libc::fstat(number, identity.as_mut_ptr()) } != 0 {
-        return None;
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::EBADF) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
     }
     // SAFETY: `fstat` answered 0, so it wrote the whole struct.
-    Some(unsafe { identity.assume_init() })
+    Ok(Some(unsafe { identity.assume_init() }))
 }
 
 /// The pre-spawn half without a spawn: the descriptor returned is a live
@@ -4947,15 +4982,17 @@ fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lea
     drop(unrelated);
 }
 
-/// Why the lookup is a `stat` of the entry and not a call through the number.
-/// A number listed by `/dev/fd` is another thread's to close at any moment
-/// after the listing, and a `File` made from a number that is no longer open
-/// is a broken contract whatever its `fstat` then answers. Constructed with
-/// the closing in the observation's hands: another thread owns a file, the
-/// scan reaches its number, and only then is that file closed and the close
-/// acknowledged; the lookup of that number finds nothing there, and the scan
-/// goes on to report this thread's own descriptor on the target and nothing
-/// else.
+/// Why the lookup is a raw `fstat` through the number, a call with no
+/// precondition, and not a `File` made from it. A number listed by `/dev/fd`
+/// is another thread's to close at any moment after the listing, and a
+/// `File` made from a number that is no longer open is a broken contract
+/// whatever its `fstat` then answers; the raw call owns nothing and answers
+/// `EBADF` for such a number, which the scan reads as nothing open there and
+/// nothing else. Constructed with the closing in the observation's hands:
+/// another thread owns a file, the scan reaches its number, and only then is
+/// that file closed and the close acknowledged; the lookup of that number
+/// finds nothing there, and the scan goes on to report this thread's own
+/// descriptor on the target and nothing else.
 #[cfg(unix)]
 #[test]
 fn a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan() {
@@ -5188,12 +5225,18 @@ fn sentinel_pair() -> (
 /// copy open, with that read's number and before the bound is checked: how a
 /// test releases a holder only once this observation has seen its copy, so
 /// that held, released, EOF is an order the observation acknowledged rather
-/// than one a timer arranged. On Linux a report is paired by the caller with
-/// the fork under test's own table ([`sentinel_attribution`]), which says
-/// whose copy it was.
+/// than one a timer arranged. A read a handled signal ended before its
+/// timeout (`Interrupted`) observed nothing -- neither a copy open nor EOF --
+/// so it is neither counted nor acknowledged; the bound, absolute from the
+/// start, decides whether the read is made again, and no interruption
+/// restarts it (`PR320-R3-MAIN-005`). On Linux a report is paired by the
+/// caller with the fork under test's own table ([`sentinel_attribution`]),
+/// which says whose copy it was. Any reader, so that the answers a socket
+/// gives -- EOF, a timeout, an interruption -- are driven in an order a test
+/// chooses (`an_interrupted_sentinel_read_is_made_again_within_the_same_bound`).
 #[cfg(unix)]
 fn sentinel_closed_within(
-    observer: &mut std::os::unix::net::UnixStream,
+    observer: &mut impl std::io::Read,
     bound: Duration,
     on_held: &mut dyn FnMut(u32),
 ) -> Result<(Duration, u32), SentinelHeldPastBound> {
@@ -5201,13 +5244,29 @@ fn sentinel_closed_within(
     let mut observations = 0_u32;
     let mut byte = [0_u8; 1];
     loop {
-        observations += 1;
         match observer.read(&mut byte) {
-            Ok(0) => return Ok((started.elapsed(), observations)),
+            Ok(0) => {
+                observations += 1;
+                return Ok((started.elapsed(), observations));
+            }
             Ok(_) => panic!("nothing writes to a sentinel, yet a read answered bytes"),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                let waited = started.elapsed();
+                if waited >= bound {
+                    return Err(SentinelHeldPastBound {
+                        bound,
+                        waited,
+                        observations,
+                    });
+                }
+                continue;
+            }
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                observations += 1;
+            }
             Err(error) => panic!("read the sentinel: {error}"),
         }
         on_held(observations);
@@ -5887,13 +5946,23 @@ fn a_parked_fork_isolates_its_child_when_close_range_is_refused() {
 #[cfg(unix)]
 const SCENARIO_BOUND: Duration = Duration::from_secs(120);
 
-/// How long, once the scenario process has ended, its stderr may keep
-/// reading open before the processes of its group are killed for holding it:
-/// a scenario that ends leaves no process of its own behind, so its stderr
-/// answers EOF at once, and a copy still open after this is a descendant the
-/// scenario left stopped or parked, which is what the kill is for.
+/// How long each step of ending the scenario's group may take, once the
+/// scenario process has ended or its bound has passed: the collection of the
+/// killed leader, the observation of the group until no member is left, and
+/// the drain of the stderr to EOF. A scenario that ends leaves no process of
+/// its own behind, so each step ends at once; the bound is for a member the
+/// scenario left stopped or parked, or a copy of the pipe held outside the
+/// group.
 #[cfg(unix)]
 const SCENARIO_GROUP_BOUND: Duration = Duration::from_secs(2);
+
+/// How many reads one turn of the stderr drain makes before it returns to
+/// its caller with the pipe still readable, 4 KiB each: a bound on the work
+/// a turn can do, so that a scenario writing without pause cannot keep the
+/// owner inside the drain past the deadlines its caller checks between
+/// turns ([`drain_turn`]).
+#[cfg(unix)]
+const DRAIN_TURN_READS: usize = 64;
 
 /// Run `parked_fork_isolation_kill_child` in a process of its own with the
 /// scenario named, bounded: its exit status and its stderr, or `None` and the
@@ -5901,11 +5970,15 @@ const SCENARIO_GROUP_BOUND: Duration = Duration::from_secs(2);
 /// Its stdin is `/dev/null`; it owns nothing of this process but the pipe.
 /// The process is owned from its spawn ([`ScenarioChild`]): it leads a
 /// process group of its own, so the processes it forks are the group's and a
-/// kill reaches them; its stderr is read as it arrives and never joined; its
-/// exit is peeked before it is collected, so that the group can be killed
-/// while the group id is still its own; and a descendant that holds its
-/// stderr after it has ended is killed within [`SCENARIO_GROUP_BOUND`]. What
-/// the wrapper had to do is appended to the text it returns.
+/// kill reaches them; its stderr is read as it arrives, a bounded turn at a
+/// time, and never joined; its exit is peeked before it is collected, so
+/// that the group can be killed while the group id is still its own; and
+/// once it has ended or run past its bound the group is killed, the leader
+/// collected, the group observed until no member is left and the pipe
+/// drained to EOF, each within [`SCENARIO_GROUP_BOUND`], the pipe's EOF being
+/// read as what it is -- every copy closed -- and never as the group empty.
+/// What the wrapper had to do, and what it could not, is appended to the
+/// text it returns.
 #[cfg(unix)]
 fn run_parked_fork_scenario(scenario: &str) -> (Option<std::process::ExitStatus>, String) {
     run_parked_fork_scenario_within(scenario, SCENARIO_BOUND, |_| {})
@@ -5934,26 +6007,13 @@ fn run_parked_fork_scenario_within(
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let status = if ended {
-        // The process has ended and is not yet collected, so its group id is
-        // still its own. Its stderr answers EOF once every copy of the pipe's
-        // write end is closed: at once, unless a process it forked holds one.
-        if !owned.drain_until_eof(SCENARIO_GROUP_BOUND) {
-            owned.note(&format!(
-                "a process of the scenario's group still held its stderr {SCENARIO_GROUP_BOUND:?} \
-                 after the scenario ended"
-            ));
-            owned.kill_group();
-            owned.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
-        }
-        Some(owned.collect())
-    } else {
+    if !ended {
         owned.note(&format!("the scenario did not end within {bound:?}"));
-        owned.kill_group();
-        owned.collect();
-        owned.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
-        None
-    };
+    }
+    // Ended and not yet collected, or past its bound: either way the
+    // process's pid, and its group's id, is still its own, and the group is
+    // ended and accounted for before the leader is collected.
+    let status = owned.end(ended);
     (status, owned.text())
 }
 
@@ -5961,12 +6021,19 @@ fn run_parked_fork_scenario_within(
 /// The spawn puts it in a process group of its own, so a kill of the group
 /// reaches what it forked -- a parked fork it left stopped, which cannot read
 /// the EOF that would otherwise end it; its stderr is a pipe read without
-/// blocking, so what it wrote so far is always in hand and nothing is ever
-/// joined; and dropping this value with the process uncollected kills the
-/// group and collects the process, never panicking, so an unwinding caller
-/// leaves no child of this process behind and no descendant of the scenario
-/// stopped or parked. The kill always precedes the collection: a collected
-/// pid is a number the kernel may hand out again, and a group id with it.
+/// blocking, a bounded turn at a time, so what it wrote so far is always in
+/// hand and nothing is ever joined or retried; once the process has ended,
+/// or run past its bound, its group is killed while the id is still its own,
+/// the leader collected, the group observed until no member is left and the
+/// pipe drained, each step within [`SCENARIO_GROUP_BOUND`] and each step's
+/// failure -- a kill the OS refused, a leader not collected, a member or a
+/// pipe copy that outlived the bound -- noted and never read as done; and
+/// dropping this value with the process uncollected kills the group and
+/// collects the process within the same bound, never panicking and never
+/// waiting past it, so an unwinding caller leaves no child of this process
+/// behind and no descendant of the scenario stopped or parked. The kill
+/// always precedes the collection: a collected pid is a number the kernel
+/// may hand out again, and a group id with it.
 #[cfg(unix)]
 struct ScenarioChild {
     child: std::process::Child,
@@ -6044,23 +6111,21 @@ impl ScenarioChild {
         libc::pid_t::try_from(self.child.id()).expect("a pid fits its type")
     }
 
-    /// Read what the pipe holds now, without blocking: `true` once it has
-    /// answered EOF.
+    /// One turn of the stderr drain ([`drain_turn`]), the text kept and a
+    /// failed read noted: `true` once the pipe has answered EOF or failed.
+    /// Never retries: the caller's loop, and its deadline, decide whether
+    /// another turn is made.
     fn drain(&mut self) -> bool {
-        let mut buffer = [0_u8; 4096];
-        while !self.eof {
-            match self.stderr.read(&mut buffer) {
-                Ok(0) => self.eof = true,
-                Ok(count) => self
-                    .text
-                    .extend_from_slice(buffer.get(..count).unwrap_or_default()),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => {
-                    self.note(&format!("the scenario's stderr could not be read: {error}"));
-                    self.eof = true;
-                }
+        if self.eof {
+            return true;
+        }
+        match drain_turn(&mut self.stderr, &mut self.text) {
+            DrainTurn::Eof => self.eof = true,
+            DrainTurn::Failed(error) => {
+                self.note(&format!("the scenario's stderr could not be read: {error}"));
+                self.eof = true;
             }
+            DrainTurn::Drained | DrainTurn::Interrupted | DrainTurn::Budget => {}
         }
         self.eof
     }
@@ -6121,30 +6186,134 @@ impl ScenarioChild {
         unsafe { info.si_pid() != 0 }
     }
 
-    /// `SIGKILL` to the group, before any collection; what it did is noted.
-    fn kill_group(&mut self) {
+    /// `SIGKILL` to the group, before any collection: `true` when the group
+    /// is now dead or was already empty (`ESRCH`); a refusal by the OS is
+    /// noted and answered `false`, and nothing here reads it as a kill.
+    fn kill_group(&mut self) -> bool {
         match crate::workspace_manager::fixture::kill_process_group(&mut self.child) {
-            Ok(()) => self.note("the scenario's process group was killed"),
+            Ok(()) => {
+                self.note("the scenario's process group was killed");
+                true
+            }
             Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
                 self.note("the scenario's process group was already empty");
+                true
             }
             Err(error) => {
                 self.note(&format!(
                     "the scenario's process group could not be killed: {error}"
                 ));
+                false
             }
         }
     }
 
-    /// Collect the scenario process: its status. After the kill, or after
-    /// [`Self::has_ended`] answered, so it does not block.
-    fn collect(&mut self) -> std::process::ExitStatus {
+    /// Collect the scenario process within `bound`, `try_wait` every 5 ms:
+    /// its status, or `None` for a process still there at the end of the
+    /// bound or one that could not be polled, either noted with the pid.
+    /// Never `Child::wait`, which would hold the owner for as long as the
+    /// process lives, a kill the OS refused included (`PR320-R3-MAIN-002`).
+    fn collect_within(&mut self, bound: Duration) -> Option<std::process::ExitStatus> {
         if let Some(status) = self.collected {
-            return status;
+            return Some(status);
         }
-        let status = self.child.wait().expect("collect the scenario child");
-        self.collected = Some(status);
+        let deadline = Instant::now() + bound;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.collected = Some(status);
+                    return Some(status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.note(&format!(
+                        "the scenario process {} could not be polled: {error}",
+                        self.pid()
+                    ));
+                    return None;
+                }
+            }
+            if Instant::now() >= deadline {
+                self.note(&format!(
+                    "the scenario process {} was not collected within {bound:?}",
+                    self.pid()
+                ));
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// End the scenario's group and account for it, the process having ended
+    /// (`ended`) or run past its bound: the group is killed while the
+    /// leader's id is still its own, the leader is collected, the group is
+    /// observed until no member of it is left ([`group_ended`]) and the
+    /// stderr is drained to EOF, each within [`SCENARIO_GROUP_BOUND`], and
+    /// whatever a step could not do is noted. The status is the scenario's
+    /// own, for a process that ended; a process killed at its bound has
+    /// none, whatever its collection read. A kill the OS refused leaves a
+    /// leader that has not ended uncollected and the pipe undrained, and
+    /// says so, rather than waiting on either: the status is then `None` and
+    /// the notes name the refusal and the pid. The pipe's EOF is never what
+    /// says the group is empty: it says every copy of the pipe is closed,
+    /// which a member that redirected or closed its stderr leaves true while
+    /// it lives (`PR320-R3-MAIN-001`).
+    fn end(&mut self, ended: bool) -> Option<std::process::ExitStatus> {
+        let killed = self.kill_group();
+        let status = if killed || ended {
+            self.collect_within(SCENARIO_GROUP_BOUND).filter(|_| ended)
+        } else {
+            self.note(&format!(
+                "the scenario process {} is left uncollected: alive, in a group that could not \
+                 be killed",
+                self.pid()
+            ));
+            None
+        };
+        if killed {
+            self.await_group_end_or_note(SCENARIO_GROUP_BOUND);
+            self.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
+        } else {
+            self.drain();
+            if !self.eof {
+                self.note("the scenario's stderr is left open: its holders could not be killed");
+            }
+        }
         status
+    }
+
+    /// Observe the scenario's group, killed a moment ago, every 10 ms until
+    /// no member of it is left or `bound` runs out, and note which; a group
+    /// that could not be observed is noted as not accounted for, never as
+    /// empty.
+    fn await_group_end_or_note(&mut self, bound: Duration) {
+        let started = Instant::now();
+        loop {
+            match group_ended(self.pid()) {
+                Ok(true) => {
+                    self.note(&format!(
+                        "the scenario's group was empty {:?} after the kill",
+                        started.elapsed()
+                    ));
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.note(&format!(
+                        "the scenario's group could not be observed: {error}; its members are \
+                         not accounted for"
+                    ));
+                    return;
+                }
+            }
+            if started.elapsed() >= bound {
+                self.note(&format!(
+                    "a member of the scenario's group was still running {bound:?} after the kill"
+                ));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn note(&mut self, note: &str) {
@@ -6166,13 +6335,155 @@ impl Drop for ScenarioChild {
     fn drop(&mut self) {
         // Best effort by nature, as `ParkedFork`'s drop is: a caller that is
         // unwinding has nothing to answer to, and a panic here would abort
-        // it. A process already collected has had its group killed or shown
-        // empty; one not yet collected is killed with its group, before the
-        // collection, and collected.
-        if self.collected.is_none() {
-            let _ = crate::workspace_manager::fixture::kill_process_group(&mut self.child);
-            let _ = self.child.wait();
+        // it. A process already collected has had its group killed, or the
+        // kill refused and noted, before the collection; one not yet
+        // collected is killed with its group, before the collection, and
+        // collected within the bound -- or, after a kill the OS refused,
+        // polled once and left. What is left alive or uncollected is said on
+        // stderr, the one channel a drop has, with the notes that say why.
+        if self.collected.is_some() {
+            return;
         }
+        let killed = self.kill_group();
+        let bound = if killed {
+            SCENARIO_GROUP_BOUND
+        } else {
+            Duration::ZERO
+        };
+        if self.collect_within(bound).is_none() {
+            eprintln!(
+                "[the scenario process {} was left uncollected by its owner's drop:{}]",
+                self.pid(),
+                self.notes
+            );
+        }
+    }
+}
+
+/// What ended one turn of a drain ([`drain_turn`]).
+#[cfg(unix)]
+#[derive(Debug)]
+enum DrainTurn {
+    /// The pipe answered EOF: every copy of its write end is closed.
+    Eof,
+    /// Nothing more to read now (`WouldBlock`).
+    Drained,
+    /// A handled signal ended a read (`Interrupted`): the turn ends, and the
+    /// caller's deadline decides whether another is made.
+    Interrupted,
+    /// The turn's work budget ran out with the pipe still readable.
+    Budget,
+    /// A read failed otherwise, with this error.
+    Failed(std::io::Error),
+}
+
+/// One turn of a non-blocking drain of `reader` into `text`: at most
+/// [`DRAIN_TURN_READS`] reads of 4 KiB, ended early by EOF, by nothing more
+/// to read, by an interruption or by an error, each returned to the caller
+/// as what it was. Nothing is retried here: the caller's loop checks its own
+/// deadline between turns, so no answer the pipe gives -- an interruption
+/// repeated, or output that never pauses -- can hold the owner inside the
+/// drain past that deadline (`PR320-R3-MAIN-003`). Any reader, so that the
+/// answers are driven in an order a test chooses.
+#[cfg(unix)]
+fn drain_turn(reader: &mut impl std::io::Read, text: &mut Vec<u8>) -> DrainTurn {
+    let mut buffer = [0_u8; 4096];
+    for _ in 0..DRAIN_TURN_READS {
+        match reader.read(&mut buffer) {
+            Ok(0) => return DrainTurn::Eof,
+            Ok(count) => text.extend_from_slice(buffer.get(..count).unwrap_or_default()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return DrainTurn::Drained;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return DrainTurn::Interrupted;
+            }
+            Err(error) => return DrainTurn::Failed(error),
+        }
+    }
+    DrainTurn::Budget
+}
+
+/// Whether no process of the group `pgid` is left running, the group's
+/// leader collected already: on Linux, read from `/proc` -- no process whose
+/// group is `pgid` in a state other than dead-and-uncollected (`Z`), which is
+/// ended for every purpose here, since a zombie holds no descriptor and runs
+/// nothing, and a subreaper up the tree may keep the group's zombies until
+/// it collects them. Each `stat` is one `read`, never retried, so an
+/// observation a policy or a signal keeps interrupting is a failed
+/// observation and not a wait; a process gone between the listing and its
+/// read is skipped.
+///
+/// # Errors
+///
+/// A `/proc` entry that could not be read for a reason other than its
+/// process having gone: the observation failed, and the caller says so
+/// rather than reading the group as empty.
+#[cfg(target_os = "linux")]
+fn group_ended(pgid: libc::pid_t) -> std::io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let mut stat = match File::open(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(error) => return Err(error),
+        };
+        let mut buffer = [0_u8; 4096];
+        let count = match stat.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(error) => return Err(error),
+        };
+        let text = String::from_utf8_lossy(buffer.get(..count).unwrap_or_default());
+        // `pid (comm) state ppid pgrp ...`: the comm may hold spaces and
+        // parentheses, so the fields are read after the last `)`.
+        let Some((_, after_comm)) = text.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let state = fields.next().unwrap_or("");
+        let group = fields
+            .nth(1)
+            .and_then(|group| group.parse::<libc::pid_t>().ok());
+        if group == Some(pgid) && state != "Z" && state != "X" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether no process of the group `pgid` is left, on the Unixes without
+/// `/proc`: `kill` with signal 0 to the group, which delivers nothing and
+/// answers `ESRCH` once no process of the group exists; a group the caller
+/// may not signal (`EPERM`) exists. Orphans there go to `launchd`, which
+/// collects them, so a killed member does not linger as a zombie of the
+/// group.
+///
+/// # Errors
+///
+/// Any other answer than `0`, `ESRCH` or `EPERM`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn group_ended(pgid: libc::pid_t) -> std::io::Result<bool> {
+    // SAFETY: signal 0 delivers nothing; the call only asks whether a
+    // process of the group exists, and hands over no memory.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(true),
+        Some(libc::EPERM) => Ok(false),
+        _ => Err(error),
     }
 }
 
@@ -6309,8 +6620,9 @@ fn a_scenario_that_never_ends_is_killed_at_the_bound_with_the_fork_it_left_stopp
 /// A scenario whose process exits abnormally -- 23, its own cleanup never
 /// run -- leaving a child that holds its stderr and runs on: the wrapper
 /// returns that status and the stderr written before it, within its bounds,
-/// and the child is killed for holding the pipe after the scenario ended, so
-/// the wrapper never waits on a process that will not let go.
+/// and the group is killed once the scenario has ended, the pipe answering
+/// EOF once its holder is dead, so the wrapper never waits on a process that
+/// will not let go.
 #[cfg(unix)]
 #[test]
 fn a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_and_kills_the_child()
@@ -6355,8 +6667,9 @@ fn a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_a
         "and the wrapper returned within its own bounds: {took:?}\n{text}"
     );
     assert!(
-        text.contains("still held its stderr 2s after the scenario ended")
-            && text.contains("the scenario's process group was killed"),
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty")
+            && !text.contains("did not answer EOF"),
         "the wrapper says what it did: {text}"
     );
     let descendants = descendants_named_in(&text, 1);
@@ -6426,6 +6739,483 @@ fn a_panic_after_the_scenario_process_is_spawned_leaves_no_child_behind() {
     }
 }
 
+/// A scenario whose process exits leaving a member of its group that holds
+/// nothing of the scenario's -- its stderr sent to `/dev/null` -- so that the
+/// pipe answers EOF the moment the scenario exits while the member runs on:
+/// the wrapper returns the scenario's status only once the group has been
+/// killed and observed empty, so the member has ended by the time the
+/// wrapper returns, without any wait by this test. A pipe's EOF says every
+/// copy of it is closed and nothing about the group
+/// (`PR320-R3-MAIN-001`, `PR320-R3-REG-003`). Linux, for the `/proc` reading
+/// of the member's state.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_that_exits_leaving_a_silent_member_in_its_group_has_the_group_ended_before_it_returns()
+ {
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "exit-23-leaving-a-silent-member-in-the-group",
+            SCENARIO_BOUND,
+            |pid| {
+                pid_sender.send(pid).expect("the test waits for the pid");
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the wrapper owned the scenario process and said which");
+    if answered.is_err() {
+        // SAFETY: as in the tests above: the scenario's own group, killed by
+        // the test only because the wrapper blocked past the test's bound.
+        assert_eq!(
+            unsafe { libc::kill(-scenario_pid, libc::SIGKILL) },
+            0,
+            "kill the scenario's group {scenario_pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    running.join().expect("the wrapper's thread ends");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    let descendants = descendants_named_in(&text, 1);
+    // The reading is made now, before any assertion, so that a member the
+    // wrapper left running is ended by this test whichever assertion fails.
+    let still_running: Vec<libc::pid_t> = descendants
+        .iter()
+        .copied()
+        .filter(|pid| !has_ended_by_proc(*pid))
+        .collect();
+    for pid in &still_running {
+        // SAFETY: `kill` takes a pid and a signal by value; the pid was read
+        // from `/proc` as a live process a moment ago, the member the
+        // scenario named, which the wrapper was to have ended.
+        let killed = unsafe { libc::kill(*pid, libc::SIGKILL) };
+        assert_ended_within(
+            *pid,
+            Duration::from_secs(5),
+            &format!("the silent member, killed by the test (kill answered {killed})"),
+        );
+    }
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(23),
+        "the scenario's own exit status is returned: {status:?}\n{text}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}"
+    );
+    assert!(
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty"),
+        "the wrapper killed the group and observed it empty: {text}"
+    );
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    assert!(
+        still_running.is_empty(),
+        "the member the scenario left in its group had ended when the wrapper returned, its \
+         stderr EOF notwithstanding; still running: {still_running:?}\n{text}"
+    );
+}
+
+/// A group kill the OS refuses -- a policy answering `EPERM` to `kill`,
+/// installed on the wrapper's own thread the moment it owns the scenario --
+/// leaves the wrapper bounded: it returns within its own bounds with no
+/// status, saying that the group could not be killed and that the process
+/// is left alive and uncollected, and never waits on the process it could
+/// not kill (`PR320-R3-MAIN-002`, `PR320-R3-REG-004`). The wrapper runs on a
+/// thread of its own, which the policy binds, so this test's thread keeps
+/// its `kill` and ends the group itself afterwards. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_kill_the_os_refuses_leaves_the_wrapper_bounded_and_the_refusal_in_its_text() {
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(30), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "hold-stderr-and-never-end",
+            Duration::from_millis(250),
+            |pid| {
+                pid_sender.send(pid).expect("the test waits for the pid");
+                refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the wrapper owned the scenario process and said which");
+    let answer = answered;
+    // Whatever the wrapper did, the group is this test's to end: this thread
+    // has no policy. Killed before the join, so that a wrapper blocked in a
+    // wait on the process it could not kill -- the defect this test holds --
+    // is released and the test fails rather than hangs.
+    // SAFETY: `kill` takes a pid and a signal by value; the negative pid is
+    // the scenario's own group, which the wrapper made and could not kill.
+    assert_eq!(
+        unsafe { libc::kill(-scenario_pid, libc::SIGKILL) },
+        0,
+        "kill the scenario's group {scenario_pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    running.join().expect("the wrapper's thread ends");
+    let mut status_word = 0;
+    // SAFETY: `waitpid` writes one int through `status_word`, which lives
+    // for the call; the pid is this process's child, which the wrapper
+    // could not kill and so left uncollected.
+    let collected = unsafe { libc::waitpid(scenario_pid, &mut status_word, 0) };
+    let ((status, text), took) = answer.expect(
+        "the wrapper returned within the test's bound although its kill was refused; a wrapper \
+         that waits on a process it could not kill is the defect this test holds",
+    );
+    assert_eq!(
+        collected,
+        scenario_pid,
+        "the scenario process was this test's to collect once its group was killed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        status.is_none(),
+        "a scenario whose group could not be killed has no status: {status:?}\n{text}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}"
+    );
+    assert!(
+        text.contains("the scenario did not end within 250ms")
+            && text.contains("the scenario's process group could not be killed")
+            && text.contains("is left uncollected"),
+        "the wrapper says what it could not do: {text}"
+    );
+}
+
+/// A reader whose every read answers what `answer` says: the seam through
+/// which the drain, the report read and the sentinel observation are driven
+/// with the answers a pipe or a socket gives -- bytes, EOF, `WouldBlock`,
+/// `TimedOut`, `Interrupted` -- in an order a test chooses, without a signal
+/// or a policy to arrange them.
+#[cfg(unix)]
+struct Answering<F: FnMut(&mut [u8]) -> std::io::Result<usize>>(F);
+
+#[cfg(unix)]
+impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> std::io::Read for Answering<F> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        (self.0)(buffer)
+    }
+}
+
+/// A drain turn ends on the first interruption and hands the question of
+/// another turn back to its caller: a pipe that answers `Interrupted` to
+/// every read costs one read per turn, never a retry inside the drain
+/// (`PR320-R3-MAIN-003`, `PR320-R3-REG-005`).
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_ends_on_an_interruption_and_leaves_the_deadline_to_its_caller() {
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let mut text = Vec::new();
+    let turn = drain_turn(&mut interrupted, &mut text);
+    assert!(
+        matches!(turn, DrainTurn::Interrupted),
+        "an interrupted read ends the turn as what it was: {turn:?}"
+    );
+    assert_eq!(reads, 1, "and the drain made no second read of its own");
+    assert!(text.is_empty());
+}
+
+/// A drain turn has a work budget: a pipe that never pauses ends the turn
+/// after `DRAIN_TURN_READS` reads with what they read kept, so the caller's
+/// deadline is checked between turns however much the scenario writes.
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_with_output_that_never_pauses_ends_at_its_work_budget() {
+    let mut reads = 0_usize;
+    let mut endless = Answering(|buffer: &mut [u8]| {
+        reads += 1;
+        buffer.fill(b'x');
+        Ok(buffer.len())
+    });
+    let mut text = Vec::new();
+    let turn = drain_turn(&mut endless, &mut text);
+    assert!(
+        matches!(turn, DrainTurn::Budget),
+        "the turn ended at its budget: {turn:?}"
+    );
+    assert_eq!(reads, DRAIN_TURN_READS);
+    assert_eq!(
+        text.len(),
+        DRAIN_TURN_READS * 4096,
+        "everything read was kept"
+    );
+    let mut ending = Answering(|buffer: &mut [u8]| {
+        buffer.fill(b'y');
+        Ok(2)
+    });
+    let mut text = Vec::new();
+    let mut turns = 0;
+    let turn = loop {
+        turns += 1;
+        match drain_turn(&mut ending, &mut text) {
+            DrainTurn::Budget if turns < 3 => {}
+            other => break other,
+        }
+    };
+    assert!(matches!(turn, DrainTurn::Budget), "{turn:?}");
+    assert_eq!(
+        text.len(),
+        3 * DRAIN_TURN_READS * 2,
+        "three turns, each its budget of short reads"
+    );
+}
+
+/// A drain turn ends on EOF, on nothing more to read, and on a failed read,
+/// each returned as what it was with the bytes before it kept.
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_returns_eof_a_pause_and_a_failure_as_what_they_were() {
+    let mut answers = vec![
+        Err(std::io::Error::other("the pipe's read failed")),
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        Ok(0),
+        Ok(3),
+    ];
+    let mut scripted = Answering(move |buffer: &mut [u8]| match answers.pop() {
+        Some(Ok(count)) => {
+            buffer
+                .get_mut(..count)
+                .expect("the answer fits the buffer")
+                .fill(b'a');
+            Ok(count)
+        }
+        Some(Err(error)) => Err(error),
+        None => Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+    });
+    let mut text = Vec::new();
+    assert!(matches!(
+        drain_turn(&mut scripted, &mut text),
+        DrainTurn::Eof
+    ));
+    assert_eq!(text, b"aaa", "the bytes before EOF were kept");
+    assert!(matches!(
+        drain_turn(&mut scripted, &mut text),
+        DrainTurn::Drained
+    ));
+    match drain_turn(&mut scripted, &mut text) {
+        DrainTurn::Failed(error) => assert_eq!(error.to_string(), "the pipe's read failed"),
+        other => panic!("a failed read ends the turn with its error: {other:?}"),
+    }
+}
+
+/// The report read keeps one deadline across interruptions: a socket that
+/// answers `Interrupted` to every read is asked again until the deadline,
+/// which no answer restarts, and the read then fails with `TimedOut`
+/// (`PR320-R3-MAIN-004`). `read_exact` would retry inside itself, each
+/// retry a fresh socket timeout.
+#[cfg(unix)]
+#[test]
+fn a_report_read_keeps_one_deadline_across_interruptions() {
+    use crate::workspace_manager::fixture::read_report_within;
+
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let bound = Duration::from_millis(100);
+    let started = Instant::now();
+    let error = read_report_within(&mut interrupted, started + bound)
+        .expect_err("a report that never arrives is a timeout, not a wait");
+    let took = started.elapsed();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        took >= bound && took < bound * 20,
+        "the deadline was kept, once: {took:?} against {bound:?} after {reads} interrupted reads"
+    );
+    assert!(reads > 1, "the interrupted read was made again: {reads}");
+    assert!(
+        error.to_string().contains("0 of 9 bytes read"),
+        "the error says how much arrived: {error}"
+    );
+}
+
+/// The report read keeps what a short read delivered: a socket answering one
+/// byte at a time, with timeouts and interruptions between, assembles the
+/// nine bytes; one that closes early fails with how much had arrived.
+#[cfg(unix)]
+#[test]
+fn a_report_read_assembles_short_answers_and_reports_an_early_close() {
+    use crate::workspace_manager::fixture::{REPORT_LEN, read_report_within};
+
+    let report: Vec<u8> = (1..=REPORT_LEN).map(|byte| byte as u8).collect();
+    let mut next = 0_usize;
+    let mut interruptions = 0_u32;
+    let mut byte_at_a_time = Answering(|buffer: &mut [u8]| {
+        if interruptions < 2 * next as u32 + 1 {
+            interruptions += 1;
+            return Err(std::io::Error::from(if next % 2 == 0 {
+                std::io::ErrorKind::Interrupted
+            } else {
+                std::io::ErrorKind::TimedOut
+            }));
+        }
+        let byte = *report
+            .get(next)
+            .expect("the script ends at the report's length");
+        *buffer.first_mut().expect("a buffer with room") = byte;
+        next += 1;
+        Ok(1)
+    });
+    let read = read_report_within(&mut byte_at_a_time, Instant::now() + Duration::from_secs(5))
+        .expect("the report assembles from short reads");
+    assert_eq!(read.to_vec(), report);
+    assert_eq!(next, REPORT_LEN);
+    let mut remaining = 3_usize;
+    let mut early_close = Answering(|buffer: &mut [u8]| {
+        if remaining == 0 {
+            return Ok(0);
+        }
+        remaining -= 1;
+        *buffer.first_mut().expect("a buffer with room") = 7;
+        Ok(1)
+    });
+    let error = read_report_within(&mut early_close, Instant::now() + Duration::from_secs(5))
+        .expect_err("a reader that closes before the report is an error");
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert!(
+        error.to_string().contains("after 3 of 9 report bytes"),
+        "{error}"
+    );
+}
+
+/// An interrupted sentinel read is made again within the same bound: it
+/// observed nothing, so it is neither counted nor acknowledged, and a socket
+/// that answers `Interrupted` to every read ends in the bound's report with
+/// zero observations, never a panic and never past the bound
+/// (`PR320-R3-MAIN-005`); interruptions between timeouts and the EOF change
+/// neither the count nor the acknowledgements.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_sentinel_read_is_made_again_within_the_same_bound() {
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let bound = Duration::from_millis(100);
+    let mut acknowledged = Vec::new();
+    let started = Instant::now();
+    let held = sentinel_closed_within(&mut interrupted, bound, &mut |read| acknowledged.push(read))
+        .expect_err("a sentinel that is never read as closed is reported at the bound");
+    let took = started.elapsed();
+    assert_eq!(
+        held.observations, 0,
+        "an interrupted read observed nothing: {held}"
+    );
+    assert!(
+        held.waited >= bound && took < bound * 20,
+        "the bound was kept, once, across {reads} interruptions: {took:?}"
+    );
+    assert!(reads > 1, "the interrupted read was made again: {reads}");
+    assert!(
+        acknowledged.is_empty(),
+        "and nothing was acknowledged: {acknowledged:?}"
+    );
+
+    let mut answers = vec![
+        Ok(0),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+    ];
+    let mut scripted = Answering(move |_: &mut [u8]| {
+        answers
+            .pop()
+            .expect("the script ends at EOF, which ends the observation")
+    });
+    let mut acknowledged = Vec::new();
+    let (_, observations) =
+        sentinel_closed_within(&mut scripted, Duration::from_secs(5), &mut |read| {
+            acknowledged.push(read);
+        })
+        .expect("EOF ends the observation");
+    assert_eq!(
+        observations, 3,
+        "two reads found a copy open and the third read EOF; the interruptions counted for nothing"
+    );
+    assert_eq!(
+        acknowledged,
+        vec![1, 2],
+        "each read that found a copy open was acknowledged, once"
+    );
+}
+
+/// A lookup that fails on a listed descriptor fails the identity scan with
+/// the number and the error, in place of a scan that reads absence through
+/// it: a failed metadata read is neither an absent descriptor nor a present
+/// one (`PR320-R3-MAIN-006`, `PR320-R3-REG-001`). The lookup's own answer
+/// for a number not open, `Ok(None)`, is what the scan skips.
+#[cfg(unix)]
+#[test]
+fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence() {
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("descriptor-scan-lookup-fails");
+    let target = root.join("target");
+    let held = File::create(&target).expect("the target, held open by this thread");
+    let number = held.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&target),
+        vec![number],
+        "the real lookup reports the held descriptor"
+    );
+    let failing = |listed: libc::c_int| {
+        if listed == number {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        } else {
+            identity_of_the_descriptor(listed)
+        }
+    };
+    let payload =
+        std::panic::catch_unwind(|| descriptors_open_on_with(&target, &mut |_| {}, &failing))
+            .expect_err("a lookup that failed fails the scan rather than answering through it");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .expect("the panic carries a message");
+    assert!(
+        message.contains(&format!(
+            "the identity of descriptor {number} could not be read"
+        )) && message.contains("os error 5"),
+        "the scan names the descriptor and the error: {message}"
+    );
+    let absent = |listed: libc::c_int| {
+        if listed == number {
+            Ok(None)
+        } else {
+            identity_of_the_descriptor(listed)
+        }
+    };
+    assert!(
+        descriptors_open_on_with(&target, &mut |_| {}, &absent).is_empty(),
+        "a number the lookup answers as not open is skipped, which is the closed-in-window case"
+    );
+    drop(held);
+}
+
 /// A descriptor above the soft limit -- opened, then the limit lowered
 /// beneath it, as a test that narrows `RLIMIT_NOFILE` leaves one -- is
 /// still closed by the parked fork's sweep, whose ceiling comes from the
@@ -6471,6 +7261,13 @@ fn parked_fork_isolation_kill_child() {
     let scenario =
         std::env::var("UPSTROKE_TEST_PARKED_FORK_SCENARIO").expect("the parent names the scenario");
     match scenario.as_str() {
+        "exit-23-leaving-a-silent-member-in-the-group" => {
+            exit_leaving_a_silent_member_in_the_group();
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-denied-with-ebadf" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EBADF);
+        }
         "a-descriptor-above-a-lowered-soft-limit" => {
             a_descriptor_above_a_lowered_soft_limit_is_closed();
         }
@@ -6542,6 +7339,36 @@ fn spawn_a_child_holding_stderr() -> std::process::Child {
         .stdout(std::process::Stdio::null())
         .spawn()
         .expect("spawn the child that holds stderr")
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving behind a member of its group that holds nothing of the
+/// scenario's: the same child as [`spawn_a_child_holding_stderr`] with its
+/// stderr sent to `/dev/null`, so that the scenario's pipe answers EOF the
+/// moment the scenario exits while the member runs on. The pid is written
+/// to stderr for the parent to read. The shape under test is a group whose
+/// emptiness the pipe cannot speak for.
+#[cfg(unix)]
+fn exit_leaving_a_silent_member_in_the_group() -> ! {
+    let exe = std::env::current_exe().expect("test binary");
+    let child = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "UPSTROKE_TEST_PARKED_FORK_SCENARIO",
+            "hold-stderr-and-never-end",
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the silent member of the group");
+    eprintln!("descendant={}", child.id());
+    std::process::exit(23)
 }
 
 /// A scenario whose process exits abnormally -- 23, its own cleanup never
@@ -6669,6 +7496,78 @@ fn a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcin
     assert!(
         status.is_some_and(|status| status.success()),
         "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A close the policy answers `EBADF` to, without making it, is read from
+/// the descriptor table and found open: the parked fork's constructor fails,
+/// naming the descriptor and the error, after the child has been collected.
+/// `EBADF` is the answer the sweep takes as a number not open when the table
+/// says so, and a policy's `EBADF` says nothing about the table
+/// (`PR320-R3-REG-002`); in a process of its own, as the `EIO` and `EINTR`
+/// witnesses are.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-denied-with-ebadf");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A `close_range` that answers success without closing -- a policy's
+/// answer, `SECCOMP_RET_ERRNO` carrying 0 -- is found out by the reading of
+/// the numbers the parent listed at the fork: the constructor fails naming
+/// the first listed descriptor still open and that its close answered
+/// success, after the child has been collected. The policy is this thread's
+/// and its forks', and this thread makes no `close_range` of its own, so no
+/// fresh process is needed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_range_close_that_answers_success_without_closing_is_found_out_before_the_child_is_announced() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let root = scratch("childlease-range-close-lies");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000B");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (_sentinel, _observer) = sentinel_pair();
+    refuse_syscall_on_this_thread(libc::SYS_close_range, 0);
+    // SAFETY: a raw syscall over a numeric range the kernel refuses as
+    // empty (`EINVAL`), so an answer of 0 is the policy's alone; it closes
+    // nothing.
+    assert_eq!(
+        unsafe { libc::syscall(libc::SYS_close_range, 3_u32, 2_u32, 0_u32) },
+        0,
+        "the policy answers success to close_range: {}",
+        std::io::Error::last_os_error()
+    );
+    let unwound = std::panic::catch_unwind(|| ParkedFork::holding_the_lease_of(&public));
+    let payload = unwound
+        .err()
+        .expect("a range close that closed nothing fails the constructor");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .expect("the panic carries a message");
+    assert!(
+        message.contains("could not close inherited descriptor")
+            && message.contains("the close answered success and the descriptor read open after it"),
+        "the constructor names a descriptor left open and the success its close answered: {message}"
+    );
+    let pid: libc::pid_t = message
+        .strip_prefix("the parked child ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|pid| pid.parse().ok())
+        .expect("the message names the child's pid");
+    assert!(
+        is_reaped(pid),
+        "the child {pid} was collected before the constructor failed"
     );
 }
 

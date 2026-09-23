@@ -395,3 +395,83 @@ Linux and Windows job green:
 Both are platform facts the round had taken from source reading. The box has no macOS
 executor, so each repair is verified here on Linux and by clippy for both Apple targets, with
 its reasoning written at the site; its native evidence is CI's.
+
+## One contract for the test machinery's observations, bounds and owners (2026-09-23, round four)
+
+The third round's independent reviews (`PR320-R3-MAIN-001`–`007`, `PR320-R3-REG-001`–`006`)
+witnessed seven classes of defect in the test machinery, again none in production, and each
+witness was reproduced at `57232d65` before the repair. Three consecutive passes have now found
+defects in machinery an earlier round of this pull request added, and the repeated failures are
+one shape: an observation's answer -- a pipe's EOF, a kill's errno, a close's errno, a read's
+error kind, an `fstat`'s nonzero -- taken as a fact about something else (the group, the process,
+the descriptor, the sentinel, the file). This round states one contract and applies it to every
+touched setup, error and cleanup path at once, in place of a seventh, eighth and ninth repair of
+one site each: one owner holds each process or descriptor from the call that made it; an
+observation that failed is reported as a failure and never read as absence, emptiness or
+completion; and each stage has one absolute deadline from its start that no retry, interruption
+or partial progress restarts, with a fixed small tick where a syscall needs a timeout of its own.
+Nothing is added over the helpers -- no reader thread, no join, no supervisor -- and every bound
+is one that already existed.
+
+- **The group, not the pipe.** `run_parked_fork_scenario` had read the stderr pipe's EOF as the
+  scenario's group being empty and collected the leader on it, leaving a member that had closed or
+  redirected its stderr alive (`PR320-R3-MAIN-001`, `PR320-R3-REG-003`). Once the scenario process
+  has ended (peeked with `waitid` `WNOWAIT`, its pid and group id still its own) or run past its
+  bound, `ScenarioChild::end` kills the group, collects the leader within `SCENARIO_GROUP_BOUND`
+  by polling `try_wait`, observes the group until no member is left -- on Linux from `/proc`, a
+  zombie counting as ended, elsewhere by `kill` with signal 0 -- and drains the pipe to EOF, each
+  within the same bound and each step's failure noted; the regression
+  `a_scenario_that_exits_leaving_a_silent_member_in_its_group_has_the_group_ended_before_it_returns`
+  reads the member's state the moment the wrapper returns.
+- **A refused kill is a refusal.** `kill_group` had discarded the OS's answer, and a `Child::wait`
+  followed it both on the timeout path and in `Drop` (`PR320-R3-MAIN-002`, `PR320-R3-REG-004`).
+  `kill_group` now answers whether the group was killed; collection is a poll within the bound,
+  never `Child::wait`; after a refused kill a leader that has not ended is left uncollected and
+  the wrapper returns at once with no status and notes naming the refusal and the pid; `Drop`
+  does the same bounded kill-and-collect and prints on stderr the one line it cannot return
+  (`a_group_kill_the_os_refuses_leaves_the_wrapper_bounded_and_the_refusal_in_its_text`).
+- **A drain turn is bounded work.** The drain had retried `Interrupted` inside its own loop and
+  read for as long as output kept coming (`PR320-R3-MAIN-003`, `PR320-R3-REG-005`). `drain_turn`
+  makes at most `DRAIN_TURN_READS` reads and returns on EOF, on nothing more to read, on an
+  interruption or on an error, each as what it was, so the caller's deadline is checked between
+  turns whatever the pipe answers; its contract is driven with controlled readers
+  (`a_drain_turn_ends_on_an_interruption_and_leaves_the_deadline_to_its_caller`,
+  `a_drain_turn_with_output_that_never_pauses_ends_at_its_work_budget`,
+  `a_drain_turn_returns_eof_a_pause_and_a_failure_as_what_they_were`).
+- **One readiness deadline.** `ParkedFork::holding` had waited for the child's report with
+  `read_exact` under a per-read socket timeout of `READY_BOUND`, so a signal handled more often
+  than the timeout restarted the bound forever (`PR320-R3-MAIN-004`). `read_report_within` reads
+  the nine bytes under one deadline from the fork, the socket's timeout now a short tick
+  (`READY_TICK`) set once before the fork while both ends are open; an interruption, a timeout or
+  a short read returns to the same deadline, and the child is collected before the constructor
+  fails, as before (`a_report_read_keeps_one_deadline_across_interruptions`,
+  `a_report_read_assembles_short_answers_and_reports_an_early_close`).
+- **An interrupted sentinel read observed nothing.** `sentinel_closed_within` had panicked on
+  `Interrupted` (`PR320-R3-MAIN-005`); it now makes the read again against its absolute bound,
+  neither counting the interruption as an observation nor acknowledging it through `on_held`,
+  which keeps the acknowledged order, the Linux attribution and the keeper and
+  missing-parent-release sensitivities exactly as they were
+  (`an_interrupted_sentinel_read_is_made_again_within_the_same_bound`).
+- **A failed metadata read is not absence.** `identity_of_the_descriptor` had answered `None` to
+  every nonzero `fstat` (`PR320-R3-MAIN-006`, `PR320-R3-REG-001`); it now answers `Ok(None)` for
+  `EBADF` alone and the error otherwise, and the scan fails the test naming the number and the
+  error, so a scan never proves a release through a read that failed; the lookup is a seam
+  (`descriptors_open_on_with`) so the scan's three readings are driven directly
+  (`a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence`).
+- **The descriptor table, not the close's answer.** The sweep had taken a close's `EBADF` as a
+  number not open (`PR320-R3-REG-002`), as the second round's had taken `EINTR`. It now asks the
+  table before and after each close (`fcntl` `F_GETFD`) and reports any descriptor still open with
+  whatever its close answered -- `EIO`, `EINTR`, `EBADF` or success -- and, after a Linux
+  `close_range` that answered success, verifies every number the parent listed at the fork
+  (`a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcing_the_child`,
+  `a_range_close_that_answers_success_without_closing_is_found_out_before_the_child_is_announced`).
+  A closed number costs one `fcntl` where it cost one `close`; nothing is retried.
+
+The stale rustdoc that called the lookup a `stat` of the entry is corrected
+(`PR320-R3-MAIN-007`), and the body's sentences the reviews found wrong -- every restored first-bad
+shape failing, where the unprobed lookup passed informatively, and two receipts of older heads
+called this head's -- are corrected in the body alone (`PR320-R3-REG-006`). No instrument row is
+added: the permanent regressions name only libc items already classified, and the reviewers'
+witnesses that name others (`SYS_read`, `SYS_fstat`, `pthread_kill`) run as controls in a private
+clone and never in the tree. The inheritance, the refusal's holder list, the classification gap
+and the disposition are as the sections above leave them.

@@ -673,6 +673,15 @@ pub(crate) struct ParkedFork {
 #[cfg(unix)]
 pub(crate) const READY_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The tick of each read the constructor makes while it waits for the report:
+/// the handshake socket's own timeout, set once, before the fork, while both
+/// ends are open. The bound on the whole wait is [`READY_BOUND`], one deadline
+/// from the fork that no tick, interruption or short read restarts
+/// ([`read_report_within`]); the tick only bounds a single read so that the
+/// deadline is looked at.
+#[cfg(unix)]
+pub(crate) const READY_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How long a release, or a drop, waits for the released child to exit
 /// before it kills it.
 #[cfg(unix)]
@@ -682,7 +691,7 @@ pub(crate) const REAP_BOUND: std::time::Duration = std::time::Duration::from_sec
 /// pid and zero after a complete sweep, the descriptor and the errno after
 /// a close that failed.
 #[cfg(unix)]
-const REPORT_LEN: usize = 9;
+pub(crate) const REPORT_LEN: usize = 9;
 #[cfg(unix)]
 const REPORT_PARKED: u8 = 0;
 #[cfg(unix)]
@@ -715,21 +724,22 @@ impl ParkedFork {
     /// # Panics
     ///
     /// When the child reports a descriptor its sweep could not close, or
-    /// reports nothing within [`READY_BOUND`]. The child has been collected
-    /// -- killed first if it was still there -- before the panic, whose
-    /// message names its pid and, for a failed close, the descriptor and the
-    /// error.
+    /// reports nothing within [`READY_BOUND`] of the fork -- one deadline,
+    /// whatever interrupts or shortens the reads that wait for the report.
+    /// The child has been collected -- killed first if it was still there --
+    /// before the panic, whose message names its pid and, for a failed close,
+    /// the descriptor and the error.
     pub(crate) fn holding(kept: libc::c_int) -> Self {
-        use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
 
         let (release, child_end) =
             std::os::unix::net::UnixStream::pair().expect("a socket pair for the park handshake");
         release
-            .set_read_timeout(Some(READY_BOUND))
-            .expect("bound the wait for the child's report");
+            .set_read_timeout(Some(READY_TICK))
+            .expect("bound each read of the child's report, while both ends are open");
         let socket = child_end.as_raw_fd();
-        let ceiling = descriptor_ceiling();
+        let listed = listed_descriptors();
+        let ceiling = descriptor_ceiling(&listed);
         // SAFETY: `fork` takes nothing and reads nothing. Its child runs
         // `park` as its first act and nothing else: only async-signal-safe
         // syscalls, no allocation, no lock, and it never returns into this
@@ -738,9 +748,10 @@ impl ParkedFork {
         let pid = unsafe { libc::fork() };
         if pid == 0 {
             // SAFETY: this is that child, before anything else.
-            unsafe { park(kept, socket, ceiling) }
+            unsafe { park(kept, socket, ceiling, &listed) }
         }
         assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+        let report_deadline = std::time::Instant::now() + READY_BOUND;
         // This process's copy of the child's end is closed now, so the
         // child's read can only be ended by a release or by this process's
         // death.
@@ -753,18 +764,20 @@ impl ParkedFork {
             reap_bound: REAP_BOUND,
             ended: Cell::new(None),
         };
-        let mut report = [0_u8; REPORT_LEN];
         let mut parent_end = parked
             .release
             .as_ref()
             .expect("the parent's end is open until a release");
-        if let Err(error) = parent_end.read_exact(&mut report) {
-            let collected = parked.collect(std::time::Duration::ZERO);
-            panic!(
-                "the parked child {pid} reported nothing within {READY_BOUND:?}: {error}; killed \
-                 and reaped: {collected:?}"
-            );
-        }
+        let report = match read_report_within(&mut parent_end, report_deadline) {
+            Ok(report) => report,
+            Err(error) => {
+                let collected = parked.collect(std::time::Duration::ZERO);
+                panic!(
+                    "the parked child {pid} reported nothing within {READY_BOUND:?}: {error}; \
+                     killed and reaped: {collected:?}"
+                );
+            }
+        };
         let (tag, first, second) = decode_report(&report);
         match tag {
             REPORT_PARKED => {
@@ -776,10 +789,14 @@ impl ParkedFork {
             }
             REPORT_CLOSE_FAILED => {
                 let collected = parked.collect(REAP_BOUND);
+                let reason = if second == 0 {
+                    String::from("the close answered success and the descriptor read open after it")
+                } else {
+                    std::io::Error::from_raw_os_error(second).to_string()
+                };
                 panic!(
-                    "the parked child {pid} could not close inherited descriptor {first}: {}; it \
-                     exited before parking and was reaped: {collected:?}",
-                    std::io::Error::from_raw_os_error(second)
+                    "the parked child {pid} could not close inherited descriptor {first}: {reason}; \
+                     it exited before parking and was reaped: {collected:?}"
                 );
             }
             other => {
@@ -950,14 +967,13 @@ fn wait_for(
     }
 }
 
-/// One past the highest number a descriptor of this process can have at a
-/// fork made now: the larger of `_SC_OPEN_MAX` -- the soft limit every open
-/// made from here on stays below -- and one past the highest number this
-/// process's own table holds as `/dev/fd` lists it, which is where a
-/// descriptor opened before the soft limit was lowered still sits, above
-/// what `sysconf` alone would say. Computed by the parent before it forks:
-/// listing a directory is not something the forked child of a threaded
-/// process may do.
+/// This process's descriptor table as `/dev/fd` lists it now, sorted: the
+/// numbers the child's sweep is verified against after a range close, and
+/// what the ceiling below is read from. Computed by the parent before it
+/// forks: listing a directory is not something the forked child of a
+/// threaded process may do. The listing's own directory descriptor is among
+/// the numbers and is closed again before the fork, so the child finds it
+/// closed like any other.
 ///
 /// # Panics
 ///
@@ -965,30 +981,44 @@ fn wait_for(
 /// then be a guess, and a helper that guesses announces an isolation it did
 /// not check. Linux and macOS, the two Unix targets CI runs, both have it.
 #[cfg(unix)]
-fn descriptor_ceiling() -> libc::c_int {
-    // SAFETY: `sysconf` reads a process limit and touches no memory.
-    let soft = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    // A limit `sysconf` cannot report (-1) contributes nothing; the listing
-    // below still covers every descriptor that exists. A limit above what a
-    // `c_int` holds exists on neither supported Unix and is read the same.
-    let soft = libc::c_int::try_from(soft).unwrap_or(0).max(0);
-    let highest = std::fs::read_dir("/dev/fd")
+fn listed_descriptors() -> Vec<libc::c_int> {
+    let mut listed: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")
         .expect("list this process's descriptor table through /dev/fd")
-        .map(|entry| {
+        .filter_map(|entry| {
             entry
                 .expect("an entry of /dev/fd")
                 .file_name()
                 .to_string_lossy()
                 .parse::<libc::c_int>()
-                .unwrap_or(-1)
+                .ok()
         })
-        .max()
-        .unwrap_or(-1);
+        .collect();
+    listed.sort_unstable();
+    listed
+}
+
+/// One past the highest number a descriptor of this process can have at a
+/// fork made now: the larger of `_SC_OPEN_MAX` -- the soft limit every open
+/// made from here on stays below -- and one past the highest number this
+/// process's own table holds as `/dev/fd` lists it (`listed`, from
+/// [`listed_descriptors`]), which is where a descriptor opened before the
+/// soft limit was lowered still sits, above what `sysconf` alone would say.
+#[cfg(unix)]
+fn descriptor_ceiling(listed: &[libc::c_int]) -> libc::c_int {
+    // SAFETY: `sysconf` reads a process limit and touches no memory.
+    let soft = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    // A limit `sysconf` cannot report (-1) contributes nothing; the listing
+    // still covers every descriptor that exists. A limit above what a
+    // `c_int` holds exists on neither supported Unix and is read the same.
+    let soft = libc::c_int::try_from(soft).unwrap_or(0).max(0);
+    let highest = listed.last().copied().unwrap_or(-1);
     soft.max(highest.saturating_add(1))
 }
 
 /// The child of [`ParkedFork::holding`]'s fork, from its first instruction
-/// to its `_exit`: the sweep, the report, the park, the exit.
+/// to its `_exit`: the sweep, the report, the park, the exit. `listed` is the
+/// parent's table at the fork ([`listed_descriptors`]), read here and never
+/// written or freed: the child `_exit`s.
 ///
 /// # Safety
 ///
@@ -998,9 +1028,14 @@ fn descriptor_ceiling() -> libc::c_int {
 /// `_exit` -- on descriptors the child inherited, allocates nothing and
 /// takes no lock.
 #[cfg(unix)]
-unsafe fn park(kept: libc::c_int, socket: libc::c_int, ceiling: libc::c_int) -> ! {
+unsafe fn park(
+    kept: libc::c_int,
+    socket: libc::c_int,
+    ceiling: libc::c_int,
+    listed: &[libc::c_int],
+) -> ! {
     // SAFETY: the sweep's own contract, which is this fn's.
-    let swept = unsafe { close_above_stdio_except([kept, socket], ceiling) };
+    let swept = unsafe { close_above_stdio_except([kept, socket], ceiling, listed) };
     let (tag, first, second) = match swept {
         // SAFETY: `getpid` takes nothing and reads nothing.
         Ok(()) => (REPORT_PARKED, unsafe { libc::getpid() }, 0),
@@ -1060,6 +1095,63 @@ fn decode_report(report: &[u8; REPORT_LEN]) -> (u8, libc::c_int, libc::c_int) {
     )
 }
 
+/// Read one report from `reader` before `deadline`: the nine bytes, or the
+/// error. One absolute deadline for the whole report, whatever the reads
+/// answer: a read that is interrupted, would block or times out -- the
+/// reader's own tick, [`READY_TICK`] on the handshake socket -- is made again
+/// against the same deadline and never a fresh one, and the bytes a short
+/// read did deliver are kept. `read_exact` would retry an interruption
+/// itself, each retry a fresh socket timeout, so a signal handled more often
+/// than the timeout would hold the caller for as long as the signals came
+/// (`PR320-R3-MAIN-004`). EOF before the report is the child gone before it
+/// reported: an error saying how much arrived.
+///
+/// # Errors
+///
+/// `TimedOut` once the deadline has passed, `UnexpectedEof` for a reader
+/// that ended early, and any other error the reader answered, as it was.
+#[cfg(unix)]
+pub(crate) fn read_report_within(
+    reader: &mut impl std::io::Read,
+    deadline: std::time::Instant,
+) -> std::io::Result<[u8; REPORT_LEN]> {
+    let mut report = [0_u8; REPORT_LEN];
+    let mut filled = 0_usize;
+    loop {
+        let Some(rest) = report.get_mut(filled..).filter(|rest| !rest.is_empty()) else {
+            return Ok(report);
+        };
+        match reader.read(rest) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("the child's end closed after {filled} of {REPORT_LEN} report bytes"),
+                ));
+            }
+            Ok(count) => filled += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "the report deadline passed with {filled} of {REPORT_LEN} bytes read; \
+                             the last read answered: {error}"
+                        ),
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// `write` until every byte of `bytes` is written, `EINTR` retried; the
 /// errno of a write that failed otherwise.
 ///
@@ -1092,7 +1184,9 @@ fn errno() -> libc::c_int {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-/// A close the sweep could not make: which descriptor, and why.
+/// A descriptor the sweep left open: which, and what its close answered --
+/// the errno, or 0 for a close that answered success while the descriptor
+/// read open after it, which a policy can do as easily as it answers an errno.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 struct CloseFailed {
@@ -1101,22 +1195,29 @@ struct CloseFailed {
 }
 
 /// Close every descriptor of the calling process from 3 up to `ceiling`,
-/// exclusive, except the two in `keep`, and say so or say which close
-/// failed. On Linux, `close_range` over each gap between the kept
-/// descriptors and above the last ([`close_ranges_except`]); when any of
+/// exclusive, except the two in `keep`, and say so or say which descriptor
+/// is still open. Whether a descriptor is closed is read from the kernel's
+/// descriptor table, `fcntl` with `F_GETFD`, and never from what a close
+/// answered: a policy answers `EBADF`, `EINTR` or success without making the
+/// close, and an errno says nothing about whether the operation it names was
+/// made (`PR320-R2-MAIN-004`, `PR320-R3-REG-002`). On Linux, `close_range`
+/// over each gap between the kept descriptors and above the last
+/// ([`close_ranges_except`]); when every call answers success, each number the
+/// parent listed at the fork (`listed`) except the kept two is asked and must
+/// read `EBADF`, or it is reported with its close's answer, 0. When any of
 /// those calls fails -- unavailable, `ENOSYS` before Linux 5.9; refused,
 /// `EPERM` under a seccomp policy; or anything else -- and on every other
-/// Unix, one `close` per number, each checked: `EBADF` is a number that was
-/// not open; `EINTR` is verified rather than trusted, because an errno says
-/// nothing about whether the close was made -- a policy that answers `EINTR`
-/// never makes it -- so the sweep asks `fcntl` with `F_GETFD`, and `EBADF`
-/// there is a number the kernel closed before it was interrupted, as Linux
-/// and macOS both do, while any other answer is a descriptor still open,
-/// reported as a failed close with `EINTR`
-/// (`rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child`);
-/// any other failure stops the sweep and is reported with its number. The
-/// forked child is single-threaded and opens nothing, so the number a close
-/// was asked about is the number the verification reads. The ceiling is the
+/// Unix, one pass by number: a number that reads `EBADF` before any close is
+/// not open and is skipped, so a closed number costs what it cost before;
+/// one that reads open is closed and asked again, `EBADF` then being the
+/// close, and any other reading a descriptor still open, reported with the
+/// close's answer -- `EIO`, `EINTR`, `EBADF` or 0 alike
+/// (`rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child`,
+/// `rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcing_the_child`).
+/// Nothing is retried: a close that did not close is a failed sweep, and the
+/// constructor collects the child and fails. The forked child is
+/// single-threaded and opens nothing, so the number a close was asked about
+/// is the number the readings before and after it are of. The ceiling is the
 /// caller's ([`descriptor_ceiling`]), never `sysconf` alone, because a soft
 /// limit lowered after a descriptor was opened leaves that descriptor above
 /// `_SC_OPEN_MAX`.
@@ -1130,39 +1231,64 @@ struct CloseFailed {
 unsafe fn close_above_stdio_except(
     keep: [libc::c_int; 2],
     ceiling: libc::c_int,
+    listed: &[libc::c_int],
 ) -> Result<(), CloseFailed> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: the range sweep's contract, which is this fn's.
         if unsafe { close_ranges_except(keep) } {
+            for &descriptor in listed {
+                if descriptor < 3 || keep.contains(&descriptor) {
+                    continue;
+                }
+                // SAFETY: `fcntl` with `F_GETFD` reads one flag of this
+                // process's own descriptor table and touches no memory;
+                // async-signal-safe.
+                if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 && errno() == libc::EBADF
+                {
+                    continue;
+                }
+                return Err(CloseFailed {
+                    descriptor,
+                    errno: 0,
+                });
+            }
             return Ok(());
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = listed;
     for descriptor in 3..ceiling {
         if keep.contains(&descriptor) {
             continue;
         }
-        // SAFETY: a numeric close in the forked child; the fn's own contract.
-        if unsafe { libc::close(descriptor) } == -1 {
-            let failed_with = errno();
-            if failed_with == libc::EBADF {
+        // SAFETY: `fcntl` with `F_GETFD` reads one flag of this process's
+        // own descriptor table and touches no memory; async-signal-safe.
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+            let unreadable = errno();
+            if unreadable == libc::EBADF {
                 continue;
-            }
-            if failed_with == libc::EINTR {
-                // SAFETY: `fcntl` with `F_GETFD` reads one flag of this
-                // process's own descriptor table and touches no memory;
-                // async-signal-safe, on the number the close was just asked
-                // about, which nothing in this child can have reused.
-                let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-                if flags == -1 && errno() == libc::EBADF {
-                    continue;
-                }
             }
             return Err(CloseFailed {
                 descriptor,
-                errno: failed_with,
+                errno: unreadable,
             });
         }
+        // SAFETY: a numeric close in the forked child; the fn's own contract.
+        let answered = if unsafe { libc::close(descriptor) } == -1 {
+            errno()
+        } else {
+            0
+        };
+        // SAFETY: as above, on the number the close was just asked about,
+        // which nothing in this child can have reused.
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 && errno() == libc::EBADF {
+            continue;
+        }
+        return Err(CloseFailed {
+            descriptor,
+            errno: answered,
+        });
     }
     Ok(())
 }
