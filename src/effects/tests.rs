@@ -1337,6 +1337,253 @@ fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {
     );
 }
 
+fn unclassified_production_files_leaving_a_governed_lint_unfenced(
+    sources: &[(String, String)],
+    classified: &[&str],
+    declaration_only: &[&str],
+    is_test_module: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let by_path: BTreeMap<String, String> = sources.iter().cloned().collect();
+    let mut named = Vec::new();
+    for (path, source) in sources {
+        if !path.starts_with("src/")
+            || classified.contains(&path.as_str())
+            || declaration_only.contains(&path.as_str())
+            || is_test_module(path)
+        {
+            continue;
+        }
+        let ancestors = ancestor_module_files(path, &by_path);
+        for lint in USED_GOVERNED_LINTS {
+            let own = crate::effects::lint_levels::file_level_lint_state(source, lint);
+            if matches!(own, Some("forbid" | "deny" | "allow" | "expect")) {
+                continue;
+            }
+            let inherited = ancestors.iter().find_map(|ancestor| {
+                by_path
+                    .get(ancestor)
+                    .and_then(|above| {
+                        crate::effects::lint_levels::file_level_lint_state(above, lint)
+                    })
+                    .map(|level| (ancestor.as_str(), level))
+            });
+            match inherited {
+                Some((_, "forbid")) => {}
+                Some((ancestor, level @ ("allow" | "expect"))) => named.push(format!(
+                    "{path}: `{lint}` is stated at no level and the production build inherits \
+                     `{level}` from {ancestor}: an allowance recorded for that file reaches this \
+                     one without a row of its own"
+                )),
+                Some((ancestor, level)) => named.push(format!(
+                    "{path}: `{lint}` is stated at no level and the production build inherits \
+                     `{level}` from {ancestor}, which an inner `allow` the placement scan does not \
+                     read lowers"
+                )),
+                None => named.push(format!(
+                    "{path}: `{lint}` is stated at no level and no ancestor states it, so the \
+                     production build takes it from `-D warnings` alone, which an inner `allow` \
+                     the placement scan does not read lowers"
+                )),
+            }
+        }
+    }
+    named
+}
+
+#[test]
+fn the_unclassified_fence_rule_names_a_silent_file_and_excuses_one_a_forbid_reaches() {
+    fn tree(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+            .collect()
+    }
+    fn named(files: &[(&str, &str)], classified: &[&str], test_modules: &[&str]) -> Vec<String> {
+        unclassified_production_files_leaving_a_governed_lint_unfenced(
+            &tree(files),
+            classified,
+            &["src/lib.rs"],
+            &|path| test_modules.contains(&path),
+        )
+    }
+    const SILENT: &str = "fn go() {}\n";
+    const FORBID: &str = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, \
+                          clippy::disallowed_macros)]\nfn go() {}\n";
+    const DENY: &str = "#![deny(clippy::disallowed_methods, clippy::disallowed_types, \
+                        clippy::disallowed_macros)]\nfn go() {}\n";
+
+    for (what, files, classified, test_modules, expected) in [
+        (
+            "a silent file under a silent, declaration-only root takes every lint from \
+             -D warnings alone; the root itself is held code-free by the declaration guard",
+            vec![("src/lib.rs", "pub mod a;\n"), ("src/a.rs", SILENT)],
+            vec![],
+            vec![],
+            3,
+        ),
+        (
+            "a silent child of a root that denies inherits a level an allow lowers",
+            vec![("src/a.rs", DENY), ("src/a/b.rs", SILENT)],
+            vec![],
+            vec![],
+            3,
+        ),
+        (
+            "a silent child of a root that allows one lint and forbids the rest inherits the \
+             allowance, which reaches it without a row of its own",
+            vec![
+                (
+                    "src/a.rs",
+                    "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, \
+                     clippy::disallowed_macros)]\nfn go() {}\n",
+                ),
+                ("src/a/b.rs", SILENT),
+            ],
+            vec![],
+            vec![],
+            1,
+        ),
+        (
+            "`warn` is a statement without being a fence or an allowance",
+            vec![(
+                "src/a.rs",
+                "#![warn(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, \
+                 clippy::disallowed_macros)]\nfn go() {}\n",
+            )],
+            vec![],
+            vec![],
+            1,
+        ),
+        (
+            "a child of a root that forbids in the production build only is reached by that \
+             forbid; a lint the root leaves unstated is named in the root and in the child",
+            vec![
+                (
+                    "src/a.rs",
+                    "#![cfg_attr(not(test), forbid(clippy::disallowed_methods, \
+                     clippy::disallowed_types))]\nfn go() {}\n",
+                ),
+                ("src/a/b.rs", SILENT),
+            ],
+            vec![],
+            vec![],
+            2,
+        ),
+    ] {
+        let found = named(&files, &classified, &test_modules);
+        assert_eq!(found.len(), expected, "{what}: {found:#?}");
+    }
+
+    let root_not_held = unclassified_production_files_leaving_a_governed_lint_unfenced(
+        &tree(&[("src/lib.rs", "pub mod a;\n"), ("src/a.rs", SILENT)]),
+        &[],
+        &[],
+        &|_| false,
+    );
+    assert_eq!(
+        root_not_held.len(),
+        6,
+        "a silent root nobody holds to declarations is named for every lint too: \
+         {root_not_held:#?}"
+    );
+
+    for (what, files, classified, test_modules) in [
+        (
+            "the file states every lint itself",
+            vec![("src/a.rs", FORBID)],
+            vec![],
+            vec![],
+        ),
+        (
+            "a `deny` is a statement here; whether it could be `forbid` is the fence sweep's \
+             question, and the two roots that state one are the fifty-file finding's",
+            vec![("src/a.rs", DENY)],
+            vec![],
+            vec![],
+        ),
+        (
+            "a silent child under a forbidding root",
+            vec![("src/a.rs", FORBID), ("src/a/b.rs", SILENT)],
+            vec![],
+            vec![],
+        ),
+        (
+            "a silent grandchild under a forbidding `mod.rs` root",
+            vec![("src/a/mod.rs", FORBID), ("src/a/b/c.rs", SILENT)],
+            vec![],
+            vec![],
+        ),
+        (
+            "a silent module under a forbidding crate root",
+            vec![("src/lib.rs", FORBID), ("src/a.rs", SILENT)],
+            vec![],
+            vec![],
+        ),
+        (
+            "a classified module is the roll-call guard's, not this rule's",
+            vec![("src/a.rs", SILENT)],
+            vec!["src/a.rs"],
+            vec![],
+        ),
+        (
+            "a whole-file test module has no production region",
+            vec![("src/a/tests.rs", SILENT)],
+            vec![],
+            vec!["src/a/tests.rs"],
+        ),
+        (
+            "an example is its own crate root and reaches nothing in the library",
+            vec![("examples/probe.rs", SILENT)],
+            vec![],
+            vec![],
+        ),
+    ] {
+        let found = named(&files, &classified, &test_modules);
+        assert!(found.is_empty(), "{what}: {found:#?}");
+    }
+}
+
+#[test]
+fn every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid() {
+    let sources = scanned_sources();
+    let stating = sources
+        .iter()
+        .filter(|(path, source)| {
+            path.starts_with("src/")
+                && !super::CLASSIFIED_MODULES.contains(&path.as_str())
+                && USED_GOVERNED_LINTS.iter().all(|lint| {
+                    crate::effects::lint_levels::file_level_lint_state(source, lint).is_some()
+                })
+        })
+        .count();
+    assert!(
+        stating > 10,
+        "only {stating} unclassified files state every governed lint at file level, so this \
+         census is measuring nothing"
+    );
+    let named = unclassified_production_files_leaving_a_governed_lint_unfenced(
+        &sources,
+        super::CLASSIFIED_MODULES,
+        DECLARATION_ONLY_MODULES,
+        &is_whole_file_test_module,
+    );
+    assert!(
+        named.is_empty(),
+        "{} governed-lint pair(s) in production files outside `CLASSIFIED_MODULES` are fenced \
+         by nothing: the file states no level for the lint and inherits no `forbid` from an \
+         ancestor, so the shape Gate 5's fourth run executed in src/capacity.rs, and #318's \
+         second MAIN review executed in src/plan/mod.rs, applies unchanged \
+         (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). Write \
+         `#![forbid(clippy::disallowed_methods, clippy::disallowed_types, \
+         clippy::disallowed_macros)]` in the file's prologue, `cfg_attr(not(test), forbid(..))` \
+         for a lint only whole-file test children allow, or the fence at the root the file \
+         descends from; a classified module is judged by the roll-call guard instead, and a \
+         module `a_declaring_module_holds_declarations_and_re_exports_and_nothing_else` holds \
+         code-free hosts nothing. The pairs:\n{named:#?}",
+        named.len()
+    );
+}
+
 const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;
 
 struct UnstatedLint {
@@ -2967,13 +3214,28 @@ fn inline_module_openers(source: &str) -> usize {
     found
 }
 
+const DECLARATION_ONLY_MODULES: &[&str] = &[ENGINE_FACADE, "src/lib.rs"];
+
 #[test]
 fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {
+    for path in DECLARATION_ONLY_MODULES {
+        let source = fs::read_to_string(repo_root().join(path)).expect(path);
+        assert_eq!(items_beyond_declarations(&source), Vec::new(), "{path}");
+        assert!(
+            source.matches("mod ").count() > 8,
+            "{path} no longer declares modules, so the empty answer above says nothing"
+        );
+        let with_a_body = format!("{source}\nfn rf_probe_body() {{}}\n");
+        assert_eq!(
+            items_beyond_declarations(&with_a_body).len(),
+            1,
+            "{path}: a function appended to a declaring module is refused"
+        );
+    }
     let facade = fs::read_to_string(repo_root().join(ENGINE_FACADE)).expect(ENGINE_FACADE);
-    assert_eq!(items_beyond_declarations(&facade), Vec::new());
     assert!(
-        facade.matches("mod ").count() > 8 && facade.contains("pub use "),
-        "the facade no longer declares and re-exports, so the empty answer above says nothing"
+        facade.contains("pub use "),
+        "the facade no longer re-exports, so the table below exercises nothing"
     );
 
     let holds = |addition: &str| -> Vec<String> {

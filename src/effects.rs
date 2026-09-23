@@ -1,5 +1,14 @@
 //! Extended notes: `docs/internals/effects.md`
 
+#![cfg_attr(
+    not(test),
+    forbid(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
+    )
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLIPPY_TOML: &str = "clippy.toml";

@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/agent/mod.md`
 
+#![deny(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 pub mod bin;
 pub mod claude;
 pub mod codex;

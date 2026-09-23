@@ -769,8 +769,10 @@ path = "src/effects.rs"
 allows = []
 packet = "effect_site_inventory.outputs: clippy.toml; effects/allowlist.toml; the wrapper classification; the residue-class evidence record"
 review = """
-This enforcement layer itself, and it carries NO attribute — which is a stronger \
-claim than any other entry in this section makes. Its whole surface is paths, \
+This enforcement layer itself. It carries no allowance and, since #318, a \
+production fence -- `#![cfg_attr(not(test), forbid(..))]` of all three governed \
+lints, conditional because its whole-file test children allow them -- which is a \
+stronger claim than any other entry in this section makes. Its whole surface is paths, \
 parsers and classification over `&str`; it reaches no denied primitive, and the \
 one `std::process::Command` its text contains is inside `DENIAL_FIXTURES`, a \
 string constant that `src/effects/tests.rs` compiles in order to prove it is \

@@ -1,4 +1,9 @@
 //! Extended notes: `docs/internals/error.md`
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 use std::fmt;
 use std::path::PathBuf;
 

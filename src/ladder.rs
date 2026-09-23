@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/ladder.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use crate::ir::QuestionKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
