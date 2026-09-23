@@ -4741,14 +4741,20 @@ fn lease_released_within(
 
 /// Every descriptor of this process open on the file at `path`, by the
 /// identity of what it is open on -- device and inode -- and never by number.
-/// The listing is `/dev/fd` and the lookup is a `stat` of each entry: on
-/// Linux the entry is the `/proc/self/fd` magic link and `stat` follows it to
-/// the open file, deleted or not; on macOS the fdesc node answers with the
-/// underlying vnode's own attributes. A path operation, so the fn borrows and
-/// owns no descriptor by a number it did not open, and a number closed
-/// between the listing and its lookup answers `ENOENT` and is skipped
+/// The listing is `/dev/fd`, and the lookup asks the kernel through each
+/// listed number itself, `fstat`, for the identity of what that number is
+/// open on ([`identity_of_the_descriptor`]), against the target's from a
+/// `stat` of its path ([`identity_at`]), the two compared field by field.
+/// The lookup owns nothing and has no precondition: a number closed between
+/// the listing and its lookup answers `EBADF` and is skipped
 /// (`a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
-/// constructs that window). A number closed by a drop is the next number any
+/// constructs that window), and the scan opens and closes nothing, so no
+/// lock this process holds on a file it visits is touched. Not a `stat` of
+/// the `/dev/fd` entry, which was this fn's lookup before: on macOS that
+/// answers no open file's identity -- the native run of `1a1734cf` read an
+/// empty scan through it while the hold was open -- and on Linux it is a
+/// path operation on an entry another thread's close removes. A number
+/// closed by a drop is the next number any
 /// thread of this process opens, so a number that reads open is no evidence
 /// that the file it used to name is still held, and a number that reads
 /// closed is no evidence that nothing else of this process holds that file
@@ -4768,9 +4774,7 @@ fn descriptors_open_on_observing(
     path: &Path,
     on_listed: &mut dyn FnMut(libc::c_int),
 ) -> Vec<libc::c_int> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let target = fs::metadata(path).expect("the file whose descriptors are counted exists");
+    let target = identity_at(path).expect("the file whose descriptors are counted exists");
     let mut open = Vec::new();
     for entry in
         fs::read_dir("/dev/fd").expect("list this process's descriptor table through /dev/fd")
@@ -4780,14 +4784,55 @@ fn descriptors_open_on_observing(
             continue;
         };
         on_listed(number);
-        if let Ok(metadata) = fs::metadata(entry.path()) {
-            if metadata.dev() == target.dev() && metadata.ino() == target.ino() {
+        if let Some(identity) = identity_of_the_descriptor(number) {
+            if identity.st_dev == target.st_dev && identity.st_ino == target.st_ino {
                 open.push(number);
             }
         }
     }
     open.sort_unstable();
     open
+}
+
+/// The identity of the file at `path`, its `stat`, or the error: what
+/// [`descriptors_open_on`] compares each descriptor's identity against, read
+/// into the same struct so that the comparison is field by field.
+#[cfg(unix)]
+fn identity_at(path: &Path) -> std::io::Result<libc::stat> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .expect("a path this module made carries no interior NUL");
+    let mut identity = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` reads the NUL-terminated path and writes one `stat`
+    // through the pointer; both live for the call.
+    if unsafe { libc::stat(path.as_ptr(), identity.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `stat` answered 0, so it wrote the whole struct.
+    Ok(unsafe { identity.assume_init() })
+}
+
+/// The identity of what `number` is open on, its `fstat`, asked of the
+/// kernel through the number itself, or `None` for a number that is not
+/// open (`EBADF`). The call takes no ownership of the number and has no
+/// precondition on it: a number closed since it was listed is answered, not
+/// read through, and one closed and reused answers the new file's identity.
+/// Nothing is opened or closed, so no lock this process holds is touched --
+/// which a lookup that opened or duplicated the entry and then closed what
+/// it opened could not say, closing any descriptor of a file releasing every
+/// record lock the process holds on it.
+#[cfg(unix)]
+fn identity_of_the_descriptor(number: libc::c_int) -> Option<libc::stat> {
+    let mut identity = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fstat` takes the number by value and writes one `stat`
+    // through the pointer, which lives for the call; a number that is not
+    // open is answered with `EBADF` and nothing is written.
+    if unsafe { libc::fstat(number, identity.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: `fstat` answered 0, so it wrote the whole struct.
+    Some(unsafe { identity.assume_init() })
 }
 
 /// The pre-spawn half without a spawn: the descriptor returned is a live
@@ -5109,9 +5154,31 @@ impl std::fmt::Display for SentinelHeldPastBound {
     }
 }
 
-/// Read `observer`, this process's end of a sentinel socket pair, every 50 ms
-/// until it answers EOF or `bound` runs out: how long that took and how many
-/// reads it was, or the report of a copy that outlasted the bound. EOF is the
+/// A sentinel socket pair: the end a fork inherits and keeps or sweeps, and
+/// this process's observer end, whose 50 ms read timeout is set here, while
+/// both ends are open, and never at an observation. On macOS a socket whose
+/// peer is gone accepts no option -- `setsockopt` answers `EINVAL` once every
+/// copy of the other end has closed, which the native run of `1a1734cf` hit
+/// at the observation that follows a keeper's release -- where Linux accepts
+/// it, so a timeout set at the observation reads as sound on Linux and is
+/// not.
+#[cfg(unix)]
+fn sentinel_pair() -> (
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+) {
+    let (sentinel, observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("bound each read of the sentinel while its peer is open");
+    (sentinel, observer)
+}
+
+/// Read `observer`, this process's end of a [`sentinel_pair`], every 50 ms --
+/// its read timeout, set when the pair was made -- until it answers EOF or
+/// `bound` runs out: how long that took and how many reads it was, or the
+/// report of a copy that outlasted the bound. EOF is the
 /// kernel's answer that no copy of the other end is open in any process, so
 /// it proves that the fork under test closed its inherited one only once
 /// every other copy is accounted for: a sibling's fork made while that end
@@ -5130,9 +5197,6 @@ fn sentinel_closed_within(
     bound: Duration,
     on_held: &mut dyn FnMut(u32),
 ) -> Result<(Duration, u32), SentinelHeldPastBound> {
-    observer
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .expect("bound each read of the sentinel");
     let started = Instant::now();
     let mut observations = 0_u32;
     let mut byte = [0_u8; 1];
@@ -5298,8 +5362,7 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     let root = scratch("childlease-sentinel");
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000004");
     fs::create_dir_all(&public).expect("the run's public directory");
-    let (sentinel, mut observer) =
-        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    let (sentinel, mut observer) = sentinel_pair();
     let sentinel_number = sentinel.as_raw_fd();
     let identity = sentinel_identity(sentinel_number);
     let sibling = ParkedFork::holding(sentinel_number);
@@ -5359,8 +5422,7 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
         "the released fork exited cleanly: {status:?}"
     );
 
-    let (sentinel, mut observer) =
-        std::os::unix::net::UnixStream::pair().expect("a second sentinel socket pair");
+    let (sentinel, mut observer) = sentinel_pair();
     let identity = sentinel_identity(sentinel.as_raw_fd());
     let unrelated_public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000007");
     fs::create_dir_all(&unrelated_public).expect("another run's public directory");
@@ -5764,8 +5826,7 @@ fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
     let root = scratch(tag);
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
     fs::create_dir_all(&public).expect("the run's public directory");
-    let (sentinel, mut observer) =
-        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    let (sentinel, mut observer) = sentinel_pair();
     let identity = sentinel_identity(sentinel.as_raw_fd());
     let parked = ParkedFork::holding_the_lease_of(&public);
     let holder = parked.pid();
@@ -6514,8 +6575,7 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     let root = scratch("childlease-high-descriptor");
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000009");
     fs::create_dir_all(&public).expect("the run's public directory");
-    let (sentinel, mut observer) =
-        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    let (sentinel, mut observer) = sentinel_pair();
     let mut limits = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

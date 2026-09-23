@@ -2109,6 +2109,10 @@ not_an_effect = [
     "getgroups",
     "getpgid",
     "getpgrp",
+    # The identity of what a descriptor is open on, asked of the kernel through the
+    # number itself by the rundir tests' identity scan (`descriptors_open_on`): a
+    # metadata read that owns, opens and closes nothing.
+    "fstat",
     "getpid",
     "getppid",
     "getrlimit",
@@ -2134,6 +2138,9 @@ not_an_effect = [
     "sleep",
     "sock_filter",
     "sock_fprog",
+    # The struct `fstat` and `stat` write, and the `stat` of a path the identity
+    # scan compares each descriptor's identity against; metadata reads.
+    "stat",
     "suseconds_t",
     "sysconf",
     "time_t",

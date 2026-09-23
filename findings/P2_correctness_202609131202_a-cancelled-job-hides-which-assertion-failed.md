@@ -330,10 +330,13 @@ and each witness was reproduced at `e5f944a6` before the repair. Each repair rem
 at the site that made it, with nothing new layered over it:
 
 - **An owned descriptor.** `descriptors_open_on` had made a `File` from every number `/dev/fd`
-  listed, a number another thread may close after the listing; it now `stat`s each entry — on
-  Linux the `/proc/self/fd` magic link, followed to the open file, on macOS the fdesc node's own
-  attributes, the underlying vnode's — a path operation with no descriptor borrowed or owned by a
-  number the fn did not open, the fn without `unsafe`.
+  listed, a number another thread may close after the listing; it now asks the kernel through
+  the number itself — `fstat`, which owns nothing and has no precondition: a number closed since
+  the listing answers `EBADF` and is skipped, one reused answers the new file's identity —
+  against the target's `stat`, compared field by field, and it opens and closes nothing, so no
+  lock this process holds on a file it visits is touched. (The round's first repair, a `stat` of
+  the `/dev/fd` entry, read as sound in XNU's source and was not: the native macOS run of
+  `1a1734cf` read an empty scan through it; the section below records that run.)
   `a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
   constructs the window with the closing in the observation's hands.
 - **A completed close.** The parked fork's sweep had read `EINTR` as a close the kernel made; a
@@ -366,3 +369,29 @@ at the site that made it, with nothing new layered over it:
 
 The inheritance, the refusal's holder list, the classification gap and the disposition are as the
 section above leaves them.
+
+## The round's Unix test support, first run on macOS (2026-09-23, round three, continued)
+
+The push of `1a1734cf` was the first time the round's Unix test support ran on macOS at all:
+every earlier Apple check on the build box was a cross-compile (`cargo check`, no clippy), and
+the body said the runtime there was CI's. CI's native run answered with two jobs red and every
+Linux and Windows job green:
+
+- `lint (macos)`: the two `let identity = sentinel_identity(...)` bindings are
+  `clippy::let_unit_value` where the non-Linux arm returned `()`. The arm now returns
+  `SentinelIdentityUnreadable`, the statement that the holder cannot be read there, and the
+  non-Linux `sentinel_attribution` takes it; clippy for both Apple targets under `-D warnings`
+  is now among the box's cross-checks.
+- `test (macos-latest)`, five of the round's rundir tests: the identity scan read `[]` where the
+  hold's descriptor was expected, in the three tests that prove a release or a reuse by
+  identity — the `stat` of a `/dev/fd` entry answers no open file's identity on macOS — and
+  `set_read_timeout` on a sentinel observer answered `EINVAL` in the sentinel test's last
+  observation and in the lowered-soft-limit scenario's child — on macOS a socket whose peer is
+  gone accepts no option, where Linux accepts it, so the timeout set at the observation read as
+  sound on every Linux run. The lookup is now `fstat` through the number (above), and the
+  observer's timeout is set by `sentinel_pair` while both ends are open, never at the
+  observation. `fstat` and `stat` are classified `not_an_effect` beside `SYS_close`.
+
+Both are platform facts the round had taken from source reading. The box has no macOS
+executor, so each repair is verified here on Linux and by clippy for both Apple targets, with
+its reasoning written at the site; its native evidence is CI's.
