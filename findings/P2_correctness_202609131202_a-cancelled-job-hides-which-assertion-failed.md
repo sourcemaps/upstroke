@@ -285,10 +285,14 @@ read the copy held, so that the order is acknowledged and not timed;
 `a_copy_that_outlasts_the_bound_still_fails_the_release_observation` shows a copy past the bound
 still failing it; and `a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else` proves
 what the parked fork holds: a sentinel socket end this process had open at the fork answers EOF
-once this process's own copy is closed, another run's lease open across the fork reads free once
-this process's copy is dropped, and on Linux the child's `/proc` descriptor table is exactly stdio,
-the socket and the lease; its control is a parked fork told to keep the sentinel, which cannot
-answer EOF until released. The first form of the parked fork (the branch's first commit) held every
+once this process's own copy is closed, another run's lease open across the fork reads free —
+within the same bound, and while the control still lives — once this process's copy is dropped, and
+on Linux the child's `/proc` descriptor table is exactly stdio, the socket and the lease; its control
+is a parked fork told to keep the sentinel, which cannot answer EOF until released. The round's own
+tests had re-created the single observation right after a drop at three places (the other run's
+lease in that test, the lease after the `dup2` in the number-reuse regression, and an exact count of
+observations after the sibling copy's release); a sibling raw fork whose copy lasted 300 ms failed
+each with correct code, and each now observes within the bound and reports the count. The first form of the parked fork (the branch's first commit) held every
 descriptor the process had open at its fork for as long as it was parked, which is the collateral
 the recovery fixture exists to stop, and the first form of that control was a raw `fork` that
 closed nothing and so held every concurrent test's descriptors for as long as it slept

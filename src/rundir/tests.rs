@@ -4834,10 +4834,12 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
 /// Constructed here in this thread's own hands, with no window for another
 /// thread to take part: `dup2` closes the hold's descriptor and installs a
 /// copy of `/dev/null` under the same number in one call, which is what a
-/// drop followed by another thread's open leaves behind. The lease is free,
-/// this process has no descriptor open on it, and the number is open --
-/// exactly the reading a check by number would mistake for the lease still
-/// held.
+/// drop followed by another thread's open leaves behind. The lease reads
+/// free -- within the bound the release test observes under, because a
+/// sibling's fork made while the hold was open carries a copy into its
+/// `exec` window here too -- this process has no descriptor open on it, and
+/// the number is open: exactly the reading a check by number would mistake
+/// for the lease still held.
 #[cfg(unix)]
 #[test]
 fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open() {
@@ -4869,10 +4871,9 @@ fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lea
         "the hold's number now names /dev/null: {}",
         std::io::Error::last_os_error()
     );
-    assert!(
-        !observe_cleanup_hold(&public, &mut NoHooks),
-        "the lease is free: its only descriptor was closed by the dup2"
-    );
+    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!("the lease reads free once the dup2 has closed its only descriptor here: {held}");
+    }
     assert!(
         descriptors_open_on(&lease).is_empty(),
         "and this process has no descriptor open on it, whatever its old number names now"
@@ -4896,11 +4897,13 @@ fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lea
 /// that window, so it is known alive and holding. The single observation the
 /// test above used to make reads held. The bounded one is then made with the
 /// release in its own hands: its first observation reads the copy held and,
-/// from inside that observation, releases the fork; its next observation
+/// from inside that observation, releases the fork; a later observation
 /// reads free. Held, released, free is therefore an order the observation
 /// acknowledged, not one a clock was trusted to produce, and a legal
 /// schedule that delays either side changes nothing: the release waits for
-/// the observation, however long the observation takes to arrive.
+/// the observation, however long the observation takes to arrive, and a
+/// second sibling's copy in its own window after the release costs
+/// observations that are reported, not asserted.
 #[cfg(unix)]
 #[test]
 fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor() {
@@ -4946,10 +4949,10 @@ fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descrip
         released_at, 1,
         "the first observation read the copy held, so the release came after it"
     );
-    assert_eq!(
-        observations, 2,
-        "and the observation after the release read free: {observations} observations over \
-         {waited:?}"
+    assert!(
+        observations > released_at,
+        "and the observation that read free came after the one that released the fork: \
+         {observations} observations over {waited:?}"
     );
     assert!(
         status.success(),
@@ -5020,7 +5023,9 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
 /// `fork` that closes nothing would hold every descriptor of every concurrent
 /// test for as long as it slept. Another run's lease is open across that
 /// control's fork and this process's copy then dropped: the lease reads free
-/// while the control lives, because the control closed its copy. On Linux
+/// -- within the bound the release test observes under, since a sibling's
+/// copy can be in its window here too -- while the control lives, because
+/// the control closed its copy. On Linux
 /// the child's descriptor table is read from `/proc` as well: exactly stdio,
 /// the socket and the lease, and the lease entry names `cleanup.lock`.
 #[cfg(unix)]
@@ -5112,11 +5117,18 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     let keeper = ParkedFork::holding(sentinel.as_raw_fd());
     let keeper_pid = keeper.pid();
     drop(unrelated_hold);
-    assert!(
-        !observe_cleanup_hold(&unrelated_public, &mut NoHooks),
-        "the other run's lease, open across the control's fork, reads free once this process's \
-         copy is dropped: the control {keeper_pid} closed its copy"
-    );
+    match lease_released_within(&unrelated_public, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        Ok((waited, observations)) => assert!(
+            keeper.is_alive(),
+            "the control {keeper_pid} is still parked when the other run's lease reads free \
+             ({observations} observations over {waited:?}), so the copy that cleared was a \
+             sibling's window and not the control's, which closed its own before it reported"
+        ),
+        Err(held) => panic!(
+            "the other run's lease, open across the control's fork, reads free once this \
+             process's copy is dropped, because the control {keeper_pid} closed its copy: {held}"
+        ),
+    }
     drop(sentinel);
     let read = observer.read(&mut byte);
     assert!(
