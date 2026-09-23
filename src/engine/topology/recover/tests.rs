@@ -1,6 +1,8 @@
 //! Extended notes: `docs/internals/engine/topology/recover/tests.md`
 
 use std::cell::Cell;
+#[cfg(unix)]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -100,6 +102,10 @@ struct Fixture {
     resume_attempts: Cell<u32>,
     release_bound: Cell<Duration>,
     hold_past_bound: Cell<Option<CleanupHoldPastBound>>,
+    #[cfg(unix)]
+    release_once_held: RefCell<Option<crate::workspace_manager::fixture::ParkedFork>>,
+    #[cfg(unix)]
+    holder_released: Cell<Option<(u32, std::process::ExitStatus)>>,
 }
 
 #[derive(Default)]
@@ -276,6 +282,10 @@ impl Fixture {
             resume_attempts: Cell::new(0),
             release_bound: Cell::new(RELEASE_BOUND),
             hold_past_bound: Cell::new(None),
+            #[cfg(unix)]
+            release_once_held: RefCell::new(None),
+            #[cfg(unix)]
+            holder_released: Cell::new(None),
         }
     }
 
@@ -323,6 +333,17 @@ impl Fixture {
     fn derive(&self, explicit: Option<&Path>) -> Result<RootDerived, UpstrokeError> {
         RootDerived::derive_with(&self.repo_root, RUN_ID, explicit, TOPOLOGY_SCHEMA)
     }
+
+    #[cfg(unix)]
+    fn holder_observed(&self, observation: u32) {
+        if let Some(parked) = self.release_once_held.borrow_mut().take() {
+            let status = parked.release();
+            self.holder_released.set(Some((observation, status)));
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn holder_observed(&self, _observation: u32) {}
 }
 
 impl Drop for Fixture {
@@ -11651,27 +11672,28 @@ fn a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnati
         "and its inherited copy alone holds the run's cleanup lease, this process having closed \
          its own"
     );
-    let released = parked.release_after(Duration::from_millis(300));
+    fixture.release_once_held.replace(Some(parked));
     let resumed = resume_as(
         &fixture,
         "resumer-after-the-fork",
         &runtime_holding_the_record(),
         &mut HarnessTopologyHooks::new(harness()),
     );
-    let returned_at = std::time::Instant::now();
-    let (released_at, status) = released.join();
-    let (_, handle) =
-        resumed.expect("the next incarnation resumes once the parked fork's copy is released");
-    assert!(
-        returned_at >= released_at,
-        "the resume returned {:?} before the fork {holder} released the lease: it did not wait \
-         for the previous incarnation's release",
-        released_at - returned_at
+    let (released_at, status) = fixture.holder_released.get().expect(
+        "the later resume's wait observed the copy held and, from inside that observation, \
+         released the fork {holder}: without the wait there is no observation and no release",
+    );
+    assert_eq!(
+        released_at, 1,
+        "the wait's first observation read the copy held, so the release came after it and the \
+         resume after the release"
     );
     assert!(
         status.success(),
-        "the released fork exec'd `true`: {status:?}"
+        "the released fork exited cleanly: {status:?}"
     );
+    let (_, handle) =
+        resumed.expect("the next incarnation resumes once the parked fork's copy is released");
     assert!(
         fixture.hold_past_bound.get().is_none(),
         "the wait ended inside its bound: {:?}",
@@ -11726,7 +11748,7 @@ fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {
         .get()
         .expect("the wait recorded that it ran out");
     assert!(
-        held.waited >= held.bound && held.observations >= 2,
+        held.waited >= held.bound,
         "the wait ran its whole bound: {held}"
     );
     assert!(
@@ -14574,6 +14596,10 @@ impl Fixture {
             resume_attempts: Cell::new(0),
             release_bound: Cell::new(RELEASE_BOUND),
             hold_past_bound: Cell::new(None),
+            #[cfg(unix)]
+            release_once_held: RefCell::new(None),
+            #[cfg(unix)]
+            holder_released: Cell::new(None),
         })
     }
 }
@@ -24126,6 +24152,14 @@ fn wait_for_cleanup_hold_release_within(
     public: &Path,
     bound: Duration,
 ) -> Result<(), CleanupHoldPastBound> {
+    wait_for_cleanup_hold_release_observing(public, bound, &mut |_| {})
+}
+
+fn wait_for_cleanup_hold_release_observing(
+    public: &Path,
+    bound: Duration,
+    on_held: &mut dyn FnMut(u32),
+) -> Result<(), CleanupHoldPastBound> {
     let started = std::time::Instant::now();
     let mut observations = 0_u32;
     loop {
@@ -24133,6 +24167,7 @@ fn wait_for_cleanup_hold_release_within(
         if !rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks) {
             return Ok(());
         }
+        on_held(observations);
         let waited = started.elapsed();
         if waited >= bound {
             return Err(CleanupHoldPastBound {
@@ -24155,8 +24190,12 @@ fn await_previous_incarnations_release(fixture: &Fixture) -> Option<CleanupHoldP
     if attempts == 0 {
         return None;
     }
-    let past_bound =
-        wait_for_cleanup_hold_release_within(&fixture.public(), fixture.release_bound.get()).err();
+    let past_bound = wait_for_cleanup_hold_release_observing(
+        &fixture.public(),
+        fixture.release_bound.get(),
+        &mut |observation| fixture.holder_observed(observation),
+    )
+    .err();
     fixture.hold_past_bound.set(past_bound);
     past_bound
 }

@@ -4707,11 +4707,16 @@ impl std::fmt::Display for LeaseHeldPastBound {
 /// Observe the run's cleanup lease every 50 ms until it reads free or
 /// `bound` runs out: how long that took and how many observations it was, or
 /// the report of a hold that outlasted the bound. The observation is
-/// `observe_cleanup_hold`, production's own read.
+/// `observe_cleanup_hold`, production's own read. `on_held` runs after each
+/// observation that found the lease held, with that observation's number
+/// and before the bound is checked: it is how a test releases a holder only
+/// once this observation has seen it, so that the order -- held, released,
+/// free -- is acknowledged by the observation rather than timed.
 #[cfg(unix)]
 fn lease_released_within(
     public: &Path,
     bound: Duration,
+    on_held: &mut dyn FnMut(u32),
 ) -> Result<(Duration, u32), LeaseHeldPastBound> {
     let started = Instant::now();
     let mut observations = 0_u32;
@@ -4720,6 +4725,7 @@ fn lease_released_within(
         if !observe_cleanup_hold(public, &mut NoHooks) {
             return Ok((started.elapsed(), observations));
         }
+        on_held(observations);
         let waited = started.elapsed();
         if waited >= bound {
             return Err(LeaseHeldPastBound {
@@ -4732,25 +4738,61 @@ fn lease_released_within(
     }
 }
 
-/// Whether `fd` is closed in this process: `F_GETFD` on it answers `EBADF`.
+/// Every descriptor of this process open on the file at `path`, by the
+/// identity of what it is open on -- device and inode, `fstat` through each
+/// number `/dev/fd` lists -- and never by number. A number closed by a drop
+/// is the next number any thread of this process opens, so a number that
+/// reads open is no evidence that the file it used to name is still held,
+/// and a number that reads closed is no evidence that nothing else of this
+/// process holds that file
+/// (`a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open`).
+/// A number closed between the listing and its `fstat` answers `EBADF` and
+/// is skipped; one reused for another file has that file's identity and is
+/// not counted. Sorted.
 #[cfg(unix)]
-fn descriptor_is_closed(fd: libc::c_int) -> bool {
-    // SAFETY: `fcntl` with `F_GETFD` reads a flag of this process's descriptor
-    // table and touches no memory.
-    let refused = unsafe { libc::fcntl(fd, libc::F_GETFD) == -1 };
-    refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+fn descriptors_open_on(path: &Path) -> Vec<libc::c_int> {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let target = fs::metadata(path).expect("the file whose descriptors are counted exists");
+    let mut open = Vec::new();
+    for entry in
+        fs::read_dir("/dev/fd").expect("list this process's descriptor table through /dev/fd")
+    {
+        let name = entry.expect("an entry of /dev/fd").file_name();
+        let Ok(number) = name.to_string_lossy().parse::<libc::c_int>() else {
+            continue;
+        };
+        // SAFETY: the `File` is never dropped, so this never closes a number
+        // it does not own; the one call made through it is `fstat`, which
+        // answers `EBADF` for a number closed in the meantime and reads
+        // nothing this thread has to own.
+        let borrowed = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(number) });
+        if let Ok(metadata) = borrowed.metadata() {
+            if metadata.dev() == target.dev() && metadata.ino() == target.ino() {
+                open.push(number);
+            }
+        }
+    }
+    open.sort_unstable();
+    open
 }
 
 /// The pre-spawn half without a spawn: the descriptor returned is a live
 /// shared hold, and dropping it releases the lease. A caller whose spawn
 /// fails therefore leaves nothing held.
 ///
-/// The release is this process's own, and it is proved as its own: the
-/// number the hold had is closed once it is dropped. The lease reading free
-/// is then observed until it does or `LEASE_RELEASE_BOUND` runs out, because
-/// under a whole parallel suite a `fork` another thread makes while the hold
-/// is open carries a copy of it to that child's `exec`, and one observation
-/// made right after the drop can land inside that window and read the copy
+/// The release is this process's own, and it is proved as its own by
+/// identity: before the drop the hold's descriptor is the one descriptor
+/// this process has open on the lease file, and after it there is none --
+/// read through `descriptors_open_on`, which compares what each descriptor
+/// is open on and never asks whether the hold's number is still open,
+/// because that number is the next one any thread of this process opens.
+/// The lease reading free is then observed until it does or
+/// `LEASE_RELEASE_BOUND` runs out, because under a whole parallel suite a
+/// `fork` another thread makes while the hold is open carries a copy of it
+/// to that child's `exec`, and one observation made right after the drop
+/// can land inside that window and read the copy
 /// (`a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor`,
 /// which constructs it). A lease still held at the end of the bound fails
 /// this test with the bound and the observations in the message
@@ -4768,24 +4810,97 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
         .expect("take the shared hold")
         .expect("Unix hands the child a hold");
     assert!(observe_cleanup_hold(&public, &mut NoHooks), "held");
+    let lease = cleanup_lock_file(&public);
     let descriptor = hold.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&lease),
+        vec![descriptor],
+        "before the drop, the hold's descriptor is the one this process has open on the lease"
+    );
     drop(hold);
     assert!(
-        descriptor_is_closed(descriptor),
-        "this process's own descriptor {descriptor} is closed by the drop"
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
     );
-    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND) {
+    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {}) {
         panic!("released with the descriptor: {held}");
     }
+}
+
+/// Why the release above is proved by identity and not by number. A
+/// descriptor number is free the instant its file is closed and is the next
+/// number any thread of this process opens, so under a parallel suite the
+/// hold's number can name an unrelated file before anything reads it.
+/// Constructed here in this thread's own hands, with no window for another
+/// thread to take part: `dup2` closes the hold's descriptor and installs a
+/// copy of `/dev/null` under the same number in one call, which is what a
+/// drop followed by another thread's open leaves behind. The lease is free,
+/// this process has no descriptor open on it, and the number is open --
+/// exactly the reading a check by number would mistake for the lease still
+/// held.
+#[cfg(unix)]
+#[test]
+fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open() {
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-number-reused");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000006");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
+    let descriptor = hold.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&lease),
+        vec![descriptor],
+        "the hold's descriptor is the one open on the lease"
+    );
+    let unrelated = File::open("/dev/null").expect("an unrelated file");
+    // SAFETY: `dup2` takes two descriptors by value: it closes `descriptor`,
+    // which `hold` owns and this thread alone uses, and makes it a copy of
+    // `unrelated` in the same call, so no other thread's descriptor can be
+    // the one it replaces. `hold` goes on owning the number and closes the
+    // copy when it drops.
+    assert_eq!(
+        unsafe { libc::dup2(unrelated.as_raw_fd(), descriptor) },
+        descriptor,
+        "the hold's number now names /dev/null: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        !observe_cleanup_hold(&public, &mut NoHooks),
+        "the lease is free: its only descriptor was closed by the dup2"
+    );
+    assert!(
+        descriptors_open_on(&lease).is_empty(),
+        "and this process has no descriptor open on it, whatever its old number names now"
+    );
+    // SAFETY: `fcntl` with `F_GETFD` reads one flag of this process's own
+    // descriptor table and touches no memory.
+    assert_ne!(
+        unsafe { libc::fcntl(descriptor, libc::F_GETFD) },
+        -1,
+        "the number is open, for /dev/null: a check by number would read the lease as still \
+         held here"
+    );
+    drop(hold);
+    drop(unrelated);
 }
 
 /// Why the observation above is bounded. A copy of this process's descriptor
 /// carried by a sibling's fork keeps the lease after the descriptor itself is
 /// closed: the fork is `ParkedFork::holding`, a child of this process parked
-/// in its `pre_exec` with that one descriptor and its socket, whose pid comes
-/// from inside that window, so it is known alive and holding. The single
-/// observation the test above used to make reads held; the bounded one reads
-/// free once the fork is released, and not before.
+/// with that one descriptor and its socket, whose report comes from inside
+/// that window, so it is known alive and holding. The single observation the
+/// test above used to make reads held. The bounded one is then made with the
+/// release in its own hands: its first observation reads the copy held and,
+/// from inside that observation, releases the fork; its next observation
+/// reads free. Held, released, free is therefore an order the observation
+/// acknowledged, not one a clock was trusted to produce, and a legal
+/// schedule that delays either side changes nothing: the release waits for
+/// the observation, however long the observation takes to arrive.
 #[cfg(unix)]
 #[test]
 fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor() {
@@ -4799,45 +4914,54 @@ fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descrip
     let hold = hold_cleanup_lease_for_child(&mut command, &public)
         .expect("take the shared hold")
         .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
     let descriptor = hold.as_raw_fd();
     let parked = ParkedFork::holding(descriptor);
     let holder = parked.pid();
     assert!(parked.is_alive(), "the parked fork {holder} is alive");
-    assert_eq!(parked.kept()[0], descriptor, "and it kept the lease copy");
+    let [lease_number, _] = parked.kept();
+    assert_eq!(lease_number, descriptor, "and it kept the lease copy");
     drop(hold);
     assert!(
-        descriptor_is_closed(descriptor),
-        "this process's own descriptor {descriptor} is closed by the drop"
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
     );
     assert!(
         observe_cleanup_hold(&public, &mut NoHooks),
         "one observation right after the drop reads the lease held: the copy in fork {holder}'s \
-         exec window"
+         window"
     );
 
-    let released = parked.release_after(Duration::from_millis(300));
-    let observed = lease_released_within(&public, LEASE_RELEASE_BOUND);
-    let returned_at = Instant::now();
-    let (released_at, status) = released.join();
+    let mut parked = Some(parked);
+    let mut released = None;
+    let observed = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |observation| {
+        if let Some(parked) = parked.take() {
+            released = Some((observation, parked.release()));
+        }
+    });
+    let (released_at, status) = released
+        .expect("the bounded observation read the copy held, and only then released the fork");
     let (waited, observations) = observed.expect("the lease reads free once the fork is released");
-    assert!(
-        returned_at >= released_at,
-        "the observation returned before fork {holder} released the copy: it did not wait"
+    assert_eq!(
+        released_at, 1,
+        "the first observation read the copy held, so the release came after it"
     );
-    assert!(
-        observations >= 2,
-        "the first observation read the copy and a later one read free: {observations} \
-         observations over {waited:?}"
+    assert_eq!(
+        observations, 2,
+        "and the observation after the release read free: {observations} observations over \
+         {waited:?}"
     );
     assert!(
         status.success(),
-        "the released fork exec'd `true`: {status:?}"
+        "the released fork exited cleanly: {status:?}"
     );
 }
 
 /// The bound is a bound: a copy that outlasts it fails the observation with
 /// the bound and the count in the message, and the observation never turns a
-/// missing release into success.
+/// missing release into success. The count is reported, not bounded below:
+/// how many observations fit inside the bound is the scheduler's to decide,
+/// and no test may assert it.
 #[cfg(unix)]
 #[test]
 fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
@@ -4851,19 +4975,20 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
     let hold = hold_cleanup_lease_for_child(&mut command, &public)
         .expect("take the shared hold")
         .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
     let descriptor = hold.as_raw_fd();
     let parked = ParkedFork::holding(descriptor);
     let holder = parked.pid();
     drop(hold);
     assert!(
-        descriptor_is_closed(descriptor),
-        "this process's own descriptor {descriptor} is closed by the drop"
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
     );
 
-    let held = lease_released_within(&public, Duration::from_millis(300))
+    let held = lease_released_within(&public, Duration::from_millis(300), &mut |_| {})
         .expect_err("a copy alive past the bound is reported, not waited into success");
     assert!(
-        held.waited >= held.bound && held.observations >= 2,
+        held.waited >= held.bound,
         "the observation ran its whole bound: {held}"
     );
     assert!(
@@ -4878,21 +5003,26 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
     let status = parked.release();
     assert!(
         status.success(),
-        "the released fork exec'd `true`: {status:?}"
+        "the released fork exited cleanly: {status:?}"
     );
-    lease_released_within(&public, LEASE_RELEASE_BOUND)
+    lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {})
         .expect("and the lease reads free once the fork has exited");
 }
 
 /// What the parked fork holds, and what it does not: the lease copy and its
-/// socket, and not a sentinel this process had open at the fork. The
-/// sentinel is one end of a socket pair. With this process's copy of that end
-/// closed, a read on the other end answers EOF only when nobody holds a copy,
-/// so EOF is the proof the fork closed its inherited one; the control, a raw
-/// `fork` that closes nothing, shows the same read unable to answer while
-/// that child lives. On Linux the child's descriptor table is read from
-/// `/proc` as well: exactly stdio, the socket and the lease, and the lease
-/// entry names `cleanup.lock`.
+/// socket, and not a sentinel this process had open at the fork, nor another
+/// run's lease. The sentinel is one end of a socket pair. With this process's
+/// copy of that end closed, a read on the other end answers EOF only when
+/// nobody holds a copy, so EOF is the proof the fork closed its inherited
+/// one. The control is a parked fork told to keep the sentinel instead: the
+/// same read cannot answer EOF while that child lives, and does once it is
+/// released -- a control that holds only what it was told to, where a raw
+/// `fork` that closes nothing would hold every descriptor of every concurrent
+/// test for as long as it slept. Another run's lease is open across that
+/// control's fork and this process's copy then dropped: the lease reads free
+/// while the control lives, because the control closed its copy. On Linux
+/// the child's descriptor table is read from `/proc` as well: exactly stdio,
+/// the socket and the lease, and the lease entry names `cleanup.lock`.
 #[cfg(unix)]
 #[test]
 fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
@@ -4965,7 +5095,7 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     let status = parked.release();
     assert!(
         status.success(),
-        "the released fork exec'd `true`: {status:?}"
+        "the released fork exited cleanly: {status:?}"
     );
 
     let (sentinel, mut observer) =
@@ -4973,22 +5103,693 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     observer
         .set_read_timeout(Some(Duration::from_millis(150)))
         .expect("bound the control read");
-    let sleeper = fork_a_sleeper(600);
+    let unrelated_public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000007");
+    fs::create_dir_all(&unrelated_public).expect("another run's public directory");
+    let mut unrelated_command = std::process::Command::new("git");
+    let unrelated_hold = hold_cleanup_lease_for_child(&mut unrelated_command, &unrelated_public)
+        .expect("take the other run's hold")
+        .expect("Unix hands the child a hold");
+    let keeper = ParkedFork::holding(sentinel.as_raw_fd());
+    let keeper_pid = keeper.pid();
+    drop(unrelated_hold);
+    assert!(
+        !observe_cleanup_hold(&unrelated_public, &mut NoHooks),
+        "the other run's lease, open across the control's fork, reads free once this process's \
+         copy is dropped: the control {keeper_pid} closed its copy"
+    );
     drop(sentinel);
     let read = observer.read(&mut byte);
     assert!(
-        read.is_err(),
-        "a fork that closed nothing still holds the sentinel, so the read cannot answer EOF \
-         while it lives: {read:?}"
+        matches!(
+            read,
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+        ),
+        "a parked fork that kept the sentinel holds a copy of it, so the read cannot answer EOF \
+         while that child {keeper_pid} lives: {read:?}"
     );
-    let mut status = 0;
-    // SAFETY: `sleeper` is the child this test forked, and nothing else waits on it.
-    unsafe { libc::waitpid(sleeper, &mut status, 0) };
+    let status = keeper.release();
+    assert!(
+        status.success(),
+        "the released control exited cleanly: {status:?}"
+    );
     let read = observer.read(&mut byte);
     assert!(
         matches!(read, Ok(0)),
         "and answers EOF once that fork has exited: {read:?}"
     );
+}
+
+/// Whether `pid` is no child of this process any more: `waitpid` with
+/// `WNOHANG` answers `ECHILD`, so it has been collected. Asked right after
+/// the collection it checks, before the kernel could hand the number to
+/// another child of this process.
+#[cfg(unix)]
+fn is_reaped(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    // SAFETY: `waitpid` writes one int through `status`, which lives for the
+    // call, and takes the pid and the flags by value.
+    let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+}
+
+/// Stop the parked child `pid` and observe that it stopped, so that it
+/// cannot read its release: `SIGSTOP`, then `waitpid` with `WUNTRACED`,
+/// which reports the stop and collects nothing.
+#[cfg(unix)]
+fn stop_parked_child(pid: libc::pid_t) {
+    // SAFETY: `kill` takes a pid and a signal by value; the pid is a parked
+    // child this test owns.
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGSTOP) },
+        0,
+        "stop the parked child {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut status = 0;
+    // SAFETY: as `is_reaped`; `WUNTRACED` reports the stop and collects
+    // nothing.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+        pid,
+        "observe the stop of {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        libc::WIFSTOPPED(status),
+        "the child {pid} is stopped: {status:#x}"
+    );
+}
+
+/// Run `act` on a thread of its own and wait for its answer within `bound`:
+/// the test's failure bound around a step that must itself be bounded, so a
+/// step that is not fails the test instead of hanging it. The thread's
+/// handle comes back with the answer, or with the timeout, for the caller to
+/// unblock and join.
+#[cfg(unix)]
+fn on_a_thread_within<T: Send + 'static>(
+    bound: Duration,
+    act: impl FnOnce() -> T + Send + 'static,
+) -> (
+    Result<T, std::sync::mpsc::RecvTimeoutError>,
+    std::thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        sender
+            .send(act())
+            .expect("the test holds the receiver until the thread is joined");
+    });
+    (receiver.recv_timeout(bound), handle)
+}
+
+/// A parked child that never reads its release -- stopped, here, so that it
+/// cannot -- is killed at the end of the reap bound and collected, and the
+/// release returns its status saying so. The release runs on a thread of
+/// its own so that a release which blocked past every bound would fail this
+/// test rather than hang it: the outer bound is the test's failure bound,
+/// thirty times the reap bound, and on its expiry the child is continued so
+/// that the release can finish before the test fails.
+#[cfg(unix)]
+#[test]
+fn a_parked_child_that_never_reads_its_release_is_killed_and_reaped_within_the_bound() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    const BOUND: Duration = Duration::from_secs(1);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    assert!(parked.is_alive(), "a stopped child has not ended");
+    let (released, releasing) = on_a_thread_within(BOUND * 30, move || {
+        let started = Instant::now();
+        (parked.release(), started.elapsed())
+    });
+    if released.is_err() {
+        // SAFETY: `kill` takes a pid and a signal by value; the child is this
+        // test's own, stopped above, and continuing it lets a blocked release
+        // finish so the test can fail rather than hang.
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGCONT) },
+            0,
+            "continue the stopped child {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    releasing.join().expect("the releasing thread ends");
+    let (status, took) = released.expect(
+        "the release returned within thirty times its reap bound; a release that blocks past its \
+         bound is the defect this test holds, and the stopped child was continued so that it \
+         could finish",
+    );
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child was killed at the end of the reap bound: {status:?}"
+    );
+    assert!(
+        took >= BOUND,
+        "the reap bound was waited out before the kill: {took:?}"
+    );
+    assert!(is_reaped(pid), "and the killed child {pid} was collected");
+}
+
+/// Dropping a parked fork releases and reaps its child on the same bound: a
+/// child that cannot read the release because it is stopped is killed at the
+/// end of the reap bound and collected before the drop returns.
+#[cfg(unix)]
+#[test]
+fn dropping_a_parked_fork_reaps_its_child_even_when_the_child_is_stopped() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(500);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    let (dropped, dropping) = on_a_thread_within(BOUND * 30, move || {
+        let started = Instant::now();
+        drop(parked);
+        started.elapsed()
+    });
+    if dropped.is_err() {
+        // SAFETY: as in the test above: this test's own stopped child,
+        // continued so that a blocked drop can finish before the test fails.
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGCONT) },
+            0,
+            "continue the stopped child {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    dropping.join().expect("the dropping thread ends");
+    let took = dropped.expect(
+        "the drop returned within thirty times its reap bound; a drop that blocks past its bound \
+         is the defect this test holds",
+    );
+    assert!(
+        took >= BOUND,
+        "the reap bound was waited out before the kill: {took:?}"
+    );
+    assert!(
+        is_reaped(pid),
+        "the drop killed the stopped child {pid} at the end of its reap bound and collected it"
+    );
+}
+
+/// A test that unwinds with a parked fork in scope leaves no child behind:
+/// the unwinding drops the fork, which releases and collects its child.
+#[cfg(unix)]
+#[test]
+fn a_test_that_unwinds_past_a_parked_fork_leaves_no_child_behind() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let pid = std::cell::Cell::new(0);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let parked = ParkedFork::holding(anchor.as_raw_fd());
+        pid.set(parked.pid());
+        assert!(parked.is_alive(), "the parked fork is alive");
+        panic!("an assertion made with the fork in scope fails");
+    }));
+    assert!(unwound.is_err(), "the closure unwound");
+    assert_ne!(pid.get(), 0, "the fork was made before the unwinding");
+    assert!(
+        is_reaped(pid.get()),
+        "the unwinding dropped the fork, which released and collected its child {}",
+        pid.get()
+    );
+}
+
+/// One BPF instruction of a seccomp policy.
+#[cfg(target_os = "linux")]
+fn seccomp_instruction(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    }
+}
+
+/// Load the word at `offset` of the `seccomp_data`: 0 is the syscall
+/// number, 16 the low word of the first argument on a little-endian machine.
+#[cfg(target_os = "linux")]
+fn seccomp_load(offset: u32) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, offset)
+}
+
+/// Jump `jt` instructions when the loaded word equals `k`, `jf` otherwise.
+#[cfg(target_os = "linux")]
+fn seccomp_jump_if_equal(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, jt, jf, k)
+}
+
+/// Answer the syscall with `k`: `SECCOMP_RET_ALLOW`, or `SECCOMP_RET_ERRNO`
+/// carrying the errno.
+#[cfg(target_os = "linux")]
+fn seccomp_return(k: u32) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_RET | libc::BPF_K, 0, 0, k)
+}
+
+/// A syscall number, descriptor or errno as the word a policy compares.
+#[cfg(target_os = "linux")]
+fn seccomp_word(value: libc::c_long) -> u32 {
+    u32::try_from(value).expect("a syscall number, descriptor or errno fits the kernel's field")
+}
+
+/// Install `program` as this thread's seccomp policy, the way
+/// `agent::proc`'s termination tests install theirs: `PR_SET_NO_NEW_PRIVS`,
+/// then `PR_SET_SECCOMP` in filter mode. A policy is the thread's and every
+/// process it forks, and it cannot be removed; libtest runs each test on a
+/// thread of its own, so it ends with the test.
+#[cfg(target_os = "linux")]
+fn install_seccomp_policy(program: &mut [libc::sock_filter]) {
+    const NONE: libc::c_long = 0;
+    const NO_NEW_PRIVS: libc::c_long = 1;
+
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            NO_NEW_PRIVS,
+            NONE,
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four instructions.
+#[cfg(target_os = "linux")]
+fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(number), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// Refuse the `close` of `descriptor` for this thread and every process it
+/// forks, answering `errno`, and refuse `close_range` with `ENOSYS` so that
+/// a sweep reaches that close: eight instructions, the descriptor read from
+/// the low word of the first argument.
+#[cfg(target_os = "linux")]
+fn refuse_closing_on_this_thread(descriptor: libc::c_int, errno: libc::c_int) {
+    // `seccomp_data`: the number at 0, the architecture and the instruction
+    // pointer, then the six 64-bit arguments from 16; the low word of the
+    // first argument is at 16 on a little-endian machine and at 20 otherwise.
+    let first_argument_low = if cfg!(target_endian = "little") {
+        16
+    } else {
+        20
+    };
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_close_range), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(libc::ENOSYS))),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_close), 0, 3),
+        seccomp_load(first_argument_low),
+        seccomp_jump_if_equal(seccomp_word(libc::c_long::from(descriptor)), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// A control that a policy is in force: `close_range` with a first
+/// descriptor above its last is `EINVAL` from the kernel, so the errno it
+/// answers here is only ever the policy's.
+#[cfg(target_os = "linux")]
+fn assert_close_range_answers(errno: libc::c_int) {
+    // SAFETY: a raw syscall over a numeric range the kernel refuses as
+    // empty; it closes nothing.
+    let answered = unsafe { libc::syscall(libc::SYS_close_range, 3_u32, 2_u32, 0_u32) };
+    let error = std::io::Error::last_os_error();
+    assert!(
+        answered == -1 && error.raw_os_error() == Some(errno),
+        "close_range answers {}: {answered} / {error}",
+        std::io::Error::from_raw_os_error(errno)
+    );
+}
+
+/// The sentinel proof under a named condition: with this process's copy of
+/// a socket end closed, the read on the other end answers EOF, so the parked
+/// fork holds no copy of it; the fork holds the lease, and is released.
+#[cfg(unix)]
+fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::io::Read as _;
+
+    let root = scratch(tag);
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("bound the sentinel read");
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "{under}: the parked fork {holder} holds the lease"
+    );
+    drop(sentinel);
+    let mut byte = [0_u8; 1];
+    let read = observer.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0)),
+        "{under}: with this process's copy of the sentinel closed the read answers EOF, so no copy \
+         of it survives in fork {holder}: {read:?}"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "{under}: the released fork exited cleanly: {status:?}"
+    );
+}
+
+/// `close_range` unavailable -- `ENOSYS`, Linux before 5.9 -- makes the
+/// sweep close by number instead, and the child is isolated all the same:
+/// the sentinel proof under a policy that answers `ENOSYS` to `close_range`
+/// for this thread and the child it forks.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_isolates_its_child_when_close_range_is_unavailable() {
+    refuse_syscall_on_this_thread(libc::SYS_close_range, libc::ENOSYS);
+    assert_close_range_answers(libc::ENOSYS);
+    assert_a_parked_fork_isolates_a_sentinel(
+        "childlease-close-range-enosys",
+        "close_range unavailable",
+    );
+}
+
+/// `close_range` refused -- `EPERM`, a policy's answer -- makes the sweep
+/// close by number instead, and the child is isolated all the same.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_isolates_its_child_when_close_range_is_refused() {
+    refuse_syscall_on_this_thread(libc::SYS_close_range, libc::EPERM);
+    assert_close_range_answers(libc::EPERM);
+    assert_a_parked_fork_isolates_a_sentinel("childlease-close-range-eperm", "close_range refused");
+}
+
+/// Run `parked_fork_isolation_kill_child` in a process of its own with the
+/// scenario named, bounded: its exit status and its stderr, or `None` and
+/// the stderr so far once it has been killed at the end of the bound. Its
+/// stdin is `/dev/null`; it owns nothing of this process but the pipe.
+#[cfg(unix)]
+fn run_parked_fork_scenario(scenario: &str) -> (Option<std::process::ExitStatus>, String) {
+    use std::io::Read as _;
+
+    let exe = std::env::current_exe().expect("test binary");
+    let mut child = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", scenario)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the scenario child");
+    let mut stderr = child.stderr.take().expect("the child's stderr is piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        match stderr.read_to_string(&mut text) {
+            Ok(_) => text,
+            Err(error) => format!("{text}\n[the child's stderr could not be read: {error}]"),
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the scenario child") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child
+                .kill()
+                .expect("kill the scenario child the bound ended");
+            child
+                .wait()
+                .expect("reap the scenario child the bound ended");
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    (status, reader.join().expect("the stderr reader ends"))
+}
+
+/// A descriptor above the soft limit -- opened, then the limit lowered
+/// beneath it, as a test that narrows `RLIMIT_NOFILE` leaves one -- is
+/// still closed by the parked fork's sweep, whose ceiling comes from the
+/// table itself and not from `sysconf` alone. In a process of its own,
+/// because the limit is the process's.
+#[cfg(unix)]
+#[test]
+fn a_parked_fork_closes_a_descriptor_above_a_lowered_soft_limit() {
+    let (status, stderr) = run_parked_fork_scenario("a-descriptor-above-a-lowered-soft-limit");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A close the sweep cannot make fails the parked fork's constructor,
+/// naming the descriptor and the error, after the child has been
+/// collected: the helper never announces a child it could not isolate. In
+/// a process of its own, because the policy that refuses the close is the
+/// thread's for good and would refuse this process's own close of the
+/// sentinel.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_cannot_close_a_descriptor_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-that-fails");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// The child half of the two isolation witnesses that change state the whole
+/// process shares -- its soft descriptor limit, and a policy on `close`
+/// itself -- which no test may do in the suite's shared process. Re-invoked
+/// as a subprocess with the scenario named in
+/// `UPSTROKE_TEST_PARKED_FORK_SCENARIO`; exits 0 when the scenario's
+/// assertions hold, and its stderr carries the reason when they do not.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by the parked-fork isolation witnesses"]
+fn parked_fork_isolation_kill_child() {
+    let scenario =
+        std::env::var("UPSTROKE_TEST_PARKED_FORK_SCENARIO").expect("the parent names the scenario");
+    match scenario.as_str() {
+        "a-descriptor-above-a-lowered-soft-limit" => {
+            a_descriptor_above_a_lowered_soft_limit_is_closed();
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-that-fails" => a_close_that_fails_fails_the_setup_after_the_child_is_reaped(),
+        other => panic!("no such scenario: {other}"),
+    }
+}
+
+/// In a process of its own: a sentinel copied to descriptor 128 by `dup2`,
+/// then the soft descriptor limit lowered to 64, so that the sentinel sits
+/// above what `sysconf(_SC_OPEN_MAX)` reports; on Linux `close_range` is
+/// refused as well, so that the sweep by number, whose ceiling is in
+/// question, is what runs there too. The parked fork's sweep closes the
+/// sentinel: the read answers EOF.
+#[cfg(unix)]
+fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::io::Read as _;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    const HIGH: libc::c_int = 128;
+    let root = scratch("childlease-high-descriptor");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000009");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("bound the sentinel read");
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through the pointer, which
+    // lives for the call.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) },
+        0,
+        "read RLIMIT_NOFILE: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        limits.rlim_cur > 128,
+        "this witness places its sentinel at descriptor {HIGH}, which needs a soft limit above \
+         it; the soft limit is {}",
+        limits.rlim_cur
+    );
+    // SAFETY: `dup2` takes two descriptors by value; this process is the
+    // witness's own and fresh, with nothing open at `HIGH`.
+    assert_eq!(
+        unsafe { libc::dup2(sentinel.as_raw_fd(), HIGH) },
+        HIGH,
+        "copy the sentinel to descriptor {HIGH}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `HIGH` is the copy `dup2` just made and nothing else owns; the
+    // stream owns it from here and closes it when dropped.
+    let high = unsafe { std::os::unix::net::UnixStream::from_raw_fd(HIGH) };
+    drop(sentinel);
+    let lowered = libc::rlimit {
+        rlim_cur: 64,
+        rlim_max: limits.rlim_max,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through the pointer, which
+    // lives for the call; the limit lowered is this witness process's own.
+    assert_eq!(
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) },
+        0,
+        "lower the soft descriptor limit to 64: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut now = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut now) },
+        0,
+        "read RLIMIT_NOFILE back: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_eq!(
+        now.rlim_cur, 64,
+        "the soft limit is below the sentinel's number while the sentinel stays open"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        refuse_syscall_on_this_thread(libc::SYS_close_range, libc::ENOSYS);
+        assert_close_range_answers(libc::ENOSYS);
+    }
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    drop(high);
+    let mut byte = [0_u8; 1];
+    let read = observer.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0)),
+        "the sentinel at descriptor {HIGH}, above the lowered soft limit of 64, was closed by \
+         fork {holder}'s sweep: {read:?}"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+/// In a process of its own: a policy that answers `EIO` to the `close` of
+/// one descriptor, the sentinel's, and `ENOSYS` to `close_range` so that the
+/// sweep reaches it. The parked fork's constructor fails, naming the
+/// descriptor and the error, and the child it forked has been collected
+/// before it fails: no child is announced that could not be isolated, and
+/// none is left behind.
+#[cfg(target_os = "linux")]
+fn a_close_that_fails_fails_the_setup_after_the_child_is_reaped() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-close-fails");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000A");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, _observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    let number = sentinel.as_raw_fd();
+    refuse_closing_on_this_thread(number, libc::EIO);
+    assert_close_range_answers(libc::ENOSYS);
+    let unwound = std::panic::catch_unwind(|| ParkedFork::holding_the_lease_of(&public));
+    let payload = unwound
+        .err()
+        .expect("a sweep that could not close the sentinel fails the constructor");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .expect("the panic carries a message");
+    let expected = format!(
+        "could not close inherited descriptor {number}: {}",
+        std::io::Error::from_raw_os_error(libc::EIO)
+    );
+    assert!(
+        message.contains(&expected),
+        "the constructor names the descriptor and the error: {message}"
+    );
+    let pid: libc::pid_t = message
+        .strip_prefix("the parked child ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|pid| pid.parse().ok())
+        .expect("the message names the child's pid");
+    assert!(
+        is_reaped(pid),
+        "the child {pid} was collected before the constructor failed"
+    );
+    // The policy refuses this thread's own close of the sentinel too, so
+    // the stream is forgotten rather than dropped into an error a drop
+    // cannot report; the process ends with the scenario.
+    std::mem::forget(sentinel);
 }
 
 /// A run directory that does not exist is an error, not a silent write with
