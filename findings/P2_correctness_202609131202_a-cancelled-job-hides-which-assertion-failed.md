@@ -255,10 +255,11 @@ found; a refusal that follows an expired wait carries the production message wit
 the observations appended. A first resume never waits, so every test that plants a hold and
 expects the immediate refusal is untouched and now asserts that no wait preceded it. The parked
 fork the witnesses use is `workspace_manager::fixture::ParkedFork`: a child of the test process
-parked in its exec window on a socket read, reporting its pid from there, holding a copy of the
+parked, before it exits, on a socket read, reporting itself from there, holding a copy of the
 lease taken exactly as a ref write takes it; the regression test
 `a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes` shows a
-later resume returning only after the fork released, and its twin
+later resume whose wait observed the copy held and released the fork from inside that
+observation, the resume then succeeding, and its twin
 `a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation` shows a holder that
 outlives a 500 ms bound refused by the resume itself, alive and holding after the refusal, with
 nothing appended to the log. The failing test's shape under the forcing sibling: 6 of 10 refused
@@ -267,21 +268,39 @@ before, 0 of 10 after.
 **The rundir twin, taken up on the same evidence.**
 `rundir::tests::a_hold_whose_command_never_spawns_is_released_with_the_descriptor` dropped its own
 copy of a lease and observed the lease once; under a whole suite that single observation read the
-same inherited copy (25 of 788 preserved suites, 7 since 2026-09-22, one of them this repair's own
-second baseline attempt). The test now proves the release is its own — the descriptor's number is
-closed once dropped — and observes the lease until it reads free or a 20 s bound runs out, failing
-with the bound and the count in the message; beside it,
+lease held in 25 of 788 preserved suites (7 since 2026-09-22, one of them this repair's own second
+baseline attempt). That each of those sightings read an inherited copy of this kind is the
+mechanism hypothesis this record proposes for them — constructed here, and consistent with the
+design's own note — and not a per-sighting identification of the holder. The test now proves the
+release is its own by identity: no descriptor of the process is open on the lease file once the
+hold is dropped, read through `/dev/fd` and `fstat`, never by whether the hold's number still
+reads open, a number the next open in any thread of the process reuses (the second pull request's
+first review found exactly that reading, `PR320-R1-MAIN-001` and `PR320-R1-REG-001`); it then
+observes the lease until it reads free or a 20 s bound runs out, failing with the bound and the
+count in the message; beside it,
 `a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor` constructs the
 copy and shows the single observation reading held and the bounded one reading free only after the
-fork's release, `a_copy_that_outlasts_the_bound_still_fails_the_release_observation` shows a copy
-past the bound still failing it, and
-`a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else` proves what the parked fork
-holds: a sentinel socket end this process had open at the fork answers EOF once this process's own
-copy is closed (a raw fork that closes nothing cannot), and on Linux the child's `/proc` descriptor
-table is exactly stdio, the socket and the lease. The first form of the parked fork (the branch's
-first commit) held every descriptor the process had open at its fork for as long as it was parked,
-which is the collateral the recovery fixture exists to stop; the form that landed closes everything
-else from inside its `pre_exec` (`close_range` on Linux, one `close` per number elsewhere).
+fork's release — a release the bounded observation makes itself, from inside the observation that
+read the copy held, so that the order is acknowledged and not timed;
+`a_copy_that_outlasts_the_bound_still_fails_the_release_observation` shows a copy past the bound
+still failing it; and `a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else` proves
+what the parked fork holds: a sentinel socket end this process had open at the fork answers EOF
+once this process's own copy is closed, another run's lease open across the fork reads free once
+this process's copy is dropped, and on Linux the child's `/proc` descriptor table is exactly stdio,
+the socket and the lease; its control is a parked fork told to keep the sentinel, which cannot
+answer EOF until released. The first form of the parked fork (the branch's first commit) held every
+descriptor the process had open at its fork for as long as it was parked, which is the collateral
+the recovery fixture exists to stop, and the first form of that control was a raw `fork` that
+closed nothing and so held every concurrent test's descriptors for as long as it slept
+(`PR320-R1-MAIN-005`). The form that landed is a raw `fork` whose child closes everything else
+before it reports itself parked, each close checked — `close_range` on Linux, with a checked sweep
+by number when that is unavailable or refused, and that sweep on every other Unix, its ceiling the
+process's own table as `/dev/fd` lists it and never `sysconf` alone — and reports a close it could
+not make instead of announcing itself, on which the parent collects it and fails the setup; it
+never execs, its exit closing the copy as an exec would, so there is no spawn whose return could
+come early and no join; and its release and its reap, on a drop and while unwinding too, are
+bounded from the moment each stage starts (the second review's `PR320-R1-MAIN-002`,
+`PR320-R1-MAIN-003`, `PR320-R1-MAIN-006` and `PR320-R1-REG-003`).
 
 **What this does not fix, and why the disposition stays `deferred`.**
 
