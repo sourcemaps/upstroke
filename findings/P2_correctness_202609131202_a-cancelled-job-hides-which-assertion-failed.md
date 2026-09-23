@@ -264,6 +264,25 @@ outlives a 500 ms bound refused by the resume itself, alive and holding after th
 nothing appended to the log. The failing test's shape under the forcing sibling: 6 of 10 refused
 before, 0 of 10 after.
 
+**The rundir twin, taken up on the same evidence.**
+`rundir::tests::a_hold_whose_command_never_spawns_is_released_with_the_descriptor` dropped its own
+copy of a lease and observed the lease once; under a whole suite that single observation read the
+same inherited copy (25 of 788 preserved suites, 7 since 2026-09-22, one of them this repair's own
+second baseline attempt). The test now proves the release is its own — the descriptor's number is
+closed once dropped — and observes the lease until it reads free or a 20 s bound runs out, failing
+with the bound and the count in the message; beside it,
+`a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor` constructs the
+copy and shows the single observation reading held and the bounded one reading free only after the
+fork's release, `a_copy_that_outlasts_the_bound_still_fails_the_release_observation` shows a copy
+past the bound still failing it, and
+`a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else` proves what the parked fork
+holds: a sentinel socket end this process had open at the fork answers EOF once this process's own
+copy is closed (a raw fork that closes nothing cannot), and on Linux the child's `/proc` descriptor
+table is exactly stdio, the socket and the lease. The first form of the parked fork (the branch's
+first commit) held every descriptor the process had open at its fork for as long as it was parked,
+which is the collateral the recovery fixture exists to stop; the form that landed closes everything
+else from inside its `pre_exec` (`close_range` on Linux, one `close` per number elsewhere).
+
 **What this does not fix, and why the disposition stays `deferred`.**
 
 - The inheritance is not closed. Every fork of the coordinator during a ref write still copies
@@ -275,5 +294,7 @@ before, 0 of 10 after.
 - Which sibling fork held the copy in each natural sighting is not identified; the mechanism is
   established by construction and by the design's own notes, not by a per-sighting instrument.
 - The classification gap (a cancelled job destroys the assertion) is as recorded above.
+- The refusal's own text still names only the reaper and the ref-writing child as holders; the
+  sibling fork in its exec window is a third kind it does not name.
 - The constructed 0-of-10 and the natural 7-of-54 are different populations; neither is a rate
   for the suite after this change.
