@@ -60,7 +60,7 @@ error rather than a compile one:
   reopening for the next lane rather than for this one;
 * [`tests::every_container_effect_in_the_tree_goes_through_the_funnel`] is
   the source census beside it, in the idiom of
-  `runner::tests::every_production_process_start_is_classified`: it names
+  `runner::contract::tests::every_production_process_start_is_classified`: it names
   every file that may issue a container effect and fails when a new one
   appears.
 
@@ -1153,7 +1153,7 @@ repository-controlled gates, and reviewers all cross the boundary;
 authoritative Git and the event log never do", and asking the container
 runtime what it holds is the same kind of thing as authoritative Git — it is
 how the boundary is *built*, so it cannot execute inside it.
-`runner::tests::every_production_process_start_is_classified` carries the
+`runner::contract::tests::every_production_process_start_is_classified` carries the
 row that says so.
 
 ## `impl DockerCli` › `pub fn new(trace: ContainerTrace) -> Self {`

@@ -2187,7 +2187,7 @@ three fields that vary *inside* an attempt's identity never vary in it:
 `AttemptNumber`, the review pass index, and pass-versus-re-ask. Each of
 those is a distinct call site in `engine::attempt`, and a call site that
 passes a constant where it should pass its argument is invisible to a grid
-of hand-built identities (`runner::tests::invocation_ids_are_unique_within_a_run…`
+of hand-built identities (`runner::contract::tests::invocation_ids_are_unique_within_a_run…`
 synthesizes its tuples; `review::tests::the_one_format_reask_is_its_own_invocation…`
 is handed a correct pair). `invocation_identity` requires "unique per
 process" and "a retry attempt has a new attempt number", and INV-20 makes

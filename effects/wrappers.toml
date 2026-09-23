@@ -882,7 +882,7 @@ effect_free = [
 # the precedent, and `ContainerRuntime`'s inspections are classified the same
 # way beside it). Nothing here creates, writes, renames or removes a path, and
 # the spawn that follows a resolution is the parent's `HostRunner::run`, which
-# `runner::tests::every_production_process_start_is_classified` accounts for
+# `runner::contract::tests::every_production_process_start_is_classified` accounts for
 # under `src/runner/host.rs`.
 [[module]]
 path = "src/runner/host/naming.rs"
@@ -916,7 +916,7 @@ effect_free = [
 # resolution is required to call them ("resolved by read-only inspection"). They
 # do start a `docker` subprocess, and that subprocess start is accounted by
 # `src/runner/container.rs`'s row in
-# `runner::tests::every_production_process_start_is_classified` rather than
+# `runner::contract::tests::every_production_process_start_is_classified` rather than
 # here.
 [[module]]
 path = "src/runner/container.rs"
@@ -1619,7 +1619,7 @@ effect_free = ["drop", "record", "settle", "spawn", "take"]
 # and `runner::host::HostRunner::run` record -- and checks the text through
 # `bin::extract_version` and `bin::boundary_refused` (effect-free rows), the
 # private `checked_help`/`validate_help`, and `advertises_flag` and
-# `missing_effort_levels` in `src/agent/mod.rs`, token scans of a string in a
+# `missing_effort_levels` in `src/agent/adapter.rs`, token scans of a string in a
 # module outside the classified set. Claude's and Copilot's stop there.
 # Codex's does not: `probe -> validate_effort_config_key ->
 # MissingOutputSchema::create` performs `std::fs::create_dir` on a directory

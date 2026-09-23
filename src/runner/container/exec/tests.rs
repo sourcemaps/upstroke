@@ -4488,8 +4488,8 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let container_rows = crate::runner::tests::adapter_parse_parity(&runner, &workspace);
-    let host_rows = crate::runner::tests::adapter_parse_parity(
+    let container_rows = crate::runner::contract::tests::adapter_parse_parity(&runner, &workspace);
+    let host_rows = crate::runner::contract::tests::adapter_parse_parity(
         &crate::runner::host::HostRunner::new(),
         &workspace,
     );

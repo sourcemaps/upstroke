@@ -475,5 +475,5 @@ v0.1 path is unchanged by its presence.
 Record that the process this failure reports never started. A builder rather
 than a constructor argument, so the one production site that classifies a
 review result keeps its single `AttemptFailure::new` call and the census over
-those calls (`runner::tests::an_observation_about_an_attempt_is_classified_in_one_production_place`)
+those calls (`runner::contract::tests::an_observation_about_an_attempt_is_classified_in_one_production_place`)
 still counts one rule per observation.

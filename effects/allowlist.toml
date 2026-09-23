@@ -383,7 +383,7 @@ here (`write_intent`, `create`, `start`, `mount_git_view`, `stop`, `remove`, \
 refuses a site that does not name its operation. Every effect is issued inside \
 one of them: the `docker` CLI (`DockerCli`, the only `std::process::Command` \
 in the file -- a coordinator-side control-plane call that deliberately does not \
-cross the boundary, with its row in `runner::tests::every_production_process_\
+cross the boundary, with its row in `runner::contract::tests::every_production_process_\
 start_is_classified`), the intent record's stage/fsync/rename/dir-fsync through \
 `util::fsync_file` and `util::fsync_dir`, and the R19 view directory. \
 NO PUBLIC FUNCTION RETURNS A WRITABLE HANDLE: the APIs return `PathBuf`, \

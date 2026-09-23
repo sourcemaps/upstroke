@@ -1275,7 +1275,7 @@ or a string literal rather than code —
 
 So the claim that holds is "drops no occurrence that is **code**". The
 string-literal drop is the in-domain one: `Command::new(` is a needle of
-`runner::tests::every_production_process_start_is_classified`, `src/effects.rs`
+`runner::contract::tests::every_production_process_start_is_classified`, `src/effects.rs`
 is in that census's domain, and its row there was deleted by the same commit
 — which is the counterexample to the sentence twenty lines above it.
 
@@ -1325,7 +1325,7 @@ carried a hazard the other two did not:
 They were measured against each other rather than assumed: a `run_with_\
 timeout` planted at the **last line** of `src/agent/claude.rs` — a file the
 `effects.rs` region truncates to its first 66 of 1064 lines — is **seen** by
-`runner::tests::every_production_process_start_is_classified`, because that
+`runner::contract::tests::every_production_process_start_is_classified`, because that
 census used the second implementation. Two censuses in one crate, both
 answering "every production X is classified", over two different domains.
 

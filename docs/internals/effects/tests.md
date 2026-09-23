@@ -903,7 +903,7 @@ production region now, and the control below proves the needle is
 findable.
 
 The **set** of files is the claim, in the idiom of
-`runner::tests::every_production_process_start_is_classified`: a new file
+`runner::contract::tests::every_production_process_start_is_classified`: a new file
 naming a container runtime is the finding, and every file in the set has
 a reason.
 

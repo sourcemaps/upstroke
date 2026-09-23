@@ -3214,7 +3214,12 @@ fn inline_module_openers(source: &str) -> usize {
     found
 }
 
-const DECLARATION_ONLY_MODULES: &[&str] = &[ENGINE_FACADE, "src/lib.rs"];
+const DECLARATION_ONLY_MODULES: &[&str] = &[
+    ENGINE_FACADE,
+    "src/lib.rs",
+    "src/agent/mod.rs",
+    "src/runner/mod.rs",
+];
 
 #[test]
 fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {
@@ -3222,7 +3227,7 @@ fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {
         let source = fs::read_to_string(repo_root().join(path)).expect(path);
         assert_eq!(items_beyond_declarations(&source), Vec::new(), "{path}");
         assert!(
-            source.matches("mod ").count() > 8,
+            source.matches("mod ").count() >= 4,
             "{path} no longer declares modules, so the empty answer above says nothing"
         );
         let with_a_body = format!("{source}\nfn rf_probe_body() {{}}\n");

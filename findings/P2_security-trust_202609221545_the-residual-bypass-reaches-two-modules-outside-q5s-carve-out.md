@@ -201,9 +201,12 @@ three of them (`disallowed_types` in `claude.rs`, `codex.rs`, `copilot.rs`) inhe
 each is a measurement, and it is outside the remedy this file's guard was built for. **Two
 things the guard does not reach, each its own finding**: a module absent from the roll-call altogether
 (`W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`), and the **50 production and test files outside the roll-call
-that state no governed lint at file level and inherit no statement** — 34 under `src/topology/` and `src/runner/`,
-16 elsewhere — where the same silence stands unjudged
-(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`, filed with the guard).
+that stated no governed lint at file level and inherited no statement** — 34 under `src/topology/` and `src/runner/`,
+16 elsewhere — where the same silence stood unjudged
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`, filed with the guard and **closed in #318's third
+round**: fenced at their roots where a fence compiles, the two roots that could only `deny` emptied into children that
+`forbid` and held to declarations, and `every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+built; its record is #318's ledger row).
 
 `location` is the pinned constant, because what remains is the number it holds.
 

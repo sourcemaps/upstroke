@@ -415,7 +415,7 @@ rustfmt (macro bodies in braces are), and a `#[cfg(test)]` module not named
 `src/runner/container/view.rs`'s `#[cfg(test)] pub(crate) mod fixtures` and a
 forged `RunnerRequest {` builder above the file's real test module,
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` both exit
-0 and `runner::tests::every_production_runner_request_is_built_by_its_roles_\
+0 and `runner::contract::tests::every_production_runner_request_is_built_by_its_roles_\
 builder` passes — while the identical forged builder **without** the probe
 fails it by name.
 
