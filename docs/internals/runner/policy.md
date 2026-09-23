@@ -37,6 +37,23 @@ the digest silently. A length-prefixed encoding written out field by field
 is injective by construction and can be written by hand in a test — which
 is the only way to pin an encoding against something other than itself.
 
+## `#![forbid(`
+
+The three governed lints are `forbid` here since #318's third round: this file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read -- macro-written, or spelled apart -- lowers; #318's second MAIN review
+executed exactly that in `src/plan/mod.rs` and reached `std::fs::write` from
+a production topology body while clippy and every governance test passed
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). A leaf with no children; it sits under `src/runner/mod.rs`, which can only `deny` (its other children carry production allowances), so this file states its own level rather than inherit a lowerable one.
+`forbid`, not `deny`, because it compiles: nothing in the file allows a governed lint, and clippy over all targets exits 0 with the fence in place. A downgrade beneath
+a `forbid` is `E0453` however it is written or generated, and the enforcement
+is the lint gate's -- rustc resolves no `clippy::` lint, so `cargo build` and
+`cargo test` compile what clippy refuses. `effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names this file the day the fence is removed, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` the
+day it drops to `deny`.
+
 ## `pub const CANONICAL_VERSION: &str = "upstroke.runner-policy.v1";`
 
 The version tag the canonical encoding opens with.

@@ -15,6 +15,23 @@ This is point-in-time data shipped with the binary — the no-HTTP invariant
 holds, so it can only be updated by releasing. Unknown models are never
 auto-selected; a pin naming one is a hard error.
 
+## `#![forbid(`
+
+The three governed lints are `forbid` here since #318's third round: this file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read -- macro-written, or spelled apart -- lowers; #318's second MAIN review
+executed exactly that in `src/plan/mod.rs` and reached `std::fs::write` from
+a production topology body while clippy and every governance test passed
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). A leaf with no children (`controls/C1-unfence-catalog-single-*`).
+`forbid`, not `deny`, because it compiles: nothing in the file allows a governed lint, and clippy over all targets exits 0 with the fence in place. A downgrade beneath
+a `forbid` is `E0453` however it is written or generated, and the enforcement
+is the lint gate's -- rustc resolves no `clippy::` lint, so `cargo build` and
+`cargo test` compile what clippy refuses. `effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names this file the day the fence is removed, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` the
+day it drops to `deny`.
+
 ## `pub enum Family {`
 
 Which lab trained the model, independent of which CLI serves it.

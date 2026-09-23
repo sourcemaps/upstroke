@@ -192,8 +192,13 @@ in any of the three is `E0453` at the lint gate, six of them measured by #318's 
 (`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/inherited-forbid.*`). The other 23 pairs sit under ancestors
 that state nothing up to `src/lib.rs` and take `-D warnings` alone, which an inner `allow` lowers. By v17's wording all
 29 are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open in the 45 files that carry an
-allowance … for the lint each allows"* under-states by the 23. Whether `forbid` of the unstated lint compiles in each is
-a measurement, and it is outside the remedy this file's guard was built for. **Two
+allowance … for the lint each allows"* under-states by the 23. Checked by file at the third round's head
+(`~/orch-pr10/repair-318-r3-evidence/plan-class/twenty-six-vs-carve-out.json`): the 23 lowerable pairs sit in 17 files,
+and every one of the 17 carries a file-level allowance of a governed lint, so all 23 are inside v17's carve-out as read
+from the files, and none is in a production host outside it; after the third round's `deny` at `src/agent/mod.rs`,
+three of them (`disallowed_types` in `claude.rs`, `codex.rs`, `copilot.rs`) inherit that `deny` instead of taking
+`-D warnings` alone -- lowerable either way, and inside either way. Whether `forbid` of the unstated lint compiles in
+each is a measurement, and it is outside the remedy this file's guard was built for. **Two
 things the guard does not reach, each its own finding**: a module absent from the roll-call altogether
 (`W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`), and the **50 production and test files outside the roll-call
 that state no governed lint at file level and inherit no statement** — 34 under `src/topology/` and `src/runner/`,

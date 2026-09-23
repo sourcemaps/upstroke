@@ -35,6 +35,26 @@ must already be object-safe and its request must already be a single
 borrowed value. It is, and [`Runner`] is `Send + Sync` so a `&dyn Runner`
 can be held across the await points PR11 introduces.
 
+## `#![deny(`
+
+The three governed lints are `deny` here since #318's third round, and `deny`
+is the strongest level that compiles: `container.rs`, `container/view.rs` and `host.rs` allow governed lints at file
+level in production code (recorded rows of `effects/allowlist.toml`), and a
+`forbid` above an `allow` is `E0453` in every build. So this file states a
+level rather than take `-D warnings` alone, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`
+excuses the `deny` because production allowances sit below it. **A `deny` is
+a level an inner `allow` lowers**, and this file holds production code, so
+the route `GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`
+records stays open in it: #318's third round showed it -- a macro-generated
+`allow` wrapper here, called from a production topology body, passes clippy
+over all targets and every governance test
+(`~/orch-pr10/repair-318-r3-evidence/controls/C5-runner-root-*`). The finding
+stays `deferred` for this file and `src/agent/mod.rs`; closing it means this file holding
+nothing but declarations and re-exports, with its bodies in a child that can
+`forbid`, and the declaration-only guard extended to it -- measured at the
+third round (`plan-class/M4-*`) and pending the orchestrator's decision.
+
 ## `pub struct CommandSpec {`
 
 What an adapter hands the runner (DESIGN.md:222).

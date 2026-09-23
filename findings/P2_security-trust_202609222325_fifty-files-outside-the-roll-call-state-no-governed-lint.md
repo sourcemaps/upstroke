@@ -73,10 +73,50 @@ for no other, and that the boundary is the roll-call, which is hand-maintained.
 
 `location` is `src/topology/mod.rs:1`, the one prologue whose statement would reach 32 of the 50.
 
+**Third round (#318, 2026-09-23): 47 of the 50 fenced, one held to declarations, two remain.** Measured before it was
+written (`~/orch-pr10/repair-318-r3-evidence/plan-class/`: the census through the tree's own readers re-derives the 50;
+the strongest fence that compiles per root and lint; the twelve fences applied at once pass clippy over all targets,
+the effects suite, the container-child and facade censuses and the MSRV check): `#![forbid(clippy::disallowed_methods,
+clippy::disallowed_types, clippy::disallowed_macros)]` at `src/topology/mod.rs` (reaching its 31), `src/plan/mod.rs`
+(its 6), `src/runner/policy.rs`, `src/catalog.rs`, `src/error.rs`, `src/ir.rs`, `src/ladder.rs`, `src/observations.rs`
+and `src/ulid.rs`; `#![cfg_attr(not(test), forbid(..))]` at `src/effects.rs`, whose only allowances below are its
+whole-file test children; and `#![deny(..)]` at `src/agent/mod.rs` and `src/runner/mod.rs`, which is all those two
+compile (production allowances below them: `claude/codex/copilot.rs`, `proc.rs`, `proc/pipe_io.rs`; `container.rs`,
+`container/view.rs`, `host.rs`). `src/lib.rs` is held to declarations and re-exports by
+`a_declaring_module_holds_declarations_and_re_exports_and_nothing_else` beside the engine facade. Five leaves that
+fenced only some of the three lints now fence all of them (`src/connect/render.rs`, `src/status/render.rs`,
+`src/util/terminal.rs`, `src/validate/graph.rs`, `src/validate/render.rs`). **The tree-wide guard is built**:
+`every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid` refuses, asserted empty, a
+production file outside `CLASSIFIED_MODULES` that states no level for a governed lint and inherits no `forbid`, naming
+the level it does inherit; the roll-call guard and its 29 pin are untouched. Held both ways: each of five fences
+removed is named (the topology root for 81 pairs, `controls/C1-*`); generated allowances in `src/topology/paths.rs`,
+`src/plan/markdown/hints.rs` and `src/effects.rs`'s production region are `E0453` (`controls/C2-*`); the executed
+representative in `src/plan/mod.rs` is `E0453` at the lint gate on the fenced tree, its no-attribute and `deny` controls
+refused at the write (`controls/C3-*`); a body appended to `src/lib.rs` is refused (`controls/C4-*`). `cargo build --lib`
+still compiles the generated allow and an external client still writes through it: rustc enforces no clippy lint level,
+the lint gate does, as for every fence in the tree (`controls/C3-rustc-production-runtime.json`).
+
+**What remains, and it is two files, not a class.** `src/agent/mod.rs` and `src/runner/mod.rs` hold production code
+under a `deny`, which an inner `allow` the placement scan does not read lowers, and the route is executed in each on the
+fenced tree: a macro-generated `allow` wrapper hosted there, called from `prepared_pin_ref`, passes clippy over all
+targets and the whole effects suite (`controls/C5-agent-root-*`, `C5-runner-root-*`). Every other file of the 50 is
+closed at the lint gate. The completion for the two is measured and pending the orchestrator's decision
+(`~/orch-pr10/questions/repair_318_r3-2.md`): their bodies move into a child that can `forbid` (`src/agent/adapter.rs`,
+`src/runner/contract.rs`), the roots keep only declarations and `pub use` re-exports of every public path, and
+`DECLARATION_ONLY_MODULES` grows by both, at which point this file is deleted.
+
 ## What the change that takes this up should do
 
 Owner, as the ledger records it: project owner — the post-v0.2 pass over PR3's layer, the pass that owns
-`PR7-WRAPPERS-EMPTY-DOMAIN`. Two things, in this order:
+`PR7-WRAPPERS-EMPTY-DOMAIN`. Items 1 and 2 below were done in #318's third round except for the two roots named
+above; what is left is item 3. The original two are kept as written, for the record of what was proposed:
+
+3. **The two roots.** Move every item of `src/agent/mod.rs` but its `mod` declarations and `pub use` re-exports into
+   `src/agent/adapter.rs`, and of `src/runner/mod.rs` into `src/runner/contract.rs`, each fencing all three lints
+   with `forbid` (nothing in either file allows a governed lint, test modules included: neither has an allowlist row);
+   re-export every public path from the root so `upstroke::agent::AgentAdapter`, `upstroke::runner::CommandSpec` and
+   the rest resolve as before; add both roots to `DECLARATION_ONLY_MODULES`. Then delete this file.
+
 
 1. **Root fences, measured by compiling.** `#![forbid(clippy::disallowed_methods, clippy::disallowed_types,
    clippy::disallowed_macros)]` in `src/topology/mod.rs` reaches all 32 files under it; no allowance exists below it

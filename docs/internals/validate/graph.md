@@ -32,6 +32,15 @@ extending here, and this line is what stops it. That is also what keeps this
 file out of `effects/allowlist.toml`: an allowance is what that file records,
 and this module takes none.
 
+## `#![forbid(`
+
+`disallowed_methods` was forbidden here already, restoring the level `super` allows. `disallowed_types` and `disallowed_macros` joined the fence in #318's third round: `super` states nothing for them (`controls/C1-unfence-validate-graph-leaf-*`), so this file
+took it from `-D warnings` alone, a level an inner `allow` the placement scan
+does not read lowers (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`);
+`every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names the pair the day it is dropped. `forbid` compiles because nothing here
+allows a governed lint.
+
 ## `Module` — `#![deny(clippy::indexing_slicing, clippy::unreachable)]`
 
 §7's panic surface, mechanised for this file ahead of the crate-wide

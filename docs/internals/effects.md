@@ -55,6 +55,26 @@ standards remain authoritative. `*_verification_dispositions`,
 `finding_dispositions[].rationale` and the `v4_`..`v15_` keys belong to the
 packet's disposition history and are not reproduced here.
 
+## `#![cfg_attr(`
+
+The three governed lints are `forbid` in this file's production build since
+#318's third round, and conditional because of what sits below it. This file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read lowers (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`).
+Its only allowances below are `src/effects/tests.rs` and the eight files
+under it, every one a whole-file test module, so an unconditional `forbid` is
+`E0453` at the lib test target and the production build -- the lib target
+CI's three clippy legs check and the binary links -- can forbid: the shape
+#318 gave `src/agent/bin.rs`. `file_level_lint_state` reads it as the
+production build's statement; a generated `allow` in this file's production
+region is `E0453` at the lint gate
+(`~/orch-pr10/repair-318-r3-evidence/controls/C2-inheritance-reach-*`), and
+the lib test target alone compiles it, as for every conditional fence.
+`effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid` names this file the day the fence is removed
+(`controls/C1-unfence-effects-root-*`). The allowlist row for this file says
+the same: no allowance, and since #318 a production fence.
+
 ## `use std::collections::BTreeSet;`
 
 Allowlist placement: the **funnel section** of `effects/allowlist.toml`, and

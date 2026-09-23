@@ -536,6 +536,66 @@ production caller applied, is named by this test while clippy still exits 0
 on that tree (`probes/P2-*`), as is each test-only spelling on its own
 (`probes/P2b-*`).
 
+## `fn unclassified_production_files_leaving_a_governed_lint_unfenced(`
+
+**The tree-wide form of the roll-call guard, over the files the roll-call
+does not name.** For every scanned file under `src/` that is not in
+`CLASSIFIED_MODULES`, not a whole-file test module and not one of
+`DECLARATION_ONLY_MODULES`, and for every used governed lint: the file states
+a level in its own prologue (`forbid`, `deny`, `allow` or `expect`, as
+`file_level_lint_state` reads it in the production build), or the nearest
+ancestor module file that states the lint (`ancestor_module_files`) states
+`forbid`. Anything else is named with the level the production build gives
+it: an ancestor's `deny` or `warn`, which an inner `allow` lowers; an
+ancestor's `allow` or `expect`, which reaches the file without a row of its
+own; or `-D warnings` alone. Derived from the tree, from no list of files.
+
+**What it does not enforce, stated so the claim is the right size.** An own
+`deny` is a statement and passes here -- whether it could be `forbid` is
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`'s
+question and whether test code alone excuses it is
+`no_deny_of_a_governed_lint_is_excused_by_test_code_alone`'s -- so the two
+roots that state one because production allowances sit below them,
+`src/agent/mod.rs` and `src/runner/mod.rs`, pass here and remain hosts a
+generated `allow` reopens (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`).
+A classified module is judged by the roll-call guard and its pin, not here.
+A whole-file test module has no production region. A declaration-only module
+is passed over only because the declaration guard holds it empty. It reads
+prologues, not macro expansion; the refusal of a generated `allow` under a
+`forbid` is clippy's `E0453`, and rustc alone enforces no clippy level. It
+reads `src/` only: an example is its own crate root and reaches nothing in
+the library. `#[path]` is not modelled; the tree declares none.
+
+## `fn the_unclassified_fence_rule_names_a_silent_file_and_excuses_one_a_forbid_reaches() {`
+
+The rule on trees small enough to read. Named: a silent file under a silent
+declaration-only root, three pairs; a silent child under a `deny` root; a
+silent child under a root that allows one lint and forbids the rest, one
+pair, the inherited allowance; `warn`; a child under a root that forbids two
+lints in the production build only, named for the third in the root and in
+the child. A silent root nobody holds to declarations is named for every
+lint too. Excused: a file that forbids everything itself; an own `deny`; a
+silent child, grandchild and module under a forbidding root, `mod.rs` and
+crate root; a classified module; a whole-file test module; an example.
+
+## `fn every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid() {`
+
+The live tree, refused outright and asserted empty, with the count of
+unclassified files that state every lint themselves as the census's own
+control. Built in #318's third round with the fences that make it true:
+`forbid` of all three lints at `src/topology/mod.rs` (32 files),
+`src/plan/mod.rs` (7), `src/runner/policy.rs`, `src/catalog.rs`,
+`src/error.rs`, `src/ir.rs`, `src/ladder.rs`, `src/observations.rs` and
+`src/ulid.rs`; `cfg_attr(not(test), forbid(..))` at `src/effects.rs`; the
+third lint in five leaves that fenced only some; `deny` at `src/agent/mod.rs`
+and `src/runner/mod.rs`, which is what those two can compile and is the
+finding's remaining residue; and `src/lib.rs` held to declarations. Held both
+ways: each of five fences removed is named -- the topology root for 81 pairs
+(`~/orch-pr10/repair-318-r3-evidence/controls/C1-*`) -- and generated
+allowances in `src/topology/paths.rs`, `src/plan/markdown/hints.rs` and
+`src/effects.rs`'s production region are `E0453` at the lint gate under the
+fences they inherit (`controls/C2-*`).
+
 ## `const UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES: usize = 29;`
 
 The per-lint residue of `G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`,
@@ -1193,14 +1253,25 @@ do. In the engine facade the alias is refused all the same, by the whitelist:
 the invocation is not a declaration or a re-export whatever it is called.
 Elsewhere it is part of what `PR7-WRAPPERS-EMPTY-DOMAIN` records.
 
+## `const DECLARATION_ONLY_MODULES: &[&str] = &[ENGINE_FACADE, "src/lib.rs"];`
+
+The modules held to declarations and re-exports: the engine facade, for the
+reasons its notes give, and the crate root since #318's third round, because
+every allowance in the crate sits below it, so no fence it could carry closes
+anything, and a file that holds no code hosts no wrapper. The tree-wide
+guard below passes over exactly these, and only because this test holds
+them empty.
+
 ## `fn a_declaring_module_holds_declarations_and_re_exports_and_nothing_else() {`
 
-`items_beyond_declarations` on the real facade, which must hold nothing beyond
-its declarations, and on the facade with one addition at a time: four
-legitimate ones that pass, and eight that are refused -- an inline module
-empty and not, a function, a constant, `include!`, an allow on a declaration,
-a `path` attribute, and the review's macro, whose definition and invocation
-are two items and both refused.
+`items_beyond_declarations` on each of `DECLARATION_ONLY_MODULES` -- the real
+facade and the real crate root -- which must hold nothing beyond their
+declarations, each with a function appended as the refusal control
+(`~/orch-pr10/repair-318-r3-evidence/controls/C4-lib-body-*`); then on the
+facade with one addition at a time: four legitimate ones that pass, and eight
+that are refused -- an inline module empty and not, a function, a constant,
+`include!`, an allow on a declaration, a `path` attribute, and the review's
+macro, whose definition and invocation are two items and both refused.
 
 Then the eleven separators rustc reads (`RUSTC_WHITESPACE`), one at a time
 between `mod` and a name: the whitelist admits the declaration **and
