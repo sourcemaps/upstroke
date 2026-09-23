@@ -2073,6 +2073,9 @@ not_an_effect = [
     "STDIN_FILENO",
     "STDOUT_FILENO",
     "SYS_clone3",
+    # The number of `close`, which the parked-fork isolation witness hands a seccomp
+    # policy so that one descriptor's close answers `EIO`; the effect is `syscall`.
+    "SYS_close",
     "SYS_close_range",
     "SYS_fcntl",
     "SYS_getdents64",
