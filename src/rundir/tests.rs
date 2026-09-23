@@ -5169,9 +5169,17 @@ fn sentinel_identity(number: libc::c_int) -> std::ffi::OsString {
         .into_os_string()
 }
 
-/// On the Unixes without `/proc`, nothing here can name whose copy it is.
+/// On the Unixes without `/proc`, nothing here can name whose copy it is:
+/// the identity is that statement, carried as a value so that a test binds
+/// and passes it exactly as it does the Linux one.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn sentinel_identity(_number: libc::c_int) {}
+struct SentinelIdentityUnreadable;
+
+/// See [`SentinelIdentityUnreadable`].
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sentinel_identity(_number: libc::c_int) -> SentinelIdentityUnreadable {
+    SentinelIdentityUnreadable
+}
 
 /// Whose copy a sentinel read that has not answered EOF is reading, as far as
 /// the platform can say: on Linux the fork under test's `/proc` table either
@@ -5207,7 +5215,7 @@ fn sentinel_attribution(holder: libc::pid_t, sentinel: &std::ffi::OsStr) -> Stri
 
 /// On the Unixes without `/proc`, nothing here can name whose copy it is.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn sentinel_attribution(holder: libc::pid_t, _sentinel: &()) -> String {
+fn sentinel_attribution(holder: libc::pid_t, _sentinel: &SentinelIdentityUnreadable) -> String {
     format!("whether fork {holder} holds a copy cannot be read on this platform")
 }
 
