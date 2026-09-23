@@ -69,11 +69,16 @@ clippy over all targets and the whole effects suite, and ran
 (`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-engine-*`). With
 the split above, the same patch is two `E0453`s at the generated attributes,
 the `forbid` quoted from this file (`controls-final/PX2-engine-clippy.log`).
-`disallowed_methods` stays a `deny` the same macro could lower in a child
-that states nothing for it -- `attempt.rs` again -- and that is
-`PR7-WRAPPERS-EMPTY-DOMAIN`'s class, excused by production allowances, not
-this change's. `effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
-names this file the day either conditional `forbid` goes back to `deny`.
+`disallowed_methods` stays a `deny`, and a `deny` is a level the same
+macro lowers in a child that states nothing for it; today no child of this
+file leaves it unstated -- `attempt.rs`, `coordinator.rs` and `resume.rs`
+allow it at file level, recorded production allowances, and every other
+child forbids it -- so what the `deny` leaves open is
+`PR7-WRAPPERS-EMPTY-DOMAIN`'s class, a `deny` excused by production
+allowances, not this change's.
+`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day the conditional `forbid` of `disallowed_types` or
+the unconditional `forbid` of `disallowed_macros` goes back to `deny`.
 
 **And it holds no code.** Its leading attributes, `mod x;` declarations and
 `use` re-exports are all this file may contain. The same guard refuses

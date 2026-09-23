@@ -2079,9 +2079,15 @@ nothing about platforms or features and must not pretend to. `all(test,
 unix)` entails; `any(test, unix)` does not, because a Unix build without
 `test` compiles it; `not(test)` does not.
 
-## `pub(crate) mod census_domain` › `fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
+## `pub(crate) mod census_domain` › `pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
 
 `predicate` with `test = false` and every other atom unknown.
+
+`pub(crate)` since #318: [`super::lint_levels`] decides a `cfg_attr`'s
+predicate through it and the production-fence rule in `tests.rs` decides
+an allowance's `cfg` stack through it, so the crate has one reading of a
+predicate and the censuses cannot disagree with each other about what
+`all(test, unix)` means.
 
 ## `fn decide_without_test(predicate: &Predicate) -> Option<bool> {` › `Predicate::All(parts) => {`
 
@@ -2124,8 +2130,9 @@ file is not one of them and must not become one.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) struct Resolution {`
 
-How a file's prologue resolves for one lint: the level **in force**, and
-whether rustc refuses the prologue outright.
+How a file's prologue resolves for one lint in the production build: the
+level **in force**, whether rustc refuses the prologue outright, and
+whether every production valuation agrees on the answer at all.
 
 ## `pub(crate) struct Resolution` › `pub(crate) level: Option<&'static str>,`
 
@@ -2138,6 +2145,21 @@ A later attribute tried to weaken a `forbid`. rustc answers `E0453`
 and the crate does not compile, so this is not a level at all — it is
 the file failing to build, and a reader that folded it into a level
 would report a governance state for a file that has none.
+
+## `pub(crate) struct Resolution` › `pub(crate) undecided: bool,`
+
+The prologue names the lint under a predicate the production build does
+not decide -- a platform's, a feature's, or one rustc would refuse -- and
+the valuations disagree, so no single level is claimed: `level` is `None`
+and `refused_downgrade` is false. Undecided is not "unstated", and the
+difference is the failure direction: a census that treats it as unstated
+fails loud (the roll-call pin counts the pair), and a census that asks for
+a `deny` or a `forbid` is told neither. #318's second regression review
+executed the alternative on the reader as it was: it skipped a nested
+`cfg_attr` it did not read and kept the level before it, so
+`#![cfg_attr(not(test), deny(L), cfg_attr(not(test), allow(L)))]` was
+called a `deny` while clippy-driver applied the `allow` (`R2-REG-02`,
+`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/nested-parity.*`).
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {`
 
@@ -2179,6 +2201,22 @@ compiled by `clippy-driver` and this reader's answer is checked against
 the diagnostics that come back, so no sentence here is the authority for
 what the compiler does.
 
+### Decided by every production valuation, or by none
+
+The production build is not one valuation: three clippy legs compile the
+lib target on three platforms, and a `cfg_attr` in the prologue may hold
+on one and not another. The reader enumerates ([`file_level_lint_worlds`])
+the answer under every assignment of the predicates it cannot decide and
+returns a level only when all of them agree; otherwise it is
+[`Resolution::undecided`] and claims nothing. What it *can* decide is what
+[`super::census_domain::decide_without_test`] decides -- `test` false,
+`not(test)` true, `all`/`any`/`not` evaluated, `all()` true and `any()`
+false as `cfg` has them -- so `#![cfg_attr(not(test), forbid(L))]` is a
+plain `forbid` here, `#![cfg_attr(test, ..)]` is nothing, and a nested
+`cfg_attr` is expanded like the outer one. This is the crate's one
+reading of a predicate: the same function decides the cfg census's
+whole-file test modules and the production-fence rule's allowances.
+
 ### What it deliberately does not do
 
 **Lint groups are not expanded.** `#![deny(clippy::all)]` denies this
@@ -2195,64 +2233,114 @@ this crate's effect fixtures are written as exactly those two shapes.
 `clippy::disallowed_methods` and `disallowed_methods` are the same lint;
 [`super::normalize_lint`] is the bridge, as it is everywhere else here.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `if bytes[at] != b'#' || bytes.get(at + 1) != Some(&b'!') {`
+## `pub(crate) mod lint_levels` › `pub(crate) type World = (Option<&'static str>, bool);`
 
-The prologue ends at the first token that is not an inner attribute.
+One production valuation's answer: the level in force, and whether the
+prologue is `E0453` under it.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `let Some(list) = rest`
+## `pub(crate) mod lint_levels` › `struct Statement {`
 
-`allowance(…)` strips to `ance(…)`, which opens nothing: the
-parenthesis is what makes the prefix an exact attribute name.
+One statement of the lint in the prologue, in source order: its level,
+and the undecided predicates that all have to hold for it to apply. A
+statement under `cfg_attr(not(test), ..)` carries no condition; one under
+`cfg_attr(unix, ..)` carries `unix`; one nested in both carries `unix`.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `if resolution.level == Some("forbid") {`
+## `pub(crate) mod lint_levels` › `const MOST_UNDECIDED_PREDICATES: usize = 12;`
+
+The valuations are enumerated, two to the power of the distinct undecided
+predicates in the prologue; past this many the reader answers undecided
+rather than enumerate. No prologue in the tree carries even one.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {`
+
+Every answer some production valuation gives for `lint` over `source`'s
+prologue: the statements are replayed in order under each assignment of
+the undecided predicates, with the ordered, `forbid`-sticky rule above,
+and the distinct outcomes are the set. One element is a decided prologue;
+more than one is what [`Resolution::undecided`] reports; none is a
+prologue past `MOST_UNDECIDED_PREDICATES`. Predicates are variables by
+their rendered text, so `unix` written twice is one variable and two
+different predicates are independent -- an over-approximation of the
+real valuations that can only add outcomes, never remove one, so it can
+only make the reader refuse, never decide wrongly.
+
+## `pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {` › `if level == Some("forbid") {`
 
 Ordered, and `forbid` is sticky. A weaker level after a
 `forbid` is `E0453`, which is the file not compiling rather
 than a level; anything else replaces what came before it.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `for statement in statements_in_the_production_build(attribute) {`
+## `pub(crate) mod lint_levels` › `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {`
+
+The walk: from the first byte, over whitespace and inner attributes only,
+each attribute expanded into the statements it applies in the production
+build, each statement kept if it names the lint.
+
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {`
+
+The prologue ends at the first token that is not an inner attribute.
+
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `statements_in_the_production_build(attribute, &mut Vec::new(), &mut applied);`
 
 An inner attribute states what it applies in the production build. For
 every attribute but `cfg_attr` that is the attribute itself; for a
-`cfg_attr` it is what its predicate applies, and the predicate is read
-below.
+`cfg_attr` it is what its predicate applies, nested `cfg_attr`s included,
+and the predicate is read below.
 
-## `pub(crate) mod lint_levels` › `fn statements_in_the_production_build(attribute: &str) -> Vec<&str> {`
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `let Some(list) = rest`
+
+`allowance(…)` strips to `ance(…)`, which opens nothing: the
+parenthesis is what makes the prefix an exact attribute name.
+
+## `pub(crate) mod lint_levels` › `fn statements_in_the_production_build<'a>(`
 
 **The valuation this reader answers for is the production build's**: the
 lib target every clippy leg checks and the binary links, compiled without
-`cfg(test)`. `#![cfg_attr(not(test), forbid(L))]` is therefore read as
-`forbid(L)`, and `#![cfg_attr(test, allow(L))]` as no statement at all.
-Any other predicate — a platform's, a feature's — is read as no statement
-either: an attribute that holds on one leg of CI and not another is not
-the file's level, and the safe direction is the loud one (a census told
-the file states nothing when it states something on some platform). The
-sweep in `governed_deny_lists_written_anywhere` still reads a `deny(`
-inside such an attribute and reports the disagreement.
+`cfg(test)`. A `cfg_attr`'s predicate is parsed by
+[`super::census_domain::parse_predicate`] and decided by
+[`super::census_domain::decide_without_test`]: true, and the attributes it
+applies are read, each through this same function, so a nested `cfg_attr`
+is expanded exactly as rustc expands it; false, and nothing is read;
+undecided -- a platform, a feature, any atom but `test` -- and the
+attributes are read under that predicate as a condition, which
+[`file_level_lint_worlds`] then enumerates both ways. A predicate rustc
+would refuse (`cfg_attr(, ..)`, `not(a, b)`, `not(te st)`) is a condition
+too, under its written text: rustc does not compile such a file, and the
+reader claims no level for it rather than repair the spelling.
 
-Why the reader learned this: `src/agent/bin.rs`'s inline `#[cfg(test)]
-mod tests` allows `disallowed_methods`, so an unconditional `forbid` is
-`E0453` at the lib test target (measured by both of #318's first reviews)
-and the file carried `deny` — a level a macro-generated `allow` in its
-production region lowered, executed by #318's MAIN review
+Why the reader learned the first half: `src/agent/bin.rs`'s inline
+`#[cfg(test)] mod tests` allows `disallowed_methods`, so an unconditional
+`forbid` is `E0453` at the lib test target (measured by both of #318's
+first reviews) and the file carried `deny` -- a level a macro-generated
+`allow` in its production region lowered, executed by #318's MAIN review
 (`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`). The repair is a
 `forbid` that exists in every build the test module does not, and a
 reader that did not read it would have counted the pair unstated. The same
 shape was then found and executed in `src/runner/container/census.rs`,
 `exec.rs` and `resolve.rs` and under `src/engine/mod.rs`, and fenced the
 same way (`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`).
+Why it learned the second: the first form of this function returned the
+outer `cfg_attr`'s attributes unexpanded and the level loop skipped the
+nested one, so a later `allow` nested under the same predicate was dropped
+and the earlier `deny` kept -- a false fence, executed by #318's second
+regression review (`R2-REG-02`).
 
 Measured, not reasoned: every row of
 `effects::tests::the_file_level_lint_reader_answers_what_rustc_does` is
 compiled by `clippy-driver` without `--test`, which is exactly this
-valuation, and the `cfg_attr` rows are among them. Several attributes in
-one `cfg_attr` are read in order, as rustc expands them.
+valuation; the nested, composite, empty-combinator and `cfg_attr(test, ..)`
+rows are among the decided ones, and a second table of platform, feature
+and malformed prologues checks that the reader refuses to decide what the
+compiler decides differently per valuation, and that what it cannot read
+does not compile.
 
-## `pub(crate) mod lint_levels` › `fn top_level_arguments(body: &str) -> Vec<&str> {`
+## `pub(crate) mod lint_levels` › `pub(crate) fn top_level_arguments(body: &str) -> Vec<&str> {`
 
 `cfg_attr`'s arguments, split at the commas that are not inside
 parentheses, brackets, braces or a string: the predicate first, then
-each attribute it applies.
+each attribute it applies. `pub(crate)` for the production-fence rule in
+`tests.rs`, which reads a `cfg_attr`'s predicate off an allowance the
+same way.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
 

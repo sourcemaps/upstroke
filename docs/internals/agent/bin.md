@@ -68,8 +68,14 @@ generated (`~/orch-pr10/repair-318-r2-evidence/controls-tree/B1-*`,
 `controls/c03`, `c08`, `c09`). The lib test target -- the only build the
 test module exists in -- gets no `forbid`; its level for this lint is
 `-D warnings`', which the test module's allow lowers as it always did, and
-which a generated `allow` in the production region would lower there too
-(`controls-tree/L1-*`). Every gate compiles the production build, and that
+which a generated `allow` in the production region lowers there too:
+measured by a fully qualified run of the review's witness under
+`cargo test --lib` alone, one test selected, one passed, the file written
+to a path deleted first (`~/orch-pr10/repair-318-r3-evidence/probes/P4-L1-*`).
+The earlier receipt for the same claim, `controls-tree/L1-*` in the
+round-2 evidence, selected no test -- a bare name to `--exact` -- and
+copied the file its `B1` run had already written; it is VOID and stands
+as written. Every gate compiles the production build, and that
 is where the lint gate refuses it. The enforcement is clippy's: rustc
 resolves no `clippy::` lint, so `cargo build` and `cargo test` compile a
 downgrade under this `forbid` as they compile every other fence's violation

@@ -13,7 +13,14 @@ guard: project owner — the post-v0.2 pass over PR3's layer, with `PR7-WRAPPERS
 
 ## Failure sequence
 
-**Measured at `de6d64348b28fb1ba460ffb198584e132c8076c3` by enumeration, not executed.** The mechanism is the one
+**Measured at `de6d64348b28fb1ba460ffb198584e132c8076c3` by enumeration; executed in one of the 50 at
+`8bca46080857fdc058c9bfe146e4d629e73cb6dc` by #318's second MAIN review** (`src/plan/mod.rs`: a macro-generated
+`#[allow(clippy::disallowed_methods)]` wrapper around `std::fs::write`, called from the production body of
+`engine::topology::integrate::prepared_pin_ref`, passed clippy over all targets and 195 effects tests, and an ordinary
+non-test client of the library built by `cargo build --lib` wrote 64 verified bytes through it; the macro emitting `deny`
+and a file-level `forbid` each refused it — `~/orch-pr10/reviews/pr-318r2/main-evidence/R1-*`, `R2-*`, `R3-*`;
+reproduced by the third round, 70 bytes by the same route, `~/orch-pr10/repair-318-r3-evidence/probes/H4-*`). One host
+and one route, executed; the other 49 remain enumerated. The mechanism is the one
 Gate 5's fourth run executed in `src/capacity.rs` and `src/runner/invocation.rs`
 (`G5RUN4-RESIDUAL-BYPASS-OUTSIDE-THE-Q5-CARVE-OUT`): a file whose prologue states no level for a governed lint takes
 that lint's level from `-D warnings` alone, and an inner `allow` the placement scan does not read — written by a
@@ -48,7 +55,7 @@ and nothing more.
 One of the 16, `src/lib.rs`, is a declaring module that holds no code, and `src/topology/mod.rs` among the 34 is
 another; a module that holds no code hosts no wrapper.
 `a_declaring_module_holds_declarations_and_re_exports_and_nothing_else` reads `ENGINE_FACADE`, `src/engine/mod.rs`,
-and no other file, so it holds neither of them to that shape. The other 14 of the 16 hold production code —
+and no other file, so it holds neither of them to that shape. The other 15 of the 16 hold production code —
 `src/agent/mod.rs` has `probe_workspace` and `probe_request`, `src/plan/mod.rs` has `detect` and the `PlanAdapter`
 trait, `src/runner/mod.rs` (among the 34) the `CommandSpec`, `AgentId`, `RunnerError` and `HarnessHooks` bodies,
 `src/effects.rs` its readers — and a production `fn` anywhere in the crate is a name a topology body can reference

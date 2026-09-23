@@ -123,10 +123,30 @@ reviewer's own patch (`~/orch-pr10/repair-318-r2-evidence/controls-tree/`): clip
 written): rustc resolves no `clippy::` lint, so it enforces neither the lint nor `E0453` for it (`controls/c15`–`c18`),
 for this fence exactly as for every `forbid` #312 and #316 wrote and every denial in `clippy.toml`; the lint gate — local
 gate 2, CI's three `lint` legs — is where every effect denial in this tree is enforced, and it is where this route is
-closed. The lib test target alone (`cargo test --lib`) compiles the generated allow (`L1-*`): that is the shape's stated
-limit. `file_level_lint_state` reads a `cfg_attr(not(test), ..)` inner attribute as the production build's statement
+closed. The lib test target alone (`cargo test --lib`) compiles the generated allow -- measured properly in the third
+round, one fully qualified test selected and passed with the witness path deleted first
+(`~/orch-pr10/repair-318-r3-evidence/probes/P4-L1-*`); the round-2 receipt for it, `controls-tree/L1-*`, selected no
+test and copied its `B1` run's file, and is VOID -- and that is the shape's stated limit. `file_level_lint_state` reads a
+`cfg_attr(not(test), ..)` inner attribute as the production build's statement
 (`the_file_level_lint_reader_answers_what_rustc_does` compiles the new spellings), so the guard counts the pair stated and
-the pin below stays 29. The class this shape names — a file-level `deny` every allowance below which is test code, so
+the pin below stays 29.
+
+**Third round (#318, 2026-09-23), after the second reviews executed two defects in the instruments above.** (1) The
+production-fence rule read only the literal `#[cfg(test)]` as test scope: `bin.rs` put back to `deny` beside an empty
+`#[cfg(all(test, unix))]` module carrying a marked `#[allow]`, with the macro wrapper and its production caller, passed
+clippy over all targets and 195 effects tests -- the rule included -- while the witness wrote (`R2-REG-01`,
+`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/boundary-extra-v2-*`; reproduced at `8bca4608`,
+`~/orch-pr10/repair-318-r3-evidence/probes/H2-*`). The rule now decides an allowance's whole `cfg` stack, its own
+`cfg_attr` predicate and the module it sits in through `census_domain::decide_without_test`, the crate's one reading
+of a predicate; the same tree is refused by `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` naming
+`src/agent/bin.rs` (`probes/P2-*`), each of the seven scoped spellings on its own too (`probes/P1-*`, `P2b-*`).
+(2) The reader dropped a nested `cfg_attr` and kept the level before it, so
+`#![cfg_attr(not(test), deny(L), cfg_attr(not(test), allow(L)))]` read as `deny` while clippy-driver applied the
+`allow` (`R2-REG-02`, `probes/nested-parity.*`; reproduced, `H3-*`). The reader now expands nested `cfg_attr`s, decides
+predicates as the cfg census does, enumerates every production valuation's answer and claims a level only when all agree
+(`Resolution::undecided` otherwise; `probes/P3-*`, and the parity test's second table compiles the platform, feature
+and malformed spellings). Neither defect changed a level in the tree: the census re-derived at the third round's head
+gives the same 43 / 29-25 / 0 / 29 pairs in 20 files. The class this shape names — a file-level `deny` every allowance below which is test code, so
 the production build could `forbid` — was measured tree-wide at **11** more pairs in four files outside the roll-call
 (`src/runner/container/census.rs`, `exec.rs`, `resolve.rs`; `src/engine/mod.rs` for `disallowed_types` and
 `disallowed_macros`), the bypass executed in each at its `deny` (`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/`),
@@ -145,8 +165,11 @@ time with no list of files (`~/orch-pr10/guard-decision-evidence/`, indexed by i
   it passes (`H1-*.log`).
 - `the_governed_lint_pairs_classified_modules_leave_unstated_only_shrink`: the (module, lint) pairs stated at no
   level are counted and asserted equal to `UNSTATED_GOVERNED_LINT_PAIRS_IN_CLASSIFIED_MODULES`, **29** at this head,
-  all inside the carve-out: the 31 of the fence change less `bin.rs`'s three, plus `bin.rs`'s `disallowed_methods`
-  which is now `deny`. The `forbid` of `disallowed_macros` removed from `src/runner/container/view.rs` fails at 30
+  all inside the carve-out, in 20 files (the guard's own listing, re-derived at the third round's head:
+  `~/orch-pr10/repair-318-r3-evidence/plan-class/census-at-head.json`); `bin.rs` contributes none, since all three of
+  its lints are stated -- `disallowed_methods` as `cfg_attr(not(test), forbid(..))` since the second round, the other
+  two as `forbid` -- and the 32 the first run of the guard counted at `de6d6434` were these 29 plus `bin.rs`'s three.
+  The `forbid` of `disallowed_macros` removed from `src/runner/container/view.rs` fails at 30
   naming that pair (`F3-*.log`); the constant lowered by one fails at 29 against 28, and raised by one at 29 against
   30, each with its reading stated (`F4b-*.log`, `F5-*.log`). A count and not a list: a table of 29 pairs in an instrument is a second roll-call, and the change
   that fences a pair lowers one number.
@@ -161,11 +184,16 @@ promised.
 governed lints and state nothing about the rest (the count is the guard's own, from the pin's failure message —
 `~/orch-pr10/reviews/pr-318r1/main-evidence/residue-prose-durable.log`, 29 pairs across 20 files, three of them under
 `src/engine/`; corrected on 2026-09-23 from a hand count of 19 and four) — `src/interaction.rs` allows methods and macros and says nothing of
-`disallowed_types`, `src/engine/{attempt,coordinator,resume}.rs` allow methods and inherit `src/engine/mod.rs`'s
-`deny` of the other two, which a child's inner `allow` lowers — each listed by the pin's own failure message and by
-`H0-*.log`. By v17's wording they are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open
-in the 45 files that carry an allowance … for the lint each allows"* under-states by them. Whether `forbid` of the
-unstated lint compiles in each is a measurement, and it is outside the remedy this file's guard was built for. **Two
+`disallowed_types`, `src/engine/{attempt,coordinator,resume}.rs` allow methods and state nothing for the other two —
+each listed by the pin's own failure message and by `H0-*.log`. **Unstated is not lowerable, and the pin's listing
+now says which is which.** Since #318 fenced `src/engine/mod.rs` (`cfg_attr(not(test), forbid(clippy::disallowed_types))`,
+`forbid(clippy::disallowed_macros)`), those six pairs inherit a production `forbid`: a generated `allow` of either lint
+in any of the three is `E0453` at the lint gate, six of them measured by #318's second regression review
+(`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/inherited-forbid.*`). The other 23 pairs sit under ancestors
+that state nothing up to `src/lib.rs` and take `-D warnings` alone, which an inner `allow` lowers. By v17's wording all
+29 are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open in the 45 files that carry an
+allowance … for the lint each allows"* under-states by the 23. Whether `forbid` of the unstated lint compiles in each is
+a measurement, and it is outside the remedy this file's guard was built for. **Two
 things the guard does not reach, each its own finding**: a module absent from the roll-call altogether
 (`W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`), and the **50 production and test files outside the roll-call
 that state no governed lint at file level and inherit no statement** — 34 under `src/topology/` and `src/runner/`,
