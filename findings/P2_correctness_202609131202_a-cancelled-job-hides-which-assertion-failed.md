@@ -196,3 +196,84 @@ reading a single observation could not give.
 `PR125-CLOSE-MACOS-READY-RED-CAUSE-UNKNOWN`: the `:8356` shape now has a Linux mechanism and a
 measured duration, so the sighting in that row's confirmation window is no longer unclassified in
 kind; whether that reads as sufficient is the owner's, and the row is not edited here.
+
+## The neighbour's holder, constructed, and the fixture's model of a restart (2026-09-23)
+
+The production refusal the neighbour reads — `WorktreeLock::acquire_in_hooked`'s scan finding the
+run's `cleanup.lock` held at its one exclusive probe, *"still has a process of its own alive … and
+that process holds the run's cleanup lease; refusing overlapping engine ownership"* — is now
+constructed on demand and waited out by the recovery fixture
+(`fix-P2/correctness_a-cancelled-job-hides-which-assertion-failed`, second pull request). The
+refusal itself is untouched: no production lock, probe or wait changed.
+
+**Where it was seen.** A content-deduplicated census of every full library-suite log preserved on
+the build box (`~/eight-logs`, the frozen evidence trees, the lane evidence roots): 42 of 782
+distinct suites carry this refusal, 34 in
+`repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`, 5
+in `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`, 4 in
+`the_cost_of_a_parked_verification_still_refuses_the_next_integration_after_a_restart` and 1 in
+`kill_after_report_before_each_cleanup_step`; 7 of the 54 distinct suites since 2026-09-22 carry
+it, and none of the isolated runs on record. In the four preserved natural sightings whose logs
+retain their order, the failure completes at the same point of the suite each time (lines
+1169–1208 of about 2,830), concurrent with the same seventeen recovery tests.
+
+**The holder, by construction.** A copy of the run's own lease descriptor. `WorkspaceManager::
+update_ref` opens it through `rundir::hold_cleanup_lease_for_child` and keeps it open until the
+`git update-ref` child has exited (measured 1.9–2.3 ms per ref write, five writes in a first
+incarnation's final step, the last closed 1.3 ms before the next incarnation's first probe); a
+`fork` by any other thread of the same process while it is open copies it, and the copy holds the
+shared `flock` until that child's `exec` closes it or the child closes it itself. Two witnesses at
+the base `5b16f727`, tree restored by hash afterwards (`~/orch-pr10/repair-cleanup-lease-evidence/`):
+
+- At the refusal site, deterministically: a sibling thread forks while a ref write's copy is open,
+  the write ends, this process drops its copy — the lease is still held, `WorktreeLock::acquire_in`
+  is refused with the exact message naming the run and `RunLock::acquire`'s probe is refused too,
+  and both acquire once the sibling exits. A sibling forked before the copy existed, or one that
+  closes its inherited descriptors as the reaper does, leaves the lease free; a real ref-writing
+  child still alive is refused at once (236 µs).
+- In the failing test's own shape, one process per run: no sibling, 0 of 10 refused; a sibling
+  thread forking every millisecond whose children keep their inherited descriptors 30 ms, **6 of
+  10 refused with this fingerprint**; the same forks closing their inherited descriptors first,
+  0 of 10; ordinary fork-and-exec siblings on a quiet box, 0 of 10.
+
+The design already states the hazard: `cleanup::take` (`src/rundir.rs`) declines to retain its
+own lock in the conductor because "arbitrary forked children would inherit its open file
+description", and `imp`'s notes record the same measurement for the run lock. What
+`hold_cleanup_lease_for_child` retains is exactly such a descriptor, on purpose — the ref-writing
+child must inherit it — and its doc said it was inherited by that child only; the doc now says
+which forks inherit it and for how long. The refusal's own text still names only the reaper and
+the ref-writing child as holders; the third, a sibling fork in its exec window, is not named
+there.
+
+**What the fixture now does.** The recovery tests resume a run in the process that drove it,
+about a millisecond after the previous incarnation's last ref write. A later resume by the same
+process — the second resume of a fixture and every one after it, through the three trunks
+`resume_with`, `resume_as_certified_by` and `resume_holding_manager` — first waits, bounded by
+`RELEASE_BOUND` (20 s, the same number the file's other eighteen waits use, polled every 50 ms),
+until the run's cleanup lease is observed free, then makes the real resume whatever the wait
+found; a refusal that follows an expired wait carries the production message with the bound and
+the observations appended. A first resume never waits, so every test that plants a hold and
+expects the immediate refusal is untouched and now asserts that no wait preceded it. The parked
+fork the witnesses use is `workspace_manager::fixture::ParkedFork`: a child of the test process
+parked in its exec window on a socket read, reporting its pid from there, holding a copy of the
+lease taken exactly as a ref write takes it; the regression test
+`a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes` shows a
+later resume returning only after the fork released, and its twin
+`a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation` shows a holder that
+outlives a 500 ms bound refused by the resume itself, alive and holding after the refusal, with
+nothing appended to the log. The failing test's shape under the forcing sibling: 6 of 10 refused
+before, 0 of 10 after.
+
+**What this does not fix, and why the disposition stays `deferred`.**
+
+- The inheritance is not closed. Every fork of the coordinator during a ref write still copies
+  the lease descriptor; the fixture tolerates this process's own copies, it does not remove them.
+- No production behaviour changed: the next coordinator's single probe refuses on any hold, as
+  the packet's R28 row requires, and this record establishes neither that a different-process
+  restart can never meet such a copy nor that it can; only that a copy is a hold the probe is
+  right to see for as long as it lasts, and that it lasts a child's fork-to-exec window.
+- Which sibling fork held the copy in each natural sighting is not identified; the mechanism is
+  established by construction and by the design's own notes, not by a per-sighting instrument.
+- The classification gap (a cancelled job destroys the assertion) is as recorded above.
+- The constructed 0-of-10 and the natural 7-of-54 are different populations; neither is a rate
+  for the suite after this change.
