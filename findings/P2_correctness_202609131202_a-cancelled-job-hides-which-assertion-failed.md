@@ -700,3 +700,17 @@ and production's lease probe above. The body's instrument sentence now counts th
 five syscall numbers, one BPF opcode and two metadata items, and says what the rows change: the
 census's classification of those names, not what an effectful call may do
 (`PR320-R6-MAIN-003`, `PR320-R6-REG-003`).
+
+Native macOS CI of `980301ff` then failed the five tests that hold a lifeline on every Unix, each on
+its cut: macOS answers `shutdown` of the test's end `ENOTCONN` once every holder of the other end --
+the scenario process and its warden, which the wrapper's group kill had already ended -- has closed
+it, where Linux answers 0, and the lifeline read that answer as a cut not made. The cut's answer is
+now read beside the presence end's EOF: not connected with the presence end closed is a lifeline
+nothing held any more, and without it a cut not made
+(`cutting_a_lifeline_whose_other_end_every_holder_has_closed_is_a_cut`,
+`PR320-R7-MACOS-LIFELINE-CUT-NOT-CONNECTED`). Every socket operation of the lifeline and the wardens
+was then set against both kernels' sources and the native runs, in the evidence's operation matrix:
+this one difference is the one fixed, and two macOS limits are named -- std sets close-on-exec on a
+new socket pair's ends only after creating them there, so a process another thread execs in between
+can hold an end and make a reading late, and the death path, which ends a group when the test
+process dies, is executed on Linux only.

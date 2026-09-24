@@ -6403,6 +6403,59 @@ fn a_warden_refuses_to_arm_outside_its_scenarios_own_group_and_signals_nothing()
     );
 }
 
+/// Cutting a lifeline whose other end every holder has already closed is a
+/// cut, whatever the platform answers, as long as the presence end had
+/// answered EOF first: Linux shuts the end down, and macOS answers
+/// `ENOTCONN` (os error 57), which says no process held the other end any
+/// more, so no warden was left to wake. A real socket pair, its other end
+/// closed, then the cut the lifeline makes: accepted on both. The same
+/// not-connected answer while the presence end was still held is two
+/// answers that disagree, and is a cut not made; any other answer is a cut
+/// not made. Before, macOS's answer was noted as a lifeline that could not
+/// be cut, although the wrapper's group kill had already ended the scenario
+/// and its warden, and the five tests that hold a lifeline on every Unix
+/// failed on native macOS (CI run 36018639391 at `980301ff`). Every Unix;
+/// native macOS gives the `ENOTCONN` its run.
+#[cfg(unix)]
+#[test]
+fn cutting_a_lifeline_whose_other_end_every_holder_has_closed_is_a_cut() {
+    let not_connected = || std::io::Error::from(std::io::ErrorKind::NotConnected);
+    let (cut, other) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    drop(other);
+    let answered = cut_answered(cut.shutdown(std::net::Shutdown::Write), true);
+    assert!(
+        matches!(answered, Ok(Cut::Made | Cut::NothingHeldIt(_))),
+        "a cut whose other end nothing holds, the presence end closed, is a cut: {answered:?}"
+    );
+    assert_eq!(
+        cut_answered(Err(not_connected()), true),
+        Ok(Cut::NothingHeldIt(not_connected().to_string())),
+        "not connected, the presence end closed, is a lifeline no process held any more"
+    );
+    let disagreeing = cut_answered(Err(not_connected()), false);
+    assert!(
+        disagreeing
+            .as_ref()
+            .is_err_and(|why| why.contains("the two answers disagree")),
+        "not connected while the presence end was still held is a cut not made: {disagreeing:?}"
+    );
+    for presence_closed in [true, false] {
+        assert!(
+            cut_answered(
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+                presence_closed
+            )
+            .is_err(),
+            "any other answer is a cut not made, the presence end closed or not"
+        );
+        assert_eq!(
+            cut_answered(Ok(()), presence_closed),
+            Ok(Cut::Made),
+            "a shutdown made is a cut"
+        );
+    }
+}
+
 /// A parked fork's drop whose release a policy refuses -- the send answering
 /// `EINTR` on the dropping thread, the refusal seen in force first -- with
 /// the child stopped, so that no EOF can release it instead, kills the child
@@ -7234,8 +7287,9 @@ struct Leftovers {
     /// Before anything was done: whether every process of the scenario had
     /// exited, the presence end answering EOF within [`LEFTOVER_BOUND`].
     when_the_wrapper_returned: Result<(Duration, u32), SentinelHeldPastBound>,
-    /// The cut's own answer: a shutdown that failed cut nothing.
-    cut: Result<(), String>,
+    /// The cut's own answer, read by [`cut_answered`]: made, or nothing
+    /// held the other end any more; any other failure cut nothing.
+    cut: Result<Cut, String>,
     /// After the cut, the same observation within [`LEASE_RELEASE_BOUND`].
     after_the_cut: Result<(Duration, u32), SentinelHeldPastBound>,
     /// After the cut, each group named, observed without a signal to have
@@ -7266,7 +7320,10 @@ impl Leftovers {
             ),
         };
         notes.push_str(&match &self.cut {
-            Ok(()) => String::from("\n[the lifeline was cut]"),
+            Ok(Cut::Made) => String::from("\n[the lifeline was cut]"),
+            Ok(Cut::NothingHeldIt(answer)) => format!(
+                "\n[the lifeline was cut: no process held its other end any more ({answer})]"
+            ),
             Err(error) => format!("\n[the lifeline could not be cut: {error}]"),
         });
         notes.push_str(&match &self.after_the_cut {
@@ -7288,6 +7345,51 @@ impl Leftovers {
             });
         }
         notes
+    }
+}
+
+/// What cutting a lifeline did ([`cut_answered`]).
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Cut {
+    /// The test's end was shut down: every warden holding the other end
+    /// reads its EOF.
+    Made,
+    /// No process held the other end any more -- the scenario process, its
+    /// descendants and every warden had closed their copies -- so no warden
+    /// was left to wake: macOS answers `ENOTCONN` for a stream socket whose
+    /// peer every holder has closed, where Linux shuts the end down all the
+    /// same. Taken only beside the presence end's EOF, read before the cut:
+    /// the platform's answer never stands in for the observation. The
+    /// answer, as the OS gave it.
+    NothingHeldIt(String),
+}
+
+/// Read the cut's `shutdown`, beside whether the presence end had already
+/// answered EOF (`presence_closed`): done is [`Cut::Made`]; not connected
+/// with the presence end closed is [`Cut::NothingHeldIt`], a lifeline whose
+/// other end every holder had already closed -- which native macOS answers
+/// once the wrapper's group kill has ended the scenario and its warden, and
+/// which was read as a cut not made until its CI run said so
+/// (`cutting_a_lifeline_whose_other_end_every_holder_has_closed_is_a_cut`).
+///
+/// # Errors
+///
+/// Not connected while the presence end was still held -- the two answers
+/// disagree, so the cut is not taken as made -- and any other answer: the
+/// cut was not made, and nothing the lifeline holds was released by it.
+#[cfg(unix)]
+fn cut_answered(answer: std::io::Result<()>, presence_closed: bool) -> Result<Cut, String> {
+    match answer {
+        Ok(()) => Ok(Cut::Made),
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected && presence_closed => {
+            Ok(Cut::NothingHeldIt(error.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => Err(format!(
+            "{error}, while a process of the scenario still held the presence end: the two \
+             answers disagree, and the cut is not taken as made"
+        )),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -7316,10 +7418,10 @@ impl Lifeline {
     fn account(&mut self, groups: &[libc::pid_t]) -> Leftovers {
         let when_the_wrapper_returned =
             sentinel_closed_within(&mut self.presence, LEFTOVER_BOUND, &mut |_| {});
-        let cut = self
-            .cut
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|error| error.to_string());
+        let cut = cut_answered(
+            self.cut.shutdown(std::net::Shutdown::Write),
+            when_the_wrapper_returned.is_ok(),
+        );
         let after_the_cut =
             sentinel_closed_within(&mut self.presence, LEASE_RELEASE_BOUND, &mut |_| {});
         let groups = groups
@@ -7406,12 +7508,14 @@ fn every_process_had_exited_when_the_wrapper_returned(text: &str) -> bool {
     )
 }
 
-/// Whether a scenario's lifeline notes say the cut was made and ended
-/// everything: every process of the scenario gone after it, and every group
-/// named observed empty.
+/// Whether a scenario's lifeline notes say the cut was made -- or found no
+/// process holding the other end any more ([`Cut`]) -- and ended everything:
+/// every process of the scenario gone after it, and every group named
+/// observed empty.
 #[cfg(unix)]
 fn the_cut_ended_everything(text: &str) -> bool {
-    text.contains("[the lifeline was cut]")
+    text.lines()
+        .any(|line| line.starts_with("[the lifeline was cut"))
         && text.lines().any(|line| {
             line.starts_with("[the lifeline: every process of the scenario had exited")
                 && line.ends_with("after the cut]")
