@@ -1975,6 +1975,10 @@ effect = [
 not_an_effect = [
     "BPF_ABS",
     "BPF_JEQ",
+    # The jump on a set bit, with which the rundir tests' policy that refuses
+    # every open but a directory's tests the flags for `O_DIRECTORY`
+    # (`refuse_nondirectory_opens_on_this_thread`, `PR320-R5-MAIN-002`).
+    "BPF_JSET",
     "BPF_JMP",
     "BPF_K",
     "BPF_LD",
@@ -2072,6 +2076,10 @@ not_an_effect = [
     "STDERR_FILENO",
     "STDIN_FILENO",
     "STDOUT_FILENO",
+    # The number of `clock_nanosleep`, which the rundir tests hand a seccomp
+    # policy so that every rest an owner takes answers `EINTR`
+    # (`PR320-R5-MAIN-006`); the effect is `syscall`.
+    "SYS_clock_nanosleep",
     "SYS_clone3",
     # The number of `close`, which the parked-fork isolation witness hands a seccomp
     # policy so that one descriptor's close answers `EIO`; the effect is `syscall`.
@@ -2080,11 +2088,23 @@ not_an_effect = [
     "SYS_fcntl",
     "SYS_getdents64",
     "SYS_kill",
+    # The number of `openat`, which the rundir tests hand a seccomp policy so
+    # that every open but a directory's answers `EINTR` (`PR320-R5-MAIN-002`);
+    # the effect is `syscall`.
+    "SYS_openat",
     "SYS_pidfd_open",
     "SYS_pidfd_send_signal",
     "SYS_prctl",
+    # The number of `sendto`, the call a Unix-socket write makes, which the
+    # rundir tests hand a seccomp policy so that a parked fork's release
+    # answers `EINTR` (`PR320-R5-MAIN-003`); the effect is `syscall`.
+    "SYS_sendto",
     "SYS_wait4",
     "SYS_waitid",
+    # The number of `write`, which the rundir tests hand a seccomp policy so
+    # that writes to descriptor 2 answer `EINTR` or `EIO` (`PR320-R5-MAIN-001`,
+    # `PR320-R5-REG-001`, `PR320-R5-REG-002`); the effect is `syscall`.
+    "SYS_write",
     "SZOMB",
     "WEXITED",
     "WEXITSTATUS",

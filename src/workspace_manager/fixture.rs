@@ -650,14 +650,17 @@ pub(crate) fn spawn_ready_helper(
 /// reads look at before every turn; the reap after a release, or after a
 /// drop, by [`REAP_BOUND`] ([`Self::reap_bound`] lowers it), past which
 /// the child is killed and then collected within the same bound again --
-/// every observation one `waitpid` with `WNOHANG` that nothing retries, and
-/// the release one write that is not made again. [`Self::is_alive`] asks
-/// the kernel whether the child has ended rather than the signal table
-/// whether its pid exists, and collects a child that has, so a zombie never
-/// reads as alive. Dropping this value releases and reaps the child, while
-/// unwinding too, never panics doing it, and says on stderr what it could
-/// not do and the state the child is left in. [`Self::kept`] names the two
-/// descriptors the child holds above stdio.
+/// every observation one `waitpid` with `WNOHANG` that nothing retries,
+/// every rest between two of them one `nanosleep` that nothing makes again
+/// ([`rest_within`]), and the release one write that is not made again.
+/// [`Self::is_alive`] asks the kernel whether the child has ended rather
+/// than the signal table whether its pid exists, and collects a child that
+/// has, so a zombie never reads as alive. Dropping this value releases and
+/// reaps the child, while unwinding too, never panics doing it, and says on
+/// stderr ([`say_on_stderr`], nothing made again) what it could not do and
+/// the state the child is left in: collected with its status when only the
+/// release failed, uncollected with the step that failed otherwise.
+/// [`Self::kept`] names the two descriptors the child holds above stdio.
 #[cfg(unix)]
 pub(crate) struct ParkedFork {
     pid: libc::pid_t,
@@ -839,10 +842,10 @@ impl ParkedFork {
     /// ended is collected here and its status kept for the release, so a
     /// zombie never reads as alive and the pid is never waited for twice.
     /// An observation a signal interrupted observed nothing and is made
-    /// again, at the observation tick, within the reap bound of this call;
-    /// one that failed otherwise, or was interrupted for the whole bound,
-    /// answered neither alive nor ended, and this panics saying so rather
-    /// than answer either.
+    /// again, after a rest of the observation tick ([`rest_within`]), within
+    /// the reap bound of this call; one that failed otherwise, or was
+    /// interrupted for the whole bound, answered neither alive nor ended,
+    /// and this panics saying so rather than answer either.
     pub(crate) fn is_alive(&self) -> bool {
         if self.ended.get().is_some() {
             return false;
@@ -865,7 +868,10 @@ impl ParkedFork {
                 }
                 Err(error) => panic!("waitpid({}, WNOHANG): {error}", self.pid),
             }
-            std::thread::sleep(OBSERVE_TICK);
+            rest_within(
+                OBSERVE_TICK,
+                self.reap_bound.saturating_sub(started.elapsed()),
+            );
         }
     }
 
@@ -885,14 +891,27 @@ impl ParkedFork {
     /// # Panics
     ///
     /// When the release could not be written and the child then had to be
-    /// killed, or when the child could not be observed, killed or collected
-    /// within the bounds: the message names the pid, the step and the state
-    /// the child is left in, and whatever the kernel allowed has been
-    /// collected before the panic.
+    /// killed -- the message says both, and the status the killed child was
+    /// collected with -- or when the child could not be observed, killed or
+    /// collected within the bounds: the message names the pid, the step and
+    /// the state the child is left in, and the release's own failure when
+    /// there was one too. Whatever the kernel allowed has been collected
+    /// before the panic.
     pub(crate) fn release(mut self) -> std::process::ExitStatus {
-        match self.release_and_reap() {
-            Ok(status) => status,
-            Err(error) => panic!("release the parked child {}: {error}", self.pid),
+        let reaped = self.release_and_reap();
+        match (reaped.collected, reaped.released) {
+            (Ok((status, false)), _) | (Ok((status, true)), Ok(())) => status,
+            (Ok((status, true)), Err(write)) => panic!(
+                "release the parked child {}: its release could not be written: {write}; it was \
+                 killed at the end of {:?} and collected: {status}",
+                self.pid, self.reap_bound
+            ),
+            (Err(collect), Ok(())) => panic!("release the parked child {}: {collect}", self.pid),
+            (Err(collect), Err(write)) => panic!(
+                "release the parked child {}: {collect}; its release could not be written \
+                 either: {write}",
+                self.pid
+            ),
         }
     }
 
@@ -904,28 +923,28 @@ impl ParkedFork {
     /// dropped, so a child the byte did not reach reads EOF instead, and the
     /// child is then collected within the reap bound, killed first if it is
     /// still there at the end. Never panics, so `Drop` can run it while
-    /// unwinding.
-    ///
-    /// # Errors
-    ///
-    /// The reap's own error ([`Self::collect`]), or the write's when the
-    /// child then had to be killed. A child that ended by itself, before or
-    /// despite a failed write, ended the way its status says, and that
-    /// status is the answer.
-    fn release_and_reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    /// unwinding. The answer keeps the collection and the write apart
+    /// ([`Reaped`]): a child killed and collected after a write that failed
+    /// is collected, and the write failed, and neither is read as the other
+    /// (`PR320-R5-MAIN-003`, `PR320-R5-REG-003`). A child that ended by
+    /// itself, before or despite a failed write, ended the way its status
+    /// says.
+    fn release_and_reap(&mut self) -> Reaped {
         if let Some(status) = self.ended.get() {
-            return Ok(status);
+            return Reaped {
+                collected: Ok((status, false)),
+                released: Ok(()),
+            };
         }
-        let written = match self.release.take() {
+        let released = match self.release.take() {
             // The stream is dropped at the end of this arm: the EOF that
             // releases a child the byte did not reach.
             Some(mut release) => write_release(&mut release),
             None => Ok(()),
         };
-        let (status, killed) = self.collect(self.reap_bound)?;
-        match written {
-            Err(error) if killed => Err(error),
-            _ => Ok(status),
+        Reaped {
+            collected: self.collect(self.reap_bound),
+            released,
         }
     }
 
@@ -935,9 +954,11 @@ impl ParkedFork {
     /// rather than blocked on, so the bound is the bound whatever the child
     /// is doing and whatever the observations answer: one a signal
     /// interrupted observed nothing and costs the tick, never a retry of its
-    /// own, and the collection after the kill is observed the same way,
-    /// within the reap bound from the kill, never blocked on
-    /// (`PR320-R4-MAIN-001`, `PR320-R4-REG-002`). `bound` is how long the
+    /// own, a rest a signal or a policy cuts short costs less than the tick
+    /// and is not made again ([`rest_within`], `PR320-R5-MAIN-006`), and the
+    /// collection after the kill is observed the same way, within the reap
+    /// bound from the kill, never blocked on (`PR320-R4-MAIN-001`,
+    /// `PR320-R4-REG-002`). `bound` is how long the
     /// child is given to end by itself -- the reap bound after a release,
     /// nothing at all when the constructor failed -- and the reap bound is
     /// how long a killed child is given to be collected.
@@ -1020,7 +1041,11 @@ impl ParkedFork {
     /// Observe the child every [`OBSERVE_TICK`] until it has ended or
     /// `bound` runs out, from now: its status, kept for the release, or what
     /// the last observation answered at the end of the bound -- nothing, or
-    /// the interruption. A `bound` of zero is one observation.
+    /// the interruption. A `bound` of zero is one observation. Each rest
+    /// between two observations is one `nanosleep` of the tick, or of what
+    /// is left of `bound` when that is less, and a rest a signal or a policy
+    /// cuts short is not made again ([`rest_within`]): the loop looks at the
+    /// bound next, whatever the rest answered (`PR320-R5-MAIN-006`).
     ///
     /// # Errors
     ///
@@ -1045,9 +1070,25 @@ impl ParkedFork {
             if started.elapsed() >= bound {
                 return Ok(Collected::Outlasted(interrupted));
             }
-            std::thread::sleep(OBSERVE_TICK);
+            rest_within(OBSERVE_TICK, bound.saturating_sub(started.elapsed()));
         }
     }
+}
+
+/// What a release and reap came to ([`ParkedFork::release_and_reap`]): the
+/// collection and the release write, each as it answered. A write that
+/// failed and a child the kill then ended and the owner collected are both
+/// facts, and neither stands in for the other (`PR320-R5-MAIN-003`,
+/// `PR320-R5-REG-003`).
+#[cfg(unix)]
+struct Reaped {
+    /// The child's status and whether the kill was needed, or the error that
+    /// names the step and the state the child is left in
+    /// ([`ParkedFork::collect`]).
+    collected: std::io::Result<(std::process::ExitStatus, bool)>,
+    /// The release write's own answer: `Ok` when the byte was written or
+    /// there was nothing left to write.
+    released: std::io::Result<()>,
 }
 
 #[cfg(unix)]
@@ -1059,25 +1100,37 @@ impl Drop for ParkedFork {
         // `release_and_reap` does before it returns anything at all: the
         // child is released and collected, killed first past the reap bound,
         // every step bounded. What it could not do is said on stderr, the
-        // one channel a drop has, with the error that names the step and the
-        // state the child is left in -- alive after a kill the OS refused,
-        // killed and not collected, or not observed -- rather than discarded
-        // with the value (`PR320-R4-MAIN-003`). Written through the handle:
-        // this file forbids the print macros (`PR6-LANEF-004`, the header),
-        // and this is its one stderr site, recorded as such. A stderr that
-        // cannot be written leaves a drop no channel at all.
-        if let Err(error) = self.release_and_reap() {
-            use std::io::Write as _;
-
-            let line = format!(
-                "[the parked child {} was left uncollected by its owner's drop: {error}]\n",
+        // one channel a drop has, each state as it is (`PR320-R4-MAIN-003`):
+        // a release that could not be written, with the child killed and
+        // collected after it and its status (`PR320-R5-MAIN-003`,
+        // `PR320-R5-REG-003`); or a child left uncollected -- alive after a
+        // kill the OS refused, killed and not collected, or not observed --
+        // with the error that names the step, and the release's failure too
+        // when there was one. Said through `say_on_stderr`, which writes the
+        // descriptor itself and makes nothing again: an interrupted or
+        // refused write ends the saying and never the drop's bound, and an
+        // error is never a panic (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`).
+        // This file forbids the print macros (`PR6-LANEF-004`, the header).
+        // A stderr that cannot be written leaves a drop no channel at all.
+        let reaped = self.release_and_reap();
+        let line = match (&reaped.collected, &reaped.released) {
+            (Ok((_, false)), _) | (Ok((_, true)), Ok(())) => return,
+            (Ok((status, true)), Err(write)) => format!(
+                "[the parked child {} could not be released by its owner's drop: {write}; it was \
+                 killed at the end of {:?} and collected: {status}]\n",
+                self.pid, self.reap_bound
+            ),
+            (Err(collect), Ok(())) => format!(
+                "[the parked child {} was left uncollected by its owner's drop: {collect}]\n",
                 self.pid
-            );
-            if std::io::stderr().write_all(line.as_bytes()).is_err() {
-                // Nothing more can be said: the one channel a drop has is
-                // gone, and a panic here would abort a test already unwinding.
-            }
-        }
+            ),
+            (Err(collect), Err(write)) => format!(
+                "[the parked child {} was left uncollected by its owner's drop: {collect}; its \
+                 release could not be written either: {write}]\n",
+                self.pid
+            ),
+        };
+        say_on_stderr(&line);
     }
 }
 
@@ -1156,6 +1209,115 @@ pub(crate) fn write_release(writer: &mut impl std::io::Write) -> std::io::Result
             format!("the release wrote {count} of 1 byte"),
         )),
         Err(error) => Err(error),
+    }
+}
+
+/// Rest for `span`, once: one `nanosleep`, whatever it answers. A signal that
+/// interrupts it, or a policy that refuses it, ends the rest early, and the
+/// rest is not made again: the caller's loop, and the bound it keeps, decide
+/// what happens next. `std::thread::sleep` makes an interrupted sleep again
+/// inside itself for what it had left, and a refused one again for all of it,
+/// so an owner whose rests were refused never came back to look at its bound
+/// (`PR320-R5-MAIN-006`).
+#[cfg(unix)]
+pub(crate) fn rest(span: std::time::Duration) {
+    let request = libc::timespec {
+        tv_sec: libc::time_t::try_from(span.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_nsec: libc::c_long::from(span.subsec_nanos()),
+    };
+    // SAFETY: `nanosleep` reads the one `timespec` it is handed, which lives
+    // for the call, and writes nothing: the remainder pointer is null.
+    if unsafe { libc::nanosleep(&request, std::ptr::null_mut()) } == -1 {
+        // Interrupted or refused: the rest ended early, which is all a rest
+        // can do wrong, and the caller's bound is what ends its loop.
+    }
+}
+
+/// [`rest`] for `tick`, or for `remaining` when that is less: the rest an
+/// owner's loop takes between two turns never carries it past the bound it
+/// keeps, and one cut short costs less than the tick.
+#[cfg(unix)]
+pub(crate) fn rest_within(tick: std::time::Duration, remaining: std::time::Duration) {
+    rest(tick.min(remaining));
+}
+
+/// Say `line` on this process's standard error, as far as the descriptor
+/// takes it and no further: [`write_while_progressing`] on descriptor 2
+/// itself ([`StandardError`]), so every write is one `write(2)`, no lock is
+/// shared with the rest of the process, and the first answer that is not
+/// progress -- an interruption, a refusal, an error, nothing taken -- ends
+/// the saying, never a retry and never a panic. This is how an owner's drop
+/// reports what it could not do: a drop that retried a refused channel
+/// would not return, and one that panicked on a broken channel would abort
+/// the test it was cleaning up after (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`, `PR320-R5-REG-002`). A channel the OS refuses
+/// carries nothing, and that is the OS's answer, not the owner's failure.
+#[cfg(unix)]
+pub(crate) fn say_on_stderr(line: &str) {
+    if write_while_progressing(&mut StandardError, line.as_bytes()).is_err() {
+        // The channel refused, was interrupted or took nothing: there is no
+        // other channel to say so on, and nothing to do about it here.
+    }
+}
+
+/// Write `bytes` to `writer` for as long as every write makes progress: one
+/// write per turn, a turn that wrote something followed by a write of the
+/// rest, and the first answer that is not progress -- an error, an
+/// interruption included, or nothing written -- the end, answered as it was
+/// and never made again. At most `bytes.len()` writes, whatever the writer
+/// answers. `write_all` makes an interrupted write again inside itself, and
+/// forever when every write is interrupted (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`).
+///
+/// # Errors
+///
+/// The first error a write answered, or `WriteZero` for a write that took
+/// nothing, saying how much had been written.
+#[cfg(unix)]
+pub(crate) fn write_while_progressing(
+    writer: &mut impl std::io::Write,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut written = 0_usize;
+    while let Some(rest) = bytes.get(written..).filter(|rest| !rest.is_empty()) {
+        match writer.write(rest) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    format!(
+                        "a write took nothing after {written} of {} bytes",
+                        bytes.len()
+                    ),
+                ));
+            }
+            Ok(count) => written = written.saturating_add(count),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// This process's standard error as descriptor 2 itself: each write one
+/// `write(2)`, answered as it was -- no buffer, no lock shared with the rest
+/// of the process, nothing made again. `std::io::stderr()` takes a lock every
+/// thread shares and retries an interruption in `write_all`; the print
+/// macros do the same and panic on an error ([`say_on_stderr`]).
+#[cfg(unix)]
+struct StandardError;
+
+#[cfg(unix)]
+impl std::io::Write for StandardError {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: `write` reads `bytes` for its length and writes no memory;
+        // descriptor 2 is whatever this process holds as its standard error,
+        // and a closed one is answered `EBADF`.
+        let written =
+            unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+        usize::try_from(written).map_err(|_| std::io::Error::last_os_error())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

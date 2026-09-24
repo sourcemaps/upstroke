@@ -556,3 +556,75 @@ directly.
 
 The inheritance, the refusal's holder list, the classification gap and the disposition are as
 the sections above leave them.
+
+## A retry hidden inside a standard call, taken out of both owners, and the regressions' own failing path given an owner (2026-09-24, round six)
+
+The fifth round's independent reviews (`PR320-R5-MAIN-001`–`006`, `PR320-R5-REG-001`–`005`)
+witnessed five classes of defect in the same test machinery, again none in production, and every
+witness was reproduced at `31e9fdd5` in a private clone before any helper changed (30 of 30
+executions as the reviewers recorded them). Four are one class: an owner whose contract is "every
+step one attempt, the owner's deadline decides" called a standard-library convenience that makes
+an interrupted call again inside itself -- `write_all` and `eprintln!` for the drops' reports,
+`File::open` for the group observation, `thread::sleep` for every rest between observations -- or
+read two answers as one. The fifth is the regressions' own failing path, which had no owner for
+the child it left. This is the sixth round, the looping signal of `MAINTAINING.md`; the repair
+removes the class at every owner site rather than the witnessed instances, adds no layer, and
+holds each class with a regression that meets the standard call's first-bad shape at the syscall,
+through the actual owner. The syscall numbers that needs are five new `not_an_effect` rows in
+`effects/wrappers.toml` (`SYS_write`, `SYS_openat`, `BPF_JSET`, `SYS_clock_nanosleep`,
+`SYS_sendto`), an instrument change approved for this pull request by the orchestrator; the
+effect stays `syscall`.
+
+- **A report that cannot be made ends, and never panics.** Both drops now report through
+  `say_on_stderr`: descriptor 2 itself, one `write` per piece of progress, no lock shared with the
+  rest of the process, and the first answer that is not progress -- an interruption, an error,
+  nothing taken -- ends the report (`write_while_progressing`). `write_all` had made an
+  interrupted write again forever, and `eprintln!` had also panicked on a failed write, which
+  aborted a caller already unwinding (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`,
+  `PR320-R5-REG-002`). Held by
+  `a_parked_forks_drop_whose_kill_and_every_stderr_write_are_refused_returns_within_its_bounds`,
+  `a_parked_forks_drop_whose_stderr_answers_errors_neither_panics_nor_aborts_an_unwinding_caller`,
+  `a_scenario_owners_drop_whose_kill_and_every_stderr_write_are_refused_returns_within_its_bounds`,
+  `a_scenario_owners_drop_whose_stderr_answers_an_error_does_not_panic`,
+  `a_scenario_owners_drop_whose_stderr_answers_an_error_does_not_abort_an_unwinding_caller` and
+  `a_progressing_write_ends_at_the_first_answer_that_is_not_progress`. An OS that refuses the
+  channel gets no report; that is its answer.
+- **Every open of the group observation is one `open`.** `group_ended` opens each process's
+  `stat` through `open_once`, so an interrupted open is a failed observation, noted with the
+  group left unaccounted for, and the caller's bound is looked at after every pass
+  (`PR320-R5-MAIN-002`;
+  `a_scenario_owners_drop_whose_group_observation_opens_are_interrupted_returns_and_says_the_group_is_unaccounted_for`).
+- **Every rest is one `nanosleep`.** Every loop both owners keep between two turns rests through
+  `rest_within`: one `nanosleep` of the tick or of what remains of the bound, a rest a signal or
+  a policy cuts short not made again. `thread::sleep` had made a refused sleep again for its whole
+  length, forever (`PR320-R5-MAIN-006`;
+  `a_parked_forks_drop_whose_every_rest_is_refused_kills_and_collects_the_stopped_child_within_its_bounds`,
+  `a_scenario_wrapper_whose_every_rest_is_refused_still_ends_its_scenario_at_its_bound`). Of
+  the sites, the parked fork's pre-kill collection and the wrapper's loop are reached by those
+  regressions every time; `is_alive`, the post-kill collection and the scenario owner's
+  collection, group observation and drain use the same call at sites no regression reaches
+  deterministically, and are not claimed as executed.
+- **A collected child is called collected.** `release_and_reap` answers the collection and the
+  release write apart, so a release that could not be written with the child then killed and
+  collected is reported as exactly that, with the status, by the drop and by `release`'s panic;
+  "left uncollected" is said only of a child that was (`PR320-R5-MAIN-003`,
+  `PR320-R5-REG-003`;
+  `a_parked_forks_drop_whose_release_send_is_interrupted_says_the_child_was_killed_and_collected`,
+  `a_parked_forks_release_whose_send_is_interrupted_panics_saying_the_child_was_killed_and_collected`).
+- **The regressions' failing path has an owner.** The three interruption regressions of round
+  five had checked their bound before joining, correctly, and then left the stopped child with a
+  worker nothing could unblock (`PR320-R5-MAIN-004`, `PR320-R5-REG-004`). Their bodies, names and
+  assertions are unchanged and now run in a process of their own through the existing scenario
+  support: on the failing path the scenario fails at its own bound and exits, and the wrapper
+  kills its process group -- its pid uncollected at the kill, so no number that could have been
+  handed out again is signalled -- and observes the group empty. The failing path itself is held
+  without a mutation by
+  `a_scenario_whose_owner_never_answers_fails_at_its_bound_and_its_stopped_child_ends_with_the_group`.
+
+Each syscall-level regression installs its refusals on the owner's thread alone and asks each
+one call it must now refuse before the owner meets it (`Refusal::in_force`); a refusal not in
+force fails the regression. What stays outside every bound here, and is not claimed: a kernel
+call that never returns, a stderr sink that blocks forever with no signal, the standard library's
+own retry inside `Command::spawn` before an owner exists, and the forked child's own loops, which
+its owner's kill ends. The body's consolidated history now records the aborted `c80f9163` control
+campaign as it happened (`PR320-R5-MAIN-005`, `PR320-R5-REG-005`).
