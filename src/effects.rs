@@ -2270,7 +2270,7 @@ pub(crate) mod census_domain {
                 _ => None,
             };
             if let Some(end) = comment_end {
-                if !erased(at, end) {
+                if !erased(at, end) || is_doc_comment(bytes, at) {
                     return None;
                 }
                 out.push(' ');
@@ -2305,7 +2305,19 @@ pub(crate) mod census_domain {
         Some(out)
     }
 
-    fn block_comment_end(bytes: &[u8], from: usize) -> usize {
+    pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {
+        if bytes.get(at) != Some(&b'/') {
+            return false;
+        }
+        match (bytes.get(at + 1), bytes.get(at + 2), bytes.get(at + 3)) {
+            (Some(b'/' | b'*'), Some(b'!'), _) => true,
+            (Some(b'/'), Some(b'/'), next) => next != Some(&b'/'),
+            (Some(b'*'), Some(b'*'), next) => !matches!(next, Some(b'*' | b'/')),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {
         let mut depth = 1_usize;
         let mut at = from + 2;
         while depth > 0 {
@@ -2326,21 +2338,110 @@ pub(crate) mod census_domain {
     }
 
     fn literal_token(literal: &str) -> String {
-        let plain = literal
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .filter(|content| {
-                content
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-            });
-        match plain {
-            Some(content) => format!("\"{content}\""),
-            None => {
-                let named: String = literal.bytes().map(|byte| format!("{byte:02x}")).collect();
-                format!("\"%{named}\"")
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        match string_literal_value(literal) {
+            Some(value) if value.bytes().all(is_kept_value_byte) => format!("\"{value}\""),
+            Some(value) => format!("\"%{}\"", hex(value.as_bytes())),
+            None => format!("\"?{}\"", hex(literal.as_bytes())),
+        }
+    }
+
+    fn is_kept_value_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+    }
+
+    #[must_use]
+    pub(crate) fn literal_token_value(token: &str) -> Option<String> {
+        let inner = token.strip_prefix('"')?.strip_suffix('"')?;
+        let Some(hex) = inner.strip_prefix('%') else {
+            return inner
+                .bytes()
+                .all(is_kept_value_byte)
+                .then(|| inner.to_owned());
+        };
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect::<Option<Vec<u8>>>()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    const MOST_RAW_STRING_HASHES: usize = 255;
+
+    fn string_literal_value(literal: &str) -> Option<String> {
+        let text = literal.replace("\r\n", "\n");
+        if text.contains('\r') {
+            return None;
+        }
+        if let Some(delimited) = text.strip_prefix('r') {
+            let content = delimited.trim_start_matches('#');
+            let hashes = delimited.len() - content.len();
+            let closing = format!("\"{}", "#".repeat(hashes));
+            return (hashes <= MOST_RAW_STRING_HASHES)
+                .then_some(content)?
+                .strip_prefix('"')?
+                .strip_suffix(closing.as_str())
+                .map(str::to_owned);
+        }
+        let content = text.strip_prefix('"')?.strip_suffix('"')?;
+        let mut value = String::with_capacity(content.len());
+        let mut characters = content.chars();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return None,
+                '\\' => unescape(&mut characters, &mut value)?,
+                other => value.push(other),
             }
         }
+        Some(value)
+    }
+
+    fn unescape(characters: &mut std::str::Chars<'_>, value: &mut String) -> Option<()> {
+        let escaped = match characters.next()? {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '\\' => '\\',
+            '0' => '\0',
+            '\'' => '\'',
+            '"' => '"',
+            'x' => {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                char::from_u32(high * 16 + low).filter(char::is_ascii)?
+            }
+            'u' => {
+                if characters.next()? != '{' {
+                    return None;
+                }
+                let mut code = 0_u32;
+                let mut digits = 0_usize;
+                loop {
+                    match characters.next()? {
+                        '}' if digits > 0 => break,
+                        '_' if digits > 0 => {}
+                        digit => {
+                            code = code * 16 + digit.to_digit(16)?;
+                            digits += 1;
+                            if digits > 6 {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                char::from_u32(code)?
+            }
+            '\n' => {
+                let rest = characters.as_str();
+                let skipped = rest.len() - rest.trim_start_matches([' ', '\t', '\n', '\r']).len();
+                *characters = rest.get(skipped..)?.chars();
+                return Some(());
+            }
+            _ => return None,
+        };
+        value.push(escaped);
+        Some(())
     }
 }
 
@@ -2349,7 +2450,8 @@ pub(crate) mod lint_levels {
     use std::collections::BTreeSet;
 
     use super::census_domain::{
-        Predicate, decide_without_test, parse_predicate, with_literal_identity,
+        Predicate, block_comment_end, decide_without_test, is_doc_comment, parse_predicate,
+        with_literal_identity,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2380,9 +2482,41 @@ pub(crate) mod lint_levels {
     }
 
     struct Statement {
-        level: &'static str,
+        effect: Effect,
         conditions: Vec<String>,
     }
+
+    #[derive(Clone, Copy)]
+    enum Effect {
+        Level {
+            level: &'static str,
+            by_a_group: bool,
+            recorded: bool,
+        },
+        Warnings,
+    }
+
+    #[derive(Debug)]
+    struct Unreadable;
+
+    enum Named {
+        TheLint,
+        AGroupOfIt,
+        Warnings,
+        Other,
+        Unknown,
+    }
+
+    const GROUPS_NAMING_THE_GOVERNED_LINTS: [&str; 2] = ["all", "style"];
+
+    const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];
+
+    const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [
+        ("disallowed_method", "disallowed_methods"),
+        ("disallowed_type", "disallowed_types"),
+    ];
+
+    const LINT_TOOLS_NAMING_NO_GOVERNED_LINT: [&str; 2] = ["rustdoc", "rustc"];
 
     const MOST_UNDECIDED_PREDICATES: usize = 12;
 
@@ -2408,51 +2542,88 @@ pub(crate) mod lint_levels {
                     .position(|variable| *variable == condition.as_str())
                     .is_some_and(|index| assignment & (1_u64 << index) != 0)
             };
-            let mut level = None;
-            let mut refused_downgrade = false;
-            for statement in &statements {
-                if !statement.conditions.iter().all(holds) {
-                    continue;
-                }
-                if level == Some("forbid") {
-                    if matches!(statement.level, "allow" | "warn" | "expect") {
-                        refused_downgrade = true;
-                    }
-                } else {
-                    level = Some(statement.level);
-                }
-            }
-            worlds.insert((level, refused_downgrade));
+            let applied = statements
+                .iter()
+                .filter(|statement| statement.conditions.iter().all(holds));
+            let Some(world) = replay(applied) else {
+                return BTreeSet::new();
+            };
+            worlds.insert(world);
         }
         worlds
     }
 
+    fn replay<'a>(statements: impl Iterator<Item = &'a Statement>) -> Option<World> {
+        let mut level = None;
+        let mut forbidden_by_a_group = false;
+        let mut unrecorded = false;
+        let mut refused_downgrade = false;
+        let mut warnings_stated = false;
+        for statement in statements {
+            let Effect::Level {
+                level: stated,
+                by_a_group,
+                recorded,
+            } = statement.effect
+            else {
+                warnings_stated = true;
+                continue;
+            };
+            if level == Some("forbid") {
+                match stated {
+                    "deny" => {}
+                    "forbid" => forbidden_by_a_group = by_a_group,
+                    _ if forbidden_by_a_group => {
+                        level = Some(stated);
+                        forbidden_by_a_group = false;
+                        unrecorded = stated != "warn" && !recorded;
+                    }
+                    _ => refused_downgrade = true,
+                }
+            } else {
+                level = Some(stated);
+                forbidden_by_a_group = stated == "forbid" && by_a_group;
+                unrecorded = matches!(stated, "allow" | "expect") && !recorded;
+            }
+        }
+        if unrecorded || (warnings_stated && matches!(level, None | Some("warn"))) {
+            return None;
+        }
+        let level = if forbidden_by_a_group && level == Some("forbid") {
+            Some("deny")
+        } else {
+            level
+        };
+        Some((level, refused_downgrade))
+    }
+
     fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {
         let blanked = super::blank_comments_and_strings(source);
-        let bytes = blanked.as_bytes();
+        let bytes = source.as_bytes();
         let mut statements = Vec::new();
-        let mut at = 0;
-        while let Some(byte) = bytes.get(at) {
-            if byte.is_ascii_whitespace() {
-                at += 1;
-                continue;
+        let mut at = prologue_start(source);
+        loop {
+            at = past_inner_doc_comments(source, at);
+            if bytes.get(at) != Some(&b'#') {
+                break;
             }
-            if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {
-                return Some(statements);
+            let bang = past_comments_and_whitespace(source, at + 1, false);
+            if bytes.get(bang) != Some(&b'!') {
+                break;
             }
-            let open = at + 2;
+            let open = past_comments_and_whitespace(source, bang + 1, false);
             if bytes.get(open) != Some(&b'[') {
-                return Some(statements);
+                return None;
             }
-            let Some(close) = super::matching(bytes, open, b'[', b']') else {
-                return Some(statements);
-            };
+            let close = super::matching(blanked.as_bytes(), open, b'[', b']')?;
             let attribute =
                 with_literal_identity(source.get(open + 1..close)?, blanked.get(open + 1..close)?)?;
+            let recorded = recorded_by_the_placement_census(source.get(at..=close)?, lint);
             for applied in applied_attributes(attribute.trim()) {
-                let Some(level) = stated_level(applied.text, lint) else {
+                let stated = stated_effects(applied.text, lint, recorded);
+                if stated.as_ref().is_ok_and(Vec::is_empty) {
                     continue;
-                };
+                }
                 let mut conditions = Vec::new();
                 let mut in_the_production_build = true;
                 for predicate in &applied.under {
@@ -2465,25 +2636,201 @@ pub(crate) mod lint_levels {
                         None => conditions.push(predicate.render()),
                     }
                 }
-                if in_the_production_build {
-                    statements.push(Statement { level, conditions });
+                if !in_the_production_build {
+                    continue;
+                }
+                for effect in stated.ok()? {
+                    statements.push(Statement {
+                        effect,
+                        conditions: conditions.clone(),
+                    });
                 }
             }
             at = close + 1;
         }
-        Some(statements)
+        (!an_inner_attribute_follows(source, at)).then_some(statements)
     }
 
-    fn stated_level(attribute: &str, lint: &str) -> Option<&'static str> {
+    fn prologue_start(source: &str) -> usize {
+        let start = if source.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        if !source
+            .get(start..)
+            .is_some_and(|rest| rest.starts_with("#!"))
+        {
+            return start;
+        }
+        let next = past_comments_and_whitespace(source, start + 2, false);
+        if source.as_bytes().get(next) == Some(&b'[') {
+            return start;
+        }
+        source
+            .get(start..)
+            .and_then(|rest| rest.find('\n'))
+            .map_or(source.len(), |line| start + line)
+    }
+
+    fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {
+        let bytes = source.as_bytes();
+        let mut at = from;
+        while let Some(rest) = source.get(at..) {
+            let skipped = doc_comments_too || !is_doc_comment(bytes, at);
+            if let Some(character) = rest
+                .chars()
+                .next()
+                .filter(|character| super::is_rustc_whitespace(*character))
+            {
+                at += character.len_utf8();
+            } else if rest.starts_with("/*") && skipped {
+                at = block_comment_end(bytes, at);
+            } else if rest.starts_with("//") && skipped {
+                at += rest.find('\n').unwrap_or(rest.len());
+            } else {
+                break;
+            }
+        }
+        at
+    }
+
+    fn past_inner_doc_comments(source: &str, from: usize) -> usize {
+        let bytes = source.as_bytes();
+        let mut at = past_comments_and_whitespace(source, from, false);
+        while is_doc_comment(bytes, at) && bytes.get(at + 2) == Some(&b'!') {
+            at = if bytes.get(at + 1) == Some(&b'*') {
+                block_comment_end(bytes, at)
+            } else {
+                source
+                    .get(at..)
+                    .and_then(|rest| rest.find('\n'))
+                    .map_or(source.len(), |line| at + line)
+            };
+            at = past_comments_and_whitespace(source, at, false);
+        }
+        at
+    }
+
+    fn an_inner_attribute_follows(source: &str, from: usize) -> bool {
+        let bytes = source.as_bytes();
+        let hash = past_comments_and_whitespace(source, from, true);
+        let bang = past_comments_and_whitespace(source, hash + 1, true);
+        let open = past_comments_and_whitespace(source, bang + 1, true);
+        bytes.get(hash) == Some(&b'#')
+            && bytes.get(bang) == Some(&b'!')
+            && bytes.get(open) == Some(&b'[')
+    }
+
+    fn recorded_by_the_placement_census(attribute: &str, lint: &str) -> bool {
+        let governed = lint.rsplit("::").next().unwrap_or(lint);
+        super::governed_allows(attribute)
+            .iter()
+            .flat_map(|allow| allow.lints.iter())
+            .any(|named| {
+                named == governed || GROUPS_NAMING_THE_GOVERNED_LINTS.contains(&named.as_str())
+            })
+    }
+
+    fn stated_effects(
+        attribute: &str,
+        lint: &str,
+        recorded: bool,
+    ) -> Result<Vec<Effect>, Unreadable> {
         const LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
-        LEVELS.into_iter().find(|level| {
-            attribute
-                .strip_prefix(level)
-                .map(str::trim_start)
-                .and_then(|rest| rest.strip_prefix('('))
-                .and_then(|body| body.strip_suffix(')'))
-                .is_some_and(|list| list.split(',').any(|entry| names_lint(entry.trim(), lint)))
-        })
+        let (name_end, name) = attribute_name_token(attribute);
+        if attribute
+            .get(name_end..)
+            .is_some_and(|rest| rest.trim_start().starts_with("::"))
+        {
+            return Err(Unreadable);
+        }
+        let Some(level) = LEVELS.into_iter().find(|level| *level == name) else {
+            return Ok(Vec::new());
+        };
+        let list = attribute_arguments(attribute).ok_or(Unreadable)?;
+        let mut effects = Vec::new();
+        let mut reasoned = false;
+        for entry in top_level_arguments(list) {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if reasoned {
+                return Err(Unreadable);
+            }
+            if is_a_reason(entry) {
+                reasoned = true;
+                continue;
+            }
+            let path = lint_path(entry).ok_or(Unreadable)?;
+            match what_a_lint_path_names(&path, lint) {
+                Named::TheLint => effects.push(Effect::Level {
+                    level,
+                    by_a_group: false,
+                    recorded,
+                }),
+                Named::AGroupOfIt => effects.push(Effect::Level {
+                    level,
+                    by_a_group: true,
+                    recorded,
+                }),
+                Named::Warnings => effects.push(Effect::Warnings),
+                Named::Other => {}
+                Named::Unknown => return Err(Unreadable),
+            }
+        }
+        Ok(effects)
+    }
+
+    fn is_a_reason(entry: &str) -> bool {
+        entry
+            .strip_prefix("r#")
+            .unwrap_or(entry)
+            .strip_prefix("reason")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+            .is_some_and(|value| super::census_domain::literal_token_value(value.trim()).is_some())
+    }
+
+    fn lint_path(entry: &str) -> Option<Vec<&str>> {
+        let mut segments = Vec::new();
+        let mut rest = entry;
+        loop {
+            let (length, name) = attribute_name_token(rest);
+            if name.is_empty() {
+                return None;
+            }
+            segments.push(name);
+            rest = rest.get(length..)?.trim_start();
+            if rest.is_empty() {
+                return Some(segments);
+            }
+            rest = rest.strip_prefix("::")?.trim_start();
+        }
+    }
+
+    fn what_a_lint_path_names(path: &[&str], lint: &str) -> Named {
+        let governed = lint.rsplit("::").next().unwrap_or(lint);
+        let renamed = |old: &str| RENAMED_TO_A_GOVERNED_LINT.contains(&(old, governed));
+        match path {
+            ["clippy", name] if *name == governed || renamed(name) => Named::TheLint,
+            ["clippy", name] if GROUPS_NAMING_THE_GOVERNED_LINTS.contains(name) => {
+                Named::AGroupOfIt
+            }
+            ["clippy", _] => Named::Other,
+            [tool, _] if LINT_TOOLS_NAMING_NO_GOVERNED_LINT.contains(tool) => Named::Other,
+            ["warnings"] => Named::Warnings,
+            [name] if *name == governed => Named::TheLint,
+            [name]
+                if GROUPS_NAMING_THE_GOVERNED_LINTS.contains(name)
+                    || PREFIXLESS_GROUP_ALIASES.contains(name) =>
+            {
+                Named::AGroupOfIt
+            }
+            [_] => Named::Other,
+            _ => Named::Unknown,
+        }
     }
 
     pub(crate) struct Applied<'a> {
@@ -2523,16 +2870,30 @@ pub(crate) mod lint_levels {
 
     #[must_use]
     pub(crate) fn attribute_name(attribute: &str) -> &str {
-        let name_end = attribute
-            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
-            .unwrap_or(attribute.len());
-        attribute.get(..name_end).unwrap_or_default()
+        attribute_name_token(attribute).1
+    }
+
+    fn attribute_name_token(attribute: &str) -> (usize, &str) {
+        let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+        let from = if attribute
+            .strip_prefix("r#")
+            .is_some_and(|rest| rest.starts_with(is_identifier))
+        {
+            2
+        } else {
+            0
+        };
+        let rest = attribute.get(from..).unwrap_or_default();
+        let length = rest
+            .find(|character: char| !is_identifier(character))
+            .unwrap_or(rest.len());
+        (from + length, rest.get(..length).unwrap_or_default())
     }
 
     #[must_use]
     pub(crate) fn attribute_arguments(attribute: &str) -> Option<&str> {
         attribute
-            .get(attribute_name(attribute).len()..)
+            .get(attribute_name_token(attribute).0..)
             .map(str::trim_start)
             .and_then(|rest| rest.strip_prefix('('))
             .and_then(|body| body.strip_suffix(')'))
@@ -2589,16 +2950,6 @@ pub(crate) mod lint_levels {
     #[must_use]
     pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {
         file_level_lint_resolution(source, lint).level
-    }
-
-    fn names_lint(entry: &str, lint: &str) -> bool {
-        if entry == lint {
-            return true;
-        }
-        match (super::normalize_lint(entry), super::normalize_lint(lint)) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        }
     }
 }
 

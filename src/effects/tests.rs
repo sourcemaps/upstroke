@@ -754,9 +754,7 @@ fn is_whole_file_test_module(path: &str) -> bool {
     })
 }
 
-use super::census_domain::{
-    Predicate, decide_without_test, parse_predicate, with_literal_identity,
-};
+use super::census_domain::{Predicate, parse_predicate, with_literal_identity};
 use super::lint_levels::{
     Applied, applied_attributes, attribute_arguments, attribute_name, top_level_arguments,
 };
@@ -943,104 +941,64 @@ fn allowance_applies_in_a_production_build(
     some_production_build_satisfies(&Predicate::All(conjuncts))
 }
 
-const SINGLE_VALUED_CFG_KEYS: [&str; 8] = [
-    "target_abi",
-    "target_arch",
-    "target_endian",
-    "target_env",
-    "target_os",
-    "target_pointer_width",
-    "target_vendor",
-    "panic",
-];
-
-const MOST_ATOMS_ENUMERATED: usize = 12;
-
-fn cfg_atom(written: &str) -> String {
-    match written.split_once('=') {
-        Some((key, value)) if key.trim() == "target_family" => {
-            let value = value.trim();
-            match value {
-                "\"unix\"" => "unix".to_owned(),
-                "\"windows\"" => "windows".to_owned(),
-                _ => format!("target_family = {value}"),
-            }
-        }
-        Some((key, value)) => format!("{} = {}", key.trim(), value.trim()),
-        None => written.trim().to_owned(),
-    }
-}
-
-fn cfg_atoms(predicate: &Predicate, into: &mut BTreeSet<String>) {
-    match predicate {
-        Predicate::Test => {}
-        Predicate::Other(written) => {
-            into.insert(cfg_atom(written));
-        }
-        Predicate::Not(inner) => cfg_atoms(inner, into),
-        Predicate::All(parts) | Predicate::Any(parts) => {
-            for part in parts {
-                cfg_atoms(part, into);
-            }
-        }
-    }
-}
-
-fn holds_without_test(predicate: &Predicate, true_atoms: &BTreeSet<&str>) -> bool {
-    match predicate {
-        Predicate::Test => false,
-        Predicate::Other(written) => true_atoms.contains(cfg_atom(written).as_str()),
-        Predicate::Not(inner) => !holds_without_test(inner, true_atoms),
-        Predicate::All(parts) => parts
-            .iter()
-            .all(|part| holds_without_test(part, true_atoms)),
-        Predicate::Any(parts) => parts
-            .iter()
-            .any(|part| holds_without_test(part, true_atoms)),
-    }
-}
-
-fn a_target_could_set(true_atoms: &BTreeSet<&str>) -> bool {
-    if true_atoms.contains("unix") && true_atoms.contains("windows") {
-        return false;
-    }
-    let mut values: BTreeMap<&str, &str> = BTreeMap::new();
-    for atom in true_atoms {
-        let Some((key, value)) = atom.split_once(" = ") else {
-            continue;
-        };
-        if !SINGLE_VALUED_CFG_KEYS.contains(&key) {
-            continue;
-        }
-        if values
-            .insert(key, value)
-            .is_some_and(|other| other != value)
-        {
-            return false;
-        }
-    }
-    true
-}
-
 fn some_production_build_satisfies(predicate: &Predicate) -> bool {
-    if let Some(decided) = decide_without_test(predicate) {
-        return decided;
+    CI_TARGETS
+        .iter()
+        .any(|target| holds_in_the_production_build(predicate, target) == Some(true))
+}
+
+fn holds_in_the_production_build(
+    predicate: &Predicate,
+    target: &ci_model::CiTarget,
+) -> Option<bool> {
+    match predicate {
+        Predicate::Test => Some(false),
+        Predicate::Other(written) => atom_in_the_production_build(written, target),
+        Predicate::Not(inner) => holds_in_the_production_build(inner, target).map(|value| !value),
+        Predicate::All(parts) => {
+            let mut decided = Some(true);
+            for part in parts {
+                match holds_in_the_production_build(part, target) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => decided = None,
+                }
+            }
+            decided
+        }
+        Predicate::Any(parts) => {
+            let mut decided = Some(false);
+            for part in parts {
+                match holds_in_the_production_build(part, target) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => decided = None,
+                }
+            }
+            decided
+        }
     }
-    let mut atoms = BTreeSet::new();
-    cfg_atoms(predicate, &mut atoms);
-    let atoms: Vec<String> = atoms.into_iter().collect();
-    if atoms.len() > MOST_ATOMS_ENUMERATED {
-        return false;
-    }
-    (0_u64..(1_u64 << atoms.len())).any(|assignment| {
-        let true_atoms: BTreeSet<&str> = atoms
+}
+
+fn atom_in_the_production_build(written: &str, target: &ci_model::CiTarget) -> Option<bool> {
+    let Some((key, value)) = written.split_once('=') else {
+        let flag = written.trim();
+        return CI_TARGETS
             .iter()
-            .enumerate()
-            .filter(|(index, _)| assignment & (1_u64 << index) != 0)
-            .map(|(_, atom)| atom.as_str())
-            .collect();
-        a_target_could_set(&true_atoms) && holds_without_test(predicate, &true_atoms)
-    })
+            .any(|each| each.flags.contains(&flag))
+            .then(|| target.flags.contains(&flag));
+    };
+    let key = key.trim();
+    let value = super::census_domain::literal_token_value(value.trim())?;
+    CI_TARGETS
+        .iter()
+        .all(|each| each.keys.iter().any(|(name, _)| *name == key))
+        .then(|| {
+            target
+                .keys
+                .iter()
+                .any(|(name, set)| *name == key && *set == value)
+        })
 }
 
 fn governed_allows_in_the_production_build(source: &str) -> BTreeSet<&'static str> {
@@ -1052,8 +1010,19 @@ fn governed_allows_in_the_production_build(source: &str) -> BTreeSet<&'static st
         let Some(text) = &attribute.text else {
             continue;
         };
+        let recorded: BTreeSet<String> = governed_allows(
+            source
+                .get(attribute.start..attribute.end)
+                .unwrap_or_default(),
+        )
+        .into_iter()
+        .flat_map(|allow| allow.lints)
+        .collect();
         for Applied { text, under } in applied_attributes(text.trim()) {
-            let lints = governed_lints_allowed_by(text);
+            let lints: Vec<&'static str> = governed_lints_allowed_by(text)
+                .into_iter()
+                .filter(|lint| recorded.contains(*lint))
+                .collect();
             if !lints.is_empty()
                 && allowance_applies_in_a_production_build(attribute.start, under, &gates)
             {
@@ -1295,6 +1264,24 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             )],
             vec![],
         ),
+        (
+            "a feature no CI valuation sets establishes no production build",
+            vec![(
+                "src/a.rs",
+                &*format!(
+                    "{DENY}#[cfg(feature = \"x\")]\n#[allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"
+                ),
+            )],
+            vec![],
+        ),
+        (
+            "an allowance spelled so the placement census does not read it",
+            vec![(
+                "src/a.rs",
+                &*format!("{DENY}# [allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"),
+            )],
+            vec![],
+        ),
     ] {
         let found = named(&files, &test_modules);
         assert_eq!(found.len(), 1, "{what}: {found:#?}");
@@ -1410,13 +1397,10 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             vec![],
         ),
         (
-            "a feature predicate is decided by no valuation read here, so the allowance stays \
-             production",
+            "a raw attribute name is the attribute",
             vec![(
                 "src/a.rs",
-                &*format!(
-                    "{DENY}#[cfg(feature = \"x\")]\n#[allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"
-                ),
+                &*format!("{DENY}#[r#allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"),
             )],
             vec![],
         ),
@@ -1528,6 +1512,63 @@ const NO_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[
         "enclosing_module_gated_twice",
         "#[cfg(test)]\nmod outer {\n    #[cfg(unix)]\n    mod inner {\n        #![allow(LINT)]\n    }\n}\n",
     ),
+    (
+        "raw_spelling_negated",
+        "#[cfg_attr(all(target_os = \"linux\", not(target_os = r\"linux\")), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "hashed_raw_spelling_negated",
+        "#[cfg_attr(all(target_os = \"linux\", not(target_os = r###\"linux\"###)), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "byte_escape_negated",
+        "#[cfg_attr(all(target_os = \"linux\", not(target_os = \"lin\\x75x\")), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "unicode_escape_negated",
+        "#[cfg_attr(all(target_os = \"linux\", not(target_os = \"lin\\u{75}x\")), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "underscored_unicode_escape_negated",
+        "#[cfg_attr(all(target_os = \"lin\\u{7_5}x\", not(target_os = r#\"linux\"#)), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "continued_line_negated",
+        "#[cfg_attr(all(target_os = \"lin\\\n        ux\", not(target_os = \"linux\")), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "raw_string_keeps_its_backslash",
+        "#[cfg_attr(all(target_os = \"linux\", target_os = r\"lin\\x75x\"), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "raw_spelling_of_the_other_family",
+        "#[cfg_attr(all(unix, target_family = r\"windows\"), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "an_os_of_the_other_family",
+        "#[cfg_attr(all(target_os = \"linux\", target_family = \"windows\"), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "a_family_flag_beside_the_other_os",
+        "#[cfg_attr(all(unix, target_os = \"windows\"), allow(LINT))]\nmod m {}\n",
+    ),
+    (
+        "a_feature_no_valuation_sets",
+        "#[cfg(feature = \"x\")]\n#[allow(LINT)]\nmod m {}\n",
+    ),
+    (
+        "an_unknown_atom_negated_twice",
+        "#[cfg_attr(not(not(some_flag_nothing_sets)), allow(LINT))]\nmod m {}\n",
+    ),
+    ("raw_cfg_gate", "#[r#cfg(test)]\n#[allow(LINT)]\nmod m {}\n"),
+    (
+        "raw_cfg_attr_gate",
+        "#[r#cfg_attr(not(test), cfg(test))]\n#[allow(LINT)]\nmod m {}\n",
+    ),
+    (
+        "raw_generated_cfg",
+        "#[cfg_attr(not(test), r#cfg(test))]\n#[allow(LINT)]\nmod m {}\n",
+    ),
 ];
 
 const SOME_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[
@@ -1568,6 +1609,38 @@ const SOME_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[
     (
         "string_valued_and_every_ci_platform",
         "#[cfg(any(unix, windows, target_os = \"linux\"))]\n#[allow(LINT)]\nmod m {}\n",
+    ),
+    (
+        "each_ci_platform_spelled_another_way",
+        "#[cfg(any(target_os = r\"linux\", target_os = \"ma\\x63os\", target_os = \"win\\u{6_4}ows\"))]\n#[allow(LINT)]\nmod m {}\n",
+    ),
+    (
+        "each_family_spelled_another_way",
+        "#[cfg_attr(any(all(unix, target_family = r#\"unix\"#), all(windows, target_family = \"win\\u{64}ows\")), allow(LINT))]\nmod m {}\n",
+    ),
+    ("raw_attribute_name", "#[r#allow(LINT)]\nmod m {}\n"),
+];
+
+const ONE_CI_PLATFORM_APPLIES: &[(&str, &str, bool)] = &[
+    (
+        "raw_spelling_on_linux",
+        "#[cfg_attr(all(target_os = \"linux\", target_os = r\"linux\"), allow(LINT))]\nmod m {}\n",
+        cfg!(target_os = "linux"),
+    ),
+    (
+        "byte_escape_on_linux",
+        "#[cfg_attr(all(target_os = \"linux\", target_os = \"lin\\x75x\"), allow(LINT))]\nmod m {}\n",
+        cfg!(target_os = "linux"),
+    ),
+    (
+        "unicode_escape_on_macos",
+        "#[cfg_attr(all(target_os = \"macos\", target_os = \"ma\\u{63}os\"), allow(LINT))]\nmod m {}\n",
+        cfg!(target_os = "macos"),
+    ),
+    (
+        "hashed_raw_spelling_on_windows",
+        "#[cfg_attr(all(target_os = \"windows\", target_os = r##\"windows\"##), allow(LINT))]\nmod m {}\n",
+        cfg!(target_os = "windows"),
     ),
 ];
 
@@ -1634,13 +1707,89 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                  fence, so this control no longer shows why the rule excuses it: {diagnostics:?}"
             );
         }
+        for (tag, shape, here) in ONE_CI_PLATFORM_APPLIES {
+            let found = named(lint, shape);
+            assert!(
+                found.is_empty(),
+                "`{tag}` for `{lint}`: one CI platform's production build applies the allowance, \
+                 so `forbid` would be E0453 there and the `deny` is excused: {found:#?}"
+            );
+            let (built, diagnostics) = clippy_outcome(
+                &scratch,
+                &format!("{tag}_{bare}_production"),
+                &fenced(lint, shape),
+                &[],
+            );
+            compiled += 1;
+            assert_eq!(
+                (built, diagnostics.iter().any(|(_, code)| code == "E0453")),
+                (!here, *here),
+                "`{tag}` for `{lint}`: the predicate holds on this host exactly when it names this \
+                 host's platform, and clippy disagreed: {diagnostics:?}"
+            );
+        }
     }
     assert_eq!(
         compiled,
         USED_GOVERNED_LINTS.len()
-            * (2 * NO_PRODUCTION_BUILD_APPLIES.len() + SOME_PRODUCTION_BUILD_APPLIES.len()),
+            * (2 * NO_PRODUCTION_BUILD_APPLIES.len()
+                + SOME_PRODUCTION_BUILD_APPLIES.len()
+                + ONE_CI_PLATFORM_APPLIES.len()),
         "a fixture was skipped"
     );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
+    ("spaced_outer", "# [allow(LINT)]\nmod m {}\n"),
+    ("commented_outer", "#/* c */[allow(LINT)]\nmod m {}\n"),
+    ("spaced_inner", "mod m {\n    # ![allow(LINT)]\n}\n"),
+    ("raw_lint_name", "#[allow(clippy::r#BARE)]\nmod m {}\n"),
+    (
+        "raw_lint_name_applied",
+        "#[cfg_attr(not(test), allow(clippy::r#BARE))]\nmod m {}\n",
+    ),
+];
+
+#[test]
+fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
+    let scratch = scratch_dir("unrecorded");
+    for lint in USED_GOVERNED_LINTS {
+        let bare = normalize_lint(lint).expect("a governed lint");
+        for (tag, shape) in ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ {
+            let shape = shape.replace("LINT", lint).replace("BARE", bare);
+            let unread = governed_allows(&shape)
+                .iter()
+                .all(|allow| !allow.lints.iter().any(|named| named == bare));
+            assert!(
+                unread,
+                "`{tag}` for `{lint}`: the placement census reads this allowance, so it is no \
+                 witness for the rule below: {shape}"
+            );
+            let found = denies_the_production_build_could_forbid(
+                &[(
+                    "src/probe.rs".to_owned(),
+                    format!("#![deny({lint})]\n{shape}"),
+                )],
+                &|_| false,
+            );
+            assert!(
+                found.len() == 1 && found.iter().all(|line| line.contains(lint)),
+                "`{tag}` for `{lint}`: an allowance no census records excused a `deny`: {found:#?}"
+            );
+            let (built, diagnostics) = clippy_outcome(
+                &scratch,
+                &format!("{tag}_{bare}"),
+                &format!("#![cfg_attr(not(test), forbid({lint}))]\n{shape}"),
+                &[],
+            );
+            assert!(
+                !built && diagnostics.iter().any(|(_, code)| code == "E0453"),
+                "`{tag}` for `{lint}`: clippy did not apply the allowance, so the refusal above \
+                 names nothing real: {diagnostics:?}"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(&scratch);
 }
 
@@ -1878,6 +2027,71 @@ fn the_unclassified_fence_rule_names_a_silent_file_and_excuses_one_a_forbid_reac
     ] {
         let found = named(&files, &classified, &test_modules);
         assert!(found.is_empty(), "{what}: {found:#?}");
+    }
+}
+
+#[test]
+fn an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one() {
+    const LINT: &str = "clippy::disallowed_methods";
+    for (what, prologue) in [
+        (
+            "an allowance only this reader reads",
+            "#![deny(clippy::disallowed_methods)]\n# ![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "a list entry rustc refuses",
+            "#![forbid(clippy::disallowed_methods)]\n#![allow(footool::disallowed_types)]\n",
+        ),
+        (
+            "a predicate the grammar refuses",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![cfg_attr(not(te st), allow(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "`warnings` lowering a `warn`",
+            "#![warn(clippy::disallowed_methods)]\n#![allow(warnings)]\n",
+        ),
+        (
+            "a platform the production valuations disagree on",
+            "#![cfg_attr(unix, forbid(clippy::disallowed_methods))]\n",
+        ),
+    ] {
+        let source = format!("{prologue}fn go() {{}}\n");
+        let resolution = crate::effects::lint_levels::file_level_lint_resolution(&source, LINT);
+        assert!(
+            resolution.undecided && resolution.level.is_none(),
+            "{what}: {resolution:?}"
+        );
+        assert!(
+            !file_level_denies(&source, LINT),
+            "{what}: the per-site expectation rule read an undecided prologue as a fence"
+        );
+        let own = unclassified_production_files_leaving_a_governed_lint_unfenced(
+            &[("src/a.rs".to_owned(), source.clone())],
+            &[],
+            &[],
+            &|_| false,
+        );
+        assert!(
+            own.iter()
+                .any(|line| line.starts_with(&format!("src/a.rs: `{LINT}`"))),
+            "{what}: the roll-call guard read an undecided prologue as a fence: {own:#?}"
+        );
+        let inherited = unclassified_production_files_leaving_a_governed_lint_unfenced(
+            &[
+                ("src/a.rs".to_owned(), source.clone()),
+                ("src/a/b.rs".to_owned(), "fn go() {}\n".to_owned()),
+            ],
+            &[],
+            &["src/a.rs"],
+            &|_| false,
+        );
+        assert!(
+            inherited
+                .iter()
+                .any(|line| line.starts_with(&format!("src/a/b.rs: `{LINT}`"))),
+            "{what}: a child took an undecided ancestor as the forbid it inherits: {inherited:#?}"
+        );
     }
 }
 
@@ -6180,7 +6394,7 @@ fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {
         let mut wrong = Vec::new();
         for needle in [
             "fn file_level_lint_state(",
-            "fn names_lint(",
+            "fn what_a_lint_path_names(",
             "mod lint_levels",
         ] {
             if !whole.contains(needle) {
@@ -6436,6 +6650,286 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
             "attribute_after_the_prologue",
             "#![deny(clippy::disallowed_methods)]\npub const S: &str = \
              \"#![allow(clippy::disallowed_methods)]\";\n",
+        ),
+        (
+            "raw_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![r#allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "raw_cfg_attr",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![r#cfg_attr(not(test), allow(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "nested_raw_allow",
+            "#![cfg_attr(not(test), deny(clippy::disallowed_methods), \
+             r#allow(clippy::disallowed_methods))]\n",
+        ),
+        (
+            "raw_tool_name",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(r#clippy::disallowed_methods)]\n",
+        ),
+        (
+            "raw_forbid_then_allow",
+            "#![r#forbid(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "spaced_path",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy :: disallowed_methods)]\n",
+        ),
+        (
+            "spaced_bang_deny",
+            "# ![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "spaced_bracket_forbid",
+            "#! [forbid(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "commented_tokens_deny",
+            "#/* a */!/* b */[deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "bang_and_bracket_on_two_lines_forbid_then_allow",
+            "#!\n[forbid(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "allow_clippy_all",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::all)]\n",
+        ),
+        (
+            "allow_clippy_style",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::style)]\n",
+        ),
+        (
+            "allow_prefixless_all",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(all)]\n",
+        ),
+        (
+            "allow_prefixless_style",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(style)]\n",
+        ),
+        (
+            "expect_clippy_all",
+            "#![deny(clippy::disallowed_methods)]\n#![expect(clippy::all)]\n",
+        ),
+        (
+            "warn_clippy_style",
+            "#![deny(clippy::disallowed_methods)]\n#![warn(clippy::style)]\n",
+        ),
+        (
+            "allow_then_deny_clippy_all",
+            "#![allow(clippy::disallowed_methods)]\n#![deny(clippy::all)]\n",
+        ),
+        (
+            "groups_without_the_lint",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::restriction, \
+             clippy::pedantic, clippy::nursery, clippy::cargo, clippy::complexity, \
+             clippy::correctness, clippy::perf, clippy::suspicious, restriction)]\n",
+        ),
+        (
+            "forbid_by_a_group_then_allow",
+            "#![forbid(clippy::all)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        ("forbid_by_a_group_alone", "#![forbid(clippy::style)]\n"),
+        (
+            "forbid_by_a_group_then_deny",
+            "#![forbid(clippy::all)]\n#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_by_a_group_then_warn",
+            "#![forbid(clippy::all)]\n#![warn(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_then_forbid_by_a_group_then_allow",
+            "#![forbid(clippy::disallowed_methods)]\n#![forbid(clippy::all)]\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_by_a_group_then_forbid_then_allow",
+            "#![forbid(clippy::all)]\n#![forbid(clippy::disallowed_methods)]\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_and_a_group_in_one_list_then_allow",
+            "#![forbid(clippy::disallowed_methods, clippy::all)]\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_then_allow_by_a_group",
+            "#![forbid(clippy::disallowed_methods)]\n#![allow(clippy::all)]\n",
+        ),
+        (
+            "forbid_by_a_prefixless_group_then_allow",
+            "#![forbid(all)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "deny_then_allow_warnings",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(warnings)]\n",
+        ),
+        (
+            "forbid_then_allow_warnings",
+            "#![forbid(clippy::disallowed_methods)]\n#![allow(warnings)]\n",
+        ),
+        (
+            "inner_doc_comment_between",
+            "#![deny(clippy::disallowed_methods)]\n//! doc\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "inner_block_doc_comment_between",
+            "#![deny(clippy::disallowed_methods)]\n/*! doc */\n\
+             #![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "byte_order_mark",
+            "\u{feff}#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "shebang",
+            "#!/usr/bin/env run-cargo-script\n#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "shebang_whose_next_token_is_a_doc_comment",
+            "#!/** d */[allow(clippy::disallowed_methods)]\n#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "trailing_comma",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods,)]\n",
+        ),
+        (
+            "raw_reason",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![allow(clippy::disallowed_methods, r#reason = \"x\")]\n",
+        ),
+        (
+            "empty_list",
+            "#![deny(clippy::disallowed_methods)]\n#![allow()]\n",
+        ),
+        (
+            "names_no_lint_resolves",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::no_such_lint_anywhere, \
+             clippy::assign_ops, clippy::DISALLOWED_METHODS, rustdoc::disallowed_methods, \
+             rustc::disallowed_methods)]\n",
+        ),
+    ];
+
+    let unread: &[(&str, &str, bool)] = &[
+        (
+            "spaced_bang_allow",
+            "#![deny(clippy::disallowed_methods)]\n# ![allow(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "spaced_bracket_allow",
+            "#![deny(clippy::disallowed_methods)]\n#! [allow(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "commented_bracket_allow",
+            "#![deny(clippy::disallowed_methods)]\n#!/**/[allow(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "comment_separated_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #/**/!/**/[allow(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "bang_and_bracket_on_two_lines_allow",
+            "#![deny(clippy::disallowed_methods)]\n#!\n[allow(clippy::disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "raw_lint_name_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::r#disallowed_methods)]\n",
+            true,
+        ),
+        (
+            "raw_group_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::r#all)]\n",
+            true,
+        ),
+        (
+            "prefixless_group_alias_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy_all)]\n",
+            true,
+        ),
+        (
+            "prefixless_group_alias_expect",
+            "#![deny(clippy::disallowed_methods)]\n#![expect(clippy_style)]\n",
+            true,
+        ),
+        (
+            "warnings_lowered_under_warn",
+            "#![warn(clippy::disallowed_methods)]\n#![allow(warnings)]\n",
+            true,
+        ),
+        ("warnings_lowered_alone", "#![allow(warnings)]\n", true),
+        ("warnings_raised_alone", "#![deny(warnings)]\n", false),
+        (
+            "three_segment_path",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![allow(clippy::disallowed_methods::x)]\n",
+            false,
+        ),
+        (
+            "doc_comment_inside",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![allow(/** d */ clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "doc_comment_between_hash_and_bang",
+            "#![deny(clippy::disallowed_methods)]\n#/** d */![allow(clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "outer_doc_comment_before_an_inner_attribute",
+            "/// doc\n#![deny(clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "custom_inner_attribute",
+            "#![deny(clippy::disallowed_methods)]\n#![clippy::allow(clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "brackets_for_parentheses",
+            "#![deny(clippy::disallowed_methods)]\n#![allow[clippy::disallowed_methods]]\n",
+            false,
+        ),
+        (
+            "literal_entry",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(\"clippy::disallowed_methods\")]\n",
+            false,
+        ),
+        (
+            "name_value_entry",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![allow(clippy::disallowed_methods = \"x\")]\n",
+            false,
+        ),
+        (
+            "reason_before_the_lint",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #![allow(reason = \"r\", clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "unknown_tool",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(footool::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "leading_path_separator",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(::clippy::disallowed_methods)]\n",
+            false,
+        ),
+        (
+            "hash_bang_opening_no_attribute",
+            "#![deny(clippy::disallowed_methods)]\n#!/bin/sh\n",
+            false,
         ),
     ];
 
@@ -6700,6 +7194,62 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
                     !built,
                     "`{tag}` for `{lint}`: clippy-driver compiled a predicate the reader could \
                      not read; the reader's refusal would have hidden a level: all diagnostics \
+                     {diagnostics:?}"
+                );
+            }
+        }
+
+        for (tag, prologue, builds) in unread {
+            let source = format!("{}{body}", spelled(prologue));
+            let resolution = file_level_lint_resolution(&source, lint);
+            assert!(
+                resolution.undecided
+                    && resolution.level.is_none()
+                    && !resolution.refused_downgrade
+                    && file_level_lint_worlds(&source, lint).is_empty(),
+                "`{tag}` for `{lint}`: the prologue states or changes the lint in a way no census \
+                 here reads or rustc refuses, and the reader claimed an answer: {resolution:?}"
+            );
+            assert_eq!(
+                file_level_lint_resolution(&source.replace('\n', "\r\n"), lint),
+                resolution,
+                "`{tag}` for `{lint}` reads differently under CRLF"
+            );
+            let (built, fired, rejected, diagnostics) = outcome(tag, &source, &[]);
+            assert_eq!(
+                built, *builds,
+                "`{tag}` for `{lint}`: clippy-driver did built={built} fired={fired:?} \
+                 E0453={rejected}; all diagnostics {diagnostics:?}"
+            );
+        }
+
+        for (renamed, to) in [
+            ("disallowed_method", "disallowed_methods"),
+            ("disallowed_type", "disallowed_types"),
+        ] {
+            let tag = format!("renamed_{renamed}");
+            let source = format!("#![deny({lint})]\n#![allow(clippy::{renamed})]\n{body}");
+            let resolution = file_level_lint_resolution(&source, lint);
+            let (built, fired, rejected, diagnostics) = outcome(&tag, &source, &[]);
+            if to == bare {
+                assert!(
+                    resolution.undecided && built && fired.is_empty() && !rejected,
+                    "`{tag}` for `{lint}`: clippy applies the renamed allowance, which no census \
+                     here records, so the reader must not answer: {resolution:?}, built={built} \
+                     fired={fired:?}; all diagnostics {diagnostics:?}"
+                );
+            } else {
+                assert!(
+                    resolution
+                        == Resolution {
+                            level: Some("deny"),
+                            refused_downgrade: false,
+                            undecided: false,
+                        }
+                        && !built
+                        && fired == ["error"],
+                    "`{tag}` for `{lint}`: another lint's old name lowers nothing: \
+                     {resolution:?}, built={built} fired={fired:?}; all diagnostics \
                      {diagnostics:?}"
                 );
             }
