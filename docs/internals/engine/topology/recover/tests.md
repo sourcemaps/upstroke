@@ -6238,6 +6238,32 @@ the correct one, `PR320-R1-MAIN-004` and `PR320-R1-REG-002`). `_within`
 passes a closure that does nothing; `await_previous_incarnations_release`
 passes `Fixture::holder_observed`.
 
+Each rest between two observations is one attempt:
+`workspace_manager::fixture::rest_within`, one `nanosleep` on Unix and one
+wait on Windows, capped at what is left of the bound and never made again.
+`std::thread::sleep` made a refused or interrupted sleep again inside
+itself, so a later resume whose every rest a policy refused never came back
+to the bound, never reached production and never returned
+(`PR320-R6-REG-001`: all three trunks and the rundir twin entered and held
+to the reviewer's cutoff). A rest the OS refuses costs less than the tick,
+and the loop spins to its bound instead of resting; where the OS lets it,
+it rests. The observation itself is production's `observe_cleanup_hold`,
+one probe per turn whose `File::options().open` retries an interrupted open
+inside std; this wait's bound cannot see inside that probe, and it is
+carried as its own deferred row
+(`PR320-R7-PRODUCTION-LEASE-PROBE-RETRIES-AN-INTERRUPTED-OPEN`). Each of the
+three trunks holds the one-attempt rest in a process of its own
+(`a_later_resume_through_resume_with_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+`a_later_resume_through_resume_as_certified_by_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+`a_later_resume_through_resume_holding_manager_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+the child `a_later_resume_whose_every_rest_is_refused_child`): the child
+makes the first real resume, which production refuses at once, refuses
+every rest of its thread and proves the refusal in force with a real
+`nanosleep`, and makes the later resume through the trunk the parent names
+with a 100 ms bound; the parent waits for the child within
+`run_kill_child_within`'s bound, so a wait that never comes back fails the
+parent and is killed with the child's process.
+
 ## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
 
 Wait, bounded, for the run's cleanup lease to be free: `RELEASE_BOUND`

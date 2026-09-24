@@ -628,3 +628,68 @@ call that never returns, a stderr sink that blocks forever with no signal, the s
 own retry inside `Command::spawn` before an owner exists, and the forked child's own loops, which
 its owner's kill ends. The body's consolidated history now records the aborted `c80f9163` control
 campaign as it happened (`PR320-R5-MAIN-005`, `PR320-R5-REG-005`).
+
+## Deadlines over whole passes and waits, and cleanup that owns an identity (2026-09-24, round seven)
+
+The sixth round's independent reviews (`PR320-R6-MAIN-001`–`003`, `PR320-R6-REG-001`–`003`) found
+three shapes the one-attempt primitives of round six do not bound by themselves, again all in test
+machinery: a pass of many successful steps with no deadline inside it; waits outside the two
+owners that still rested through `thread::sleep`; and cleanup that signalled a number after the
+component under test could have released it, or ran only after a failing assertion. The three
+executed findings were reproduced at `23021ff6` with the reviewers' own probes before any source
+changed. This is the seventh round, the looping signal of `MAINTAINING.md`: the operation matrix
+was widened from the two owners to every wait, rest, scan, signal and cleanup the whole diff adds
+or rewrites, derived by a script over the base-to-head diff, and the repair closes each shape
+where it occurs, not only where it was witnessed.
+
+- **A pass answers to its caller's deadline, step by step and at its end.** The group
+  observation takes the owner's absolute deadline into its `/proc` pass (`group_seen_by`,
+  `group_seen_in`), reads the clock after every step that returns -- each listed entry, and the
+  end of the listing -- and answers `Unfinished` when the deadline has come, which the owner notes
+  as its group not accounted for and never as empty (`PR320-R6-MAIN-001`). Held over the real
+  `/proc` through the owner with a driven clock
+  (`a_scenario_owners_group_observation_whose_steps_all_succeed_but_outlast_its_deadline_is_not_read_as_empty`),
+  and at the pass by
+  `a_group_pass_whose_steps_outlast_its_deadline_stops_there_and_is_unfinished` and
+  `a_group_pass_that_completes_after_its_deadline_is_unfinished_not_empty`.
+- **Every rest in a wait this pull request added or rewrote is one attempt.** Both lease waits and
+  the readiness wait split out for its clock rest through `rest_within`, one `nanosleep` capped at
+  what is left of the bound, Windows taking one `std::thread::sleep`, which there retries nothing
+  (`PR320-R6-REG-001`). Held on each actual path: the three resume trunks in processes of their own
+  (`a_later_resume_through_resume_with_whose_every_rest_is_refused_reaches_production_at_its_bound`
+  and its `resume_as_certified_by` and `resume_holding_manager` twins), the rundir lease wait
+  (`a_lease_wait_whose_every_rest_is_refused_returns_at_its_bound`) and the readiness wait
+  (`a_readiness_wait_whose_every_rest_is_refused_times_out_at_its_bound`). Production's lease
+  probe, one call per turn, retries an interrupted open inside std and is outside every such
+  bound; it is its own deferred finding
+  (`PR320-R7-PRODUCTION-LEASE-PROBE-RETRIES-AN-INTERRUPTED-OPEN`).
+- **A test owns the end of what it started, and signals no number.** Every test that runs a
+  scenario holds a lifeline: the scenario's stdin is one end of a socket pair every process of the
+  scenario inherits, and its stdout the end the group's warden reads. Every scenario that leads a
+  group of its own starts a warden in it first, which arms only in its parent's own group and
+  never the test harness's (`a_warden_refuses_to_arm_outside_its_scenarios_own_group_and_signals_nothing`),
+  and ends its own group with `kill(0, SIGKILL)` when the lifeline is cut or the test process
+  dies. Before any assertion a test reads whether every process of the scenario had exited when
+  the wrapper returned -- the kernel's EOF on its end, which no number enters and no warden holds
+  -- then cuts, reads again, and observes each named group empty without a signal
+  (`Lifeline::account`); only then are its original assertions made, against the first reading.
+  The wrapper regressions' failing path so leaves nothing running whatever the wrapper under test
+  does (`PR320-R6-REG-002`), and the number signals are gone (`PR320-R6-MAIN-002`):
+  `assert_ended_within`'s fallback kill and the tests' immediate kills of a member read by its
+  number, the stuck-wrapper and refused-kill group kills whose leader the wrapper might already
+  have collected, and the two `SIGCONT`s of the stopped-child tests, which now run in processes of
+  their own; `is_reaped` asks without collecting. Held by the wrapper regressions themselves
+  (`a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_and_kills_the_child`
+  and its siblings), each of which fails its original assertion under its first-bad wrapper with
+  nothing left for a driver to end. The group kills that remain are made by a process whose own
+  uncollected child leads the group.
+
+The lifeline and the warden are test support, approved for this pull request by the orchestrator;
+they add no syscall, no libc name and no instrument row. What they do not cover is named: a process
+that closes or replaces its stdin or leaves its group -- none of the scenarios' processes does,
+and the group observation after the cut covers the first -- a kernel call that never returns, a
+stderr that blocks with no signal, std's retry inside `Command::spawn` before an owner exists,
+and production's lease probe above. The body's instrument sentence now counts the eight rows as
+five syscall numbers, one BPF opcode and two metadata items, and says what the rows change: the
+census's classification of those names, not what an effectful call may do
+(`PR320-R6-MAIN-003`, `PR320-R6-REG-003`).

@@ -1233,12 +1233,129 @@ pub(crate) fn rest(span: std::time::Duration) {
     }
 }
 
+/// [`rest`] on Windows: `std::thread::sleep`, which there is one wait of the
+/// span -- a high-resolution waitable timer, or `Sleep` where there is none --
+/// and nothing it makes again, no signal interrupting it and no thread policy
+/// refusing it. For the waits shared with the Unix suites
+/// (`wait_for_cleanup_hold_release_observing`, `await_signal_by`), whose rest
+/// is one attempt on every platform.
+#[cfg(windows)]
+pub(crate) fn rest(span: std::time::Duration) {
+    std::thread::sleep(span);
+}
+
 /// [`rest`] for `tick`, or for `remaining` when that is less: the rest an
 /// owner's loop takes between two turns never carries it past the bound it
 /// keeps, and one cut short costs less than the tick.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn rest_within(tick: std::time::Duration, remaining: std::time::Duration) {
     rest(tick.min(remaining));
+}
+
+/// Refuse every rest this thread takes, and every rest of every process it
+/// forks: a seccomp policy answering `EINTR` to `clock_nanosleep`, the call
+/// a sleep makes here, then one real `nanosleep`, which it must refuse, so
+/// that a test built on it enters the refused rest rather than assuming it.
+/// For the suites that cannot reach the rundir suite's own policies
+/// (`Refusal::Rests` is that module's): the recovery trunks' lease-wait
+/// regressions, which run it in a process of their own, a policy being its
+/// thread's for good (`PR320-R6-REG-001`).
+///
+/// # Errors
+///
+/// The refusal is not in force: the `nanosleep` was made, or answered
+/// something other than `EINTR`.
+///
+/// # Panics
+///
+/// When the kernel refuses the policy itself.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_rests_on_this_thread() -> Result<(), String> {
+    const NONE: libc::c_long = 0;
+    const NO_NEW_PRIVS: libc::c_long = 1;
+
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(libc::SYS_clock_nanosleep),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(libc::EINTR)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            NO_NEW_PRIVS,
+            NONE,
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+    let request = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 1,
+    };
+    // SAFETY: `nanosleep` reads the one `timespec`, which lives for the call;
+    // the remainder pointer is null.
+    let answered = unsafe { libc::nanosleep(&request, std::ptr::null_mut()) };
+    let error = std::io::Error::last_os_error();
+    match (answered, error.raw_os_error()) {
+        (-1, Some(libc::EINTR)) => Ok(()),
+        (-1, _) => Err(format!("nanosleep answered {error}, not the refusal")),
+        _ => Err(String::from(
+            "nanosleep was made: the refusal is not in force",
+        )),
+    }
 }
 
 /// Say `line` on this process's standard error, as far as the descriptor

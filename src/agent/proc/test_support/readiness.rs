@@ -182,10 +182,14 @@ pub(crate) fn await_signal_by(
                 return Waited::ProducerGone(format!("waiting on it failed: {error}"));
             }
         }
-        if now() >= deadline {
+        let reading = now();
+        if reading >= deadline {
             return Waited::TimedOut(bound);
         }
-        thread::sleep(POLL);
+        crate::workspace_manager::fixture::rest_within(
+            POLL,
+            deadline.saturating_duration_since(reading),
+        );
     }
 }
 

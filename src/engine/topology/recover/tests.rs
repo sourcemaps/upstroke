@@ -11819,6 +11819,132 @@ fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {
     drop(handle);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "run in a process of its own by the later-resume rest-refused regressions"]
+fn a_later_resume_whose_every_rest_is_refused_child() {
+    use crate::workspace_manager::fixture::{ParkedFork, refuse_rests_on_this_thread};
+
+    let trunk =
+        std::env::var("UPSTROKE_TEST_REST_REFUSED_TRUNK").expect("the parent names the trunk");
+    let fixture = Fixture::healthy(&format!("rest-refused-{trunk}"));
+    fixture.release_bound.set(Duration::from_millis(100));
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    assert!(
+        parked.is_alive() && rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "the parked fork {} holds the run's cleanup lease",
+        parked.pid()
+    );
+    let before = fixture.log_bytes();
+    let first = resume_through(&fixture, &trunk)
+        .expect_err("production refuses a first resume at once while the lease is held");
+    assert!(
+        message(&first).contains("still has a process of its own alive"),
+        "the first resume is production's own refusal: {}",
+        message(&first)
+    );
+    assert_eq!(
+        fixture.resume_attempts.get(),
+        1,
+        "the first resume is counted once"
+    );
+    assert!(
+        fixture.hold_past_bound.get().is_none(),
+        "a first resume waits for nothing"
+    );
+    refuse_rests_on_this_thread().expect("every rest of this thread is refused");
+    let started = std::time::Instant::now();
+    let later = resume_through(&fixture, &trunk).expect_err(
+        "a later resume whose wait ran out still reaches production, which refuses the held lease",
+    );
+    let took = started.elapsed();
+    let text = message(&later);
+    assert!(
+        text.contains("still has a process of its own alive") && text.contains(RUN_ID),
+        "production's refusal, naming the run: {text}"
+    );
+    assert!(
+        text.contains("still held after the full 100ms bound"),
+        "with the wait's report that its whole bound ran out, every rest refused: {text}"
+    );
+    assert!(
+        took >= Duration::from_millis(100) && took < Duration::from_secs(30),
+        "the wait spent its bound and came back to it: {took:?}"
+    );
+    assert_eq!(
+        fixture.resume_attempts.get(),
+        2,
+        "the later resume is counted once"
+    );
+    assert_eq!(fixture.log_bytes(), before, "nothing was appended");
+    assert!(parked.is_alive(), "the holder outlived both refusals");
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn resume_through(fixture: &Fixture, trunk: &str) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let runtime = runtime_holding_the_record();
+    match trunk {
+        "resume_with" => {
+            resume_with(
+                fixture,
+                &mut hooks,
+                &Given::healthy(fixture, &runtime, &AlwaysCertifies),
+            )
+            .0
+        }
+        "resume_as_certified_by" => {
+            resume_as_certified_by(fixture, RESUMER, &runtime, &AlwaysCertifies, &mut hooks)
+        }
+        "resume_holding_manager" => resume_holding_manager(fixture, &fixture.manager(), &mut hooks),
+        other => panic!("no trunk is named {other}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn assert_a_later_resume_whose_every_rest_is_refused_reaches_production(trunk: &str) {
+    let status = crate::workspace_manager::fixture::run_kill_child_within(
+        "engine::topology::recover::tests::a_later_resume_whose_every_rest_is_refused_child",
+        &[(
+            "UPSTROKE_TEST_REST_REFUSED_TRUNK",
+            std::ffi::OsStr::new(trunk),
+        )],
+        Duration::from_secs(60),
+    );
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the later resume through `{trunk}`, every rest of its thread refused, came back to its \
+         100 ms bound and reached production in a process of its own: {status:?} -- `None` is a \
+         wait that never came back, its process killed at the end of the bound"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_later_resume_through_resume_with_whose_every_rest_is_refused_reaches_production_at_its_bound()
+{
+    assert_a_later_resume_whose_every_rest_is_refused_reaches_production("resume_with");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_later_resume_through_resume_as_certified_by_whose_every_rest_is_refused_reaches_production_at_its_bound()
+ {
+    assert_a_later_resume_whose_every_rest_is_refused_reaches_production("resume_as_certified_by");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_later_resume_through_resume_holding_manager_whose_every_rest_is_refused_reaches_production_at_its_bound()
+ {
+    assert_a_later_resume_whose_every_rest_is_refused_reaches_production("resume_holding_manager");
+}
+
 #[test]
 fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {
     assert_eq!(
@@ -24211,7 +24337,10 @@ fn wait_for_cleanup_hold_release_observing(
                 observations,
             });
         }
-        std::thread::sleep(Duration::from_millis(50));
+        crate::workspace_manager::fixture::rest_within(
+            Duration::from_millis(50),
+            bound.saturating_sub(started.elapsed()),
+        );
     }
 }
 
