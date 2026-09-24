@@ -6187,6 +6187,117 @@ fn a_scenario_owners_group_observation_whose_steps_all_succeed_but_outlast_its_d
     );
 }
 
+/// A scenario owner's observation that found a member of its group running
+/// and then met its deadline in a later pass notes the member as running, not
+/// only the pass the deadline cut short. Over the real `/proc`, the owner's
+/// leader having exited 23 and its silent member left running, asked with a
+/// 1 s bound and a clock the test drives 100 µs a reading: every pass that
+/// finishes finds the member running, and the pass the deadline cuts short
+/// says nothing of the group. Before, that last pass was all the note said
+/// -- the observation met its deadline after so many entries, after none
+/// when the rest before it, capped at the deadline, left it no step to take
+/// -- so an owner whose group kept a member running read as one that ran out
+/// of time (the round-seven control `LC1-M1-and-no-cut`). Then the owner
+/// kills its group, the leader still its own, and finds it empty. Linux, for
+/// `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_group_observation_that_found_a_member_running_says_so_when_a_later_pass_meets_its_deadline()
+ {
+    const STEP: Duration = Duration::from_micros(100);
+    let (mut owned, leader) = an_owner_whose_leader_exited(false);
+    let origin = Instant::now();
+    let readings = std::cell::Cell::new(0_u32);
+    let ended = owned.await_group_end_or_note_by(Duration::from_secs(1), &mut || {
+        let reading = origin + STEP * readings.get();
+        readings.set(readings.get() + 1);
+        reading
+    });
+    let text = owned.text();
+    assert!(
+        !ended,
+        "a group whose member runs is not said to be empty: {text}"
+    );
+    assert!(
+        text.contains("a member of it was still running at the last pass that finished")
+            || text
+                .contains("a member of the scenario's group was still running 1s after the kill"),
+        "the owner notes the member it found running, not only the pass the deadline cut short: \
+         {text}"
+    );
+    assert!(
+        owned.kill_group(),
+        "the owner kills its group, the leader {leader} still its own: {}",
+        owned.text()
+    );
+    assert_eq!(
+        owned
+            .collect_within(SCENARIO_GROUP_BOUND)
+            .and_then(|status| status.code()),
+        Some(23),
+        "the leader is collected with its own status: {}",
+        owned.text()
+    );
+    assert!(
+        owned.await_group_end_or_note(SCENARIO_GROUP_BOUND),
+        "the group is empty after the kill: {}",
+        owned.text()
+    );
+}
+
+/// An observation of a process group without a signal that found a process
+/// of it running and then met its deadline in a later pass reports the
+/// process as running, not only the pass the deadline cut short -- the
+/// observation each lifeline makes of a scenario's groups after the cut
+/// ([`Lifeline::account`]). Over the real `/proc`, a scenario owner's leader
+/// having exited 23, uncollected, and its silent member left running, the
+/// group is observed with a 1 s bound and a clock the test drives 100 µs a
+/// reading: every pass that finishes finds the member, and the report says
+/// so. Before, it said only that the observation met its deadline, after 0
+/// entries when the capped rest left the last pass no step to take (the
+/// round-seven control `LC1-M1-and-no-cut`). Then the owner kills its group,
+/// the leader still its own, and finds it empty. Linux, for `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_observation_that_found_a_process_running_says_so_when_a_later_pass_meets_its_deadline() {
+    const STEP: Duration = Duration::from_micros(100);
+    let (mut owned, leader) = an_owner_whose_leader_exited(false);
+    let origin = Instant::now();
+    let readings = std::cell::Cell::new(0_u32);
+    let seen = group_observed_empty_within_by(leader, Duration::from_secs(1), &mut || {
+        let reading = origin + STEP * readings.get();
+        readings.set(readings.get() + 1);
+        reading
+    });
+    assert!(
+        seen.as_ref().is_err_and(|why| {
+            why.starts_with("a process of it was still running at the last pass that finished")
+                || why == "a process of it was still running at the end of 1s"
+        }),
+        "the observation reports the process it found running, not only the pass the deadline \
+         cut short: {seen:?}; {}",
+        owned.text()
+    );
+    assert!(
+        owned.kill_group(),
+        "the owner kills its group, the leader {leader} still its own: {}",
+        owned.text()
+    );
+    assert_eq!(
+        owned
+            .collect_within(SCENARIO_GROUP_BOUND)
+            .and_then(|status| status.code()),
+        Some(23),
+        "the leader is collected with its own status: {}",
+        owned.text()
+    );
+    assert!(
+        owned.await_group_end_or_note(SCENARIO_GROUP_BOUND),
+        "the group is empty after the kill: {}",
+        owned.text()
+    );
+}
+
 /// A parked fork's drop whose every rest a policy refuses --
 /// `clock_nanosleep` answering `EINTR` on the dropping thread, the refusal
 /// seen in force first -- still comes back to its bound between
@@ -7230,16 +7341,41 @@ impl Lifeline {
 }
 
 /// Observe the process group `pgid` until no process of it is running or
-/// `bound` runs out, without signalling it: [`group_seen_by`], one pass at a
-/// time, each answering to the same absolute deadline, and one capped rest
-/// between two. `Err` with what was seen last.
+/// `bound` runs out, without signalling it: [`group_observed_empty_within_by`]
+/// with the wall clock.
 #[cfg(unix)]
 fn group_observed_empty_within(pgid: libc::pid_t, bound: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + bound;
+    group_observed_empty_within_by(pgid, bound, &mut || Instant::now())
+}
+
+/// [`group_observed_empty_within`] with `now` as the clock: [`group_seen_by`],
+/// one pass at a time, each answering to the same absolute deadline, and one
+/// capped rest between two. `Err` with what was seen: a process of the group
+/// running -- at the end of the bound, or at the last pass that finished when
+/// a later one met the deadline, since a pass the deadline cuts short says
+/// nothing of the group and the rest before it, capped at the deadline, may
+/// leave it no step to take
+/// (`a_group_observation_that_found_a_process_running_says_so_when_a_later_pass_meets_its_deadline`)
+/// -- the deadline met before any pass finished, or an observation that
+/// failed.
+#[cfg(unix)]
+fn group_observed_empty_within_by(
+    pgid: libc::pid_t,
+    bound: Duration,
+    now: &mut dyn FnMut() -> Instant,
+) -> Result<(), String> {
+    let deadline = now() + bound;
+    let mut found_running = false;
     loop {
-        match group_seen_by(pgid, deadline, &mut || Instant::now()) {
+        match group_seen_by(pgid, deadline, now) {
             Ok(GroupSeen::Ended) => return Ok(()),
-            Ok(GroupSeen::MemberRunning) => {}
+            Ok(GroupSeen::MemberRunning) => found_running = true,
+            Ok(GroupSeen::Unfinished { listed }) if found_running => {
+                return Err(format!(
+                    "a process of it was still running at the last pass that finished, and the \
+                     next met the deadline of {bound:?} after {listed} entries"
+                ));
+            }
             Ok(GroupSeen::Unfinished { listed }) => {
                 return Err(format!(
                     "the observation met its deadline after {listed} entries"
@@ -7247,7 +7383,7 @@ fn group_observed_empty_within(pgid: libc::pid_t, bound: Duration) -> Result<(),
             }
             Err(error) => return Err(format!("it could not be observed: {error}")),
         }
-        let reading = Instant::now();
+        let reading = now();
         if reading >= deadline {
             return Err(format!(
                 "a process of it was still running at the end of {bound:?}"
@@ -7680,7 +7816,12 @@ impl ScenarioChild {
     /// empty: a pass whose steps all succeed but together outlast it answers
     /// that it was not finished, which is noted as the group not accounted
     /// for and never read as empty, and the loop ends there -- the deadline
-    /// having passed, there is no second pass to make. Before
+    /// having passed, there is no second pass to make. A pass cut short after
+    /// one that found a member running notes that member as still running at
+    /// the last pass that finished, not only the unfinished pass: the rest
+    /// before it, capped at the deadline, may leave it no step to take
+    /// (`a_scenario_owners_group_observation_that_found_a_member_running_says_so_when_a_later_pass_meets_its_deadline`).
+    /// Before
     /// `PR320-R6-MAIN-001` the pass took no deadline and an empty answer
     /// returned before the loop looked at its own, so a pass of successful
     /// steps held the owner 646 ms against a 100 ms bound and its drop 3.2 s
@@ -7694,6 +7835,7 @@ impl ScenarioChild {
     ) -> bool {
         let started = now();
         let deadline = started + bound;
+        let mut found_running = false;
         loop {
             match group_seen_by(self.pid(), deadline, now) {
                 Ok(GroupSeen::Ended) => {
@@ -7703,12 +7845,17 @@ impl ScenarioChild {
                     ));
                     return true;
                 }
-                Ok(GroupSeen::MemberRunning) => {}
+                Ok(GroupSeen::MemberRunning) => found_running = true,
                 Ok(GroupSeen::Unfinished { listed }) => {
+                    let seen = if found_running {
+                        "a member of it was still running at the last pass that finished, and the \
+                         next met the deadline"
+                    } else {
+                        "the observation met its deadline"
+                    };
                     self.note(&format!(
-                        "the scenario's group was not observed to its end within {bound:?}: the \
-                         observation met its deadline after {listed} entries; its members are not \
-                         accounted for"
+                        "the scenario's group was not observed to its end within {bound:?}: \
+                         {seen} after {listed} entries; its members are not accounted for"
                     ));
                     return false;
                 }
@@ -9987,8 +10134,9 @@ fn drop_parked_forks_whose_kill_is_refused_and_stderr_answers_eio() {
 /// still holds its id ([`group_observed_empty_within`]), so that a drop whose
 /// own kill a policy refuses leaves nothing running, whatever becomes of the
 /// drop: the drop's kill is refused whatever the group holds, which is the
-/// state under test. The member was seen ended by its number, and killed by
-/// it again if not (`PR320-R6-MAIN-002`). The scenario owner is handed the
+/// state under test. Before, the member was seen ended by its number and
+/// killed by it again if not, a number nothing kept reserved
+/// (`PR320-R6-MAIN-002`). The scenario owner is handed the
 /// lifeline this process was handed, when it was handed one, so its group
 /// has a warden of its own.
 #[cfg(target_os = "linux")]

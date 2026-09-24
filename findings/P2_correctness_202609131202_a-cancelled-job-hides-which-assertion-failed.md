@@ -651,7 +651,14 @@ where it occurs, not only where it was witnessed.
   (`a_scenario_owners_group_observation_whose_steps_all_succeed_but_outlast_its_deadline_is_not_read_as_empty`),
   and at the pass by
   `a_group_pass_whose_steps_outlast_its_deadline_stops_there_and_is_unfinished` and
-  `a_group_pass_that_completes_after_its_deadline_is_unfinished_not_empty`.
+  `a_group_pass_that_completes_after_its_deadline_is_unfinished_not_empty`. A pass the deadline
+  cuts short after one that found a member running is reported with that member still running,
+  not only as unfinished: the rest before it, capped at the deadline, can leave it no step to take,
+  and the report then said only that the observation met its deadline after 0 entries -- found by
+  this round's own causal control of the lifeline, and held for the owner and for the
+  observation each lifeline makes after its cut by
+  `a_scenario_owners_group_observation_that_found_a_member_running_says_so_when_a_later_pass_meets_its_deadline`
+  and `a_group_observation_that_found_a_process_running_says_so_when_a_later_pass_meets_its_deadline`.
 - **Every rest in a wait this pull request added or rewrote is one attempt.** Both lease waits and
   the readiness wait split out for its clock rest through `rest_within`, one `nanosleep` capped at
   what is left of the bound, Windows taking one `std::thread::sleep`, which there retries nothing
