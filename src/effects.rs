@@ -1088,6 +1088,8 @@ pub const DENIAL_CONTROL: &str = "pub fn go(p: &std::path::Path) -> bool {\n\
 pub(crate) mod census_domain {
     use std::path::PathBuf;
 
+    use super::lint_levels::{applied_attributes, attribute_arguments, attribute_name};
+
     pub(crate) fn production_calls(code: &str, name: &str, form: Call) -> usize {
         let needle = format!("{name}(");
         code.match_indices(&needle)
@@ -1670,38 +1672,63 @@ pub(crate) mod census_domain {
                 let Some(close) = super::matching(bytes, open, b'[', b']') else {
                     return Err(ScanRefusal::UnclosedAttribute { line: line_of(i) });
                 };
-                let raw = &source[open + 1..close];
-                let name = blanked
-                    .get(open + 1..close)
-                    .unwrap_or_default()
+                let raw = source.get(open + 1..close).unwrap_or_default();
+                let shape = blanked.get(open + 1..close).unwrap_or_default();
+                let name = shape
                     .trim_start()
                     .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
                     .next()
                     .unwrap_or_default();
                 match name {
-                    "cfg" => {
-                        let written = raw
-                            .trim()
-                            .strip_prefix("cfg")
-                            .map(str::trim_start)
-                            .and_then(|rest| rest.strip_prefix('('))
-                            .and_then(|rest| rest.strip_suffix(')'))
-                            .unwrap_or_default()
-                            .trim();
-                        let pred = parse_predicate(written).map_err(|why| {
+                    "cfg" | "cfg_attr" => {
+                        if name == "cfg_attr" && raw.contains("path") {
+                            pending_path = true;
+                        }
+                        let text = with_literal_identity(raw, shape).ok_or_else(|| {
                             ScanRefusal::UnreadablePredicate {
                                 line: line_of(i),
-                                written: written.to_owned(),
-                                why,
+                                written: raw.trim().to_owned(),
+                                why: "its comments and literals do not read as the blanked text \
+                                      does"
+                                    .to_owned(),
                             }
                         })?;
-                        if inner {
-                            return Err(ScanRefusal::UnsupportedInnerCfg { line: line_of(i) });
+                        for applied in applied_attributes(text.trim()) {
+                            if attribute_name(applied.text) != "cfg" {
+                                continue;
+                            }
+                            let written =
+                                attribute_arguments(applied.text).unwrap_or_default().trim();
+                            let gate = parse_predicate(written).map_err(|why| {
+                                ScanRefusal::UnreadablePredicate {
+                                    line: line_of(i),
+                                    written: written.to_owned(),
+                                    why,
+                                }
+                            })?;
+                            let under = applied
+                                .under
+                                .into_iter()
+                                .collect::<Result<Vec<Predicate>, String>>()
+                                .map_err(|why| ScanRefusal::UnreadablePredicate {
+                                    line: line_of(i),
+                                    written: written.to_owned(),
+                                    why,
+                                })?;
+                            if inner {
+                                return Err(ScanRefusal::UnsupportedInnerCfg { line: line_of(i) });
+                            }
+                            pending.push(if under.is_empty() {
+                                gate
+                            } else {
+                                Predicate::Any(vec![
+                                    Predicate::Not(Box::new(Predicate::all(under))),
+                                    gate,
+                                ])
+                            });
                         }
-                        pending.push(pred);
                     }
                     "path" => pending_path = true,
-                    "cfg_attr" if raw.contains("path") => pending_path = true,
                     _ => {}
                 }
                 if !inner {
@@ -2216,13 +2243,114 @@ pub(crate) mod census_domain {
         }
         Ok(parts)
     }
+
+    #[must_use]
+    pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {
+        let bytes = raw.as_bytes();
+        let shape = blanked.as_bytes();
+        if bytes.len() != shape.len() {
+            return None;
+        }
+        let erased = |from: usize, to: usize| {
+            shape
+                .get(from..to)
+                .is_some_and(|run| run.iter().all(|byte| matches!(byte, b' ' | b'\n')))
+        };
+        let mut out = String::with_capacity(raw.len());
+        let mut at = 0;
+        while let Some(&byte) = bytes.get(at) {
+            let comment_end = match (byte, bytes.get(at + 1)) {
+                (b'/', Some(b'/')) => Some(
+                    bytes
+                        .get(at..)
+                        .and_then(|rest| rest.iter().position(|next| *next == b'\n'))
+                        .map_or(bytes.len(), |length| at + length),
+                ),
+                (b'/', Some(b'*')) => Some(block_comment_end(bytes, at)),
+                _ => None,
+            };
+            if let Some(end) = comment_end {
+                if !erased(at, end) {
+                    return None;
+                }
+                out.push(' ');
+                at = end;
+                continue;
+            }
+            let literal_end = match byte {
+                b'r' | b'b' | b'"' => super::literal_end(bytes, at),
+                b'\'' => super::char_literal_end(bytes, at),
+                _ => None,
+            };
+            if let Some(end) = literal_end {
+                if !erased(at, end) {
+                    return None;
+                }
+                out.push_str(&literal_token(raw.get(at..end)?));
+                at = end;
+                continue;
+            }
+            let character = raw.get(at..)?.chars().next()?;
+            let width = character.len_utf8();
+            let written = shape.get(at..at + width)?;
+            if Some(written) == bytes.get(at..at + width) {
+                out.push(character);
+            } else if super::is_rustc_whitespace(character) && written.iter().all(|b| *b == b' ') {
+                out.push(' ');
+            } else {
+                return None;
+            }
+            at += width;
+        }
+        Some(out)
+    }
+
+    fn block_comment_end(bytes: &[u8], from: usize) -> usize {
+        let mut depth = 1_usize;
+        let mut at = from + 2;
+        while depth > 0 {
+            match (bytes.get(at), bytes.get(at + 1)) {
+                (None, _) => break,
+                (Some(b'/'), Some(b'*')) => {
+                    depth += 1;
+                    at += 2;
+                }
+                (Some(b'*'), Some(b'/')) => {
+                    depth -= 1;
+                    at += 2;
+                }
+                _ => at += 1,
+            }
+        }
+        at.min(bytes.len())
+    }
+
+    fn literal_token(literal: &str) -> String {
+        let plain = literal
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .filter(|content| {
+                content
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            });
+        match plain {
+            Some(content) => format!("\"{content}\""),
+            None => {
+                let named: String = literal.bytes().map(|byte| format!("{byte:02x}")).collect();
+                format!("\"%{named}\"")
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod lint_levels {
     use std::collections::BTreeSet;
 
-    use super::census_domain::{decide_without_test, parse_predicate};
+    use super::census_domain::{
+        Predicate, decide_without_test, parse_predicate, with_literal_identity,
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct Resolution {
@@ -2260,14 +2388,16 @@ pub(crate) mod lint_levels {
 
     #[must_use]
     pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {
-        let statements = lint_statements_in_the_prologue(source, lint);
+        let mut worlds = BTreeSet::new();
+        let Some(statements) = lint_statements_in_the_prologue(source, lint) else {
+            return worlds;
+        };
         let variables: Vec<&str> = statements
             .iter()
             .flat_map(|statement| statement.conditions.iter().map(String::as_str))
             .collect::<BTreeSet<&str>>()
             .into_iter()
             .collect();
-        let mut worlds = BTreeSet::new();
         if variables.len() > MOST_UNDECIDED_PREDICATES {
             return worlds;
         }
@@ -2297,8 +2427,7 @@ pub(crate) mod lint_levels {
         worlds
     }
 
-    fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {
-        const LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+    fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {
         let blanked = super::blank_comments_and_strings(source);
         let bytes = blanked.as_bytes();
         let mut statements = Vec::new();
@@ -2309,80 +2438,104 @@ pub(crate) mod lint_levels {
                 continue;
             }
             if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {
-                return statements;
+                return Some(statements);
             }
             let open = at + 2;
             if bytes.get(open) != Some(&b'[') {
-                return statements;
+                return Some(statements);
             }
             let Some(close) = super::matching(bytes, open, b'[', b']') else {
-                return statements;
+                return Some(statements);
             };
-            let attribute = blanked.get(open + 1..close).unwrap_or_default().trim();
-            let mut applied = Vec::new();
-            statements_in_the_production_build(attribute, &mut Vec::new(), &mut applied);
-            for (statement, conditions) in applied {
-                for level in LEVELS {
-                    let Some(rest) = statement.strip_prefix(level) else {
-                        continue;
+            let attribute =
+                with_literal_identity(source.get(open + 1..close)?, blanked.get(open + 1..close)?)?;
+            for applied in applied_attributes(attribute.trim()) {
+                let Some(level) = stated_level(applied.text, lint) else {
+                    continue;
+                };
+                let mut conditions = Vec::new();
+                let mut in_the_production_build = true;
+                for predicate in &applied.under {
+                    let Ok(predicate) = predicate else {
+                        return None;
                     };
-                    let Some(list) = rest
-                        .trim_start()
-                        .strip_prefix('(')
-                        .and_then(|body| body.strip_suffix(')'))
-                    else {
-                        continue;
-                    };
-                    if !list.split(',').any(|entry| names_lint(entry.trim(), lint)) {
-                        continue;
+                    match decide_without_test(predicate) {
+                        Some(true) => {}
+                        Some(false) => in_the_production_build = false,
+                        None => conditions.push(predicate.render()),
                     }
+                }
+                if in_the_production_build {
                     statements.push(Statement { level, conditions });
-                    break;
                 }
             }
             at = close + 1;
         }
-        statements
+        Some(statements)
     }
 
-    fn statements_in_the_production_build<'a>(
+    fn stated_level(attribute: &str, lint: &str) -> Option<&'static str> {
+        const LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+        LEVELS.into_iter().find(|level| {
+            attribute
+                .strip_prefix(level)
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('('))
+                .and_then(|body| body.strip_suffix(')'))
+                .is_some_and(|list| list.split(',').any(|entry| names_lint(entry.trim(), lint)))
+        })
+    }
+
+    pub(crate) struct Applied<'a> {
+        pub(crate) text: &'a str,
+        pub(crate) under: Vec<Result<Predicate, String>>,
+    }
+
+    #[must_use]
+    pub(crate) fn applied_attributes(attribute: &str) -> Vec<Applied<'_>> {
+        let mut into = Vec::new();
+        applied_under(attribute, &mut Vec::new(), &mut into);
+        into
+    }
+
+    fn applied_under<'a>(
         attribute: &'a str,
-        conditions: &mut Vec<String>,
-        into: &mut Vec<(&'a str, Vec<String>)>,
+        under: &mut Vec<Result<Predicate, String>>,
+        into: &mut Vec<Applied<'a>>,
     ) {
-        let name_end = attribute
-            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
-            .unwrap_or(attribute.len());
-        if attribute.get(..name_end) != Some("cfg_attr") {
-            into.push((attribute, conditions.clone()));
+        if attribute_name(attribute) != "cfg_attr" {
+            into.push(Applied {
+                text: attribute,
+                under: under.clone(),
+            });
             return;
         }
-        let Some(body) = attribute
-            .get(name_end..)
-            .map(str::trim_start)
-            .and_then(|rest| rest.strip_prefix('('))
-            .and_then(|body| body.strip_suffix(')'))
-        else {
+        let Some(body) = attribute_arguments(attribute) else {
             return;
         };
         let mut arguments = top_level_arguments(body).into_iter();
-        let written = arguments.next().unwrap_or_default().trim();
-        let variable = match parse_predicate(written) {
-            Ok(predicate) => match decide_without_test(&predicate) {
-                Some(true) => None,
-                Some(false) => return,
-                None => Some(predicate.render()),
-            },
-            Err(_) => Some(format!("cfg_attr({written})")),
-        };
-        let pushed = variable.is_some();
-        conditions.extend(variable);
+        under.push(parse_predicate(arguments.next().unwrap_or_default().trim()));
         for argument in arguments {
-            statements_in_the_production_build(argument.trim(), conditions, into);
+            applied_under(argument.trim(), under, into);
         }
-        if pushed {
-            conditions.pop();
-        }
+        under.pop();
+    }
+
+    #[must_use]
+    pub(crate) fn attribute_name(attribute: &str) -> &str {
+        let name_end = attribute
+            .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .unwrap_or(attribute.len());
+        attribute.get(..name_end).unwrap_or_default()
+    }
+
+    #[must_use]
+    pub(crate) fn attribute_arguments(attribute: &str) -> Option<&str> {
+        attribute
+            .get(attribute_name(attribute).len()..)
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|body| body.strip_suffix(')'))
     }
 
     #[must_use]
