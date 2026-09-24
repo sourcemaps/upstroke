@@ -364,86 +364,161 @@ Whether a scanned path is one of the crate's whole-file test modules,
 by `cfg::WHOLE_FILE_TEST_MODULES`, the crate's one statement of that
 population (paths under `src/`, forward slashes on every host).
 
-## `struct StackedAttribute<'a> {`
+## `struct ReadAttribute {`
 
-One attribute in the blanked text -- where it starts and ends, its line,
-its name (`cfg`, `cfg_attr`, `allow`, ...), its text inside the brackets
--- and the stack it belongs to: attributes separated by whitespace alone
-are one stack, on one item.
+One attribute in the file, inner or outer: where it starts and ends, the
+stack it belongs to -- attributes of one kind separated by whitespace alone
+are one stack, on one item -- its name from the blanked text, and its text
+through `census_domain::with_literal_identity`, `None` when that cannot be
+read.
 
-## `fn attributes_in_stacks(blanked: &str) -> Vec<StackedAttribute<'_>> {`
+## `fn attributes_in_stacks(source: &str, blanked: &str) -> Vec<ReadAttribute> {`
 
-Every attribute in the file, inner and outer, with its stack number. Read
-over the comment-and-string-blanked text with items intact, not over
+Every attribute in the file, with its stack number. Read over the
+comment-and-string-blanked text with items intact, not over
 `production_code`, because `production_code` blanks a `#[cfg(test)]` item
 from that attribute to its end and an allowance written above it on the
-same item survives; the stack is what says they are one item.
-
-## `fn cfg_predicate(attribute: &StackedAttribute<'_>) -> Option<Predicate> {`
-
-The predicate a `cfg(..)` carries, or the first argument of a
-`cfg_attr(..)`, parsed by `census_domain::parse_predicate`; `None` for any
-other attribute and for a predicate that cannot be read.
-
-## `fn stack_entails_test(attributes: &[StackedAttribute<'_>], stack: usize) -> bool {`
-
-Whether the conjunction of every `cfg` in the stack is false in every
-build without `test` -- `census_domain::entails_test`, the crate's one
-reading of a predicate. `cfg(test)`, `cfg(all(test))`,
-`cfg(all(test, unix))`, `cfg(any(test))`, `cfg(test)` beside `cfg(unix)`,
-`cfg(not(not(test)))` and `cfg(any())` all entail; `cfg(not(test))`,
-`cfg(unix)`, `cfg(all())`, `cfg(any(test, unix))` and a feature do not.
+same item survives; the stack is what says they are one item. An inner
+attribute starts a stack of its own, and whitespace between `#`, `!` and
+`[` is read as rustc reads it.
 
 ## `fn skip_whitespace(bytes: &[u8], from: usize) -> usize {`
 
 The next non-whitespace byte at or after `from`.
 
-## `fn test_only_module_spans(blanked: &str, attributes: &[StackedAttribute<'_>]) -> Vec<(usize, usize)> {`
+## `struct Gate {`
 
-The brace spans of the inline modules whose attribute stack entails
-`test`, however the predicate is spelled. `production_code` blanks only
-the literal `#[cfg(test)]` item, so a module under `cfg(all(test, unix))`
-survives it with its body, and an inner `#![allow]` written inside that
-body would otherwise read as production. An item after such a stack that
-is not `mod name {` -- a `fn`, a declaration `mod name;` -- has no span:
-the stack rule covers the first and the whole-file test-module population
-covers the second.
+A condition on a span of the file: every allowance written between `from`
+and `to` exists only where `predicate` holds, and `None` is a condition this
+reading cannot decide.
 
-## `fn allowance_compiles_in_no_production_build(attributes: &[StackedAttribute<'_>], test_only_spans: &[(usize, usize)], line: usize) -> bool {`
+## `fn under_every_predicate(under: Vec<Result<Predicate, String>>) -> Option<Vec<Predicate>> {`
 
-Whether the allowance at `line` exists in no production build: it sits
-inside a test-only module's braces, or every `cfg` in its own stack
-conjoined with its own `cfg_attr` predicate (an allowance applied only
-under `cfg_attr(test, ..)` is one) entails `test`. A predicate no
-valuation decides -- a platform, a feature -- keeps the allowance as
-production, because a production build on that platform compiles it and
-`forbid` would be `E0453` there; that is the conservative direction for
-this rule, which names a `deny` only when `forbid` compiles everywhere.
+The predicates an attribute is applied under, or `None` if one of them
+cannot be read.
 
-**Executed, and why this replaced a forward scan for the literal
-`cfg(test)`.** #318's second regression review restored `src/agent/bin.rs`
-to `deny`, added an empty `#[cfg(all(test, unix))]` module with a marked
-`#[allow]` of the lint, and called a macro-generated production wrapper
-from `engine::topology::integrate::prepared_pin_ref`: clippy over all
-targets exited 0 and 195 effects tests passed, the previous form of this
-rule among them, while the runtime witness wrote its bytes; seven scoped
-negatives (`all(test)`, the same reordered, `all(test, unix)`,
-`any(test)`, `cfg_attr(test, allow)`, `cfg_attr(test, expect)`, `any()`)
-were each missed (`R2-REG-01`,
-`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/boundary-extra-v2-*`,
-`guard-test-only-scopes.*`; reproduced and then refused at
-`~/orch-pr10/repair-318-r3-evidence/probes/H1-*`, `H2-*`, `P1-*`, `P2-*`).
+## `fn generated_gates(attribute: &ReadAttribute) -> Vec<Option<Predicate>> {`
 
-## `fn governed_allows_in_the_production_build(path: &str, source: &str, is_test_module: &dyn Fn(&str) -> bool) -> BTreeSet<&'static str> {`
+The gates a `cfg` or `cfg_attr` puts on its item: each `cfg(Q)` the
+attribute applies (`lint_levels::applied_attributes`), as `Q` when it is
+written directly and as `any(not(P), Q)` when a `cfg_attr(P, ..)` applies it
+-- the item is compiled where `P` fails or `Q` holds -- with nested
+`cfg_attr` predicates conjoined into `P`. A `cfg` or `cfg_attr` that cannot
+be read is one gate that decides nothing.
 
-The governed lints a file allows **in code the production build
-compiles**: none for a whole-file test module, and otherwise
-`governed_allows` over `production_code` -- every literal `#[cfg(test)]`
-item blanked -- less every allowance
-`allowance_compiles_in_no_production_build` finds. Read from the tree,
-from no list of files. A statement-level allowance inside a test-only
-function body is not read here and need not be: the placement census
-refuses one anywhere in the tree, test code included.
+## `fn brace_blocks(bytes: &[u8]) -> Vec<(usize, usize)> {`
+
+Every `{…}` pair in the blanked text.
+
+## `fn gates_in_the_file(blanked: &str, attributes: &[ReadAttribute]) -> Vec<Gate> {`
+
+Every gate in the file and the span it governs. An outer attribute's gate
+governs its whole stack and the item after it, to `configured_item_end` --
+the same end `production_code` finds -- so an allowance in the stack, and an
+allowance anywhere inside the item's body, is under it: the item's own
+`cfg`, generated or written, and every enclosing item's, a module, a
+function or a block. An inner attribute's gate governs the innermost braces
+around it, or the whole file at the top.
+
+## `fn governed_lints_allowed_by(applied: &str) -> Vec<&'static str> {`
+
+The governed lints an applied `allow(..)` or `expect(..)` names.
+
+## `fn allowance_applies_in_a_production_build(at: usize, under: Vec<Result<Predicate, String>>, gates: &[Gate]) -> bool {`
+
+**An allowance's effective activation.** The conjunction of the predicates
+it is applied under and every gate whose span holds it, decided by
+`some_production_build_satisfies`: it applies in a production build unless
+no build without `test` satisfies it. A predicate a target can satisfy -- a
+platform, a feature -- keeps the allowance as production, because a
+production build on that platform compiles it and `forbid` would be `E0453`
+there; that is the conservative direction for this rule, which names a
+`deny` only when `forbid` compiles everywhere. A predicate or gate that
+cannot be read makes the allowance no excuse at all: the rule cannot show a
+production build needs it.
+
+**Executed twice, and why the activation is derived rather than scanned.**
+#318's second regression review restored `src/agent/bin.rs` to `deny`,
+added an empty `#[cfg(all(test, unix))]` module with a marked `#[allow]` of
+the lint, and called a macro-generated production wrapper from
+`engine::topology::integrate::prepared_pin_ref`: clippy over all targets
+exited 0 and 195 effects tests passed while the runtime witness wrote its
+bytes (`R2-REG-01`); the literal-`cfg(test)` scan was replaced by a reading
+of each allowance's own stack. #318's third reviews then did the same with
+`#[cfg_attr(unix, cfg_attr(test, allow(..)))]` and
+`#[cfg_attr(not(test), cfg_attr(test, allow(..)))]`: all-target clippy exited
+0, 197 effects tests passed, and 58 bytes were written through a test harness
+and 63 through an ordinary library (`R3-MAIN-01`, `R3-REG-01`,
+`~/orch-pr10/reviews/pr-318r3/main-evidence/B4-*`,
+`regression-evidence/probes/nested2-*`). That reading took `cfg` attributes
+literally, one outer `cfg_attr` predicate, the first attribute on the line,
+and no enclosing item but a module whose literal `cfg` entailed `test`, and
+it dropped any predicate whose string value the blanker had erased -- 42
+shapes across the three lints in MAIN's sweep, 18 in REGRESSION's. The
+activation is now composed from the one expansion of `cfg_attr` the crate
+has, the gates of the item and of everything around it, and predicates that
+keep their values; the sweep is
+`the_production_fence_rule_reads_the_effective_activation_of_every_allowance`
+(`~/orch-pr10/repair-318-r4-evidence/repro/`).
+
+## `const SINGLE_VALUED_CFG_KEYS: [&str; 8] = [`
+
+The `cfg` keys a target sets to one value at most, so two different values
+of one of them cannot both hold: `all(target_os = "linux", target_os =
+"macos")` is compiled nowhere. `target_family`, `target_feature`,
+`target_has_atomic` and `feature` are multi-valued and are not here.
+
+## `const MOST_ATOMS_ENUMERATED: usize = 12;`
+
+Past this many distinct atoms in one allowance's activation, the rule does
+not enumerate and the allowance excuses nothing -- the direction that names
+the `deny`, loudly, rather than excuse it unread.
+
+## `fn cfg_atom(written: &str) -> String {`
+
+An atom's identity for the enumeration: `key = value` with the spacing
+normalised, and `target_family = "unix"`/`"windows"` read as `unix` and
+`windows`, which is what rustc sets them from.
+
+## `fn cfg_atoms(predicate: &Predicate, into: &mut BTreeSet<String>) {`
+
+Every atom a predicate names, `test` apart.
+
+## `fn holds_without_test(predicate: &Predicate, true_atoms: &BTreeSet<&str>) -> bool {`
+
+A predicate's value with `test` false and exactly `true_atoms` true.
+
+## `fn a_target_could_set(true_atoms: &BTreeSet<&str>) -> bool {`
+
+Whether one target could set every atom in `true_atoms`: not `unix` beside
+`windows`, and not two values of one single-valued key. Distinct atoms are
+otherwise independent -- an over-approximation that can only keep an
+allowance as production, and a value spelled two ways is two values, which
+can only take one out; the first errs toward excusing on relations this does
+not model, the second toward naming.
+
+## `fn some_production_build_satisfies(predicate: &Predicate) -> bool {`
+
+**Exact, where three values were not.** `census_domain::decide_without_test`
+reads every atom as unknown, so it cannot see that one atom written twice is
+one value: `#[cfg_attr(unix, cfg(test), allow(L))]` is compiled on Unix only
+as a test item and applies its `allow` nowhere else, but conjoined as
+`all(unix, any(not(unix), test))` the three-valued reading answers unknown
+and would keep it as production. So a predicate that reading does not decide
+is enumerated: every assignment of its atoms a target could set
+(`a_target_could_set`), `test` false; production when one satisfies it.
+
+## `fn governed_allows_in_the_production_build(source: &str) -> BTreeSet<&'static str> {`
+
+The governed lints a file allows **in code some production build compiles**:
+every `allow` or `expect` of a governed lint any attribute applies, read
+through `lint_levels::applied_attributes` so a nested `cfg_attr` and a
+second attribute on the line are each read for what they are, kept when
+`allowance_applies_in_a_production_build` says it applies somewhere. Read
+from the tree, from no list of files; whether the file itself is test code
+is the caller's question. A statement-level allowance is read like any other
+and is placed by the gates around it; the placement census refuses one
+anywhere in the tree, test code included.
 
 ## `fn denies_the_production_build_could_forbid(sources: &[(String, String)], is_test_module: &dyn Fn(&str) -> bool) -> Vec<String> {`
 
@@ -473,13 +548,17 @@ same bypass in each before fencing it (`witnesses-prefix/PW2-*`,
 `controls-final/PX2-*`), so this rule is what names the shape so it is not
 written again.
 
+A file is test code here when it is a whole-file test module or any module
+file above it is one: a file declared inside `tests.rs` without a guard of
+its own is compiled only where `tests.rs` is.
+
 **What it does not claim.** It reads prologues and attribute stacks, not
 macro expansion: a generated `allow` is invisible to it as it is to the
 placement scan, and the refusal of one is clippy's `E0453` under the
 `forbid`, not this test's. A fence that is deleted rather than dropped to
 `deny` is the roll-call guard's. An allowance on a statement inside a
-function body, preceded on its line by code, reads as production; the
-placement scan already refuses it as below module level. And the
+function body is placed by the gates around it, and the placement scan
+refuses it anyway as below module level. And the
 enforcement is the lint gate's: rustc resolves no `clippy::` lint, so
 `cargo build` and `cargo test` compile a downgrade under this `forbid`
 exactly as they compile every other fence's violation
@@ -507,6 +586,51 @@ does not read; a `cfg(not(test))` module; an allowance under
 `cfg_attr(not(test), ..)`; `cfg(all())`; `cfg(any(test, unix))`; an inner
 allowance inside a `cfg(unix)` module; and a feature-gated allowance,
 which no valuation read here decides.
+
+## `const NO_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[`
+
+Allowances no production build applies, each written under `LINT`: every
+shape #318's third reviews found the rule excusing a `deny` with -- MAIN's
+nine nested and generated-gate shapes and five string-valued ones, the
+42-case sweep across the three lints, with its two literal controls
+(`~/orch-pr10/reviews/pr-318r3/main-evidence/F1-*`, `F3-*`); REGRESSION's
+inner allowance under a generated `cfg(test)`, statement allowance in an
+inactive function and second attribute on the line (`regression-evidence/probes/r3-nested-allowances.*`)
+-- and more of the class: a value whose escaped quote would move a comma for
+a quote-toggling splitter, a module nested inside a test-only one, a gate
+generated under the same atom the allowance is applied under, contradictory
+platforms and values, nested or written together, and a value conjoined
+with its own negation.
+
+## `const SOME_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[`
+
+Allowances some production build on every CI platform applies, so `forbid`
+is `E0453` in it and the `deny` is excused: unconditional, `not(test)`,
+`all()`, `any(unix, windows)`, a nested `not(test)`, a gate generated only
+in test builds, a production module and function, the allowance as the second
+attribute on its line, a string-valued predicate beside the platform ones,
+and a value or its negation. Each predicate holds on every leg, so the refusal below is the same on
+all three.
+
+## `fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance() {`
+
+**The class sweep, permanent, and held by the compiler.** For each governed
+lint, every shape in `NO_PRODUCTION_BUILD_APPLIES` under a file-level `deny`
+is named by the rule, and the fence the rule then asks for --
+`#![cfg_attr(not(test), forbid(<lint>))]` over the same shape -- is
+compiled by `clippy-driver` in the production valuation and again with
+`--cfg test`, and must build without `E0453` both times: the shape's
+allowance really is absent from production, and the legitimate test
+allowance keeps compiling. Every shape in `SOME_PRODUCTION_BUILD_APPLIES` is
+excused, and the same fence over it must be refused with `E0453` -- the
+Clippy refusal the rule's excuse stands for, and the control that shows this
+harness can see one. The count of compiled fixtures is asserted, so a skipped
+row is a failure.
+
+Failing before, passing after: applied without the repair to the rule, this
+test fails on its first shape (`~/orch-pr10/repair-318-r4-evidence/repro/after/A01-*`);
+the reviewers' own sweeps, unchanged, fail before with 27, 15 and 18 misses
+and pass after (`before/S08`-`S10`, `after/A10`, `A12`, `A14`).
 
 ## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
 
@@ -536,6 +660,16 @@ production caller applied, is named by this test while clippy still exits 0
 on that tree (`probes/P2-*`), as is each test-only spelling on its own
 (`probes/P2b-*`).
 
+And held against the third reviews' executed bypass: `bin.rs` at `deny`
+beside a marked `#[cfg_attr(unix, cfg_attr(test, allow(..)))]` module, with
+the macro wrapper and its production caller applied, passed all-target
+clippy and this test before #318's fourth round; with the effective
+activation it is named here, and only here, while clippy still exits 0 on
+that tree (`~/orch-pr10/repair-318-r4-evidence/repro/after/A05-*`,
+`A06-*`), as is REGRESSION's `cfg_attr(not(test), cfg_attr(test, ..))`
+variant (`A09-*`); the same allowance with the production `forbid` kept
+compiles and passes (`A07-*`, `A08-*`).
+
 ## `fn unclassified_production_files_leaving_a_governed_lint_unfenced(`
 
 **The tree-wide form of the roll-call guard, over the files the roll-call
@@ -554,10 +688,14 @@ own; or `-D warnings` alone. Derived from the tree, from no list of files.
 `deny` is a statement and passes here -- whether it could be `forbid` is
 `every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile`'s
 question and whether test code alone excuses it is
-`no_deny_of_a_governed_lint_is_excused_by_test_code_alone`'s -- so the two
-roots that state one because production allowances sit below them,
-`src/agent/mod.rs` and `src/runner/mod.rs`, pass here and remain hosts a
-generated `allow` reopens (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`).
+`no_deny_of_a_governed_lint_is_excused_by_test_code_alone`'s. The two roots
+that state one because production allowances sit below them,
+`src/agent/mod.rs` and `src/runner/mod.rs`, are `DECLARATION_ONLY_MODULES`
+since #318's third round moved their bodies into `src/agent/adapter.rs` and
+`src/runner/contract.rs`, which forbid all three lints: they are passed over
+here, and `a_declaring_module_holds_declarations_and_re_exports_and_nothing_else`
+refuses any code -- a macro invocation included -- written in them, so their
+`deny` hosts nothing a generated `allow` could reopen.
 A classified module is judged by the roll-call guard and its pin, not here.
 A whole-file test module has no production region. A declaration-only module
 is passed over only because the declaration guard holds it empty. It reads
@@ -587,9 +725,11 @@ control. Built in #318's third round with the fences that make it true:
 `src/plan/mod.rs` (7), `src/runner/policy.rs`, `src/catalog.rs`,
 `src/error.rs`, `src/ir.rs`, `src/ladder.rs`, `src/observations.rs` and
 `src/ulid.rs`; `cfg_attr(not(test), forbid(..))` at `src/effects.rs`; the
-third lint in five leaves that fenced only some; `deny` at `src/agent/mod.rs`
-and `src/runner/mod.rs`, which is what those two can compile and is the
-finding's remaining residue; and `src/lib.rs` held to declarations. Held both
+third lint in five leaves that fenced only some; `forbid` of all three in
+`src/agent/adapter.rs` and `src/runner/contract.rs`, which took the bodies of
+`src/agent/mod.rs` and `src/runner/mod.rs`; and those two roots, which keep the
+`deny` they can compile, held to declarations beside `src/lib.rs` and
+`src/engine/mod.rs`. Held both
 ways: each of five fences removed is named -- the topology root for 81 pairs
 (`~/orch-pr10/repair-318-r3-evidence/controls/C1-*`) -- and generated
 allowances in `src/topology/paths.rs`, `src/plan/markdown/hints.rs` and
@@ -604,9 +744,12 @@ pinned so that it can only shrink: file-and-lint pairs over
 in the file's own prologue. Each is inside the carve-out -- a file that allows
 one or two governed lints and says nothing about the rest. **What the pin
 counts is the prologue's silence, not what is lowerable**, and at this head
-the two differ: 23 of the 29 pairs take their level from `-D warnings`
-alone, where the file is exactly where `src/capacity.rs` was at `9bb177ea`,
-and six -- `disallowed_types` and `disallowed_macros` in each of
+the two differ: 23 of the 29 pairs are lowerable -- 20 take their level
+from `-D warnings` alone, where the file is exactly where `src/capacity.rs`
+was at `9bb177ea`, and three (`disallowed_types` in `src/agent/claude.rs`,
+`codex.rs` and `copilot.rs`) inherit `src/agent/mod.rs`'s `deny`, which an
+inner `allow` lowers as well -- and six -- `disallowed_types` and
+`disallowed_macros` in each of
 `src/engine/attempt.rs`, `coordinator.rs` and `resume.rs` -- inherit
 `src/engine/mod.rs`'s production `forbid` of both since #318 fenced it, so a
 generated `allow` of either in those three is `E0453` at the lint gate, not
@@ -1401,6 +1544,14 @@ facade: an allow-bearing parent elsewhere in the crate is outside it.
 Compile `body` as its own crate under the repo's `clippy.toml`, and return
 whether it compiled plus every clippy diagnostic it emitted.
 
+## `fn clippy_outcome(dir: &Path, tag: &str, source: &str, cfgs: &[&str]) -> (bool, Vec<(String, String)>) {`
+
+Compile one fixture as a library with `clippy-driver` under this
+repository's `clippy.toml`, with each of `cfgs` passed as `--cfg`, and
+return whether it built and every diagnostic that carries a code, as
+`(level, code)`. The reader's parity table and the production-fence rule's
+class sweep ask the compiler the same way.
+
 ## `fn clippy_driver() -> PathBuf {`
 
 `clippy-driver`, from `PATH` or from the active toolchain's sysroot.
@@ -2167,6 +2318,16 @@ must keep it. Deciding it "test-only" would remove a production file from
 every census below, silently, which is the failure direction this whole
 derivation is shaped against.
 
+Since #318's fourth round the table holds a `cfg` a `cfg_attr` generates
+too: `cfg_attr(not(test), cfg(test))`, the same nested and beside another
+attribute, are declarations no production build compiles; under `unix`, or
+generated only in test builds, they are production. And two escaped quotes:
+`all(feature = "a\"", test, feature = "b\"")` has `test` at top level, so
+it is test-only, and `all(feature = "\", test, y = \"")` is one value, so it
+is not -- a splitter that toggled at every quote read each the other way
+round. An inner `cfg_attr` that can apply a `cfg`, and a generated `cfg`
+under a predicate the grammar cannot read, are refused, not placed.
+
 ## `fn the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute() {` › `for written in ["test", "all(test, unix)", "not(any(not(test), unix))"] {`
 
 (8) The entailment itself, driven on predicates rather than on sources.
@@ -2768,15 +2929,15 @@ The rows include the two shapes that are the whole reason for the repair —
 which is `E0453` and not a level at all — and the decoys the blanking exists
 for.
 
-## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `const BODY: &str = "pub fn go(p: &std::path::Path) { let _ = std::fs::write(p, \"x\"); }\n";`
+## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `const GOVERNED: [(&str, &str); 3] = [`
 
-A body that reaches a denied path exactly once, so a `disallowed_methods`
-diagnostic is produced by every level that does not suppress one.
-
-## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `fn compile(dir: &Path, tag: &str, source: &str) -> (bool, Vec<(String, String)>) {`
-
-Compile one prologue and return whether it built, plus every diagnostic
-that carries a code, as `(level, code)`.
+Each governed lint with a body that reaches one of its denied items exactly
+once -- `std::fs::write`, `std::process::Command`, `eprintln!` -- so a
+diagnostic of that lint is produced by every level that does not suppress
+one. Every table below runs for all three, its rows spelled for
+`disallowed_methods` and respelled per lint: #318's third MAIN review found
+the parity held for one lint and measured the other two by hand
+(`~/orch-pr10/reviews/pr-318r3/main-evidence/P1-*`).
 
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `fn predict_world(`
 
@@ -2807,6 +2968,21 @@ claims no level and the fixture must fail to build: a spelling the reader
 cannot read is never a spelling the compiler accepts. #318's second MAIN
 review found the previous reader compacting `not(te st)` to `not(test)`
 and answering `forbid` for a file rustc rejects; it now answers nothing.
+
+## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `let valued: &[(&str, &str, &[&str])] = &[`
+
+The third table: string-valued predicates, each with the `--cfg` values its
+fixture is compiled under. Distinct values are distinct conditions, so
+every row is undecided and the host's outcome must be one the reader
+enumerated: `target_os = "linux"` beside `"windows"`, the same nested under
+one active `cfg_attr`, `target_arch` values and `feature` values -- the
+twelve cases across three lints where #318's third MAIN review measured a
+definite `deny` against clippy's `allow` (`R3-MAIN-02`) -- and REGRESSION's
+OS, feature and architecture pairs under `allow`, `expect` and `warn`, 27
+across three lints (`R3-REG-02`), and an escaped quote a quote-toggling
+splitter would mis-split. The decided table holds the other half: the same
+value written twice is one condition, so `same_value_twice_is_one_condition`
+is a decided `deny`, and a `reason` that spells a lint name states nothing.
 
 ## `fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {` › `return (false, Vec::new(), true);`
 

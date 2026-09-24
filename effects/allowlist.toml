@@ -880,18 +880,18 @@ allows = []
 packet = "effect_site_inventory.mechanism (2): schema-1..3 engine paths"
 legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
-primitive today, so it carries no allow. Since #306 round 3 it carries \
-`#![deny(..)]` of all three governed lints instead, because its parent \
-`src/engine/mod.rs` then allowed `disallowed_methods` and a lint level inherits \
-down the module tree: without that deny an effect added here was exempt by \
-inheritance while this row still read `allows = []`, which is exactly the \
-promise the third review of #306 found broken in `assembly.rs` \
-(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). The parent's allow is gone since \
-2026-09-20 and the deny stays, held for every module the facade declares \
-whatever the facade writes. Listed so that a legacy effect \
-added here is reviewed into `allows`, with the deny lifted in the same change, \
-rather than appearing silently."""
-shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the deny it carries needs no row."
+primitive today, so it carries no allow. Since #312 it carries \
+`#![forbid(..)]` of all three governed lints; from #306 round 3 until then it \
+carried `#![deny(..)]`, because its parent `src/engine/mod.rs` then allowed \
+`disallowed_methods` and a lint level inherits down the module tree: without a \
+fence an effect added here was exempt by inheritance while this row still read \
+`allows = []`, which is exactly the promise the third review of #306 found \
+broken in `assembly.rs` (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`). The \
+parent's allow is gone since 2026-09-20 and the fence stays, held for every \
+module the facade declares whatever the facade writes. Listed so that a legacy \
+effect added here is reviewed into `allows`, with the forbid lifted for that \
+lint in the same change, rather than appearing silently."""
+shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything; the forbid it carries needs no row."
 
 [[legacy]]
 path = "src/workspace.rs"
@@ -970,8 +970,10 @@ packet = "effect_site_inventory.mechanism (2): src/capacity.rs"
 legacy_effect = """
 LEGACY-EFFECT: named by the packet in the frozen legacy list. Reaches no denied \
 primitive today — PR4 moved its process starts behind the Runner — so it carries \
-no attribute; listed so a legacy effect added here is reviewed rather than \
-silent."""
+no allow; since #316 it carries `#![forbid(..)]` of all three governed lints, \
+the fence Gate 5's fourth run found it lacking. Listed so a legacy effect \
+added here is reviewed into `allows`, with the forbid lifted for that lint in \
+the same change, rather than silent."""
 shrinks_when = "immediately — it can be dropped from this list at any time without weakening anything."
 
 [[legacy]]

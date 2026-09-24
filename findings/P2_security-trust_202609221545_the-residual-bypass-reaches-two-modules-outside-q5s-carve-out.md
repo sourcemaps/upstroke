@@ -30,10 +30,13 @@ test module and `src/agent/proc/test_support/readiness.rs`'s six per-site `#[exp
 allowance), the classified split is **29 inside / 25 outside**, and **three** classified modules carried neither an
 allowance nor a fence — `src/capacity.rs`, `src/runner/invocation.rs` and `src/agent/bin.rs` — not two. Both
 of #314's fourth-round reviews derived the same figures independently at the frozen range
-(`G5R4R4-RECORD-01`, `~/orch-pr10/reviews/pr-g5r4r4/`), and they are re-derived here at #318's final head with a
+(`G5R4R4-RECORD-01`, `~/orch-pr10/reviews/pr-g5r4r4/`), and they were re-derived at #318's second-round head with a
 reader-faithful census (`~/orch-pr10/repair-318-r2-evidence/census/`): 187 scanned files, 51 rows, 45 non-empty,
-43 file-level allowance files, 29/25, and **0** classified modules with neither. The corrected scope is the
-affected one; the receipt is what run 4 measured.
+43 file-level allowance files, 29/25, and **0** classified modules with neither. At #318's fourth-round head
+(`42c9bc4f`) the census reads **189** scanned files -- the two children the third round's relocation added -- with the
+same 51 rows, 45 non-empty, 43 file-level allowance files (28 of them production hosts, every one's allowance in force
+in the production build), 29/25 and 0 with neither (`~/orch-pr10/repair-318-r4-evidence/measure/`). The corrected
+scope is the affected one; the receipt is what run 4 measured.
 
 **At `9bb177ea`, `PR7-WRAPPERS-EMPTY-DOMAIN`'s class was open in three of those 25, and run 4 executed it in two.**
 `src/capacity.rs` and `src/runner/invocation.rs` were classified modules that carry **no** file-level allowance —
@@ -153,6 +156,32 @@ the production build could `forbid` — was measured tree-wide at **11** more pa
 and all four fenced the same way in #318; `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` refuses the shape
 tree-wide from then on (`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`, fixed in #318 and recorded in its ledger).
 
+**Fourth round (#318, 2026-09-24), after the third reviews executed two more defects in the same two instruments.**
+(1) The production-fence rule decided an allowance by its literal `cfg` attributes and one outer `cfg_attr` predicate, so
+an allowance under a nested `cfg_attr`, behind a `cfg` a `cfg_attr` generates, inside a gated function, or conjoined
+with `test` through a string-valued atom the blanker had erased, excused a `deny` it never applies in production:
+`bin.rs` at `deny` beside a marked `#[cfg_attr(unix, cfg_attr(test, allow(..)))]` module, with the macro wrapper and
+its production caller, passed clippy over all targets and 197 effects tests while 58 bytes were written through a test
+harness (`R3-MAIN-01`), and 63 through an ordinary library in REGRESSION's `cfg_attr(not(test), cfg_attr(test, ..))`
+variant (`R3-REG-01`); the sweeps missed 42 and 18 shapes. (2) The reader parsed blanked attribute text, so
+`target_os = "linux"` and `target_os = "windows"` were one condition and a prologue clippy compiles as `allow` on Linux
+read as a definite `deny`, 12 of 57 compiler cases (`R3-MAIN-02`, `R3-REG-02`). Both reproduced unchanged at
+`4da6973a` (`~/orch-pr10/repair-318-r4-evidence/repro/before/`). Repaired in `42c9bc4f`: attribute text is read with
+every literal kept as an identity token and every `cfg_attr` expanded by one reader; the lint reader answers undecided,
+never a level, where a predicate's identity cannot be read; the module scan models a generated `cfg`; the rule
+composes each allowance's activation from its own `cfg_attr` path, its item's gates, every enclosing item's and
+block's, and the whole-file test module above it, and decides it by enumeration over the atoms (single-valued keys and
+`unix`/`windows` exclusive). On the repaired tree the same mutations still pass clippy and are refused by
+`no_deny_of_a_governed_lint_is_excused_by_test_code_alone` naming `src/agent/bin.rs`; the same allowance with the
+production `forbid` kept compiles and passes (`repro/after/`). **Measured across the whole population at `42c9bc4f`
+(`measure/`), the macro-generated route outside the carve-out is closed**: every governed lint in every production
+host outside the carve-out that may hold code (109 files) is under a production `forbid`, its own or an ancestor's;
+a `macro_rules!` generating `#[allow]` of each lint, appended to every one of the 140 library hosts and checked by
+clippy on the lib target, is `E0453` in 338 of 420 pairs and agrees pair by pair with the census; the other 82 are
+the four declaration-only roots (10 pairs, held code-free by the declaration guard) and 72 pairs in 27 carve-out
+files, inside v17's carve-out: the lints those files allow themselves, and the lowerable unstated pairs pinned below
+(22 of the 23 in production hosts; the 23rd is in a whole-file test module).
+
 **The guard, built.** Two tests in `src/effects/tests.rs`, one helper, one pinned constant, reading the tree at run
 time with no list of files (`~/orch-pr10/guard-decision-evidence/`, indexed by its `README.md`):
 
@@ -189,8 +218,9 @@ each listed by the pin's own failure message and by `H0-*.log`. **Unstated is no
 now says which is which.** Since #318 fenced `src/engine/mod.rs` (`cfg_attr(not(test), forbid(clippy::disallowed_types))`,
 `forbid(clippy::disallowed_macros)`), those six pairs inherit a production `forbid`: a generated `allow` of either lint
 in any of the three is `E0453` at the lint gate, six of them measured by #318's second regression review
-(`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/inherited-forbid.*`). The other 23 pairs sit under ancestors
-that state nothing up to `src/lib.rs` and take `-D warnings` alone, which an inner `allow` lowers. By v17's wording all
+(`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/inherited-forbid.*`). The other 23 pairs are lowerable: 20 sit
+under ancestors that state nothing up to `src/lib.rs` and take `-D warnings` alone, and three inherit `src/agent/mod.rs`'s
+`deny` (below); an inner `allow` lowers either. By v17's wording all
 29 are inside the carve-out and `PR7-WRAPPERS-EMPTY-DOMAIN`'s, whose sentence *"open in the 45 files that carry an
 allowance … for the lint each allows"* under-states by the 23. Checked by file at the third round's head
 (`~/orch-pr10/repair-318-r3-evidence/plan-class/twenty-six-vs-carve-out.json`): the 23 lowerable pairs sit in 17 files,

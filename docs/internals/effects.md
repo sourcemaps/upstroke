@@ -1756,7 +1756,10 @@ A `}` with no `{`.
 
 ## `pub(crate) enum ScanRefusal` › `UnreadablePredicate {`
 
-A `cfg` predicate the entailment grammar cannot read.
+A `cfg` predicate the entailment grammar cannot read, written directly or
+applied through a `cfg_attr` (the `cfg_attr`'s own predicate included), or a
+`cfg`/`cfg_attr` attribute whose comments and literals do not read the way
+the blanked text does ([`with_literal_identity`] answers `None`).
 
 ## `pub(crate) enum ScanRefusal` › `UnsupportedPathAttribute {`
 
@@ -1764,7 +1767,8 @@ A `cfg` predicate the entailment grammar cannot read.
 
 ## `pub(crate) enum ScanRefusal` › `UnsupportedInnerCfg {`
 
-An inner `#![cfg(…)]`, which gates the module it is written in.
+An inner `#![cfg(…)]`, or an inner `#![cfg_attr(…)]` that can apply one,
+which gates the module it is written in.
 
 ## `pub(crate) enum ScanRefusal` › `DuplicateDeclaration {`
 
@@ -1797,9 +1801,14 @@ this a source that does not.
 Comments and string literals are blanked first —
 [`super::blank_comments_and_strings`], which also handles raw strings,
 byte strings and char literals — so a `mod` written in prose is spaces.
-The predicate text is read from the **raw** span at the same offsets,
-because blanking erases what is inside a string and `feature = "x"` would
-otherwise arrive as `feature = "   "`.
+A `cfg` or `cfg_attr` attribute's text is then read through
+[`with_literal_identity`] at the same offsets: comments blanked, and every
+string literal kept as a token that names it exactly. Blanking alone erased
+the value, so `feature = "x"` would arrive as `feature = "   "`; reading the
+raw span instead, as this did until #318's fourth round, handed the grammar
+string contents it split as structure -- `all(feature = "a\"", test,
+feature = "b\"")` has `test` at top level, and the quote-toggling splitter
+saw one atom and called a test-only declaration production.
 
 ## `pub(crate) mod census_domain` › `struct Scope {`
 
@@ -1813,6 +1822,22 @@ The brace depth *outside* the module's body.
 
 -- an attribute, which belongs to whatever item comes next -----
 
+## `pub(crate) mod census_domain` › `"cfg" | "cfg_attr" => {`
+
+A `cfg` gates the item that follows, and so does a `cfg` that a `cfg_attr`
+applies: `#[cfg_attr(P, cfg(Q))] mod x;` is compiled where `P` fails or `Q`
+holds, so it is pushed as `any(not(P), Q)`, and a nested `cfg_attr` conjoins
+its predicates into `P`. This scan read only the literal `cfg` until #318's
+fourth round, so `#[cfg_attr(not(test), cfg(test))] mod x;` -- a file no
+production build compiles -- was a production declaration, and
+[`declared_whole_file_test_modules`] left it out of the population every
+production census skips. The expansion is [`super::lint_levels::applied_attributes`],
+the one reading of `cfg_attr` the crate has; a predicate on the way to a
+generated `cfg` that the grammar cannot read is refused rather than dropped,
+and an inner `cfg_attr` that can apply a `cfg` is refused like an inner `cfg`.
+A `cfg_attr` that applies no `cfg` gates nothing and is passed over, as it
+always was.
+
 ## `pub(crate) mod census_domain` › `"path" => pending_path = true,`
 
 `path` names the file directly; `cfg_attr` can apply one
@@ -1820,8 +1845,8 @@ conditionally. Both are refused where they could reach a
 module, which is decided when the item is read.
 
 The attribute's **name** is read from the tokenizer's text and its `cfg`
-predicate from the source, which still holds the string values the tokenizer
-blanks. The name used to come from the source too, through `trim_start`, which
+predicate from [`with_literal_identity`]'s reading of the source, which keeps
+the string values the tokenizer blanks. The name used to come from the source too, through `trim_start`, which
 does not read U+200E or U+200F: `#[`, U+200E, `path = ".."]` was then an
 attribute with no name, the refusal never fired, and the walk went on to the
 file the declaration's own name resolves to while rustc compiled the one the
@@ -2104,9 +2129,10 @@ unix)` entails; `any(test, unix)` does not, because a Unix build without
 `predicate` with `test = false` and every other atom unknown.
 
 `pub(crate)` since #318: [`super::lint_levels`] decides a `cfg_attr`'s
-predicate through it and the production-fence rule in `tests.rs` decides
-an allowance's `cfg` stack through it, so the crate has one reading of a
-predicate and the censuses cannot disagree with each other about what
+predicate through it and the production-fence rule in `tests.rs` decides an
+allowance's effective activation through it first -- enumerating the atoms
+only where it answers unknown -- so the crate has one reading of a predicate
+and the censuses cannot disagree with each other about what
 `all(test, unix)` means.
 
 ## `fn decide_without_test(predicate: &Predicate) -> Option<bool> {` › `Predicate::All(parts) => {`
@@ -2126,6 +2152,15 @@ The grammar is `all(…)`, `any(…)`, `not(P)`, and an atom — a bare name
 or `name = "value"`. Anything else is refused: an unknown combinator, an
 unbalanced paren, `not` with other than one argument, an empty atom.
 
+Its splitter tracks a string only by toggling at `"`, so it is handed
+[`with_literal_identity`]'s text, never raw source: there a literal is a
+token with no quote, escape or separator inside it. An atom's text is its
+identity (`Predicate::Other`), so `target_os = "linux"` and
+`target_os = "windows"` are two atoms, and the same predicate spelled two
+ways is two atoms too -- the second is an over-approximation every caller
+here tolerates, the first is what #318's third reviews executed the absence
+of.
+
 ## `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {` › `if name.is_empty() {`
 
 An atom: `test`, `unix`, or `key = "value"`.
@@ -2133,6 +2168,58 @@ An atom: `test`, `unix`, or `key = "value"`.
 ## `pub(crate) mod census_domain` › `fn split_arguments(text: &str) -> Result<Vec<&str>, String> {`
 
 The comma-separated arguments of a parenthesised group starting at `(`.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {`
+
+An attribute's text -- `raw` between its brackets, with `blanked` the same
+span of [`super::blank_comments_and_strings`] -- with every comment blanked
+and every string or char literal replaced by a token that **names it
+exactly and carries nothing a splitter reads as structure**; `None` when the
+two spans disagree about where the code is.
+
+**Why it exists: the value is the predicate's identity.** Every reader of a
+`cfg` or `cfg_attr` here used to parse the blanked text, where
+`target_os = "linux"` and `target_os = "windows"` are both `target_os =`
+followed by spaces: the grammar refused both, and the lint reader then made
+the refused text one condition, so the two were assumed to hold together.
+`#![deny(L)] #![cfg_attr(target_os = "linux", allow(L))]
+#![cfg_attr(target_os = "windows", deny(L))]` read as a definite `deny`
+while clippy-driver on Linux applied the `allow` -- 12 of 57 compiler cases
+across the three governed lints in #318's third MAIN review, and the same
+aliasing in the third regression review (`R3-MAIN-02`, `R3-REG-02`). The
+production-fence rule in `tests.rs` dropped the whole unreadable predicate
+instead, so `cfg(all(test, target_os = "linux"))` lost its `test` and an
+allowance no production build compiles excused a `deny` (`R3-MAIN-01`).
+Parsing the raw text is not the repair either: the grammar's splitter
+toggles at every `"`, so an escaped quote inside a value moves top-level
+commas into and out of the atom.
+
+A plain `"…"` whose content is ASCII letters, digits, `_`, `-` and `.` is
+kept as written, so a predicate still renders as the source spells it;
+every other literal -- an escape, a raw or byte string, a separator inside
+-- becomes `"%"` and the hex of its whole source text. No kept literal
+contains `%`, so no two different literals share a token; a literal spelled
+two ways is two tokens, which only ever adds a condition. Comments become a
+space.
+
+**The structure is always `blanked`'s.** The walk mirrors
+`code_bytes_only`'s rules -- comments first, then [`super::literal_end`]
+where `code_bytes_only` would read a string, then [`super::char_literal_end`]
+-- and every byte it keeps as code must be the byte `blanked` holds there,
+every comment or literal must be spaces there; a rustc whitespace character
+`blanked` turned to spaces is a space. Any disagreement is `None`, which
+every caller treats as an attribute it cannot read, never as one it can.
+
+## `pub(crate) mod census_domain` › `fn block_comment_end(bytes: &[u8], from: usize) -> usize {`
+
+The end of the nested block comment opening at `from`, as
+`code_bytes_only` counts it.
+
+## `pub(crate) mod census_domain` › `fn literal_token(literal: &str) -> String {`
+
+The token a literal is read as: itself when it is a plain string of
+letters, digits, `_`, `-` and `.`; otherwise `"%"` and the hex of its
+source text.
 
 ## `pub(crate) mod lint_levels {`
 
@@ -2169,9 +2256,11 @@ would report a governance state for a file that has none.
 ## `pub(crate) struct Resolution` › `pub(crate) undecided: bool,`
 
 The prologue names the lint under a predicate the production build does
-not decide -- a platform's, a feature's, or one rustc would refuse -- and
-the valuations disagree, so no single level is claimed: `level` is `None`
-and `refused_downgrade` is false. Undecided is not "unstated", and the
+not decide -- a platform's, a feature's -- and the valuations disagree, or
+under a predicate the reader cannot read at all (one rustc would refuse, or
+an attribute [`super::census_domain::with_literal_identity`] cannot read), so
+no single level is claimed: `level` is `None` and `refused_downgrade` is
+false. Undecided is not "unstated", and the
 difference is the failure direction: a census that treats it as unstated
 fails loud (the roll-call pin counts the pair), and a census that asks for
 a `deny` or a `forbid` is told neither. #318's second regression review
@@ -2248,7 +2337,11 @@ loud — and the tree is measured rather than trusted:
 
 Comments and string literals are blanked first, so a level quoted in a doc
 comment or inside a `&str` is invisible — `PR4-CENSUS-COMMENT-ORACLE`, and
-this crate's effect fixtures are written as exactly those two shapes.
+this crate's effect fixtures are written as exactly those two shapes. Inside
+an attribute the prologue walk found, a literal is read back as the token
+[`super::census_domain::with_literal_identity`] gives it: a predicate's value
+keeps its identity, and a `reason = "…"` that spells a lint name is still no
+entry of the level's list.
 
 `clippy::disallowed_methods` and `disallowed_methods` are the same lint;
 [`super::normalize_lint`] is the bridge, as it is everywhere else here.
@@ -2278,11 +2371,22 @@ prologue: the statements are replayed in order under each assignment of
 the undecided predicates, with the ordered, `forbid`-sticky rule above,
 and the distinct outcomes are the set. One element is a decided prologue;
 more than one is what [`Resolution::undecided`] reports; none is a
-prologue past `MOST_UNDECIDED_PREDICATES`. Predicates are variables by
-their rendered text, so `unix` written twice is one variable and two
-different predicates are independent -- an over-approximation of the
-real valuations that can only add outcomes, never remove one, so it can
-only make the reader refuse, never decide wrongly.
+prologue past `MOST_UNDECIDED_PREDICATES`, or one that states the lint
+under a predicate the reader cannot read.
+
+Predicates are variables by their rendered text, and the text keeps each
+string value ([`super::census_domain::with_literal_identity`]): `unix`
+written twice is one variable, `target_os = "linux"` and
+`target_os = "windows"` are two, and two different predicates are
+independent -- an over-approximation of the real valuations that can only
+add outcomes, never remove one, so it can only make the reader refuse,
+never decide wrongly. That argument held only while no two different
+predicates shared a text, and until #318's fourth round they did: the
+values were blanked, both OS predicates became one unreadable condition,
+and the reader replayed an `allow` and a `deny` under one variable and
+answered a definite `deny` that Linux compiles as `allow` (`R3-MAIN-02`,
+`R3-REG-02`). A predicate whose identity cannot be read is not guessed at:
+the file has no answer for the lint.
 
 ## `pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {` › `if level == Some("forbid") {`
 
@@ -2290,77 +2394,116 @@ Ordered, and `forbid` is sticky. A weaker level after a
 `forbid` is `E0453`, which is the file not compiling rather
 than a level; anything else replaces what came before it.
 
-## `pub(crate) mod lint_levels` › `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {`
+## `pub(crate) mod lint_levels` › `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {`
 
 The walk: from the first byte, over whitespace and inner attributes only,
-each attribute expanded into the statements it applies in the production
-build, each statement kept if it names the lint.
+each attribute read through [`super::census_domain::with_literal_identity`],
+expanded by [`applied_attributes`] into the attributes it applies, and each
+one that states the lint kept with the undecided predicates it is applied
+under. `None` when the lint is stated under a predicate the grammar cannot
+read, or in an attribute whose literals cannot be read: the file then has
+no answer for the lint, rather than an answer that assumed what the
+unreadable text said.
 
-## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {`
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {` › `if *byte != b'#' || bytes.get(at + 1) != Some(&b'!') {`
 
 The prologue ends at the first token that is not an inner attribute.
 
-## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `statements_in_the_production_build(attribute, &mut Vec::new(), &mut applied);`
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {` › `for applied in applied_attributes(attribute.trim()) {`
 
 An inner attribute states what it applies in the production build. For
 every attribute but `cfg_attr` that is the attribute itself; for a
-`cfg_attr` it is what its predicate applies, nested `cfg_attr`s included,
-and the predicate is read below.
+`cfg_attr` it is what its predicates apply, nested `cfg_attr`s included.
+Each predicate on the way is decided by
+[`super::census_domain::decide_without_test`]: true, and it adds no
+condition; false, and the statement is not in the production build;
+undecided -- a platform, a feature, any atom but `test` -- and it becomes a
+condition that [`file_level_lint_worlds`] enumerates both ways. A predicate
+rustc would refuse (`cfg_attr(, ..)`, `not(a, b)`, `not(te st)`) is no
+condition at all: rustc does not compile such a file, and the reader claims
+no level for it rather than repair the spelling.
 
-## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Vec<Statement> {` › `let Some(list) = rest`
+## `pub(crate) mod lint_levels` › `fn stated_level(attribute: &str, lint: &str) -> Option<&'static str> {`
 
-`allowance(…)` strips to `ance(…)`, which opens nothing: the
-parenthesis is what makes the prefix an exact attribute name.
-
-## `pub(crate) mod lint_levels` › `fn statements_in_the_production_build<'a>(`
+The level an applied attribute states for `lint`, if it is one of the five
+level attributes and its list names the lint. `allowance(…)` strips to
+`ance(…)`, which opens nothing: the parenthesis is what makes the prefix an
+exact attribute name.
 
 **The valuation this reader answers for is the production build's**: the
 lib target every clippy leg checks and the binary links, compiled without
-`cfg(test)`. A `cfg_attr`'s predicate is parsed by
-[`super::census_domain::parse_predicate`] and decided by
-[`super::census_domain::decide_without_test`]: true, and the attributes it
-applies are read, each through this same function, so a nested `cfg_attr`
-is expanded exactly as rustc expands it; false, and nothing is read;
-undecided -- a platform, a feature, any atom but `test` -- and the
-attributes are read under that predicate as a condition, which
-[`file_level_lint_worlds`] then enumerates both ways. A predicate rustc
-would refuse (`cfg_attr(, ..)`, `not(a, b)`, `not(te st)`) is a condition
-too, under its written text: rustc does not compile such a file, and the
-reader claims no level for it rather than repair the spelling.
-
-Why the reader learned the first half: `src/agent/bin.rs`'s inline
-`#[cfg(test)] mod tests` allows `disallowed_methods`, so an unconditional
-`forbid` is `E0453` at the lib test target (measured by both of #318's
-first reviews) and the file carried `deny` -- a level a macro-generated
-`allow` in its production region lowered, executed by #318's MAIN review
-(`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`). The repair is a
-`forbid` that exists in every build the test module does not, and a
-reader that did not read it would have counted the pair unstated. The same
-shape was then found and executed in `src/runner/container/census.rs`,
-`exec.rs` and `resolve.rs` and under `src/engine/mod.rs`, and fenced the
-same way (`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`).
-Why it learned the second: the first form of this function returned the
-outer `cfg_attr`'s attributes unexpanded and the level loop skipped the
-nested one, so a later `allow` nested under the same predicate was dropped
-and the earlier `deny` kept -- a false fence, executed by #318's second
-regression review (`R2-REG-02`).
+`cfg(test)`. Why the reader learned to expand `cfg_attr`:
+`src/agent/bin.rs`'s inline `#[cfg(test)] mod tests` allows
+`disallowed_methods`, so an unconditional `forbid` is `E0453` at the lib
+test target (measured by both of #318's first reviews) and the file carried
+`deny` -- a level a macro-generated `allow` in its production region
+lowered, executed by #318's MAIN review
+(`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`). The repair is a `forbid`
+that exists in every build the test module does not, and a reader that did
+not read it would have counted the pair unstated. The same shape was then
+found and executed in `src/runner/container/census.rs`, `exec.rs` and
+`resolve.rs` and under `src/engine/mod.rs`, and fenced the same way
+(`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`).
+Why it learned nesting: the first form returned the outer `cfg_attr`'s
+attributes unexpanded and the level loop skipped the nested one, so a later
+`allow` nested under the same predicate was dropped and the earlier `deny`
+kept -- a false fence, executed by #318's second regression review
+(`R2-REG-02`). Why it keeps literal identity: see
+[`super::census_domain::with_literal_identity`] (`R3-MAIN-02`, `R3-REG-02`).
 
 Measured, not reasoned: every row of
 `effects::tests::the_file_level_lint_reader_answers_what_rustc_does` is
 compiled by `clippy-driver` without `--test`, which is exactly this
-valuation; the nested, composite, empty-combinator and `cfg_attr(test, ..)`
-rows are among the decided ones, and a second table of platform, feature
-and malformed prologues checks that the reader refuses to decide what the
-compiler decides differently per valuation, and that what it cannot read
-does not compile.
+valuation, for each of the three governed lints; the nested, composite,
+empty-combinator and `cfg_attr(test, ..)` rows are among the decided ones,
+a second table of platform, feature and malformed prologues checks that the
+reader refuses to decide what the compiler decides differently per
+valuation, and that what it cannot read does not compile, and a third of
+string-valued predicates -- the reviews' collisions among them -- checks
+that distinct values stay distinct.
+
+## `pub(crate) mod lint_levels` › `pub(crate) struct Applied<'a> {`
+
+One attribute an attribute applies, and the `cfg_attr` predicates it is
+applied under, outermost first, each parsed or the reason it cannot be.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn applied_attributes(attribute: &str) -> Vec<Applied<'_>> {`
+
+**The crate's one reading of `cfg_attr`.** Every attribute `attribute`
+applies, with the predicates it is applied under: for anything but a
+`cfg_attr`, the attribute itself under none; for a `cfg_attr`, what each of
+its attributes applies, under its predicate and theirs. Nothing is decided
+here -- [`lint_statements_in_the_prologue`] decides for the production
+build, [`super::census_domain::scan_modules`] turns an applied `cfg` into a
+declaration's gate, and the production-fence rule in `tests.rs` turns the
+predicates, an item's gates and its enclosing items' gates into an
+allowance's effective activation. Before #318's fourth round each of those
+read `cfg_attr` its own way, and the fence rule read only the outermost
+predicate: `#[cfg_attr(unix, cfg_attr(test, allow(L)))]` was an allowance
+under `unix` (`R3-MAIN-01`, `R3-REG-01`). Handed
+[`super::census_domain::with_literal_identity`]'s text, so a predicate
+keeps its values.
+
+## `pub(crate) mod lint_levels` › `fn applied_under<'a>(`
+
+The recursion: a `cfg_attr` with no parenthesised body applies nothing,
+and its first argument is the predicate whatever it holds.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn attribute_name(attribute: &str) -> &str {`
+
+The path an attribute starts with, up to the first character that is not
+an identifier's: `cfg`, `cfg_attr`, `allow`.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn attribute_arguments(attribute: &str) -> Option<&str> {`
+
+What an attribute holds between the parentheses after its name.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn top_level_arguments(body: &str) -> Vec<&str> {`
 
 `cfg_attr`'s arguments, split at the commas that are not inside
 parentheses, brackets, braces or a string: the predicate first, then
 each attribute it applies. `pub(crate)` for the production-fence rule in
-`tests.rs`, which reads a `cfg_attr`'s predicate off an allowance the
-same way.
+`tests.rs`, which splits an allowance's list of lints with it.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
 
