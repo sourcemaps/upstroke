@@ -428,14 +428,14 @@ The governed lints an applied `allow(..)` or `expect(..)` names.
 
 **An allowance's effective activation.** The conjunction of the predicates
 it is applied under and every gate whose span holds it, decided by
-`some_production_build_satisfies`: it applies in a production build unless
-no build without `test` satisfies it. A predicate a target can satisfy -- a
-platform, a feature -- keeps the allowance as production, because a
-production build on that platform compiles it and `forbid` would be `E0453`
-there; that is the conservative direction for this rule, which names a
-`deny` only when `forbid` compiles everywhere. A predicate or gate that
-cannot be read makes the allowance no excuse at all: the rule cannot show a
-production build needs it.
+`some_production_build_satisfies`: the allowance excuses a `deny` only when
+one of the production builds CI runs is **shown** to apply it. An allowance
+is evidence that `forbid` would be `E0453`, and the rule accepts no evidence
+it cannot establish: a predicate, gate or value it cannot read, and an atom
+no CI valuation decides -- a feature, `debug_assertions`, a custom flag --
+make the allowance no excuse at all. The direction is the loud one: at worst
+the rule names a `deny` whose `forbid` would not compile, and the author
+answers with the allowance spelled so a valuation decides it.
 
 **Executed twice, and why the activation is derived rather than scanned.**
 #318's second regression review restored `src/agent/bin.rs` to `deny`,
@@ -461,52 +461,54 @@ keep their values; the sweep is
 `the_production_fence_rule_reads_the_effective_activation_of_every_allowance`
 (`~/orch-pr10/repair-318-r4-evidence/repro/`).
 
-## `const SINGLE_VALUED_CFG_KEYS: [&str; 8] = [`
-
-The `cfg` keys a target sets to one value at most, so two different values
-of one of them cannot both hold: `all(target_os = "linux", target_os =
-"macos")` is compiled nowhere. `target_family`, `target_feature`,
-`target_has_atomic` and `feature` are multi-valued and are not here.
-
-## `const MOST_ATOMS_ENUMERATED: usize = 12;`
-
-Past this many distinct atoms in one allowance's activation, the rule does
-not enumerate and the allowance excuses nothing -- the direction that names
-the `deny`, loudly, rather than excuse it unread.
-
-## `fn cfg_atom(written: &str) -> String {`
-
-An atom's identity for the enumeration: `key = value` with the spacing
-normalised, and `target_family = "unix"`/`"windows"` read as `unix` and
-`windows`, which is what rustc sets them from.
-
-## `fn cfg_atoms(predicate: &Predicate, into: &mut BTreeSet<String>) {`
-
-Every atom a predicate names, `test` apart.
-
-## `fn holds_without_test(predicate: &Predicate, true_atoms: &BTreeSet<&str>) -> bool {`
-
-A predicate's value with `test` false and exactly `true_atoms` true.
-
-## `fn a_target_could_set(true_atoms: &BTreeSet<&str>) -> bool {`
-
-Whether one target could set every atom in `true_atoms`: not `unix` beside
-`windows`, and not two values of one single-valued key. Distinct atoms are
-otherwise independent -- an over-approximation that can only keep an
-allowance as production, and a value spelled two ways is two values, which
-can only take one out; the first errs toward excusing on relations this does
-not model, the second toward naming.
-
 ## `fn some_production_build_satisfies(predicate: &Predicate) -> bool {`
 
-**Exact, where three values were not.** `census_domain::decide_without_test`
-reads every atom as unknown, so it cannot see that one atom written twice is
-one value: `#[cfg_attr(unix, cfg(test), allow(L))]` is compiled on Unix only
-as a test item and applies its `allow` nowhere else, but conjoined as
-`all(unix, any(not(unix), test))` the three-valued reading answers unknown
-and would keep it as production. So a predicate that reading does not decide
-is enumerated: every assignment of its atoms a target could set
-(`a_target_could_set`), `test` false; production when one satisfies it.
+**Shown by a CI valuation, or not shown.** Whether some production build CI
+runs -- the library invocation, without `test`, of each target in
+`ci_model::CI_TARGETS`, the model the platform census compiles against --
+applies the predicate: `holds_in_the_production_build` answers true for it on
+one target. An answer of unknown on every target is not a yes.
+
+**Why not enumerate the atoms.** Until #318's fifth round this assigned the
+predicate's atoms every value a target could jointly set
+(`a_target_could_set`, removed: not `unix` beside `windows`, not two values
+of one single-valued key) and credited
+the allowance when one assignment satisfied it. That is an
+over-approximation, and an over-approximation of the builds is the wrong
+direction for evidence that a build needs an exception. It was executed
+twice: `target_os = "linux"` and `target_os = r"linux"` were two atoms, so
+`all(target_os = "linux", not(target_os = r"linux"))` was satisfiable and a
+never-active allowance excused bin.rs's downgraded `deny` while a
+macro-written `allow` wrote 47 bytes with all ten gates green (`R4-MAIN-01`;
+`R4-REG-01`, 63 bytes); and the sweep #318's fourth regression review ran
+beside that finding recorded the same rule crediting
+`all(unix, target_os = "windows")` and
+`all(target_os = "linux", target_family = "windows")`, which no target is,
+because no enumeration of independent atoms knows what an OS implies
+(`~/orch-pr10/reviews/pr-318r4/killed-regression-1/regression-evidence/new-activation/results.json`,
+not raised there as a finding). The
+explanation this note used to give -- that a value spelled two ways "can only
+take one out" -- was false under negation: the spelling split added the
+assignment the negation needed. A concrete valuation cannot be satisfied by a
+combination no target has, and it names each value by what it is
+(`census_domain::literal_token_value`), so there is no relation left to model
+and no spelling left to enumerate.
+
+## `fn holds_in_the_production_build(predicate: &Predicate, target: &ci_model::CiTarget) -> Option<bool> {`
+
+A predicate's value in `target`'s production build, three-valued: `test` is
+false, an atom is what `atom_in_the_production_build` says, and `all`, `any`
+and `not` combine as `cfg` does, with an unknown part deciding nothing a known
+part does not already decide -- `any(unix, some_flag)` is true on a Unix
+target, `all(unix, some_flag)` unknown.
+
+## `fn atom_in_the_production_build(written: &str, target: &ci_model::CiTarget) -> Option<bool> {`
+
+An atom's value on `target`: a flag CI's model sets on some target -- `unix`,
+`windows` -- is decided on every target; a `key = value` whose key every
+target gives a value for is decided by comparing values, the atom's read
+back from its token; anything else -- an unmodelled key or flag, a literal
+that could not be decoded -- is unknown.
 
 ## `fn governed_allows_in_the_production_build(source: &str) -> BTreeSet<&'static str> {`
 
@@ -514,11 +516,23 @@ The governed lints a file allows **in code some production build compiles**:
 every `allow` or `expect` of a governed lint any attribute applies, read
 through `lint_levels::applied_attributes` so a nested `cfg_attr` and a
 second attribute on the line are each read for what they are, kept when
-`allowance_applies_in_a_production_build` says it applies somewhere. Read
-from the tree, from no list of files; whether the file itself is test code
-is the caller's question. A statement-level allowance is read like any other
-and is placed by the gates around it; the placement census refuses one
-anywhere in the tree, test code included.
+`allowance_applies_in_a_production_build` says it applies somewhere **and
+the placement census reads it** -- `governed_allows` over the attribute's own
+source span reports the lint. Read from the tree, from no list of files;
+whether the file itself is test code is the caller's question. A
+statement-level allowance is read like any other and is placed by the gates
+around it; the placement census refuses one anywhere in the tree, test code
+included.
+
+**Why the placement census has the last word.** This walk reads an
+attribute's tokens as rustc does -- `#`, `!` and `[` apart, a raw name -- and
+the placement census does not, so until #318's fifth round an allowance
+written `# [allow(..)]` excused a `deny` here while no census recorded it
+(`effects/allowlist.toml` answers for what `governed_allows` reads). An
+excuse no census records is not one: the rule counts only what the
+placement census also reads, and the file-level reader withholds its answer
+on the same test (`lint_levels::recorded_by_the_placement_census`), so the
+two cannot part.
 
 ## `fn denies_the_production_build_could_forbid(sources: &[(String, String)], is_test_module: &dyn Fn(&str) -> bool) -> Vec<String> {`
 
@@ -577,15 +591,20 @@ under `cfg(all(test))`, the same with the allowance written first,
 the allowance itself under `cfg_attr(test, ..)`, a per-site expectation
 under `cfg_attr(test, ..)`, an item under `cfg(any())` that no build
 compiles, an inner allowance inside a `cfg(all(test, unix))` module and
-inside a module nested in one, and `cfg(not(not(test)))`. Excused, or not
+inside a module nested in one, and `cfg(not(not(test)))`; since #318's
+fifth round, a feature no CI valuation sets, which establishes no production
+build, and an allowance written `# [allow(..)]`, which the placement census
+does not read and so no census records. Excused, or not
 the rule's: the repair itself; every fence forbids; a production child
 allows; the file's own production region allows; a platform-gated
 allowance; a whole-file test module that fences, which has no production
 region; an outer `#[deny]` on an item, which the sweep names and this
 does not read; a `cfg(not(test))` module; an allowance under
 `cfg_attr(not(test), ..)`; `cfg(all())`; `cfg(any(test, unix))`; an inner
-allowance inside a `cfg(unix)` module; and a feature-gated allowance,
-which no valuation read here decides.
+allowance inside a `cfg(unix)` module; and `#[r#allow(..)]`, a raw
+attribute name, which rustc applies and the placement census reads. The
+feature-gated allowance used to be excused as one "no valuation read here
+decides"; it is named now, because an undecided allowance is no evidence.
 
 ## `const NO_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[`
 
@@ -600,7 +619,16 @@ inactive function and second attribute on the line (`regression-evidence/probes/
 a quote-toggling splitter, a module nested inside a test-only one, a gate
 generated under the same atom the allowance is applied under, contradictory
 platforms and values, nested or written together, and a value conjoined
-with its own negation.
+with its own negation. Since #318's fifth round: a value conjoined with the
+negation of itself spelled raw, raw with hashes, byte-escaped,
+unicode-escaped, unicode-escaped with an underscore and continued across a
+line (`R4-MAIN-01`, `R4-REG-01`: REGRESSION's twelve negations); a raw string
+whose backslash stays a backslash, so its value is another value; an OS of
+the other family and a family flag beside the other OS, which no CI target
+is (REGRESSION's contradiction shapes, which the atom enumeration missed); a
+feature no valuation sets and an unknown flag negated twice, which no
+valuation shows; and a gate written `r#cfg`, `r#cfg_attr` or generated as
+`r#cfg` (REGRESSION's raw gate shapes).
 
 ## `const SOME_PRODUCTION_BUILD_APPLIES: &[(&str, &str)] = &[`
 
@@ -609,8 +637,21 @@ is `E0453` in it and the `deny` is excused: unconditional, `not(test)`,
 `all()`, `any(unix, windows)`, a nested `not(test)`, a gate generated only
 in test builds, a production module and function, the allowance as the second
 attribute on its line, a string-valued predicate beside the platform ones,
-and a value or its negation. Each predicate holds on every leg, so the refusal below is the same on
-all three.
+and a value or its negation; since #318's fifth round, each CI platform
+named in another spelling -- raw, byte-escaped, unicode-escaped with an
+underscore -- each family the same way, and a raw attribute name. Each
+predicate holds on every leg, so the refusal below is the same on all
+three.
+
+## `const ONE_CI_PLATFORM_APPLIES: &[(&str, &str, bool)] = &[`
+
+Allowances one CI platform's production build applies -- REGRESSION's
+`all(target_os = "linux", target_os = r"linux")` and its byte-escaped twin,
+which the spelling split refused (`R4-REG-01`), and one for each other
+platform -- with whether the predicate holds on the host compiling the test.
+The rule excuses each on every host, since some CI valuation applies it; the
+fence over it is `E0453` exactly on the host it names, so each leg checks its
+own row against the compiler and the others as the valuation says.
 
 ## `fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance() {`
 
@@ -624,13 +665,35 @@ allowance really is absent from production, and the legitimate test
 allowance keeps compiling. Every shape in `SOME_PRODUCTION_BUILD_APPLIES` is
 excused, and the same fence over it must be refused with `E0453` -- the
 Clippy refusal the rule's excuse stands for, and the control that shows this
-harness can see one. The count of compiled fixtures is asserted, so a skipped
-row is a failure.
+harness can see one. Every shape in `ONE_CI_PLATFORM_APPLIES` is excused, and
+the fence over it is refused exactly when the host is the platform it names.
+The count of compiled fixtures is asserted, so a skipped row is a failure.
 
 Failing before, passing after: applied without the repair to the rule, this
 test fails on its first shape (`~/orch-pr10/repair-318-r4-evidence/repro/after/A01-*`);
 the reviewers' own sweeps, unchanged, fail before with 27, 15 and 18 misses
-and pass after (`before/S08`-`S10`, `after/A10`, `A12`, `A14`).
+and pass after (`before/S08`-`S10`, `after/A10`, `A12`, `A14`). #318's fifth
+round's rows fail on the head before it and pass after, and each rule they
+hold was removed in turn and failed a row
+(`~/orch-pr10/repair-318-r5-evidence/`: `repro/`, `mutations/`).
+
+## `const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[`
+
+Production allowances rustc applies and `governed_allows` does not read:
+`#`, `[` spaced or commented apart on an outer attribute, `#`, `!`, `[`
+spaced on an inner one, and a raw lint name, alone or applied through
+`cfg_attr(not(test), ..)`.
+
+## `fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {`
+
+**A deliberate refusal, and the compiler shows it is one.** For each governed
+lint and each shape in `ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ`: the
+placement census reads no allowance of the lint in it; the production-fence
+rule names the file's `deny` rather than take it as an excuse; and
+clippy-driver refuses the fence the rule asks for with `E0453` -- the
+allowance is real. So the rule refuses on purpose here: the remedy is the
+allowance written as the placement census reads it, which records it, not a
+`deny` excused by a lowering nothing accounts for.
 
 ## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
 
@@ -715,6 +778,18 @@ the child. A silent root nobody holds to declarations is named for every
 lint too. Excused: a file that forbids everything itself; an own `deny`; a
 silent child, grandchild and module under a forbidding root, `mod.rs` and
 crate root; a classified module; a whole-file test module; an example.
+
+## `fn an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one() {`
+
+**Undecided is not a passing fence.** Five prologues the file-level reader
+will not answer for -- an allowance only it reads, a list entry rustc
+refuses, a predicate the grammar refuses, `warnings` over a `warn`, and a
+platform the production valuations disagree on -- are each undecided; the
+per-site-expectation rule does not take one for a `deny`; the roll-call guard
+names the file, and names a silent child of it, whose nearest stating
+ancestor states nothing to inherit. The classified-module pin and the
+container census read the live tree and are not fed fixtures; what they do
+with an undecided answer is stated at `lint_levels::Resolution::undecided`.
 
 ## `fn every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid() {`
 
@@ -2871,7 +2946,10 @@ to be the parsers and the frozen lists and nothing else. It is
 
 Asserted over the region rather than by eye, and in both directions: the
 name is absent from the production region and present in the file, so a
-typo in the needle fails the second half instead of passing the first.
+typo in the needle fails the second half instead of passing the first. The
+needles are the module, its public answer and the one function that says
+what a lint name names (`what_a_lint_path_names`, since #318's fifth round;
+`names_lint` before it).
 
 ## `fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {` › `fn absent_from_production(source: &str) -> Vec<String> {`
 
@@ -2984,6 +3062,42 @@ splitter would mis-split. The decided table holds the other half: the same
 value written twice is one condition, so `same_value_twice_is_one_condition`
 is a decided `deny`, and a `reason` that spells a lint name states nothing.
 
+The decided table also holds, since #318's fifth round, every spelling the
+reader now reads as rustc does, each a row MAIN's or REGRESSION's fourth
+review compiled against it (`R4-MAIN-02`, `R4-REG-02`) or one measured beside
+them: `r#allow`, `r#cfg_attr`, a nested `r#allow`, a raw tool name, a raw
+`forbid`, a spaced path; a `deny` or `forbid` with `#`, `!` and `[` spaced,
+commented or on two lines; `allow`, `expect` and `warn` of `clippy::all` or
+`clippy::style`, prefixless `all` and `style`, `deny(clippy::all)` over an
+`allow`, and every group that does not hold the lint; a `forbid` a group
+states, alone, lowered by `allow`, `warn` and a later group, kept by a later
+direct `forbid`, and a direct `forbid` a group `allow` cannot lower; `allow
+(warnings)` beside a `deny` or a `forbid`; inner doc comments between
+attributes; a byte-order mark; a shebang, and a first line that is one
+because a doc comment follows its `#!`; a trailing comma; a raw `reason`; an
+empty list; and names that resolve to no lint -- unknown, removed, upper-case,
+`rustdoc::`, `rustc::`.
+
+## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `let unread: &[(&str, &str, bool)] = &[`
+
+The fourth table: prologues the reader will not answer for, each with
+whether clippy-driver builds it. The reader must be undecided with no world
+at all. Clippy builds the allowances only this reader reads -- `#`, `!`, `[`
+spaced, commented or on two lines, `clippy::r#<lint>`, `clippy::r#all`, the
+aliases `clippy_all` and `clippy_style` -- so a definite `deny` there would
+have been false and a definite `allow` one no census records; it builds
+`warnings` lowering a `warn`, and refuses the rest: `deny(warnings)` alone, a
+three-segment path, a doc comment inside or between the tokens, an outer doc
+comment before an inner attribute, a custom inner attribute, brackets for
+parentheses, a literal or name-value entry, `reason` first, an unknown tool,
+a leading `::`, and a `#!` that opens nothing.
+
+Then Clippy's two renames onto a governed lint: `clippy::disallowed_method`
+and `clippy::disallowed_type` after a `deny` compile clean for the lint each
+names, which no census records, so the reader is undecided there; for the
+other two lints each is a name that lowers nothing, and the answer is the
+`deny` clippy-driver enforces.
+
 ## `fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {` › `return (false, Vec::new(), true);`
 
 Not a level: the prologue is rejected and the lint never runs.
@@ -2995,8 +3109,9 @@ Every row is a prologue. Nothing here says what it means.
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `(`
 
 The qualified and bare spellings are one lint, and the order still
-decides. `normalize_lint` is the bridge, and rustc accepts the bare
-name (with a rename warning of its own, which this ignores).
+decides. `lint_levels::what_a_lint_path_names` is the bridge, and rustc
+accepts the bare name (with a rename warning of its own, which this
+ignores).
 
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `(`
 

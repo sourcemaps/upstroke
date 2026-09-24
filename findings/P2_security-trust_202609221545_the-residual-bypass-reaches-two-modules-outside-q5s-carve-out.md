@@ -182,6 +182,29 @@ the four declaration-only roots (10 pairs, held code-free by the declaration gua
 files, inside v17's carve-out: the lints those files allow themselves, and the lowerable unstated pairs pinned below
 (22 of the 23 in production hosts; the 23rd is in a whole-file test module).
 
+**Fifth round (#318, 2026-09-24), after the fourth reviews executed two more defects in the same two instruments**
+(https://github.com/sourcemaps/upstroke/pull/318#issuecomment-5821384240; the owner's one narrow round under the round
+cap). (1) A `cfg` string's spelling was its identity and the rule satisfied a predicate by enumerating independent
+atoms, so `all(target_os = "linux", not(target_os = r"linux"))`, which no configuration applies, excused `bin.rs`'s
+downgraded `deny`: with the macro wrapper and its production caller the tree passed all ten local gates while an
+ordinary library wrote 47 bytes (`R4-MAIN-01`), and 63 by REGRESSION's recipe (`R4-REG-01`). (2) The reader skipped
+`r#allow`, `r#cfg_attr`, a raw lint name, `#`, `!` and `[` spaced or commented apart, and `allow(clippy::all)` and
+`allow(clippy::style)`, and kept the `deny` before them: 27 of 48 and 18 of 30 clippy-driver cases were a definite
+`deny` Clippy did not enforce (`R4-MAIN-02`, `R4-REG-02`). Both reproduced unchanged at `8d0fa24d` with the
+reviewers' own patches (`~/orch-pr10/repair-318-r5-evidence/repro/before/`). Repaired in `c2f29951`: a string literal
+is read for its value, and one that cannot be decoded names no value; the rule no longer enumerates atoms but asks
+CI's production valuations (`ci_model::CI_TARGETS`), crediting an allowance only when one of them is shown to apply
+it -- an unknown atom is never evidence, and an OS no longer combines with the other family -- and counts only an
+allowance the placement census reads; the reader lexes a prologue as rustc does, names a lint as Clippy's lint store
+does (the two groups that hold the governed lints, their aliases, Clippy's renames onto them; a `forbid` a group
+states is the lowerable `deny` it is), and answers undecided, never the level before, for what rustc refuses, for
+`warnings` over a `warn`, and for an allowance only it reads. On the repaired tree both witnesses still pass clippy
+and are refused by `no_deny_of_a_governed_lint_is_excused_by_test_code_alone` naming `src/agent/bin.rs`; REGRESSION's
+24 value cases agree, and MAIN's 48 and REGRESSION's 30 syntax cases agree with clippy-driver or come out undecided,
+none falsely definite (`repro/after/`, `repro/case-classification.json`). Neither defect changed an answer in the
+tree: every reader answer, production allowance and guard output over the 189 files is the same before and after,
+the pin still 29 in 20 files (`repro/census-comparison.json`).
+
 **The guard, built.** Two tests in `src/effects/tests.rs`, one helper, one pinned constant, reading the tree at run
 time with no list of files (`~/orch-pr10/guard-decision-evidence/`, indexed by its `README.md`):
 
