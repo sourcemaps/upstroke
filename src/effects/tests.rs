@@ -3402,11 +3402,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
 
     // No attribute anywhere: the sibling's reach and the facade's own are
     // both reported, so the fixture sees what the two shapes below can hide.
-    let (ok, control) = lint_fixture(
-        scratch,
-        "siblings_control",
-        &root_of("", "sibling-open.rs"),
-    );
+    let (ok, control) = lint_fixture(scratch, "siblings_control", &root_of("", "sibling-open.rs"));
     assert!(
         ok,
         "the control shape must compile with warnings only: {control:#?}"

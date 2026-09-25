@@ -2239,7 +2239,7 @@ pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
         &repo,
         &["for-each-ref", "--format=%(refname)", "refs/replace/"],
     );
-    
+
     if found == format!("refs/replace/{recorded}") {
         let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
         if read == "replacing" {
