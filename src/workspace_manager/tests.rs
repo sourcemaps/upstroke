@@ -3091,6 +3091,18 @@ fn the_ref_funnel_follows_a_git_discovery_link_planted_at_the_before_hook() {
 /// call removed from `commit_tree`, `snapshot_commit_tree` returns `Ok` and
 /// the object it names is one the victim holds and the managed repository
 /// does not.
+///
+/// **The base is named in the spelling the manager holds, not the fixture's.**
+/// `derive` stores `canonical_prefix(base)` and the walk refuses `&self.base`,
+/// so the canonical spelling is the one the refusal carries, while the
+/// fixture's is whatever `std::env::temp_dir()` answered. The two differ
+/// wherever the temporary directory is spelled through something
+/// canonicalization resolves, and there a comparison with the fixture's
+/// spelling fails however right the refusal is. The hosted `windows-latest`
+/// lane's `TEMP` is `C:\Users\RUNNER~1\…`, an 8.3 alias, and this test failed
+/// on that lane in merge-queue run 36173430383, whose log ends before any
+/// panic text; `a_base_derived_from_its_8dot3_spelling_is_refused_under_the_spelling_the_manager_holds`
+/// builds that case on a lane whose `TEMP` is spelled long.
 #[test]
 fn the_commit_tree_funnels_refuse_a_base_exchanged_at_the_before_hook() {
     for (site, label) in [
@@ -3100,37 +3112,182 @@ fn the_commit_tree_funnels_refuse_a_base_exchanged_at_the_before_hook() {
         let fixture = Fixture::created(&format!("commit-tree-base-{label}"));
         let victim = victim_clone(&fixture, "victim-repo");
         let objects_before = all_objects(&victim);
-        let tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
-        let mut hooks = SubstituteAtBefore {
-            site: EffectSiteId::Object(site),
-            target: fixture.base.clone(),
-            moved: fixture.root.join("base-moved-away"),
-            victim: victim.clone(),
-            file_link: false,
-        };
 
-        let error = match site {
-            ObjectSite::SnapshotCommitTree => fixture
-                .manager
-                .snapshot_commit_tree(&mut hooks, &tree, &fixture.head)
-                .expect_err("the in-funnel walk sees the exchanged base"),
-            _ => fixture
-                .manager
-                .candidate_commit_tree(&mut hooks, &tree, &fixture.head, "candidate")
-                .expect_err("the in-funnel walk sees the exchanged base"),
-        };
-        let message = refusal_of(&error);
-        assert!(
-            message.contains("the managed base is not a real directory")
-                && message.contains(&fixture.base.display().to_string()),
-            "{label}: the refusal must name its reason and the base: {message}"
+        let error = exchange_the_base_at_a_commit_tree_funnel(
+            &fixture,
+            &fixture.manager,
+            &fixture.base,
+            site,
+            &victim,
         );
+        assert_the_refusal_names_the_held_base(label, &fixture.manager, &error);
         assert_eq!(
             all_objects(&victim),
             objects_before,
             "{label}: no object was written into the repository the link named"
         );
     }
+}
+
+/// Drive `site`'s commit-tree funnel through `manager` with the managed base
+/// exchanged at the `Before` hook for a link to `victim`, planted at the
+/// spelling `base`, and return the refusal.
+fn exchange_the_base_at_a_commit_tree_funnel(
+    fixture: &Fixture,
+    manager: &WorkspaceManager,
+    base: &Path,
+    site: ObjectSite,
+    victim: &Path,
+) -> UpstrokeError {
+    let tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+    let mut hooks = SubstituteAtBefore {
+        site: EffectSiteId::Object(site),
+        target: base.to_path_buf(),
+        moved: fixture.root.join("base-moved-away"),
+        victim: victim.to_path_buf(),
+        file_link: false,
+    };
+    match site {
+        ObjectSite::SnapshotCommitTree => {
+            manager.snapshot_commit_tree(&mut hooks, &tree, &fixture.head)
+        }
+        _ => manager.candidate_commit_tree(&mut hooks, &tree, &fixture.head, "candidate"),
+    }
+    .expect_err("the in-funnel walk sees the exchanged base")
+}
+
+/// The refusal a commit-tree funnel owes a base exchanged at its `Before`
+/// hook: its reason, and the base in the spelling `manager` holds — the one
+/// the refusal is built from, whatever spelling `derive` was handed.
+fn assert_the_refusal_names_the_held_base(
+    label: &str,
+    manager: &WorkspaceManager,
+    error: &UpstrokeError,
+) {
+    let message = refusal_of(error);
+    assert!(
+        message.contains("the managed base is not a real directory")
+            && message.contains(&manager.base().display().to_string()),
+        "{label}: the refusal must name its reason and the base: {message}"
+    );
+}
+
+/// A base handed to `derive` in its **8.3 spelling** is refused under the
+/// canonical spelling the manager holds, and the assertion the test above
+/// makes holds for it. On the hosted `windows-latest` lane every fixture under
+/// `TEMP` reaches `derive` through an 8.3 alias, because `TEMP` there is
+/// `C:\Users\RUNNER~1\…`; this builds the case on purpose, so a lane whose
+/// `TEMP` is spelled long runs it too.
+///
+/// The fixture's base and private root are re-spelled through
+/// `GetShortPathNameW`, the call that produces aliases like `RUNNER~1`, and a
+/// second manager is derived from the re-spelled pair, as `Fixture` derives
+/// its own on that lane. Four assertions, in the order a failure reads:
+///
+/// 1. **The 8.3 spelling is not the canonical one.** 8.3 name creation is a
+///    per-volume setting and is often off, and on such a volume
+///    `GetShortPathNameW` answers the long spelling unchanged — a case in
+///    which every assertion below passes and none of them tests anything. So
+///    it fails, naming the spellings, rather than passing or skipping: a skip
+///    is counted like a pass in the suite's own totals. The comparison is with
+///    the canonical spelling and not the fixture's, because where `TEMP` is
+///    already an alias, as on the hosted lane, the fixture's spelling is one
+///    too and re-spelling it need not change it.
+/// 2. **`derive` holds the canonical spelling**, not the 8.3 one it was
+///    handed.
+/// 3. **The assertion the test above made at `567c4b7f` fails here.** It is
+///    the control, with the 8.3 spelling standing where the fixture's stood:
+///    the refusal names its reason and does not carry that spelling.
+/// 4. **The assertion it makes now passes here**, through the same helper.
+#[cfg(windows)]
+#[test]
+fn a_base_derived_from_its_8dot3_spelling_is_refused_under_the_spelling_the_manager_holds() {
+    for (site, label) in [
+        (ObjectSite::SnapshotCommitTree, "snapshot"),
+        (ObjectSite::CandidateCommitTree, "candidate"),
+    ] {
+        let fixture = Fixture::created(&format!("commit-tree-8dot3-base-{label}"));
+        let canonical = strip_verbatim(fixture.base.canonicalize().expect("canonical base"));
+        let base = short_spelling(&fixture.base);
+        let private = short_spelling(&fixture.private);
+        assert!(
+            !base.as_os_str().eq_ignore_ascii_case(canonical.as_os_str()),
+            "{label}: GetShortPathNameW answered {} for {}, which is its canonical spelling {} \
+             but for ASCII case, so no component of it has an 8.3 alias and the case this test \
+             exists for cannot be built on this volume; a pass would pin nothing \
+             (`fsutil 8dot3name query <volume>` reports its setting)",
+            base.display(),
+            fixture.base.display(),
+            canonical.display()
+        );
+        let manager = WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-1")
+            .expect("derive the manager over the 8.3 spelling");
+        assert_eq!(
+            manager.base(),
+            canonical.as_path(),
+            "{label}: handed {}, derive must hold the canonical spelling",
+            base.display()
+        );
+
+        let victim = victim_clone(&fixture, "victim-repo");
+        let objects_before = all_objects(&victim);
+        let error =
+            exchange_the_base_at_a_commit_tree_funnel(&fixture, &manager, &base, site, &victim);
+        let message = refusal_of(&error);
+        assert!(
+            !(message.contains("the managed base is not a real directory")
+                && message.contains(&base.display().to_string())),
+            "{label}: the fixture-spelling assertion holds for {}, so the refusal carries the \
+             spelling derive was handed and this is not the case the test exists for: {message}",
+            base.display()
+        );
+        assert_the_refusal_names_the_held_base(label, &manager, &error);
+        assert_eq!(
+            all_objects(&victim),
+            objects_before,
+            "{label}: no object was written into the repository the link named"
+        );
+    }
+}
+
+/// `path` as `GetShortPathNameW` spells it: each component that has an 8.3
+/// alias by that alias, the rest as they are. A path with no alias on it comes
+/// back unchanged rather than as an error, which is why the caller checks the
+/// answer instead of trusting it.
+#[cfg(windows)]
+fn short_spelling(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path that outlives the
+    // call, and a null buffer of length zero is the documented way to ask for
+    // the length the answer needs, terminator included.
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    assert_ne!(
+        needed,
+        0,
+        "GetShortPathNameW could not size the answer for {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+    let mut short = vec![0_u16; usize::try_from(needed).expect("a u32 fits a usize")];
+    // SAFETY: the same live path, and `short` holds the `needed` writable
+    // UTF-16 units the length argument says it does.
+    let written = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), needed) };
+    assert!(
+        written != 0 && written < needed,
+        "GetShortPathNameW wrote {written} units of a {needed}-unit buffer for {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+    short.truncate(usize::try_from(written).expect("a u32 fits a usize"));
+    PathBuf::from(std::ffi::OsString::from_wide(&short))
 }
 
 /// One substitution per Git repository-discovery path the table names for a
