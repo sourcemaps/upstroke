@@ -3185,14 +3185,21 @@ fn assert_the_refusal_names_the_held_base(
 /// its own on that lane. Four assertions, in the order a failure reads:
 ///
 /// 1. **The 8.3 spelling is not the canonical one.** 8.3 name creation is a
-///    per-volume setting and is often off, and on such a volume
-///    `GetShortPathNameW` answers the long spelling unchanged — a case in
-///    which every assertion below passes and none of them tests anything. So
-///    it fails, naming the spellings, rather than passing or skipping: a skip
-///    is counted like a pass in the suite's own totals. The comparison is with
-///    the canonical spelling and not the fixture's, because where `TEMP` is
-///    already an alias, as on the hosted lane, the fixture's spelling is one
-///    too and re-spelling it need not change it.
+///    per-volume setting and is often off, and for a path none of whose
+///    components has an 8.3 name `GetShortPathNameW` answers the long
+///    spelling. Without this assertion, where that answer is the canonical
+///    spelling byte for byte, the test still fails, at assertion 3, but later
+///    and with a message that does not point at the volume; and where it
+///    differs from the canonical spelling only in ASCII case, assertion 3
+///    passes, because its `contains` is case-sensitive, and so does every
+///    assertion after it: the test passes with nothing re-spelled but case.
+///    So this fails first, naming the spellings, rather than passing or
+///    skipping: a skip is counted like a pass in the suite's own totals. It
+///    compares ignoring ASCII case, and must: with `!=`, a case-only answer
+///    passes it and the test is green without the case it exists for. The
+///    comparison is with the canonical spelling and not the fixture's,
+///    because where `TEMP` is already an alias, as on the hosted lane, the
+///    fixture's spelling is one too and re-spelling it need not change it.
 /// 2. **`derive` holds the canonical spelling**, not the 8.3 one it was
 ///    handed.
 /// 3. **The assertion the test above made at `567c4b7f` fails here.** It is
