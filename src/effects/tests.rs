@@ -1665,6 +1665,8 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
     let mut compiled = 0;
     for lint in USED_GOVERNED_LINTS {
         let bare = normalize_lint(lint).expect("a governed lint");
+        let mut builds: Vec<(&str, &str, &str)> = Vec::new();
+        let mut refused: Vec<(&str, &str, &str)> = Vec::new();
         for (tag, shape) in NO_PRODUCTION_BUILD_APPLIES {
             let found = named(lint, shape);
             assert!(
@@ -1672,20 +1674,12 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 "`{tag}` for `{lint}`: the allowance applies in no production build, so it \
                  cannot excuse the file's `deny`, and the rule has to name it: {found:#?}"
             );
-            for (valuation, cfgs) in [("production", &[][..]), ("test", &["test"][..])] {
-                let (built, diagnostics) = clippy_outcome(
-                    &scratch,
-                    &format!("{tag}_{bare}_{valuation}"),
-                    &fenced(lint, shape),
-                    cfgs,
-                );
-                compiled += 1;
-                assert!(
-                    built && diagnostics.iter().all(|(_, code)| code != "E0453"),
-                    "`{tag}` for `{lint}`: the fence the rule asks for does not compile in the \
-                     {valuation} build, so naming the `deny` was wrong: {diagnostics:?}"
-                );
-            }
+            builds.push((
+                tag,
+                shape,
+                "the fence the rule asks for does not compile in the production build, so \
+                 naming the `deny` was wrong",
+            ));
         }
         for (tag, shape) in SOME_PRODUCTION_BUILD_APPLIES {
             let found = named(lint, shape);
@@ -1694,18 +1688,12 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 "`{tag}` for `{lint}`: the allowance applies in a production build, so `forbid` \
                  would be E0453 there and the `deny` is excused: {found:#?}"
             );
-            let (built, diagnostics) = clippy_outcome(
-                &scratch,
-                &format!("{tag}_{bare}_production"),
-                &fenced(lint, shape),
-                &[],
-            );
-            compiled += 1;
-            assert!(
-                !built && diagnostics.iter().any(|(_, code)| code == "E0453"),
-                "`{tag}` for `{lint}`: clippy did not refuse the production allowance under the \
-                 fence, so this control no longer shows why the rule excuses it: {diagnostics:?}"
-            );
+            refused.push((
+                tag,
+                shape,
+                "clippy did not refuse the production allowance under the fence, so this \
+                 control no longer shows why the rule excuses it",
+            ));
         }
         for (tag, shape, here) in ONE_CI_PLATFORM_APPLIES {
             let found = named(lint, shape);
@@ -1714,19 +1702,44 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 "`{tag}` for `{lint}`: one CI platform's production build applies the allowance, \
                  so `forbid` would be E0453 there and the `deny` is excused: {found:#?}"
             );
-            let (built, diagnostics) = clippy_outcome(
-                &scratch,
-                &format!("{tag}_{bare}_production"),
-                &fenced(lint, shape),
-                &[],
-            );
-            compiled += 1;
-            assert_eq!(
-                (built, diagnostics.iter().any(|(_, code)| code == "E0453")),
-                (!here, *here),
-                "`{tag}` for `{lint}`: the predicate holds on this host exactly when it names this \
-                 host's platform, and clippy disagreed: {diagnostics:?}"
-            );
+            let why = "the predicate holds on this host exactly when it names this host's \
+                       platform, and clippy disagreed";
+            if *here {
+                refused.push((tag, shape, why));
+            } else {
+                builds.push((tag, shape, why));
+            }
+        }
+        let in_test: Vec<(&str, &str, &str)> = NO_PRODUCTION_BUILD_APPLIES
+            .iter()
+            .map(|(tag, shape)| {
+                (
+                    *tag,
+                    *shape,
+                    "the fence the rule asks for does not compile in the test build, so naming \
+                     the `deny` was wrong",
+                )
+            })
+            .collect();
+        for (batch, cases, cfgs, expect_refused) in [
+            ("production", &builds, &[][..], false),
+            ("test", &in_test, &["test"][..], false),
+            ("refused", &refused, &[][..], true),
+        ] {
+            let sources: Vec<String> = cases
+                .iter()
+                .map(|(_, shape, _)| fenced(lint, shape))
+                .collect();
+            let outcomes = clippy_outcomes(&scratch, &format!("{bare}_{batch}"), &sources, cfgs);
+            for ((tag, _, why), (built, diagnostics)) in cases.iter().zip(&outcomes) {
+                compiled += 1;
+                let rejected = diagnostics.iter().any(|(_, code)| code == "E0453");
+                assert_eq!(
+                    (*built, rejected),
+                    (!expect_refused, expect_refused),
+                    "`{tag}` for `{lint}` ({batch}): {why}: {diagnostics:?}"
+                );
+            }
         }
     }
     assert_eq!(
@@ -1756,6 +1769,7 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
     let scratch = scratch_dir("unrecorded");
     for lint in USED_GOVERNED_LINTS {
         let bare = normalize_lint(lint).expect("a governed lint");
+        let mut fenced = Vec::new();
         for (tag, shape) in ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ {
             let shape = shape.replace("LINT", lint).replace("BARE", bare);
             let unread = governed_allows(&shape)
@@ -1777,12 +1791,13 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
                 found.len() == 1 && found.iter().all(|line| line.contains(lint)),
                 "`{tag}` for `{lint}`: an allowance no census records excused a `deny`: {found:#?}"
             );
-            let (built, diagnostics) = clippy_outcome(
-                &scratch,
-                &format!("{tag}_{bare}"),
-                &format!("#![cfg_attr(not(test), forbid({lint}))]\n{shape}"),
-                &[],
-            );
+            fenced.push(format!("#![cfg_attr(not(test), forbid({lint}))]\n{shape}"));
+        }
+        let outcomes = clippy_outcomes(&scratch, bare, &fenced, &[]);
+        for ((tag, _), (built, diagnostics)) in ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ
+            .iter()
+            .zip(&outcomes)
+        {
             assert!(
                 !built && diagnostics.iter().any(|(_, code)| code == "E0453"),
                 "`{tag}` for `{lint}`: clippy did not apply the allowance, so the refusal above \
@@ -4148,23 +4163,120 @@ fn clippy_outcome(
     (output.status.success(), diagnostics)
 }
 
-fn clippy_driver() -> PathBuf {
-    let sysroot = std::process::Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .expect("rustc runs; it built this test");
-    let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim().to_owned());
-    let name = if cfg!(windows) {
-        "clippy-driver.exe"
-    } else {
-        "clippy-driver"
-    };
-    let in_sysroot = sysroot.join("bin").join(name);
-    if in_sysroot.is_file() {
-        return in_sysroot;
+fn clippy_outcomes(
+    dir: &Path,
+    tag: &str,
+    cases: &[impl AsRef<str>],
+    cfgs: &[&str],
+) -> Vec<(bool, Vec<(String, String)>)> {
+    let mut source = String::new();
+    let mut case_lines = Vec::with_capacity(cases.len());
+    for (index, case) in cases.iter().enumerate() {
+        let first = source.matches('\n').count() + 1;
+        let case = case.as_ref();
+        source.push_str(&format!("pub mod case_{index} {{\n{case}\n}}\n"));
+        case_lines.push(first..=source.matches('\n').count());
     }
-    PathBuf::from(name)
+    let file = dir.join(format!("{tag}.rs"));
+    fs::write(&file, &source).expect("the batched fixture");
+    let out = dir.join("out");
+    fs::create_dir_all(&out).expect("an output directory");
+    let mut command = std::process::Command::new(clippy_driver());
+    command
+        .env("CLIPPY_CONF_DIR", repo_root())
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "lib",
+            "--emit=metadata",
+            "--error-format=json",
+        ])
+        .arg("--out-dir")
+        .arg(&out);
+    for cfg in cfgs {
+        command.arg("--cfg").arg(cfg);
+    }
+    let output = command
+        .arg(&file)
+        .output()
+        .expect("clippy-driver runs; the lint gate uses the same binary");
+    let mut outcomes: Vec<(bool, Vec<(String, String)>)> = vec![(true, Vec::new()); cases.len()];
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let level = value
+            .get("level")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let code = value
+            .get("code")
+            .and_then(|code| code.get("code"))
+            .and_then(serde_json::Value::as_str);
+        let primary = value
+            .get("spans")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|spans| {
+                spans.iter().find(|span| {
+                    span.get("is_primary").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+            });
+        let in_this_file = primary
+            .filter(|span| {
+                span.get("file_name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| Path::new(name).file_name() == file.file_name())
+            })
+            .and_then(|span| span.get("line_start"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|line| usize::try_from(line).ok());
+        let case =
+            in_this_file.and_then(|line| case_lines.iter().position(|lines| lines.contains(&line)));
+        let Some(outcome) = case.and_then(|case| outcomes.get_mut(case)) else {
+            assert!(
+                primary.is_none() && code.is_none(),
+                "`{tag}`: clippy-driver reported {level} {code:?} at no case's lines: {line}"
+            );
+            continue;
+        };
+        if level == "error" {
+            outcome.0 = false;
+        }
+        if let Some(code) = code {
+            outcome.1.push((level.to_owned(), code.to_owned()));
+        }
+    }
+    assert_eq!(
+        output.status.success(),
+        outcomes.iter().all(|(built, _)| *built),
+        "`{tag}`: clippy-driver's exit status disagrees with the errors attributed to the cases, \
+         so a case's outcome cannot be read from this batch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    outcomes
+}
+
+fn clippy_driver() -> &'static Path {
+    static DRIVER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DRIVER.get_or_init(|| {
+        let sysroot = std::process::Command::new("rustc")
+            .arg("--print")
+            .arg("sysroot")
+            .output()
+            .expect("rustc runs; it built this test");
+        let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim().to_owned());
+        let name = if cfg!(windows) {
+            "clippy-driver.exe"
+        } else {
+            "clippy-driver"
+        };
+        let in_sysroot = sysroot.join("bin").join(name);
+        if in_sysroot.is_file() {
+            return in_sysroot;
+        }
+        PathBuf::from(name)
+    })
 }
 
 mod ci_model;
@@ -6494,6 +6606,70 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         predict_world(resolution.level, resolution.refused_downgrade)
     }
 
+    enum Wants {
+        Predicted(Resolution),
+        Builds(bool),
+        Renamed(bool, Resolution),
+    }
+
+    fn starts_the_file(prologue: &str) -> bool {
+        prologue.starts_with('\u{feff}')
+            || (prologue.starts_with("#!") && !prologue.starts_with("#!["))
+    }
+
+    fn judge(
+        lint: &str,
+        tag: &str,
+        wants: &Wants,
+        (built, fired, rejected, diagnostics): (bool, Vec<String>, bool, Vec<(String, String)>),
+        observed_shapes: &mut BTreeSet<(bool, Vec<String>, bool)>,
+    ) {
+        match *wants {
+            Wants::Predicted(resolution) => {
+                let (wants_build, wants_fired, wants_rejected) = predict(resolution);
+                assert_eq!(
+                    (built, fired.clone(), rejected),
+                    (
+                        wants_build,
+                        wants_fired
+                            .iter()
+                            .map(|level| (*level).to_owned())
+                            .collect(),
+                        wants_rejected
+                    ),
+                    "`{tag}` for `{lint}` — the reader answered {resolution:?} and clippy-driver \
+                     did something else: built={built} fired={fired:?} E0453={rejected}; all \
+                     diagnostics {diagnostics:?}"
+                );
+                observed_shapes.insert((built, fired, rejected));
+            }
+            Wants::Builds(builds) => assert_eq!(
+                built, builds,
+                "`{tag}` for `{lint}`: clippy-driver did built={built} fired={fired:?} \
+                 E0453={rejected}; all diagnostics {diagnostics:?}"
+            ),
+            Wants::Renamed(true, resolution) => assert!(
+                resolution.undecided && built && fired.is_empty() && !rejected,
+                "`{tag}` for `{lint}`: clippy applies the renamed allowance, which no census \
+                 here records, so the reader must not answer: {resolution:?}, built={built} \
+                 fired={fired:?}; all diagnostics {diagnostics:?}"
+            ),
+            Wants::Renamed(false, resolution) => assert!(
+                resolution
+                    == Resolution {
+                        level: Some("deny"),
+                        refused_downgrade: false,
+                        undecided: false,
+                    }
+                    && !built
+                    && fired == ["error"],
+                "`{tag}` for `{lint}`: another lint's old name lowers nothing: \
+                 {resolution:?}, built={built} fired={fired:?}; all diagnostics \
+                 {diagnostics:?}"
+            ),
+        }
+    }
+
     let table: &[(&str, &str)] = &[
         ("bare", ""),
         ("allow", "#![allow(clippy::disallowed_methods)]\n"),
@@ -7105,9 +7281,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
     for (lint, body) in GOVERNED {
         let bare = normalize_lint(lint).expect("a governed lint");
         let spelled = |text: &str| text.replace("disallowed_methods", bare);
-        let outcome = |tag: &str, source: &str, cfgs: &[&str]| {
-            let (built, diagnostics) =
-                clippy_outcome(&scratch, &format!("{tag}_{bare}"), source, cfgs);
+        let read = |built: bool, diagnostics: Vec<(String, String)>| {
             let fired: Vec<String> = diagnostics
                 .iter()
                 .filter(|(_, code)| code == lint)
@@ -7116,33 +7290,31 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
             let rejected = diagnostics.iter().any(|(_, code)| code == "E0453");
             (built, fired, rejected, diagnostics)
         };
+        let outcome = |tag: &str, source: &str, cfgs: &[&str]| {
+            let (built, diagnostics) =
+                clippy_outcome(&scratch, &format!("{tag}_{bare}"), source, cfgs);
+            read(built, diagnostics)
+        };
+        let mut passes: Vec<(String, String, Wants)> = Vec::new();
+        let mut refused: Vec<(String, String, Wants)> = Vec::new();
+        let mut alone: Vec<(String, String, Wants)> = Vec::new();
 
         for (tag, prologue) in table {
             let source = format!("{}{body}", spelled(prologue));
             let resolution = file_level_lint_resolution(&source, lint);
-            let (built, fired, rejected, diagnostics) = outcome(tag, &source, &[]);
-            let (wants_build, wants_fired, wants_rejected) = predict(resolution);
-            assert_eq!(
-                (built, fired.clone(), rejected),
-                (
-                    wants_build,
-                    wants_fired
-                        .iter()
-                        .map(|level| (*level).to_owned())
-                        .collect(),
-                    wants_rejected
-                ),
-                "`{tag}` for `{lint}` — the reader answered {resolution:?} and clippy-driver did \
-                 something else: built={built} fired={fired:?} E0453={rejected}; all \
-                 diagnostics {diagnostics:?}"
-            );
-            observed_shapes.insert((built, fired, rejected));
-
             assert_eq!(
                 file_level_lint_resolution(&source.replace('\n', "\r\n"), lint),
                 resolution,
                 "`{tag}` for `{lint}` reads differently under CRLF"
             );
+            let row = ((*tag).to_owned(), source, Wants::Predicted(resolution));
+            if starts_the_file(prologue) {
+                alone.push(row);
+            } else if predict(resolution).2 {
+                refused.push(row);
+            } else {
+                passes.push(row);
+            }
         }
 
         let every_undecided = undecided
@@ -7215,44 +7387,48 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
                 resolution,
                 "`{tag}` for `{lint}` reads differently under CRLF"
             );
-            let (built, fired, rejected, diagnostics) = outcome(tag, &source, &[]);
-            assert_eq!(
-                built, *builds,
-                "`{tag}` for `{lint}`: clippy-driver did built={built} fired={fired:?} \
-                 E0453={rejected}; all diagnostics {diagnostics:?}"
-            );
+            let row = ((*tag).to_owned(), source, Wants::Builds(*builds));
+            if *builds && !starts_the_file(prologue) {
+                passes.push(row);
+            } else {
+                alone.push(row);
+            }
         }
 
         for (renamed, to) in [
             ("disallowed_method", "disallowed_methods"),
             ("disallowed_type", "disallowed_types"),
         ] {
-            let tag = format!("renamed_{renamed}");
             let source = format!("#![deny({lint})]\n#![allow(clippy::{renamed})]\n{body}");
             let resolution = file_level_lint_resolution(&source, lint);
-            let (built, fired, rejected, diagnostics) = outcome(&tag, &source, &[]);
-            if to == bare {
-                assert!(
-                    resolution.undecided && built && fired.is_empty() && !rejected,
-                    "`{tag}` for `{lint}`: clippy applies the renamed allowance, which no census \
-                     here records, so the reader must not answer: {resolution:?}, built={built} \
-                     fired={fired:?}; all diagnostics {diagnostics:?}"
-                );
-            } else {
-                assert!(
-                    resolution
-                        == Resolution {
-                            level: Some("deny"),
-                            refused_downgrade: false,
-                            undecided: false,
-                        }
-                        && !built
-                        && fired == ["error"],
-                    "`{tag}` for `{lint}`: another lint's old name lowers nothing: \
-                     {resolution:?}, built={built} fired={fired:?}; all diagnostics \
-                     {diagnostics:?}"
+            passes.push((
+                format!("renamed_{renamed}"),
+                source,
+                Wants::Renamed(to == bare, resolution),
+            ));
+        }
+
+        for (batch, rows) in [("passes", &passes), ("refused", &refused)] {
+            let sources: Vec<&str> = rows.iter().map(|(_, source, _)| source.as_str()).collect();
+            let outcomes = clippy_outcomes(&scratch, &format!("{bare}_{batch}"), &sources, &[]);
+            for ((tag, _, wants), (built, diagnostics)) in rows.iter().zip(outcomes) {
+                judge(
+                    lint,
+                    tag,
+                    wants,
+                    read(built, diagnostics),
+                    &mut observed_shapes,
                 );
             }
+        }
+        for (tag, source, wants) in &alone {
+            judge(
+                lint,
+                tag,
+                wants,
+                outcome(tag, source, &[]),
+                &mut observed_shapes,
+            );
         }
 
         let deny_then_allow = spelled(

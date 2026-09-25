@@ -668,6 +668,12 @@ Clippy refusal the rule's excuse stands for, and the control that shows this
 harness can see one. Every shape in `ONE_CI_PLATFORM_APPLIES` is excused, and
 the fence over it is refused exactly when the host is the platform it names.
 The count of compiled fixtures is asserted, so a skipped row is a failure.
+Since #318's fifth round the fixtures reach `clippy-driver` in three
+invocations per lint, not one each (`clippy_outcomes`, below): the shapes the
+fence must let build in the production valuation, the
+`NO_PRODUCTION_BUILD_APPLIES` shapes again under `--cfg test`, and the shapes
+it must refuse. Each shape is still judged alone, on the diagnostics at its
+own lines, and the count counts shapes.
 
 Failing before, passing after: applied without the repair to the rule, this
 test fails on its first shape (`~/orch-pr10/repair-318-r4-evidence/repro/after/A01-*`);
@@ -693,7 +699,8 @@ rule names the file's `deny` rather than take it as an excuse; and
 clippy-driver refuses the fence the rule asks for with `E0453` -- the
 allowance is real. So the rule refuses on purpose here: the remedy is the
 allowance written as the placement census reads it, which records it, not a
-`deny` excused by a lowering nothing accounts for.
+`deny` excused by a lowering nothing accounts for. The fenced shapes compile
+as one batch per lint, and each must carry its own `E0453`.
 
 ## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
 
@@ -1624,12 +1631,45 @@ whether it compiled plus every clippy diagnostic it emitted.
 Compile one fixture as a library with `clippy-driver` under this
 repository's `clippy.toml`, with each of `cfgs` passed as `--cfg`, and
 return whether it built and every diagnostic that carries a code, as
-`(level, code)`. The reader's parity table and the production-fence rule's
-class sweep ask the compiler the same way.
+`(level, code)`. The rows that must compile alone use it -- a prologue at a
+file's first bytes, one rustc refuses, one under its own `--cfg` values; the
+rest go through `clippy_outcomes`.
 
-## `fn clippy_driver() -> PathBuf {`
+## `fn clippy_outcomes(`
 
-`clippy-driver`, from `PATH` or from the active toolchain's sysroot.
+Compile several fixtures as one library, each wrapped as
+`pub mod case_<n> { .. }`, and return for each what `clippy_outcome` returns
+for one: whether it built -- no error at its own lines -- and every
+diagnostic with a code whose primary span lies in the batch file within its
+lines. A diagnostic located in no case fails the test rather than being
+dropped, and the exit status must agree with the errors the cases carry, so
+an error no case owns cannot leave every case reading as built.
+
+Sound only within a batch of one expected kind, measured before it was
+adopted (`~/orch-pr10/repair-318-r5-evidence/flake/batching-probe/`): `E0453`
+is reported for every case that has one and compilation then stops, so no
+other case's lint diagnostics appear; lint-pass diagnostics of every module
+appear whatever another module raised. An inner attribute at a module's head
+scopes to that module as a file's does to its crate, so a case reads as the
+file it stands for, except for what only a file's first bytes can be.
+
+Why it exists: #318's fifth round's rows took `effects::` from 409
+`clippy-driver` runs at `8d0fa24d` to 727 at `b9498724`, each a fork of the
+test process with a `rustc --print sysroot` fork before it; and the
+cleanup-lease refusal of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` -- a lease
+descriptor inherited by a sibling fork -- reddened `engine::topology::recover::`
+run beside `effects::` in 5 of 8 interleaved runs of `b9498724`'s source
+against 2 of 8 of `8d0fa24d`'s, and in none of 16 without `effects::`
+(`~/orch-pr10/repair-318-r5-evidence/flake/rate-summary.json`). Batched, with
+the driver found once, `effects::` forks 173 compiler processes where
+`8d0fa24d` forked 818 (`flake/spawn-count/` there).
+
+## `fn clippy_driver() -> &'static Path {`
+
+`clippy-driver`, from the active toolchain's sysroot or else from `PATH`,
+found once per test process: the lookup is a `rustc` fork, and until #318's
+fifth round every fixture made one.
 
 **Not** optional, and not skipped when missing: a build refusal whose only
 evidence is a fixture nothing executes is `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`,
@@ -3097,6 +3137,20 @@ and `clippy::disallowed_type` after a `deny` compile clean for the lint each
 names, which no census records, so the reader is undecided there; for the
 other two lints each is a name that lowers nothing, and the answer is the
 `deny` clippy-driver enforces.
+
+How the rows reach the compiler, since #318's fifth round. A decided row the
+reader predicts to build or to fire, an unread row clippy builds, and the two
+renames share one `clippy_outcomes` batch per lint; the decided rows it
+predicts refused with `E0453` share a second, because an `E0453` anywhere in
+a crate stops the lint pass for all of it. The routing uses the reader's own
+prediction, and a wrong one cannot pass: a row that is `E0453` in the first
+batch fails, and every row there that needed the lint pass fails with it; a
+row in the second that builds carries no `E0453` and fails. Three kinds still
+compile alone: a row whose first bytes are what it tests -- a byte-order mark,
+or a `#!` not followed at once by `[`, which rustc reads by its shebang rule
+on a file's first line only; an unread row clippy refuses, since a parse or attribute error can stop the
+compiler before the next case; and every row of the undecided and valued
+tables, each under its own `--cfg` values.
 
 ## `fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {` › `return (false, Vec::new(), true);`
 
