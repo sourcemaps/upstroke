@@ -5211,18 +5211,31 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
 /// What [`sentinel_closed_within`] reports when a copy of the sentinel end
 /// was still open at the end of its bound: the bound, the time actually
 /// waited and how many reads found a copy open, which is what tells a copy
-/// that never closed from one observed at a single instant.
+/// that never closed from one observed at a single instant, and whether a
+/// read begun within the bound answered EOF only after it (`eof_late`).
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 struct SentinelHeldPastBound {
     bound: Duration,
     waited: Duration,
     observations: u32,
+    /// The last read answered EOF, but only once the bound had passed: a
+    /// close observed late, never accepted as one within the bound
+    /// (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`).
+    eof_late: bool,
 }
 
 #[cfg(unix)]
 impl std::fmt::Display for SentinelHeldPastBound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.eof_late {
+            return write!(
+                f,
+                "the sentinel answered EOF only after the full {:?} bound, {:?} in, after {} \
+                 reads finding a copy open: a close read after the bound is not one within it",
+                self.bound, self.waited, self.observations
+            );
+        }
         write!(
             f,
             "a copy of the sentinel was still open after the full {:?} bound, every one of {} \
@@ -5270,11 +5283,19 @@ fn sentinel_pair() -> (
 /// timeout (`Interrupted`) observed nothing -- neither a copy open nor EOF --
 /// so it is neither counted nor acknowledged; the bound, absolute from the
 /// start, decides whether the read is made again, and no interruption
-/// restarts it (`PR320-R3-MAIN-005`). On Linux a report is paired by the
-/// caller with the fork under test's own table ([`sentinel_attribution`]),
-/// which says whose copy it was. Any reader, so that the answers a socket
-/// gives -- EOF, a timeout, an interruption -- are driven in an order a test
-/// chooses (`an_interrupted_sentinel_read_is_made_again_within_the_same_bound`).
+/// restarts it (`PR320-R3-MAIN-005`). An EOF is a close within the bound
+/// only when the clock, read once the read has returned, is still inside
+/// it: a read begun in time can return after the bound, its timeout being
+/// the socket's and not the bound, and an EOF it answered then is reported
+/// as the bound's end with the EOF late (`eof_late`), never as a close within
+/// it; before, EOF was returned at once and the bound looked at only after a
+/// read that found a copy open (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`,
+/// `a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused`). On
+/// Linux a report is paired by the caller with the fork under test's own
+/// table ([`sentinel_attribution`]), which says whose copy it was. Any
+/// reader, so that the answers a socket gives -- EOF, a timeout, an
+/// interruption -- are driven in an order a test chooses
+/// (`an_interrupted_sentinel_read_is_made_again_within_the_same_bound`).
 #[cfg(unix)]
 fn sentinel_closed_within(
     observer: &mut impl std::io::Read,
@@ -5287,8 +5308,16 @@ fn sentinel_closed_within(
     loop {
         match observer.read(&mut byte) {
             Ok(0) => {
-                observations += 1;
-                return Ok((started.elapsed(), observations));
+                let waited = started.elapsed();
+                if waited >= bound {
+                    return Err(SentinelHeldPastBound {
+                        bound,
+                        waited,
+                        observations,
+                        eof_late: true,
+                    });
+                }
+                return Ok((waited, observations + 1));
             }
             Ok(_) => panic!("nothing writes to a sentinel, yet a read answered bytes"),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
@@ -5298,6 +5327,7 @@ fn sentinel_closed_within(
                         bound,
                         waited,
                         observations,
+                        eof_late: false,
                     });
                 }
                 continue;
@@ -5317,6 +5347,7 @@ fn sentinel_closed_within(
                 bound,
                 waited,
                 observations,
+                eof_late: false,
             });
         }
     }
@@ -9202,6 +9233,76 @@ fn a_report_arriving_slower_than_its_deadline_on_a_real_socket_is_timed_out_with
     );
 }
 
+/// A warden's word that a read begun within the deadline completes only
+/// after it is refused, on a real socket with the warden's own 100 ms read
+/// tick: the word is written twenty milliseconds after a twenty millisecond
+/// deadline, and the read waiting for it returns with it late
+/// (`PR320-R7-MAIN-001`, `PR320-R7-REG-001`). Before, the reader accepted
+/// the word the read had completed and looked at the deadline only before
+/// the next read, and this took the late word for the warden armed. A
+/// reader held off the processor past the deadline before its first read
+/// is refused for silence instead, which is a refusal all the same. The
+/// writer is joined before any assertion.
+#[cfg(unix)]
+#[test]
+fn a_warden_word_completed_after_the_deadline_on_a_real_socket_is_refused() {
+    use std::io::Write as _;
+
+    let (mut words, mut said) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for the warden's word");
+    words
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("the warden's read tick, set while both ends are open");
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(20);
+    let saying = std::thread::spawn(move || {
+        let late = deadline + Duration::from_millis(20);
+        while Instant::now() < late {
+            std::thread::sleep(late.saturating_duration_since(Instant::now()));
+        }
+        said.write_all(b"warden armed 123\n")
+    });
+    let answer = read_the_wardens_word_within(&mut words, deadline);
+    let took = started.elapsed();
+    saying
+        .join()
+        .expect("the saying thread ends")
+        .expect("the word was written");
+    let refusal = match answer {
+        Ok(word) => panic!(
+            "a word complete only after the deadline is refused, not taken for the warden \
+             armed: {word:?} after {took:?} against 20ms"
+        ),
+        Err(refusal) => refusal,
+    };
+    assert!(
+        refusal == "the warden's word was complete only after its deadline: warden armed 123"
+            || refusal.starts_with("the warden said nothing within"),
+        "refused as late, or for silence when the reader came to its first read only after \
+         the deadline: {refusal}"
+    );
+}
+
+/// The same word written before the wait, behind the lines libtest writes
+/// first, is accepted within its deadline: the refusal above is the word's
+/// lateness, not the reader's.
+#[cfg(unix)]
+#[test]
+fn a_warden_word_completed_within_the_deadline_on_a_real_socket_is_accepted() {
+    use std::io::Write as _;
+
+    let (mut words, mut said) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for the warden's word");
+    words
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("the warden's read tick, set while both ends are open");
+    said.write_all(b"running 1 test\nwarden armed 123\n")
+        .expect("the word is written");
+    let word = read_the_wardens_word_within(&mut words, Instant::now() + Duration::from_secs(5))
+        .expect("a word complete within the deadline is accepted");
+    assert_eq!(word, "warden armed 123");
+}
+
 /// An interrupted sentinel read is made again within the same bound: it
 /// observed nothing, so it is neither counted nor acknowledged, and a socket
 /// that answers `Interrupted` to every read ends in the bound's report with
@@ -9264,6 +9365,64 @@ fn an_interrupted_sentinel_read_is_made_again_within_the_same_bound() {
         vec![1, 2],
         "each read that found a copy open was acknowledged, once"
     );
+}
+
+/// An EOF that a sentinel read begun within the bound answers only after it
+/// is refused, on a real [`sentinel_pair`] with its own 50 ms read tick: the
+/// other end is closed twenty milliseconds after a twenty millisecond bound,
+/// and the read waiting on it returns EOF late
+/// (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`). Before, EOF was returned
+/// at once and the bound looked at only after a read that found a copy open,
+/// so this read as a close within the bound. A closing thread held off past
+/// the read's tick leaves the copy open at the tick instead, which is the
+/// bound's report all the same. The closing thread is joined before any
+/// assertion.
+#[cfg(unix)]
+#[test]
+fn a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused() {
+    let (sentinel, mut observer) = sentinel_pair();
+    let bound = Duration::from_millis(20);
+    let started = Instant::now();
+    let closing = std::thread::spawn(move || {
+        let late = started + bound + Duration::from_millis(20);
+        while Instant::now() < late {
+            std::thread::sleep(late.saturating_duration_since(Instant::now()));
+        }
+        drop(sentinel);
+    });
+    let answer = sentinel_closed_within(&mut observer, bound, &mut |_| {});
+    closing.join().expect("the closing thread ends");
+    let held = match answer {
+        Ok((took, observations)) => panic!(
+            "an EOF read only after the bound is not a close within it: read as one after \
+             {took:?} and {observations} reads, against {bound:?}"
+        ),
+        Err(held) => held,
+    };
+    assert!(
+        held.waited >= held.bound,
+        "reported at the bound's end, not before it: {held}"
+    );
+    let report = held.to_string();
+    assert!(
+        (held.eof_late && report.starts_with("the sentinel answered EOF only after the full 20ms"))
+            || (!held.eof_late && report.starts_with("a copy of the sentinel was still open")),
+        "the report says which it was, the EOF late or a copy open at the tick: {report}"
+    );
+}
+
+/// An end closed before the observation answers EOF at the first read, well
+/// within the bound, and is accepted: the refusal above is the EOF's
+/// lateness, not the reader's.
+#[cfg(unix)]
+#[test]
+fn a_sentinel_eof_read_within_the_bound_on_a_real_socket_is_accepted() {
+    let (sentinel, mut observer) = sentinel_pair();
+    drop(sentinel);
+    let (_, observations) =
+        sentinel_closed_within(&mut observer, Duration::from_secs(5), &mut |_| {})
+            .expect("an EOF read within the bound is a close within it");
+    assert_eq!(observations, 1, "the first read answered EOF");
 }
 
 /// A lookup that fails on a listed descriptor fails the identity scan with
@@ -9641,13 +9800,21 @@ fn spawn_a_warden(harness: &str) -> Result<std::process::Child, String> {
 
 /// The warden's one line of word, `warden armed <group>` or `warden refused:
 /// <why>`, read from `words` -- whose reads each wait at most their timeout
-/// -- one read per turn, `deadline` looked at before every turn; the lines
-/// libtest itself writes first are skipped.
+/// -- one read per turn, `deadline` looked at before every turn: before a
+/// word a read completed is accepted, as well as before another read is
+/// made. A read begun in time can return after the deadline, its timeout
+/// being the socket's and not the caller's, and a word it completed then
+/// came late and is refused, as a report complete only after its deadline
+/// is (`read_report_within_by`); before, the word was accepted first and the
+/// deadline looked at only before the next read (`PR320-R7-MAIN-001`,
+/// `PR320-R7-REG-001`,
+/// `a_warden_word_completed_after_the_deadline_on_a_real_socket_is_refused`).
+/// The lines libtest itself writes first are skipped.
 ///
 /// # Errors
 ///
-/// No word by the deadline, the warden's end closed with none, or a read
-/// that failed.
+/// No word by the deadline -- none said, or one complete only after it --
+/// the warden's end closed with none, or a read that failed.
 #[cfg(unix)]
 fn read_the_wardens_word_within(
     words: &mut impl std::io::Read,
@@ -9656,18 +9823,24 @@ fn read_the_wardens_word_within(
     let mut text = Vec::new();
     let mut buffer = [0_u8; 256];
     loop {
-        if let Some(word) = String::from_utf8_lossy(&text)
+        let word = String::from_utf8_lossy(&text)
             .split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
             .find(|line| line.starts_with("warden "))
-        {
-            return Ok(word.trim_end().to_owned());
-        }
+            .map(|word| word.trim_end().to_owned());
         if Instant::now() >= deadline {
-            return Err(format!(
-                "the warden said nothing within {WARDEN_BOUND:?}: {}",
-                String::from_utf8_lossy(&text)
-            ));
+            return Err(match word {
+                Some(word) => {
+                    format!("the warden's word was complete only after its deadline: {word}")
+                }
+                None => format!(
+                    "the warden said nothing within {WARDEN_BOUND:?}: {}",
+                    String::from_utf8_lossy(&text)
+                ),
+            });
+        }
+        if let Some(word) = word {
+            return Ok(word);
         }
         match words.read(&mut buffer) {
             Ok(0) => {

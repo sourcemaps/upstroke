@@ -714,3 +714,22 @@ this one difference is the one fixed, and two macOS limits are named -- std sets
 new socket pair's ends only after creating them there, so a process another thread execs in between
 can hold an end and make a reading late, and the death path, which ends a group when the test
 process dies, is executed on Linux only.
+
+## A word or an EOF a read completed only after its deadline (2026-09-25, round eight)
+
+The seventh round's independent reviews found one P3, the same one in both (`PR320-R7-MAIN-001`,
+`PR320-R7-REG-001`): the warden's word reader accepted a word that a read begun in time completed
+only after its deadline, because it looked at a completed word before the clock and at the clock
+only before the next read. Both reviewers' probes reproduced it at `ac1cdfbf` before any source
+changed. The reader now reads the clock before it accepts a completed word as well as before each
+read, and refuses a late word as late
+(`a_warden_word_completed_after_the_deadline_on_a_real_socket_is_refused`, with its timely
+control). The sweep this round made of every other reader and wait the pull request adds or
+rewrites found one more of the same shape: the sentinel reader returned an EOF that its 50 ms read
+answered after the bound as a close within it. It is refused the same way
+(`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`,
+`a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused`), which changes nothing the
+lifeline or the lease-sentinel tests assert, their bounds being seconds. The twelve polls that
+observe once more after a rest capped at their deadline are a different shape and are unchanged:
+each observation is one non-blocking call, so the look after the deadline is late only by the wake,
+not by a socket's tick, and five of them collect a child, whose status a refusal would lose.
