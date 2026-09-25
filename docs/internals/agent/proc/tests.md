@@ -1234,8 +1234,20 @@ still be useless.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `let silent = scratch.join("never");`
 
-Two bounds against one silent producer: each wait ends at the value
-its caller passed, and the longer bound spends longer.
+One bound against one silent producer, on the wall clock: the wait
+reports the bound its caller passed and does not end before it -- a
+lower bound, which a loaded runner cannot fail. Then two bounds, 120 ms
+and 480 ms, through `await_signal_by` on a clock the test drives, sixty
+milliseconds a reading: the wait reads the clock once for its deadline
+and once per poll, so the first ends at its third reading and the second
+at its ninth, which is the deadline being the caller's bound and nothing
+else -- a bound of the wait's own, whatever its value, would end both at
+the same reading. The oracle before this one compared the two waits'
+wall-clock durations and required the longer bound to have spent longer,
+which a stall of the first wait past their difference of 360 ms fails: CI's
+Windows guest measured the 120 ms wait at 558.8 ms against the 480 ms
+wait's 485.5 ms (`PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). A reading count
+has no stall in it.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `const GENEROUS: Duration = Duration::from_secs(30);`
 

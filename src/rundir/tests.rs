@@ -30,6 +30,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
 use crate::agent::proc::test_support::readiness;
+#[cfg(unix)]
+use crate::workspace_manager::fixture::{rest_within, say_on_stderr};
 
 /// A scratch tree for one test.
 ///
@@ -4673,12 +4675,266 @@ fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
     );
 }
 
+/// How long a lease observed after its holder's release -- or a sentinel end
+/// observed after this process's copy of it is closed -- may keep reading
+/// held before the observation fails: a sibling's fork-to-exec window is
+/// milliseconds, so this is ten thousand times the hold it tolerates, and it
+/// is paid only by a failing run.
+#[cfg(unix)]
+const LEASE_RELEASE_BOUND: Duration = Duration::from_secs(20);
+
+/// What [`lease_released_within`] reports when the lease still read held at
+/// the end of its bound: the bound, the time actually waited and how many
+/// observations found it held, which is what tells a hold that never cleared
+/// from one observed at a single instant.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct LeaseHeldPastBound {
+    bound: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for LeaseHeldPastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the run's cleanup.lock was still held after the full {:?} bound, every one of {} \
+             observations over {:?} finding it held",
+            self.bound, self.observations, self.waited
+        )
+    }
+}
+
+/// Observe the run's cleanup lease every 50 ms until it reads free or
+/// `bound` runs out: how long that took and how many observations it was, or
+/// the report of a hold that outlasted the bound. The observation is
+/// `observe_cleanup_hold`, production's own read. `on_held` runs after each
+/// observation that found the lease held, with that observation's number
+/// and before the bound is checked: it is how a test releases a holder only
+/// once this observation has seen it, so that the order -- held, released,
+/// free -- is acknowledged by the observation rather than timed. Each rest
+/// between two observations is one `nanosleep`, capped at what is left of
+/// the bound and never made again ([`rest_within`]): `std::thread::sleep`
+/// made a refused rest again inside itself, and the wait never came back to
+/// its bound (`PR320-R6-REG-001`,
+/// `a_lease_wait_whose_every_rest_is_refused_returns_at_its_bound`).
+#[cfg(unix)]
+fn lease_released_within(
+    public: &Path,
+    bound: Duration,
+    on_held: &mut dyn FnMut(u32),
+) -> Result<(Duration, u32), LeaseHeldPastBound> {
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
+        if !observe_cleanup_hold(public, &mut NoHooks) {
+            return Ok((started.elapsed(), observations));
+        }
+        on_held(observations);
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(LeaseHeldPastBound {
+                bound,
+                waited,
+                observations,
+            });
+        }
+        rest_within(
+            Duration::from_millis(50),
+            bound.saturating_sub(started.elapsed()),
+        );
+    }
+}
+
+/// Every descriptor of this process open on the file at `path`, by the
+/// identity of what it is open on -- device and inode -- and never by number.
+/// The listing is `/dev/fd`, and the lookup asks the kernel through each
+/// listed number itself, `fstat`, for the identity of what that number is
+/// open on ([`identity_of_the_descriptor`]), against the target's from a
+/// `stat` of its path ([`identity_at`]), the two compared field by field.
+/// The lookup owns nothing and has no precondition: a number closed between
+/// the listing and its lookup answers `EBADF` and is skipped
+/// (`a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan`
+/// constructs that window), any other answer than an identity fails the scan
+/// with the number and the error -- a metadata read that failed is neither an
+/// absent descriptor nor a present one, and a scan that read it as absent
+/// would prove a release that never happened
+/// (`a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence`)
+/// -- and the scan opens and closes nothing, so no lock this process holds
+/// on a file it visits is touched. Not a `stat` of
+/// the `/dev/fd` entry, which was this fn's lookup before: on macOS that
+/// answers no open file's identity -- the native run of `1a1734cf` read an
+/// empty scan through it while the hold was open -- and on Linux it is a
+/// path operation on an entry another thread's close removes. A number
+/// closed by a drop is the next number any
+/// thread of this process opens, so a number that reads open is no evidence
+/// that the file it used to name is still held, and a number that reads
+/// closed is no evidence that nothing else of this process holds that file
+/// (`a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open`);
+/// one reused for another file has that file's identity and is not counted.
+/// Sorted.
+#[cfg(unix)]
+fn descriptors_open_on(path: &Path) -> Vec<libc::c_int> {
+    descriptors_open_on_observing(path, &mut |_| {})
+}
+
+/// [`descriptors_open_on`], with `on_listed` run for each number after it is
+/// listed and before it is looked up: the seam through which a test closes a
+/// listed number inside that window.
+#[cfg(unix)]
+fn descriptors_open_on_observing(
+    path: &Path,
+    on_listed: &mut dyn FnMut(libc::c_int),
+) -> Vec<libc::c_int> {
+    descriptors_open_on_with(path, on_listed, &identity_of_the_descriptor)
+}
+
+/// [`descriptors_open_on_observing`] with `lookup` in place of
+/// [`identity_of_the_descriptor`]: the seam through which the scan's reading
+/// of a lookup's three answers -- an identity, a number not open, a read
+/// that failed -- is driven with answers a test chooses.
+#[cfg(unix)]
+fn descriptors_open_on_with(
+    path: &Path,
+    on_listed: &mut dyn FnMut(libc::c_int),
+    lookup: &dyn Fn(libc::c_int) -> std::io::Result<Option<libc::stat>>,
+) -> Vec<libc::c_int> {
+    let target = identity_at(path).expect("the file whose descriptors are counted exists");
+    let mut open = Vec::new();
+    for entry in
+        fs::read_dir("/dev/fd").expect("list this process's descriptor table through /dev/fd")
+    {
+        let entry = entry.expect("an entry of /dev/fd");
+        let Ok(number) = entry.file_name().to_string_lossy().parse::<libc::c_int>() else {
+            continue;
+        };
+        on_listed(number);
+        match lookup(number) {
+            Ok(Some(identity)) => {
+                if identity.st_dev == target.st_dev && identity.st_ino == target.st_ino {
+                    open.push(number);
+                }
+            }
+            // Closed between the listing and the lookup: nothing is open there.
+            Ok(None) => {}
+            Err(error) => panic!(
+                "the identity of descriptor {number} could not be read: {error}; a metadata read \
+                 that failed is neither an absent descriptor nor a present one, and the scan \
+                 does not answer through it"
+            ),
+        }
+    }
+    open.sort_unstable();
+    open
+}
+
+/// The identity of the file at `path`, its `stat`, or the error: what
+/// [`descriptors_open_on`] compares each descriptor's identity against, read
+/// into the same struct so that the comparison is field by field.
+#[cfg(unix)]
+fn identity_at(path: &Path) -> std::io::Result<libc::stat> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .expect("a path this module made carries no interior NUL");
+    let mut identity = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` reads the NUL-terminated path and writes one `stat`
+    // through the pointer; both live for the call.
+    if unsafe { libc::stat(path.as_ptr(), identity.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `stat` answered 0, so it wrote the whole struct.
+    Ok(unsafe { identity.assume_init() })
+}
+
+/// The identity of what `number` is open on, its `fstat`, asked of the
+/// kernel through the number itself: `Ok(None)` for a number that is not
+/// open (`EBADF`, the one answer that means absence), and the error for any
+/// other failed read, which means neither absence nor identity and is the
+/// caller's to fail on -- an I/O or permission failure of the read is not a
+/// closed descriptor, and no retry is made. The call takes no ownership of
+/// the number and has no precondition on it: a number closed since it was
+/// listed is answered, not read through, and one closed and reused answers
+/// the new file's identity. Nothing is opened or closed, so no lock this
+/// process holds is touched -- which a lookup that opened or duplicated the
+/// entry and then closed what it opened could not say, closing any
+/// descriptor of a file releasing every record lock the process holds on it.
+/// The reading of the call's answer is [`identity_answered_by`]'s, with
+/// `fstat` as the call.
+#[cfg(unix)]
+fn identity_of_the_descriptor(number: libc::c_int) -> std::io::Result<Option<libc::stat>> {
+    // SAFETY: the call is `fstat` itself, which keeps the seam's contract:
+    // it takes the number by value and writes one `stat` through the
+    // pointer, which the seam keeps alive for the call, when it answers 0,
+    // and nothing that is read otherwise. The closure is inside this block,
+    // so the call is made under it.
+    unsafe { identity_answered_by(number, |number, identity| libc::fstat(number, identity)) }
+}
+
+/// [`identity_of_the_descriptor`] with `call` in place of `fstat`: the one
+/// place the call's answer is read -- zero, and the struct it wrote, is the
+/// identity; nonzero, and the errno it left, is `EBADF` for a number not
+/// open and the error for anything else -- so that a test drives the
+/// reading with a call that fails as it chooses, which no policy can make
+/// the real call do in the suite's shared process
+/// (`a_failed_identity_call_is_read_at_the_call_ebadf_as_absence_and_any_other_errno_as_the_error`;
+/// `PR320-R4-MAIN-004`, `PR320-R4-REG-004`).
+///
+/// # Safety
+///
+/// `call` answers as `fstat` answers: 0 only after writing the whole
+/// `stat` through the pointer, and nonzero with errno set, having written
+/// nothing that is read.
+///
+/// # Errors
+///
+/// The call's, for any errno but `EBADF`.
+#[cfg(unix)]
+unsafe fn identity_answered_by(
+    number: libc::c_int,
+    mut call: impl FnMut(libc::c_int, *mut libc::stat) -> libc::c_int,
+) -> std::io::Result<Option<libc::stat>> {
+    let mut identity = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if call(number, identity.as_mut_ptr()) != 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::EBADF) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: the call answered 0, so it wrote the whole struct, which is
+    // what the caller promised of it.
+    Ok(Some(unsafe { identity.assume_init() }))
+}
+
 /// The pre-spawn half without a spawn: the descriptor returned is a live
 /// shared hold, and dropping it releases the lease. A caller whose spawn
 /// fails therefore leaves nothing held.
+///
+/// The release is this process's own, and it is proved as its own by
+/// identity: before the drop the hold's descriptor is the one descriptor
+/// this process has open on the lease file, and after it there is none --
+/// read through `descriptors_open_on`, which compares what each descriptor
+/// is open on and never asks whether the hold's number is still open,
+/// because that number is the next one any thread of this process opens.
+/// The lease reading free is then observed until it does or
+/// `LEASE_RELEASE_BOUND` runs out, because under a whole parallel suite a
+/// `fork` another thread makes while the hold is open carries a copy of it
+/// to that child's `exec`, and one observation made right after the drop
+/// can land inside that window and read the copy
+/// (`a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor`,
+/// which constructs it). A lease still held at the end of the bound fails
+/// this test with the bound and the observations in the message
+/// (`a_copy_that_outlasts_the_bound_still_fails_the_release_observation`).
 #[cfg(unix)]
 #[test]
 fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
+    use std::os::fd::AsRawFd as _;
+
     let root = scratch("childlease-unspawned");
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000001");
     fs::create_dir_all(&public).expect("the run's public directory");
@@ -4687,11 +4943,6386 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
         .expect("take the shared hold")
         .expect("Unix hands the child a hold");
     assert!(observe_cleanup_hold(&public, &mut NoHooks), "held");
+    let lease = cleanup_lock_file(&public);
+    let descriptor = hold.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&lease),
+        vec![descriptor],
+        "before the drop, the hold's descriptor is the one this process has open on the lease"
+    );
     drop(hold);
     assert!(
-        !observe_cleanup_hold(&public, &mut NoHooks),
-        "released with the descriptor"
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
     );
+    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!("released with the descriptor: {held}");
+    }
+}
+
+/// Why the release above is proved by identity and not by number. A
+/// descriptor number is free the instant its file is closed and is the next
+/// number any thread of this process opens, so under a parallel suite the
+/// hold's number can name an unrelated file before anything reads it.
+/// Constructed here in this thread's own hands, with no window for another
+/// thread to take part: `dup2` closes the hold's descriptor and installs a
+/// copy of `/dev/null` under the same number in one call, which is what a
+/// drop followed by another thread's open leaves behind. The lease reads
+/// free -- within the bound the release test observes under, because a
+/// sibling's fork made while the hold was open carries a copy into its
+/// `exec` window here too -- this process has no descriptor open on it, and
+/// the number is open: exactly the reading a check by number would mistake
+/// for the lease still held.
+#[cfg(unix)]
+#[test]
+fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open() {
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-number-reused");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000006");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
+    let descriptor = hold.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&lease),
+        vec![descriptor],
+        "the hold's descriptor is the one open on the lease"
+    );
+    let unrelated = File::open("/dev/null").expect("an unrelated file");
+    // SAFETY: `dup2` takes two descriptors by value: it closes `descriptor`,
+    // which `hold` owns and this thread alone uses, and makes it a copy of
+    // `unrelated` in the same call, so no other thread's descriptor can be
+    // the one it replaces. `hold` goes on owning the number and closes the
+    // copy when it drops.
+    assert_eq!(
+        unsafe { libc::dup2(unrelated.as_raw_fd(), descriptor) },
+        descriptor,
+        "the hold's number now names /dev/null: {}",
+        std::io::Error::last_os_error()
+    );
+    if let Err(held) = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!("the lease reads free once the dup2 has closed its only descriptor here: {held}");
+    }
+    assert!(
+        descriptors_open_on(&lease).is_empty(),
+        "and this process has no descriptor open on it, whatever its old number names now"
+    );
+    // SAFETY: `fcntl` with `F_GETFD` reads one flag of this process's own
+    // descriptor table and touches no memory.
+    assert_ne!(
+        unsafe { libc::fcntl(descriptor, libc::F_GETFD) },
+        -1,
+        "the number is open, for /dev/null: a check by number would read the lease as still \
+         held here"
+    );
+    drop(hold);
+    drop(unrelated);
+}
+
+/// Why the lookup is a raw `fstat` through the number, a call with no
+/// precondition, and not a `File` made from it. A number listed by `/dev/fd`
+/// is another thread's to close at any moment after the listing, and a
+/// `File` made from a number that is no longer open is a broken contract
+/// whatever its `fstat` then answers; the raw call owns nothing and answers
+/// `EBADF` for such a number, which the scan reads as nothing open there and
+/// nothing else. Constructed with the closing in the observation's hands:
+/// another thread owns a file, the scan reaches its number, and only then is
+/// that file closed and the close acknowledged; the lookup of that number
+/// finds nothing there, and the scan goes on to report this thread's own
+/// descriptor on the target and nothing else.
+#[cfg(unix)]
+#[test]
+fn a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_identity_scan() {
+    use std::os::fd::AsRawFd as _;
+    use std::sync::mpsc;
+
+    let root = scratch("descriptor-scan-closed-in-window");
+    let target = root.join("target");
+    let held = File::create(&target).expect("the target, held open by this thread");
+    let (number_sender, number_receiver) = mpsc::channel();
+    let (close_sender, close_receiver) = mpsc::channel::<()>();
+    let (closed_sender, closed_receiver) = mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        let unrelated = File::open("/dev/null").expect("a file another thread owns");
+        number_sender
+            .send(unrelated.as_raw_fd())
+            .expect("the scanning thread waits for the number");
+        if close_receiver.recv().is_ok() {
+            drop(unrelated);
+            closed_sender
+                .send(())
+                .expect("the scanning thread waits for the acknowledgement");
+        }
+    });
+    let unrelated_number = number_receiver.recv().expect("the owner opened its file");
+    let mut closed_in_window = false;
+    let open = descriptors_open_on_observing(&target, &mut |listed| {
+        if listed == unrelated_number && !closed_in_window {
+            close_sender
+                .send(())
+                .expect("the owner waits to close its file");
+            closed_receiver
+                .recv()
+                .expect("the owner closed its file and said so");
+            closed_in_window = true;
+        }
+    });
+    drop(close_sender);
+    owner.join().expect("the owner thread ends");
+    assert!(
+        closed_in_window,
+        "the listing reached the owner's number {unrelated_number} while its file was open"
+    );
+    assert_eq!(
+        open,
+        vec![held.as_raw_fd()],
+        "the scan reports this thread's descriptor on the target and nothing for the number \
+         closed between its listing and its lookup"
+    );
+    drop(held);
+}
+
+/// Why the observation above is bounded. A copy of this process's descriptor
+/// carried by a sibling's fork keeps the lease after the descriptor itself is
+/// closed: the fork is `ParkedFork::holding`, a child of this process parked
+/// with that one descriptor and its socket, whose report comes from inside
+/// that window, so it is known alive and holding. The single observation the
+/// test above used to make reads held. The bounded one is then made with the
+/// release in its own hands: its first observation reads the copy held and,
+/// from inside that observation, releases the fork; a later observation
+/// reads free. Held, released, free is therefore an order the observation
+/// acknowledged, not one a clock was trusted to produce, and a legal
+/// schedule that delays either side changes nothing: the release waits for
+/// the observation, however long the observation takes to arrive, and a
+/// second sibling's copy in its own window after the release costs
+/// observations that are reported, not asserted.
+#[cfg(unix)]
+#[test]
+fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-sibling-copy");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000003");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
+    let descriptor = hold.as_raw_fd();
+    let parked = ParkedFork::holding(descriptor);
+    let holder = parked.pid();
+    assert!(parked.is_alive(), "the parked fork {holder} is alive");
+    let [lease_number, _] = parked.kept();
+    assert_eq!(lease_number, descriptor, "and it kept the lease copy");
+    drop(hold);
+    assert!(
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
+    );
+    assert!(
+        observe_cleanup_hold(&public, &mut NoHooks),
+        "one observation right after the drop reads the lease held: the copy in fork {holder}'s \
+         window"
+    );
+
+    let mut parked = Some(parked);
+    let mut released = None;
+    let observed = lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |observation| {
+        if let Some(parked) = parked.take() {
+            released = Some((observation, parked.release()));
+        }
+    });
+    let (released_at, status) = released
+        .expect("the bounded observation read the copy held, and only then released the fork");
+    let (waited, observations) = observed.expect("the lease reads free once the fork is released");
+    assert_eq!(
+        released_at, 1,
+        "the first observation read the copy held, so the release came after it"
+    );
+    assert!(
+        observations > released_at,
+        "and the observation that read free came after the one that released the fork: \
+         {observations} observations over {waited:?}"
+    );
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+/// The bound is a bound: a copy that outlasts it fails the observation with
+/// the bound and the count in the message, and the observation never turns a
+/// missing release into success. The count is reported, not bounded below:
+/// how many observations fit inside the bound is the scheduler's to decide,
+/// and no test may assert it.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-past-bound");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000005");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    let lease = cleanup_lock_file(&public);
+    let descriptor = hold.as_raw_fd();
+    let parked = ParkedFork::holding(descriptor);
+    let holder = parked.pid();
+    drop(hold);
+    assert!(
+        descriptors_open_on(&lease).is_empty(),
+        "this process holds no descriptor on the lease once the hold is dropped"
+    );
+
+    let held = lease_released_within(&public, Duration::from_millis(300), &mut |_| {})
+        .expect_err("a copy alive past the bound is reported, not waited into success");
+    assert!(
+        held.waited >= held.bound,
+        "the observation ran its whole bound: {held}"
+    );
+    assert!(
+        held.to_string()
+            .contains("still held after the full 300ms bound"),
+        "{held}"
+    );
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the holder {holder} is alive and holding after the report"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+    lease_released_within(&public, LEASE_RELEASE_BOUND, &mut |_| {})
+        .expect("and the lease reads free once the fork has exited");
+}
+
+/// What [`sentinel_closed_within`] reports when a copy of the sentinel end
+/// was still open at the end of its bound: the bound, the time actually
+/// waited and how many reads found a copy open, which is what tells a copy
+/// that never closed from one observed at a single instant, and whether a
+/// read begun within the bound answered EOF only after it (`eof_late`).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct SentinelHeldPastBound {
+    bound: Duration,
+    waited: Duration,
+    observations: u32,
+    /// The last read answered EOF, but only once the bound had passed: a
+    /// close observed late, never accepted as one within the bound
+    /// (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`).
+    eof_late: bool,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for SentinelHeldPastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.eof_late {
+            return write!(
+                f,
+                "the sentinel answered EOF only after the full {:?} bound, {:?} in, after {} \
+                 reads finding a copy open: a close read after the bound is not one within it",
+                self.bound, self.waited, self.observations
+            );
+        }
+        write!(
+            f,
+            "a copy of the sentinel was still open after the full {:?} bound, every one of {} \
+             reads over {:?} finding one",
+            self.bound, self.observations, self.waited
+        )
+    }
+}
+
+/// A sentinel socket pair: the end a fork inherits and keeps or sweeps, and
+/// this process's observer end, whose 50 ms read timeout is set here, while
+/// both ends are open, and never at an observation. On macOS a socket whose
+/// peer is gone accepts no option -- `setsockopt` answers `EINVAL` once every
+/// copy of the other end has closed, which the native run of `1a1734cf` hit
+/// at the observation that follows a keeper's release -- where Linux accepts
+/// it, so a timeout set at the observation reads as sound on Linux and is
+/// not.
+#[cfg(unix)]
+fn sentinel_pair() -> (
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+) {
+    let (sentinel, observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    observer
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("bound each read of the sentinel while its peer is open");
+    (sentinel, observer)
+}
+
+/// Read `observer`, this process's end of a [`sentinel_pair`], every 50 ms --
+/// its read timeout, set when the pair was made -- until it answers EOF or
+/// `bound` runs out: how long that took and how many reads it was, or the
+/// report of a copy that outlasted the bound. EOF is the
+/// kernel's answer that no copy of the other end is open in any process, so
+/// it proves that the fork under test closed its inherited one only once
+/// every other copy is accounted for: a sibling's fork made while that end
+/// was open carries a copy into its own window exactly as it does the lease,
+/// which is why the read is observed within the bound the lease observations
+/// use and never at one instant. `on_held` runs after each read that found a
+/// copy open, with that read's number and before the bound is checked: how a
+/// test releases a holder only once this observation has seen its copy, so
+/// that held, released, EOF is an order the observation acknowledged rather
+/// than one a timer arranged. A read a handled signal ended before its
+/// timeout (`Interrupted`) observed nothing -- neither a copy open nor EOF --
+/// so it is neither counted nor acknowledged; the bound, absolute from the
+/// start, decides whether the read is made again, and no interruption
+/// restarts it (`PR320-R3-MAIN-005`). An EOF is a close within the bound
+/// only when the clock, read once the read has returned, is still inside
+/// it: a read begun in time can return after the bound, its timeout being
+/// the socket's and not the bound, and an EOF it answered then is reported
+/// as the bound's end with the EOF late (`eof_late`), never as a close within
+/// it; before, EOF was returned at once and the bound looked at only after a
+/// read that found a copy open (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`,
+/// `a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused`). On
+/// Linux a report is paired by the caller with the fork under test's own
+/// table ([`sentinel_attribution`]), which says whose copy it was. Any
+/// reader, so that the answers a socket gives -- EOF, a timeout, an
+/// interruption -- are driven in an order a test chooses
+/// (`an_interrupted_sentinel_read_is_made_again_within_the_same_bound`).
+#[cfg(unix)]
+fn sentinel_closed_within(
+    observer: &mut impl std::io::Read,
+    bound: Duration,
+    on_held: &mut dyn FnMut(u32),
+) -> Result<(Duration, u32), SentinelHeldPastBound> {
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    let mut byte = [0_u8; 1];
+    loop {
+        match observer.read(&mut byte) {
+            Ok(0) => {
+                let waited = started.elapsed();
+                if waited >= bound {
+                    return Err(SentinelHeldPastBound {
+                        bound,
+                        waited,
+                        observations,
+                        eof_late: true,
+                    });
+                }
+                return Ok((waited, observations + 1));
+            }
+            Ok(_) => panic!("nothing writes to a sentinel, yet a read answered bytes"),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                let waited = started.elapsed();
+                if waited >= bound {
+                    return Err(SentinelHeldPastBound {
+                        bound,
+                        waited,
+                        observations,
+                        eof_late: false,
+                    });
+                }
+                continue;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                observations += 1;
+            }
+            Err(error) => panic!("read the sentinel: {error}"),
+        }
+        on_held(observations);
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(SentinelHeldPastBound {
+                bound,
+                waited,
+                observations,
+                eof_late: false,
+            });
+        }
+    }
+}
+
+/// The identity a fork's table is searched for when a sentinel read has not
+/// answered EOF within its bound: on Linux the `/proc` link of this process's
+/// descriptor, `socket:[<inode>]` for a socket end, read while the descriptor
+/// is still open.
+#[cfg(target_os = "linux")]
+fn sentinel_identity(number: libc::c_int) -> std::ffi::OsString {
+    std::fs::read_link(format!("/proc/self/fd/{number}"))
+        .expect("this process's own descriptor has a /proc entry")
+        .into_os_string()
+}
+
+/// On the Unixes without `/proc`, nothing here can name whose copy it is:
+/// the identity is that statement, carried as a value so that a test binds
+/// and passes it exactly as it does the Linux one.
+#[cfg(all(unix, not(target_os = "linux")))]
+struct SentinelIdentityUnreadable;
+
+/// See [`SentinelIdentityUnreadable`].
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sentinel_identity(_number: libc::c_int) -> SentinelIdentityUnreadable {
+    SentinelIdentityUnreadable
+}
+
+/// Whose copy a sentinel read that has not answered EOF is reading, as far as
+/// the platform can say: on Linux the fork under test's `/proc` table either
+/// holds a descriptor with the sentinel's identity or it does not, and the
+/// answer attributes the copy to that fork or explicitly to another process
+/// of this test binary -- a sibling's fork window -- rather than to whichever
+/// child the test happened to make.
+#[cfg(target_os = "linux")]
+fn sentinel_attribution(holder: libc::pid_t, sentinel: &std::ffi::OsStr) -> String {
+    let table = match std::fs::read_dir(format!("/proc/{holder}/fd")) {
+        Ok(entries) => entries,
+        Err(error) => return format!("fork {holder}'s table could not be read: {error}"),
+    };
+    let mut holds = false;
+    for entry in table {
+        let Ok(entry) = entry else {
+            return format!("fork {holder}'s table could not be listed to its end");
+        };
+        if std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == sentinel) {
+            holds = true;
+        }
+    }
+    if holds {
+        format!("fork {holder}'s table holds a copy of the sentinel {sentinel:?}")
+    } else {
+        format!(
+            "fork {holder}'s table holds no copy of the sentinel {sentinel:?}: the copy still open \
+             belongs to another process of this test binary, a fork made while the sentinel was \
+             open"
+        )
+    }
+}
+
+/// On the Unixes without `/proc`, nothing here can name whose copy it is.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sentinel_attribution(holder: libc::pid_t, _sentinel: &SentinelIdentityUnreadable) -> String {
+    format!("whether fork {holder} holds a copy cannot be read on this platform")
+}
+
+/// On Linux, the fork under test's own descriptor table, read from `/proc`:
+/// exactly stdio, its lease copy and its socket end, the lease entry naming
+/// `cleanup.lock`. The child-specific proof of what the fork holds, which no
+/// read of a sentinel from this process can be: EOF is a fact about every
+/// copy of an end at once.
+#[cfg(target_os = "linux")]
+fn assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+    holder: libc::pid_t,
+    lease_number: libc::c_int,
+    socket_number: libc::c_int,
+    under: &str,
+) {
+    let mut entries: Vec<(libc::c_int, PathBuf)> = std::fs::read_dir(format!("/proc/{holder}/fd"))
+        .expect("the child's descriptor table")
+        .map(|entry| {
+            let entry = entry.expect("an entry of the table");
+            let number = entry
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .expect("a descriptor number");
+            (number, std::fs::read_link(entry.path()).unwrap_or_default())
+        })
+        .collect();
+    entries.sort();
+    let numbers: Vec<libc::c_int> = entries.iter().map(|(number, _)| *number).collect();
+    let mut expected = vec![0, 1, 2, lease_number, socket_number];
+    expected.sort_unstable();
+    assert_eq!(
+        numbers, expected,
+        "{under}: the child's table is stdio, the lease copy and the socket: {entries:?}"
+    );
+    let lease_target = &entries
+        .iter()
+        .find(|(number, _)| *number == lease_number)
+        .expect("the lease entry")
+        .1;
+    assert!(
+        lease_target.ends_with("cleanup.lock"),
+        "{under}: the kept descriptor is the run's lease: {lease_target:?}"
+    );
+}
+
+/// What the parked fork holds, and what it does not: the lease copy and its
+/// socket, and not a sentinel this process had open at the fork, nor another
+/// run's lease. The sentinel is one end of a socket pair. With this process's
+/// copy of that end closed, a read on the other end answers EOF only when
+/// nobody holds a copy, so EOF is the proof that no copy survives -- in the
+/// fork under test and in every other process alike, which is the point:
+/// under a whole parallel suite a sibling's fork made while the end was open
+/// carries a copy into its own window, exactly as it does the lease, and a
+/// single read made right after the drop can land inside that window and
+/// read the sibling's copy. So the read is observed within the bound the
+/// lease observations use, and the test constructs the sibling itself: a
+/// second parked fork told to keep only the sentinel, released from inside
+/// the first read that found a copy open, so that held, released, EOF is an
+/// order the observation acknowledged (the shape of
+/// `a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descriptor`),
+/// while the fork under test is proved on its own account: on Linux its
+/// descriptor table, read from `/proc`, is exactly stdio, the socket and the
+/// lease, the lease entry naming `cleanup.lock`, and a read that has not
+/// answered EOF at the end of the bound says whether that fork holds a copy.
+/// The control is a parked fork told to keep a second sentinel: the read
+/// cannot answer EOF while that child lives -- on Linux its table shows the
+/// copy -- and answers it within the bound once the child is released; and
+/// another run's lease, open across that control's fork and this process's
+/// copy then dropped, reads free within the bound while the control lives,
+/// because the control closed its copy -- where a raw `fork` that closed
+/// nothing would hold every descriptor of every concurrent test for as long
+/// as it slept.
+#[cfg(unix)]
+#[test]
+fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-sentinel");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000004");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) = sentinel_pair();
+    let sentinel_number = sentinel.as_raw_fd();
+    let identity = sentinel_identity(sentinel_number);
+    let sibling = ParkedFork::holding(sentinel_number);
+    let sibling_pid = sibling.pid();
+
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    let [lease_number, socket_number] = parked.kept();
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the parked fork {holder} holds the lease"
+    );
+    assert!(
+        sentinel_number != lease_number && sentinel_number != socket_number,
+        "the sentinel {sentinel_number} is neither kept descriptor"
+    );
+    #[cfg(target_os = "linux")]
+    assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+        holder,
+        lease_number,
+        socket_number,
+        "the fork under test",
+    );
+    drop(sentinel);
+    let mut sibling = Some(sibling);
+    let mut released = None;
+    let observed = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |read| {
+        if let Some(sibling) = sibling.take() {
+            released = Some((read, sibling.release()));
+        }
+    });
+    let (released_at, sibling_status) = released
+        .expect("the first read found the sibling's copy open, and only then released the sibling");
+    assert_eq!(
+        released_at, 1,
+        "the sibling {sibling_pid} kept its copy until the first read had seen it"
+    );
+    assert!(
+        sibling_status.success(),
+        "the released sibling exited cleanly: {sibling_status:?}"
+    );
+    match observed {
+        Ok((waited, reads)) => assert!(
+            reads > released_at,
+            "the read that answered EOF came after the one that released the sibling: {reads} \
+             reads over {waited:?}"
+        ),
+        Err(held) => panic!(
+            "with this process's copy of the sentinel closed and the sibling released, the read \
+             answers EOF, so no copy of it survives in fork {holder}: {held}; {}",
+            sentinel_attribution(holder, &identity)
+        ),
+    }
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+
+    let (sentinel, mut observer) = sentinel_pair();
+    let identity = sentinel_identity(sentinel.as_raw_fd());
+    let unrelated_public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000007");
+    fs::create_dir_all(&unrelated_public).expect("another run's public directory");
+    let mut unrelated_command = std::process::Command::new("git");
+    let unrelated_hold = hold_cleanup_lease_for_child(&mut unrelated_command, &unrelated_public)
+        .expect("take the other run's hold")
+        .expect("Unix hands the child a hold");
+    let keeper = ParkedFork::holding(sentinel.as_raw_fd());
+    let keeper_pid = keeper.pid();
+    drop(unrelated_hold);
+    match lease_released_within(&unrelated_public, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        Ok((waited, observations)) => assert!(
+            keeper.is_alive(),
+            "the control {keeper_pid} is still parked when the other run's lease reads free \
+             ({observations} observations over {waited:?}), so the copy that cleared was a \
+             sibling's window and not the control's, which closed its own before it reported"
+        ),
+        Err(held) => panic!(
+            "the other run's lease, open across the control's fork, reads free once this \
+             process's copy is dropped, because the control {keeper_pid} closed its copy: {held}"
+        ),
+    }
+    drop(sentinel);
+    let held = sentinel_closed_within(&mut observer, Duration::from_millis(150), &mut |_| {})
+        .expect_err(
+            "a parked fork that kept the sentinel holds a copy of it, so the read cannot answer \
+             EOF while that child lives",
+        );
+    assert!(
+        held.waited >= held.bound && keeper.is_alive(),
+        "the control {keeper_pid} lived through the whole bound: {held}"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let attribution = sentinel_attribution(keeper_pid, &identity);
+        assert!(
+            attribution.contains("holds a copy of the sentinel"),
+            "and its table says so, which is the reading a report of the fork under test would \
+             give: {attribution}"
+        );
+    }
+    let status = keeper.release();
+    assert!(
+        status.success(),
+        "the released control exited cleanly: {status:?}"
+    );
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "and answers EOF once that fork has exited: {held}; {}",
+            sentinel_attribution(keeper_pid, &identity)
+        );
+    }
+}
+
+/// Whether `pid` is no child of this process any more, asked without
+/// collecting anything: `waitid` with `WNOWAIT` answers `ECHILD`, so it has
+/// been collected. A child still there, running or ended, is left exactly as
+/// it was: this reads and never reaps, so an assertion made with it cannot
+/// act on a number whose owner may already have let it go. It answered with
+/// `waitpid`, which collected an ended child as a side effect of asking,
+/// after which a test could signal the number it had just freed
+/// (`PR320-R6-MAIN-002`).
+#[cfg(unix)]
+fn is_reaped(pid: libc::pid_t) -> bool {
+    // SAFETY: `zeroed` is a valid `siginfo_t`. `waitid` writes one
+    // `siginfo_t` through the pointer, which lives for the call, and takes
+    // the id and the flags by value; `WNOWAIT` leaves whatever it reports
+    // uncollected.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let answered = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            libc::id_t::try_from(pid).expect("a pid names a process, so it fits an id"),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+}
+
+/// Collect `pid`, a child of this process its owner left uncollected, within
+/// `bound`, `waitpid` with `WNOHANG` every 5 ms: its status, or `None` for a
+/// child not collected by the end of the bound. For a test that collects a
+/// child its owner could not, from a thread no policy binds; never `waitpid`
+/// without `WNOHANG`, which would hold the test for as long as the kernel
+/// took. Each rest is one `nanosleep` capped at what is left of the bound
+/// ([`rest_within`]), as every wait of this module's is.
+#[cfg(target_os = "linux")]
+fn collect_child_within(pid: libc::pid_t, bound: Duration) -> Option<std::process::ExitStatus> {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let started = Instant::now();
+    loop {
+        let mut status = 0;
+        // SAFETY: `waitpid` writes one int through `status`, which lives for
+        // the call, and takes the pid and the flags by value.
+        let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if answered == pid {
+            return Some(std::process::ExitStatus::from_raw(status));
+        }
+        assert_eq!(
+            answered,
+            0,
+            "waitpid({pid}, WNOHANG): {}",
+            std::io::Error::last_os_error()
+        );
+        if started.elapsed() >= bound {
+            return None;
+        }
+        rest_within(
+            Duration::from_millis(5),
+            bound.saturating_sub(started.elapsed()),
+        );
+    }
+}
+
+/// Collect `child`, a process this one spawned and still owns, within
+/// `bound`: `try_wait` -- one `waitpid` with `WNOHANG` -- every 5 ms, each rest
+/// one `nanosleep` capped at what is left of the bound ([`rest_within`]).
+/// Its status, or `None` for a child not collected by the end of the bound.
+/// Through the `Child`, so that a child std has already collected is
+/// answered from std's record and no number is waited on twice.
+#[cfg(unix)]
+fn try_collect_within(
+    child: &mut std::process::Child,
+    bound: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + bound;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        let reading = Instant::now();
+        if reading >= deadline {
+            return None;
+        }
+        rest_within(
+            Duration::from_millis(5),
+            deadline.saturating_duration_since(reading),
+        );
+    }
+}
+
+/// Stop the parked child `pid` and observe that it stopped, so that it
+/// cannot read its release: `SIGSTOP`, then `waitpid` with `WUNTRACED`,
+/// which reports the stop and collects nothing.
+#[cfg(unix)]
+fn stop_parked_child(pid: libc::pid_t) {
+    // SAFETY: `kill` takes a pid and a signal by value; the pid is a parked
+    // child this test owns.
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGSTOP) },
+        0,
+        "stop the parked child {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut status = 0;
+    // SAFETY: as `is_reaped`; `WUNTRACED` reports the stop and collects
+    // nothing.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+        pid,
+        "observe the stop of {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        libc::WIFSTOPPED(status),
+        "the child {pid} is stopped: {status:#x}"
+    );
+}
+
+/// Run `act` on a thread of its own and wait for its answer within `bound`:
+/// the test's failure bound around a step that must itself be bounded, so a
+/// step that is not fails the test instead of hanging it. The thread's
+/// handle comes back with the answer, or with the timeout, for the caller to
+/// unblock and join; the thread's send is best effort by design, because a
+/// caller whose bound ran out reports that bound and not the late answer.
+#[cfg(unix)]
+fn on_a_thread_within<T: Send + 'static>(
+    bound: Duration,
+    act: impl FnOnce() -> T + Send + 'static,
+) -> (
+    Result<T, std::sync::mpsc::RecvTimeoutError>,
+    std::thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        if sender.send(act()).is_err() {
+            // The caller stopped waiting: its failure bound expired and it
+            // reports that, which is the outcome this late answer confirms.
+        }
+    });
+    (receiver.recv_timeout(bound), handle)
+}
+
+/// A parked child that never reads its release -- stopped, here, so that it
+/// cannot -- is killed at the end of the reap bound and collected, and the
+/// release returns its status saying so. The release runs on a thread of
+/// its own so that a release which blocked past every bound would fail this
+/// test rather than hang it: the outer bound is the failure bound, thirty
+/// times the reap bound.
+///
+/// The body runs in a process of its own
+/// (`release-a-stopped-parked-fork-that-never-reads-its-release`,
+/// [`release_a_stopped_parked_fork_that_never_reads_its_release`]), its
+/// assertions this test's: on the failing path the scenario fails at the
+/// failure bound and exits, its stuck thread with it, and the stopped child
+/// ends with the scenario's group. The test continued the stopped child by
+/// its number instead so that a blocked release could finish, and the
+/// release it waited on might already have collected that number
+/// (`PR320-R6-MAIN-002`).
+#[cfg(unix)]
+#[test]
+fn a_parked_child_that_never_reads_its_release_is_killed_and_reaped_within_the_bound() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "release-a-stopped-parked-fork-that-never-reads-its-release",
+    );
+    assert!(
+        text.contains("released after"),
+        "the release returned its status: {text}"
+    );
+}
+
+/// Dropping a parked fork releases and reaps its child on the same bound: a
+/// child that cannot read the release because it is stopped is killed at the
+/// end of the reap bound and collected before the drop returns. In a process
+/// of its own (`drop-a-stopped-parked-fork`,
+/// [`drop_a_stopped_parked_fork`]), as the test above.
+#[cfg(unix)]
+#[test]
+fn dropping_a_parked_fork_reaps_its_child_even_when_the_child_is_stopped() {
+    let text = assert_the_scenario_ran_to_its_end("drop-a-stopped-parked-fork");
+    assert!(
+        text.contains("the child collected"),
+        "the drop returned having collected the child: {text}"
+    );
+}
+
+/// A release whose every observation a policy interrupts -- `wait4`
+/// answering `EINTR` on the owner's thread alone, installed after the child
+/// is acknowledged -- ends at its bounds instead of inside a retry of its
+/// own: the owner sends the kill at the end of the reap bound and, the child
+/// not collectable within another, the release panics naming the pid, the
+/// signal sent and the interrupted observation (`PR320-R4-MAIN-001`,
+/// `PR320-R4-REG-002`); the unwinding drop spends the same two bounds again
+/// and prints. The child is live, as in REG's probe: it reads its release
+/// byte and ends by itself, which its owner cannot see, so the signal
+/// reaches a zombie, and the child, collected here from a thread the policy
+/// does not bind, has the status of its own exit -- the owner said what it
+/// observed and no more. The release runs on a thread of its own because
+/// the policy is the thread's for good. Linux, for the policy.
+///
+/// The body runs in a process of its own
+/// (`release-a-parked-fork-whose-every-observation-is-interrupted`,
+/// [`release_a_parked_fork_whose_every_observation_is_interrupted`]), in a
+/// group of its own, and this test holds it to having run to its end
+/// ([`assert_the_scenario_ran_to_its_end`]). On the failing path the scenario
+/// fails at its own bound and exits, and the wrapper's kill of its group ends
+/// the child the stuck owner still holds -- the scenario's pid uncollected at
+/// the kill, so no number is signalled that could have been handed out again --
+/// before the group is observed empty: nothing in this process waits on, or is
+/// left behind with, a thread spinning under a policy (`PR320-R5-MAIN-004`,
+/// `PR320-R5-REG-004`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_release_whose_every_observation_is_interrupted_ends_at_its_bounds_and_says_the_child_is_uncollected()
+ {
+    assert_the_scenario_ran_to_its_end(
+        "release-a-parked-fork-whose-every-observation-is-interrupted",
+    );
+}
+
+/// Dropping a parked fork whose every observation a policy interrupts
+/// returns within its bounds too -- the kill sent at the end of the reap
+/// bound, the collection given the reap bound again and then given up --
+/// and never panics; what the drop could not do is on stderr, which
+/// `dropping_a_parked_fork_whose_kill_the_os_refuses_says_so_and_what_is_left`
+/// reads from a process of its own. The child is stopped, as in MAIN's
+/// probe, so it cannot read its release and the kill is what ends it: its
+/// status, collected here from a thread the policy does not bind, says so.
+/// Linux, for the policy.
+///
+/// The body runs in a process of its own
+/// (`drop-a-stopped-parked-fork-whose-every-observation-is-interrupted`,
+/// [`drop_a_stopped_parked_fork_whose_every_observation_is_interrupted`]), in a
+/// group of its own, and this test holds it to having run to its end
+/// ([`assert_the_scenario_ran_to_its_end`]). On the failing path the scenario
+/// fails at its own bound and exits, and the wrapper's kill of its group ends
+/// the child the stuck owner still holds -- the scenario's pid uncollected at
+/// the kill, so no number is signalled that could have been handed out again --
+/// before the group is observed empty: nothing in this process waits on, or is
+/// left behind with, a thread spinning under a policy (`PR320-R5-MAIN-004`,
+/// `PR320-R5-REG-004`).
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_a_parked_fork_whose_every_observation_is_interrupted_returns_within_its_bounds() {
+    assert_the_scenario_ran_to_its_end(
+        "drop-a-stopped-parked-fork-whose-every-observation-is-interrupted",
+    );
+}
+
+/// A liveness observation a policy interrupts for the whole reap bound
+/// fails instead of answering: `is_alive` makes an interrupted observation
+/// again at the tick within the bound, and at its end panics naming the
+/// pid, the bound and the interruption -- neither alive nor ended
+/// (`PR320-R4-MAIN-001`, `PR320-R4-REG-002`). The fork is then dropped on
+/// the same thread, bounded as the drop is, and the child, live and
+/// released by that drop, is collected here from a thread the policy does
+/// not bind. Linux, for the policy.
+///
+/// The body runs in a process of its own
+/// (`observe-a-parked-fork-whose-every-observation-is-interrupted`,
+/// [`observe_a_parked_fork_whose_every_observation_is_interrupted`]), in a
+/// group of its own, and this test holds it to having run to its end
+/// ([`assert_the_scenario_ran_to_its_end`]). On the failing path the scenario
+/// fails at its own bound and exits, and the wrapper's kill of its group ends
+/// the child the stuck owner still holds -- the scenario's pid uncollected at
+/// the kill, so no number is signalled that could have been handed out again --
+/// before the group is observed empty: nothing in this process waits on, or is
+/// left behind with, a thread spinning under a policy (`PR320-R5-MAIN-004`,
+/// `PR320-R5-REG-004`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_liveness_observation_interrupted_for_the_whole_bound_fails_instead_of_answering() {
+    assert_the_scenario_ran_to_its_end(
+        "observe-a-parked-fork-whose-every-observation-is-interrupted",
+    );
+}
+
+/// Run `scenario` in a process of its own and hold it to having run to its
+/// end: exit 0, which the scenario's assertions give only when all of them
+/// held, and the wrapper's notes saying that the scenario's group was killed
+/// or found empty and then observed empty, so that whatever the scenario
+/// left -- a child a refused kill left stopped, or one a stuck owner still
+/// held when the scenario failed -- has ended with the group; and the
+/// lifeline's readings, taken before the text was returned, saying that
+/// every process of the scenario had exited when the wrapper returned and
+/// that the cut which followed left nothing ([`run_parked_fork_scenario`]).
+/// The scenario's text, the wrapper's notes and the lifeline's with it, is in
+/// every message, and is returned for the caller's own assertions.
+#[cfg(unix)]
+fn assert_the_scenario_ran_to_its_end(scenario: &str) -> String {
+    let (status, text) = run_parked_fork_scenario(scenario);
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario `{scenario}`, in a process of its own, ran to its end: {status:?}\n{text}"
+    );
+    assert!(
+        (text.contains("the scenario's process group was killed")
+            || text.contains("the scenario's process group was already empty"))
+            && text.contains("the scenario's group was empty"),
+        "and the wrapper ended its group and observed it empty: {text}"
+    );
+    assert!(
+        every_process_had_exited_when_the_wrapper_returned(&text),
+        "and every process of the scenario had exited when the wrapper returned: {text}"
+    );
+    assert!(
+        the_cut_ended_everything(&text),
+        "and the lifeline's cut left nothing: {text}"
+    );
+    text
+}
+
+/// A scenario whose owner never answers fails at its own bound, and the
+/// stopped child that owner still holds ends with the scenario's group: in a
+/// process of its own
+/// (`fail-at-the-bound-holding-a-stopped-child-on-a-worker-that-never-answers`),
+/// a worker holds a parked fork whose child is stopped and never answers,
+/// as the owner's worker under a first-bad mutation spins, and the scenario
+/// fails at its bound and exits with the child held. The wrapper then kills
+/// the scenario's group -- the scenario uncollected at the kill, so the
+/// group id is still its own -- and the child, which could read neither a
+/// release nor an EOF, has ended when the wrapper returns. This is the
+/// failing path of the three interruption regressions above, held without a
+/// mutation: a bounded failure that leaves no child (`PR320-R5-MAIN-004`,
+/// `PR320-R5-REG-004`). Whether the child had ended when the wrapper
+/// returned is the lifeline's reading, taken before this test's assertions
+/// and before the cut that ends whatever the wrapper left, through the
+/// group's warden rather than by the child's number (`PR320-R6-MAIN-002`).
+/// Linux, for the policy the three regressions stand behind.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_whose_owner_never_answers_fails_at_its_bound_and_its_stopped_child_ends_with_the_group()
+ {
+    let (status, text) = run_parked_fork_scenario(
+        "fail-at-the-bound-holding-a-stopped-child-on-a-worker-that-never-answers",
+    );
+    let child = descendants_named_in(&text, 1)
+        .first()
+        .copied()
+        .expect("the scenario named its child");
+    let ended = every_process_had_exited_when_the_wrapper_returned(&text);
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(101),
+        "the scenario failed at its own bound, as the failing path it stands for does: \
+         {status:?}\n{text}"
+    );
+    assert!(
+        text.contains("the worker answered within its bound"),
+        "with its own bounded failure: {text}"
+    );
+    assert!(
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty"),
+        "the wrapper killed the scenario's group and observed it empty: {text}"
+    );
+    assert!(
+        ended,
+        "the stopped child the stuck worker held, {child}, had ended when the wrapper returned: \
+         {text}"
+    );
+    assert!(
+        the_cut_ended_everything(&text),
+        "and the lifeline's cut left nothing of the scenario: {text}"
+    );
+}
+
+/// A parked fork's drop whose kill and every write to stderr a policy
+/// refuses -- the kill `EPERM`, the writes `EINTR`, installed on the
+/// dropping thread after the child is stopped and acknowledged, and each
+/// seen in force before the drop -- returns within its bounds: it spends the
+/// reap bound, meets the refused kill, tries its line once and gives up on
+/// it, never making the interrupted write again (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`). The line reaches no one, and the child is left
+/// stopped, as a refused kill leaves it; the wrapper's kill of the
+/// scenario's group ends it. In a process of its own
+/// (`drop-a-parked-fork-whose-kill-and-stderr-writes-are-refused`): a drop
+/// that retried would spin on a thread nothing can unblock. Linux, for the
+/// policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_forks_drop_whose_kill_and_every_stderr_write_are_refused_returns_within_its_bounds() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-parked-fork-whose-kill-and-stderr-writes-are-refused",
+    );
+    let pid = descendants_named_in(&text, 1)
+        .first()
+        .copied()
+        .expect("the scenario named its fork");
+    assert!(
+        text.lines().any(|line| line.ends_with("left=T")),
+        "the refused kill left the child stopped after the drop: {text}"
+    );
+    assert!(
+        !text.contains(&format!("[the parked child {pid} ")),
+        "the drop's line met the refused writes and reached no one: {text}"
+    );
+    assert!(
+        every_process_had_exited_when_the_wrapper_returned(&text),
+        "the stopped child the refused kill left, {pid}, had ended with the scenario's group \
+         when the wrapper returned: {text}"
+    );
+}
+
+/// A parked fork's drop whose kill a policy refuses and whose every write to
+/// stderr answers `EIO` neither panics nor aborts: dropped plainly it
+/// returns within its bounds, and dropped by a caller already unwinding from
+/// a failure of its own it lets that unwinding reach the caller's catch, a
+/// second panic being an abort (`PR320-R5-MAIN-001`). In a process of its
+/// own (`drop-parked-forks-whose-kill-is-refused-and-stderr-answers-eio`),
+/// whose abort this test would read as a signal; both children are left
+/// stopped by the refused kills and end with the scenario's group. Linux,
+/// for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_forks_drop_whose_stderr_answers_errors_neither_panics_nor_aborts_an_unwinding_caller() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-parked-forks-whose-kill-is-refused-and-stderr-answers-eio",
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("unwound and caught") && line.ends_with("left=T T")),
+        "both drops returned, the second through the caught unwinding, and left their children \
+         stopped: {text}"
+    );
+    let children = descendants_named_in(&text, 2);
+    assert!(
+        every_process_had_exited_when_the_wrapper_returned(&text),
+        "the stopped children the refused kills left, {children:?}, had ended with the \
+         scenario's group when the wrapper returned: {text}"
+    );
+}
+
+/// A scenario owner's drop whose kill and every write to stderr a policy
+/// refuses (`EPERM`, `EINTR`) returns within its bounds: the leader, which
+/// exited by itself, is collected, the refusal noted, and the line the drop
+/// tries once reaches no one; the print macro it replaces retried the
+/// interrupted write forever (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`). In a
+/// process of its own
+/// (`drop-a-scenario-owner-whose-kill-and-stderr-writes-are-refused`), the
+/// member of the owned group ended first so that nothing is left whatever
+/// the drop does. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_drop_whose_kill_and_every_stderr_write_are_refused_returns_within_its_bounds()
+{
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-scenario-owner-whose-kill-and-stderr-writes-are-refused",
+    );
+    let leader = text
+        .lines()
+        .find_map(|line| line.strip_prefix("leader="))
+        .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+        .expect("the scenario named the leader its owner held");
+    assert!(
+        text.contains(&format!("dropped the owner of {leader} after")),
+        "the drop returned: {text}"
+    );
+    assert!(
+        !text.contains(&format!("[the scenario process {leader} was dropped")),
+        "the drop's line met the refused writes and reached no one: {text}"
+    );
+}
+
+/// A scenario owner's drop whose kill a policy refuses and whose every write
+/// to stderr answers `EIO` does not panic: the print macro it replaces
+/// panicked on the failed write (`PR320-R5-REG-002`, `PR320-R5-MAIN-001`).
+/// In a process of its own
+/// (`drop-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio`).
+/// Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_drop_whose_stderr_answers_an_error_does_not_panic() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio",
+    );
+    assert!(
+        text.contains("dropped the owner of"),
+        "the drop returned: {text}"
+    );
+}
+
+/// A scenario owner's drop run by the unwinding of a caller's own failure,
+/// its kill refused by a policy and every write to stderr answering `EIO`,
+/// lets that unwinding reach the caller's catch: the print macro it
+/// replaces panicked on the failed write, and a panic while unwinding
+/// aborted the process (`PR320-R5-REG-002`, `PR320-R5-MAIN-001`). In a
+/// process of its own
+/// (`unwind-through-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio`),
+/// whose abort this test reads as a signal. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_drop_whose_stderr_answers_an_error_does_not_abort_an_unwinding_caller() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "unwind-through-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio",
+    );
+    assert!(
+        text.contains("unwound through the owner of") && text.contains("and caught it"),
+        "the unwinding was caught: {text}"
+    );
+}
+
+/// A scenario owner's drop whose group observation a policy interrupts at
+/// every open of what it lists -- every open but a directory's answering
+/// `EINTR` on the dropping thread, the refusal seen in force first --
+/// returns within its bounds and says what it could and could not do: the
+/// group killed, the leader collected with its status 23, and the group
+/// neither observed empty nor read as empty, its members not accounted for.
+/// `File::open` made the interrupted open again inside itself, and the drop
+/// never came back to its bound (`PR320-R5-MAIN-002`). The drop's own kill
+/// is made, so the member has ended when the drop returns. In a process of
+/// its own (`drop-a-scenario-owner-whose-group-observation-opens-are-interrupted`).
+/// Linux, for the policy and `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_drop_whose_group_observation_opens_are_interrupted_returns_and_says_the_group_is_unaccounted_for()
+ {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-scenario-owner-whose-group-observation-opens-are-interrupted",
+    );
+    let leader = text
+        .lines()
+        .find_map(|line| line.strip_prefix("leader="))
+        .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+        .expect("the scenario named the leader its owner held");
+    assert!(
+        text.contains(&format!(
+            "[the scenario process {leader} was dropped by its owner with its cleanup \
+             incomplete: the group was killed; the process was collected (exit status: 23); \
+             the group was not observed empty within the bound:"
+        )),
+        "the drop said the kill, the collection and a group it did not observe empty: {text}"
+    );
+    assert!(
+        text.contains(
+            "[the scenario's group could not be observed: Interrupted system call (os error \
+             4); its members are not accounted for]"
+        ),
+        "with the interrupted observation as it was: {text}"
+    );
+    let members = descendants_named_in(&text, 1);
+    assert!(
+        every_process_had_exited_when_the_wrapper_returned(&text),
+        "the member the drop's own kill reached, {members:?}, had ended when the wrapper \
+         returned: {text}"
+    );
+}
+
+/// A scenario owner's observation of its group whose every step succeeds
+/// but whose steps together outlast its deadline is not read as the group
+/// empty. Over the real `/proc`, the owner's leader having exited 23 and been
+/// collected after the owner killed its group, the group is empty; asked with
+/// a 50 ms bound and a clock the test drives 10 ms a reading, the owner meets
+/// its deadline inside the first pass, answers that the group was not
+/// observed to its end and notes its members as not accounted for -- and the
+/// same owner asked again with the wall clock finds the group empty, so it is
+/// the deadline that withheld the answer. Before, a pass took no deadline
+/// and an empty answer returned before the loop read its own: finite,
+/// successful steps held the owner 646 ms against a 100 ms bound and its drop
+/// 3.2 s against 2 s (`PR320-R6-MAIN-001`). Linux, for `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_group_observation_whose_steps_all_succeed_but_outlast_its_deadline_is_not_read_as_empty()
+ {
+    const STEP: Duration = Duration::from_millis(10);
+    let (mut owned, leader) = an_owner_whose_leader_exited(false);
+    assert!(
+        owned.kill_group(),
+        "the owner kills its group, the leader {leader} still its own: {}",
+        owned.text()
+    );
+    assert_eq!(
+        owned
+            .collect_within(SCENARIO_GROUP_BOUND)
+            .and_then(|status| status.code()),
+        Some(23),
+        "the leader is collected with its own status: {}",
+        owned.text()
+    );
+    let origin = Instant::now();
+    let readings = std::cell::Cell::new(0_u32);
+    let ended = owned.await_group_end_or_note_by(Duration::from_millis(50), &mut || {
+        let reading = origin + STEP * readings.get();
+        readings.set(readings.get() + 1);
+        reading
+    });
+    let text = owned.text();
+    assert!(
+        !ended,
+        "a pass that met its deadline does not say the group is empty: {text}"
+    );
+    assert!(
+        text.contains("the scenario's group was not observed to its end within 50ms")
+            && text.contains("its members are not accounted for")
+            && !text.contains("the scenario's group was empty"),
+        "the owner notes the unfinished pass and never an empty group: {text}"
+    );
+    assert!(
+        readings.get() <= 7,
+        "the pass stopped at its deadline, five steps of 10 ms in, not at the end of /proc: {} \
+         readings",
+        readings.get()
+    );
+    assert!(
+        owned.await_group_end_or_note(SCENARIO_GROUP_BOUND),
+        "the group is empty, as the wall clock's observation finds: {}",
+        owned.text()
+    );
+}
+
+/// A scenario owner's observation that found a member of its group running
+/// and then met its deadline in a later pass notes the member as running, not
+/// only the pass the deadline cut short. Over the real `/proc`, the owner's
+/// leader having exited 23 and its silent member left running, asked with a
+/// 1 s bound and a clock the test drives 100 µs a reading: every pass that
+/// finishes finds the member running, and the pass the deadline cuts short
+/// says nothing of the group. Before, that last pass was all the note said
+/// -- the observation met its deadline after so many entries, after none
+/// when the rest before it, capped at the deadline, left it no step to take
+/// -- so an owner whose group kept a member running read as one that ran out
+/// of time (the round-seven control `LC1-M1-and-no-cut`). Then the owner
+/// kills its group, the leader still its own, and finds it empty. Linux, for
+/// `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_owners_group_observation_that_found_a_member_running_says_so_when_a_later_pass_meets_its_deadline()
+ {
+    const STEP: Duration = Duration::from_micros(100);
+    let (mut owned, leader) = an_owner_whose_leader_exited(false);
+    let origin = Instant::now();
+    let readings = std::cell::Cell::new(0_u32);
+    let ended = owned.await_group_end_or_note_by(Duration::from_secs(1), &mut || {
+        let reading = origin + STEP * readings.get();
+        readings.set(readings.get() + 1);
+        reading
+    });
+    let text = owned.text();
+    assert!(
+        !ended,
+        "a group whose member runs is not said to be empty: {text}"
+    );
+    assert!(
+        text.contains("a member of it was still running at the last pass that finished")
+            || text
+                .contains("a member of the scenario's group was still running 1s after the kill"),
+        "the owner notes the member it found running, not only the pass the deadline cut short: \
+         {text}"
+    );
+    assert!(
+        owned.kill_group(),
+        "the owner kills its group, the leader {leader} still its own: {}",
+        owned.text()
+    );
+    assert_eq!(
+        owned
+            .collect_within(SCENARIO_GROUP_BOUND)
+            .and_then(|status| status.code()),
+        Some(23),
+        "the leader is collected with its own status: {}",
+        owned.text()
+    );
+    assert!(
+        owned.await_group_end_or_note(SCENARIO_GROUP_BOUND),
+        "the group is empty after the kill: {}",
+        owned.text()
+    );
+}
+
+/// An observation of a process group without a signal that found a process
+/// of it running and then met its deadline in a later pass reports the
+/// process as running, not only the pass the deadline cut short -- the
+/// observation each lifeline makes of a scenario's groups after the cut
+/// ([`Lifeline::account`]). Over the real `/proc`, a scenario owner's leader
+/// having exited 23, uncollected, and its silent member left running, the
+/// group is observed with a 1 s bound and a clock the test drives 100 µs a
+/// reading: every pass that finishes finds the member, and the report says
+/// so. Before, it said only that the observation met its deadline, after 0
+/// entries when the capped rest left the last pass no step to take (the
+/// round-seven control `LC1-M1-and-no-cut`). Then the owner kills its group,
+/// the leader still its own, and finds it empty. Linux, for `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_observation_that_found_a_process_running_says_so_when_a_later_pass_meets_its_deadline() {
+    const STEP: Duration = Duration::from_micros(100);
+    let (mut owned, leader) = an_owner_whose_leader_exited(false);
+    let origin = Instant::now();
+    let readings = std::cell::Cell::new(0_u32);
+    let seen = group_observed_empty_within_by(leader, Duration::from_secs(1), &mut || {
+        let reading = origin + STEP * readings.get();
+        readings.set(readings.get() + 1);
+        reading
+    });
+    assert!(
+        seen.as_ref().is_err_and(|why| {
+            why.starts_with("a process of it was still running at the last pass that finished")
+                || why == "a process of it was still running at the end of 1s"
+        }),
+        "the observation reports the process it found running, not only the pass the deadline \
+         cut short: {seen:?}; {}",
+        owned.text()
+    );
+    assert!(
+        owned.kill_group(),
+        "the owner kills its group, the leader {leader} still its own: {}",
+        owned.text()
+    );
+    assert_eq!(
+        owned
+            .collect_within(SCENARIO_GROUP_BOUND)
+            .and_then(|status| status.code()),
+        Some(23),
+        "the leader is collected with its own status: {}",
+        owned.text()
+    );
+    assert!(
+        owned.await_group_end_or_note(SCENARIO_GROUP_BOUND),
+        "the group is empty after the kill: {}",
+        owned.text()
+    );
+}
+
+/// A parked fork's drop whose every rest a policy refuses --
+/// `clock_nanosleep` answering `EINTR` on the dropping thread, the refusal
+/// seen in force first -- still comes back to its bound between
+/// observations: it spends the reap bound, kills the stopped child and
+/// collects it, and returns. `std::thread::sleep` made the refused rest
+/// again inside itself and the drop never reached the kill
+/// (`PR320-R5-MAIN-006`). In a process of its own
+/// (`drop-a-stopped-parked-fork-whose-every-rest-is-refused`), a drop that
+/// never came back being a thread nothing can unblock. Linux, for the
+/// policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_forks_drop_whose_every_rest_is_refused_kills_and_collects_the_stopped_child_within_its_bounds()
+ {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-stopped-parked-fork-whose-every-rest-is-refused",
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("dropped after") && line.ends_with("the child collected")),
+        "the drop killed and collected the child within its bounds: {text}"
+    );
+}
+
+/// The scenario wrapper whose every rest a policy refuses still ends its
+/// scenario at its bound: its loop comes back to the bound after every
+/// refused rest, kills the group and accounts for it, and returns
+/// (`PR320-R5-MAIN-006`, the rests of the scenario owner's own loops). In a
+/// process of its own (`run-a-scenario-wrapper-whose-every-rest-is-refused`),
+/// the wrapper's scenario spawned before the policy so that it is not the
+/// policy's. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_wrapper_whose_every_rest_is_refused_still_ends_its_scenario_at_its_bound() {
+    let text =
+        assert_the_scenario_ran_to_its_end("run-a-scenario-wrapper-whose-every-rest-is-refused");
+    assert!(
+        text.contains("the wrapper ended its scenario after"),
+        "the wrapper returned: {text}"
+    );
+}
+
+/// A wait for a run's cleanup lease whose every rest a policy refuses still
+/// comes back to its bound between observations: a parked fork holds the
+/// lease, and `lease_released_within`, its rests `clock_nanosleep` answering
+/// `EINTR` on the waiting thread and the refusal seen in force first, reports
+/// the lease held past its 100 ms bound and returns, the holder alive.
+/// `std::thread::sleep` made the refused rest again inside itself, and the
+/// wait never returned (`PR320-R6-REG-001`; the recovery trunks' twin of this
+/// wait holds the same in
+/// `engine::topology::recover::tests::a_later_resume_through_resume_with_whose_every_rest_is_refused_reaches_production_at_its_bound`
+/// and its two siblings). In a process of its own
+/// (`a-lease-wait-whose-every-rest-is-refused`), a wait that never came back
+/// being a thread nothing can unblock. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lease_wait_whose_every_rest_is_refused_returns_at_its_bound() {
+    let text = assert_the_scenario_ran_to_its_end("a-lease-wait-whose-every-rest-is-refused");
+    assert!(
+        text.contains("the lease wait returned after"),
+        "the wait returned: {text}"
+    );
+}
+
+/// A readiness wait whose every rest a policy refuses still times out at its
+/// bound: a producer that never publishes, and `readiness::await_signal`,
+/// its rests refused on the waiting thread, the refusal seen in force first,
+/// answers `TimedOut` at its 100 ms bound. `thread::sleep` made the refused
+/// rest again inside itself, so the wait this pull request split out
+/// (`await_signal_by`) never came back to its deadline: the same retry as the
+/// lease waits' (`PR320-R6-REG-001`). In a process of its own
+/// (`a-readiness-wait-whose-every-rest-is-refused`). Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_readiness_wait_whose_every_rest_is_refused_times_out_at_its_bound() {
+    let text = assert_the_scenario_ran_to_its_end("a-readiness-wait-whose-every-rest-is-refused");
+    assert!(
+        text.contains("the readiness wait timed out after"),
+        "the wait returned: {text}"
+    );
+}
+
+/// A warden refuses to arm anywhere but its scenario's own group, and a
+/// refusing warden signals nothing: asked for in a group its parent does not
+/// lead, it refuses and the group's keeper runs on; asked for in the group
+/// named as the test harness's, it refuses and its parent runs on. Every
+/// scenario arms one ([`arm_this_groups_warden`]) and is not run without it,
+/// so this is the other half: a warden never ends a group that is not a
+/// scenario's own, and never the harness's (`PR320-R6-MAIN-002`,
+/// `PR320-R6-REG-002`). The groups asked about are of the scenario's own
+/// making, so that a warden that armed there anyway could end nothing else.
+/// In a process of its own
+/// (`a-warden-refuses-to-arm-outside-its-scenarios-own-group`). Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_warden_refuses_to_arm_outside_its_scenarios_own_group_and_signals_nothing() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "a-warden-refuses-to-arm-outside-its-scenarios-own-group",
+    );
+    assert!(
+        text.contains("the warden refused both groups and signalled nothing"),
+        "both refusals were made and read: {text}"
+    );
+}
+
+/// Cutting a lifeline whose other end every holder has already closed is a
+/// cut, whatever the platform answers, as long as the presence end had
+/// answered EOF first: Linux shuts the end down, and macOS answers
+/// `ENOTCONN` (os error 57), which says no process held the other end any
+/// more, so no warden was left to wake. A real socket pair, its other end
+/// closed, then the cut the lifeline makes: accepted on both. The same
+/// not-connected answer while the presence end was still held is two
+/// answers that disagree, and is a cut not made; any other answer is a cut
+/// not made. Before, macOS's answer was noted as a lifeline that could not
+/// be cut, although the wrapper's group kill had already ended the scenario
+/// and its warden, and the five tests that hold a lifeline on every Unix
+/// failed on native macOS (CI run 36018639391 at `980301ff`). Every Unix;
+/// native macOS gives the `ENOTCONN` its run.
+#[cfg(unix)]
+#[test]
+fn cutting_a_lifeline_whose_other_end_every_holder_has_closed_is_a_cut() {
+    let not_connected = || std::io::Error::from(std::io::ErrorKind::NotConnected);
+    let (cut, other) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    drop(other);
+    let answered = cut_answered(cut.shutdown(std::net::Shutdown::Write), true);
+    assert!(
+        matches!(answered, Ok(Cut::Made | Cut::NothingHeldIt(_))),
+        "a cut whose other end nothing holds, the presence end closed, is a cut: {answered:?}"
+    );
+    assert_eq!(
+        cut_answered(Err(not_connected()), true),
+        Ok(Cut::NothingHeldIt(not_connected().to_string())),
+        "not connected, the presence end closed, is a lifeline no process held any more"
+    );
+    let disagreeing = cut_answered(Err(not_connected()), false);
+    assert!(
+        disagreeing
+            .as_ref()
+            .is_err_and(|why| why.contains("the two answers disagree")),
+        "not connected while the presence end was still held is a cut not made: {disagreeing:?}"
+    );
+    for presence_closed in [true, false] {
+        assert!(
+            cut_answered(
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+                presence_closed
+            )
+            .is_err(),
+            "any other answer is a cut not made, the presence end closed or not"
+        );
+        assert_eq!(
+            cut_answered(Ok(()), presence_closed),
+            Ok(Cut::Made),
+            "a shutdown made is a cut"
+        );
+    }
+}
+
+/// A parked fork's drop whose release a policy refuses -- the send answering
+/// `EINTR` on the dropping thread, the refusal seen in force first -- with
+/// the child stopped, so that no EOF can release it instead, kills the child
+/// at the end of the reap bound and collects it, and says so: the release
+/// could not be written, and the child was killed and collected, with its
+/// status. It says nothing of a child left uncollected, which it is not; a
+/// drop that read the write's failure as the collection's said so
+/// (`PR320-R5-MAIN-003`, `PR320-R5-REG-003`). In a process of its own
+/// (`drop-a-stopped-parked-fork-whose-release-send-is-interrupted`), whose
+/// stderr this test reads. Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_forks_drop_whose_release_send_is_interrupted_says_the_child_was_killed_and_collected() {
+    let text = assert_the_scenario_ran_to_its_end(
+        "drop-a-stopped-parked-fork-whose-release-send-is-interrupted",
+    );
+    let pid = descendants_named_in(&text, 1)
+        .first()
+        .copied()
+        .expect("the scenario named its fork");
+    assert!(
+        text.contains(&format!(
+            "[the parked child {pid} could not be released by its owner's drop: Interrupted \
+             system call (os error 4); it was killed at the end of 100ms and collected: signal: \
+             9 (SIGKILL)]"
+        )),
+        "the drop said the release failed and the child was killed and collected: {text}"
+    );
+    assert!(
+        !text.contains("left uncollected"),
+        "and never that the collected child was left uncollected: {text}"
+    );
+}
+
+/// A parked fork's release whose send a policy refuses (`EINTR`), the child
+/// stopped so that no EOF releases it, panics saying both what failed and
+/// what was done: the release could not be written, and the child was
+/// killed at the end of the reap bound and collected, with its status
+/// (`PR320-R5-MAIN-003`, `PR320-R5-REG-003`). In a process of its own
+/// (`release-a-stopped-parked-fork-whose-release-send-is-interrupted`).
+/// Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_forks_release_whose_send_is_interrupted_panics_saying_the_child_was_killed_and_collected()
+ {
+    let text = assert_the_scenario_ran_to_its_end(
+        "release-a-stopped-parked-fork-whose-release-send-is-interrupted",
+    );
+    assert!(
+        text.contains("released: release the parked child"),
+        "the release's panic was caught and read: {text}"
+    );
+}
+
+/// A progressing write ends at the first answer that is not progress:
+/// `write_while_progressing` asks a writer that answers an interruption
+/// once and hands the interruption back, asks one that answers an error
+/// once, stops at a write that takes nothing, and writes on only while each
+/// write takes something -- so an interrupted or refused channel costs one
+/// write and is never asked again (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`).
+/// Each writer answers otherwise when asked a second time, so a retry shows
+/// as a second attempt, never as a hang.
+#[cfg(unix)]
+#[test]
+fn a_progressing_write_ends_at_the_first_answer_that_is_not_progress() {
+    use crate::workspace_manager::fixture::write_while_progressing;
+
+    let line = b"[a line an owner's drop says]\n";
+    let mut attempts = 0_usize;
+    let mut interrupted = Writing(|bytes: &[u8]| {
+        attempts += 1;
+        if attempts == 1 {
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        } else {
+            Ok(bytes.len())
+        }
+    });
+    assert_eq!(
+        write_while_progressing(&mut interrupted, line).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::Interrupted),
+        "the interruption is the answer"
+    );
+    assert_eq!(attempts, 1, "the interrupted write was not made again");
+
+    let mut attempts = 0_usize;
+    let mut failing = Writing(|bytes: &[u8]| {
+        attempts += 1;
+        if attempts == 1 {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        } else {
+            Ok(bytes.len())
+        }
+    });
+    assert_eq!(
+        write_while_progressing(&mut failing, line).map_err(|error| error.raw_os_error()),
+        Err(Some(libc::EIO)),
+        "the error is the answer"
+    );
+    assert_eq!(attempts, 1, "the failed write was not made again");
+
+    let mut attempts = 0_usize;
+    let mut nothing = Writing(|bytes: &[u8]| {
+        attempts += 1;
+        if attempts == 1 {
+            Ok(0)
+        } else {
+            Ok(bytes.len())
+        }
+    });
+    assert_eq!(
+        write_while_progressing(&mut nothing, line).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::WriteZero),
+        "a write that took nothing is the end"
+    );
+    assert_eq!(attempts, 1, "and is not made again");
+
+    let mut attempts = 0_usize;
+    let mut taken = Vec::new();
+    let mut short = Writing(|bytes: &[u8]| {
+        attempts += 1;
+        let piece = bytes.get(..3).unwrap_or(bytes);
+        taken.extend_from_slice(piece);
+        Ok(piece.len())
+    });
+    write_while_progressing(&mut short, line).expect("every write took something");
+    assert_eq!(taken, line, "the whole line, in order");
+    assert_eq!(
+        attempts,
+        line.len().div_ceil(3),
+        "one write per piece of progress and no more"
+    );
+}
+
+/// The release is one write of its byte and never a second: a writer that
+/// answers `Interrupted` is asked once and the interruption is the answer,
+/// one that answers the byte written is asked once, and one that answers
+/// nothing written is a `WriteZero`. `write_all` would ask again on the
+/// interruption inside itself, outside the reap bound the owner keeps
+/// (`PR320-R4-REG-002`). The actual owner meets a refused send in processes
+/// of their own
+/// (`a_parked_forks_drop_whose_release_send_is_interrupted_says_the_child_was_killed_and_collected`,
+/// `a_parked_forks_release_whose_send_is_interrupted_panics_saying_the_child_was_killed_and_collected`);
+/// here the count of attempts is driven through the writer, the interrupted
+/// case on a thread of its own so that a writer asked forever fails this
+/// test rather than hangs it.
+#[cfg(unix)]
+#[test]
+fn a_release_write_is_one_attempt_whatever_the_writer_answers() {
+    use crate::workspace_manager::fixture::write_release;
+
+    let (answered, writing) = on_a_thread_within(Duration::from_secs(10), || {
+        let mut attempts = 0_u32;
+        let mut interrupted = Writing(|_: &[u8]| {
+            attempts += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        });
+        let answer = write_release(&mut interrupted).map_err(|error| error.kind());
+        (answer, attempts)
+    });
+    let (answer, attempts) = answered.expect(
+        "the release write returned; one that asks an interrupted writer again forever is the \
+         defect this test holds",
+    );
+    writing.join().expect("the writing thread ends");
+    assert_eq!(answer, Err(std::io::ErrorKind::Interrupted));
+    assert_eq!(attempts, 1, "the interrupted write was not made again");
+    let mut attempts = 0_u32;
+    let mut written = Writing(|bytes: &[u8]| {
+        attempts += 1;
+        Ok(bytes.len())
+    });
+    write_release(&mut written).expect("the byte written is the release");
+    assert_eq!(attempts, 1, "one write");
+    let mut nothing = Writing(|_: &[u8]| Ok(0));
+    assert_eq!(
+        write_release(&mut nothing)
+            .expect_err("nothing written is not a release")
+            .kind(),
+        std::io::ErrorKind::WriteZero
+    );
+}
+
+/// A test that unwinds with a parked fork in scope leaves no child behind:
+/// the unwinding drops the fork, which releases and collects its child.
+#[cfg(unix)]
+#[test]
+fn a_test_that_unwinds_past_a_parked_fork_leaves_no_child_behind() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let pid = std::cell::Cell::new(0);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let parked = ParkedFork::holding(anchor.as_raw_fd());
+        pid.set(parked.pid());
+        assert!(parked.is_alive(), "the parked fork is alive");
+        panic!("an assertion made with the fork in scope fails");
+    }));
+    assert!(unwound.is_err(), "the closure unwound");
+    assert_ne!(pid.get(), 0, "the fork was made before the unwinding");
+    assert!(
+        is_reaped(pid.get()),
+        "the unwinding dropped the fork, which released and collected its child {}",
+        pid.get()
+    );
+}
+
+/// One BPF instruction of a seccomp policy.
+#[cfg(target_os = "linux")]
+fn seccomp_instruction(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    }
+}
+
+/// Load the word at `offset` of the `seccomp_data`: 0 is the syscall
+/// number, 16 the low word of the first argument on a little-endian machine.
+#[cfg(target_os = "linux")]
+fn seccomp_load(offset: u32) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, offset)
+}
+
+/// Jump `jt` instructions when the loaded word equals `k`, `jf` otherwise.
+#[cfg(target_os = "linux")]
+fn seccomp_jump_if_equal(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, jt, jf, k)
+}
+
+/// Answer the syscall with `k`: `SECCOMP_RET_ALLOW`, or `SECCOMP_RET_ERRNO`
+/// carrying the errno.
+#[cfg(target_os = "linux")]
+fn seccomp_return(k: u32) -> libc::sock_filter {
+    seccomp_instruction(libc::BPF_RET | libc::BPF_K, 0, 0, k)
+}
+
+/// A syscall number, descriptor or errno as the word a policy compares.
+#[cfg(target_os = "linux")]
+fn seccomp_word(value: libc::c_long) -> u32 {
+    u32::try_from(value).expect("a syscall number, descriptor or errno fits the kernel's field")
+}
+
+/// Install `program` as this thread's seccomp policy, the way
+/// `agent::proc`'s termination tests install theirs: `PR_SET_NO_NEW_PRIVS`,
+/// then `PR_SET_SECCOMP` in filter mode. A policy is the thread's and every
+/// process it forks, and it cannot be removed; libtest runs each test on a
+/// thread of its own, so it ends with the test.
+#[cfg(target_os = "linux")]
+fn install_seccomp_policy(program: &mut [libc::sock_filter]) {
+    const NONE: libc::c_long = 0;
+    const NO_NEW_PRIVS: libc::c_long = 1;
+
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            NO_NEW_PRIVS,
+            NONE,
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four instructions.
+#[cfg(target_os = "linux")]
+fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(number), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// Refuse the `close` of `descriptor` for this thread and every process it
+/// forks, answering `errno`, and refuse `close_range` with `ENOSYS` so that
+/// a sweep reaches that close: eight instructions, the descriptor read from
+/// the low word of the first argument.
+#[cfg(target_os = "linux")]
+fn refuse_closing_on_this_thread(descriptor: libc::c_int, errno: libc::c_int) {
+    // `seccomp_data`: the number at 0, the architecture and the instruction
+    // pointer, then the six 64-bit arguments from 16; the low word of the
+    // first argument is at 16 on a little-endian machine and at 20 otherwise.
+    let first_argument_low = if cfg!(target_endian = "little") {
+        16
+    } else {
+        20
+    };
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_close_range), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(libc::ENOSYS))),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_close), 0, 3),
+        seccomp_load(first_argument_low),
+        seccomp_jump_if_equal(seccomp_word(libc::c_long::from(descriptor)), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// A control that a policy is in force: `close_range` with a first
+/// descriptor above its last is `EINVAL` from the kernel, so the errno it
+/// answers here is only ever the policy's.
+#[cfg(target_os = "linux")]
+fn assert_close_range_answers(errno: libc::c_int) {
+    // SAFETY: a raw syscall over a numeric range the kernel refuses as
+    // empty; it closes nothing.
+    let answered = unsafe { libc::syscall(libc::SYS_close_range, 3_u32, 2_u32, 0_u32) };
+    let error = std::io::Error::last_os_error();
+    assert!(
+        answered == -1 && error.raw_os_error() == Some(errno),
+        "close_range answers {}: {answered} / {error}",
+        std::io::Error::from_raw_os_error(errno)
+    );
+}
+
+/// Refuse this thread's writes to descriptor 2 with `errno`, and every
+/// process it forks the same; a write to any other descriptor is made. Six
+/// instructions, the descriptor read from the low word of the first
+/// argument.
+#[cfg(target_os = "linux")]
+fn refuse_stderr_writes_on_this_thread(errno: libc::c_int) {
+    let first_argument_low = if cfg!(target_endian = "little") {
+        16
+    } else {
+        20
+    };
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_write), 0, 3),
+        seccomp_load(first_argument_low),
+        seccomp_jump_if_equal(seccomp_word(libc::c_long::from(libc::STDERR_FILENO)), 0, 1),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// Refuse this thread's opens of anything but a directory with `errno`, and
+/// every process it forks the same: an `openat` whose flags lack
+/// `O_DIRECTORY`. A listing's `opendir` is made, so a pass over `/proc`
+/// meets the refusal at the opens of what it lists, which is where a retry
+/// hid (`PR320-R5-MAIN-002`). Six instructions, the flags read from the low
+/// word of the third argument.
+#[cfg(target_os = "linux")]
+fn refuse_nondirectory_opens_on_this_thread(errno: libc::c_int) {
+    // `seccomp_data`: the number at 0, the architecture and the instruction
+    // pointer, then the six 64-bit arguments from 16, so the third at 32; its
+    // low word is at 32 on a little-endian machine and at 36 otherwise.
+    let third_argument_low = if cfg!(target_endian = "little") {
+        32
+    } else {
+        36
+    };
+    let mut program = [
+        seccomp_load(0),
+        seccomp_jump_if_equal(seccomp_word(libc::SYS_openat), 0, 3),
+        seccomp_load(third_argument_low),
+        seccomp_instruction(
+            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
+            1,
+            0,
+            seccomp_word(libc::c_long::from(libc::O_DIRECTORY)),
+        ),
+        seccomp_return(libc::SECCOMP_RET_ERRNO | seccomp_word(libc::c_long::from(errno))),
+        seccomp_return(libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_policy(&mut program);
+}
+
+/// A call an owner's thread is refused before the owner meets it, installed
+/// on that thread alone and asked one call it must now refuse
+/// ([`Refusal::in_force`]): a regression built on these enters the denial it
+/// is about, and one not in force fails the regression rather than passing
+/// it. Each is a seccomp policy of the thread and of every process it forks.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+enum Refusal {
+    /// `kill` answers `EPERM`: the OS refuses every signal the thread sends.
+    Kill,
+    /// A write to descriptor 2 answers this errno; other writes are made.
+    StderrWrites(libc::c_int),
+    /// An `openat` without `O_DIRECTORY` answers `EINTR`; directories open.
+    NondirectoryOpens,
+    /// `clock_nanosleep` answers `EINTR`: every rest the thread takes is
+    /// refused, before it has rested at all.
+    Rests,
+    /// `sendto` answers `EINTR`: a write to a Unix socket is refused.
+    Sends,
+}
+
+#[cfg(target_os = "linux")]
+impl Refusal {
+    /// Install this refusal on this thread.
+    fn install(self) {
+        match self {
+            Self::Kill => refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM),
+            Self::StderrWrites(errno) => refuse_stderr_writes_on_this_thread(errno),
+            Self::NondirectoryOpens => refuse_nondirectory_opens_on_this_thread(libc::EINTR),
+            Self::Rests => refuse_syscall_on_this_thread(libc::SYS_clock_nanosleep, libc::EINTR),
+            Self::Sends => refuse_syscall_on_this_thread(libc::SYS_sendto, libc::EINTR),
+        }
+    }
+
+    /// One call this refusal must now answer, made on this thread: `Ok` when
+    /// it answered the refusal, and what it answered otherwise. Nothing here
+    /// panics or prints: a thread whose stderr is refused has no channel for
+    /// either.
+    fn in_force(self) -> Result<(), String> {
+        use std::io::Write as _;
+        use std::os::fd::FromRawFd as _;
+
+        match self {
+            Self::Kill => {
+                // SAFETY: signal 0 delivers nothing; the call only asks
+                // whether this process may be signalled.
+                let answered = unsafe { libc::kill(libc::getpid(), 0) };
+                refused_with(answered == -1, libc::EPERM, "kill(getpid(), 0)")
+            }
+            Self::StderrWrites(errno) => {
+                // SAFETY: a write of no bytes reads nothing from the buffer;
+                // descriptor 2 is this process's standard error.
+                let answered = unsafe { libc::write(libc::STDERR_FILENO, b"".as_ptr().cast(), 0) };
+                refused_with(answered == -1, errno, "write(2, \"\", 0)")
+            }
+            Self::NondirectoryOpens => {
+                // SAFETY: `open` reads the NUL-terminated name, a literal, and
+                // takes the flags by value; nothing is created.
+                let answered = unsafe {
+                    libc::open(
+                        c"/proc/self/stat".as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC,
+                    )
+                };
+                let error = std::io::Error::last_os_error();
+                if answered >= 0 {
+                    // SAFETY: opened just now by this call and owned by
+                    // nothing else; the `File` closes it on its drop.
+                    drop(unsafe { File::from_raw_fd(answered) });
+                    return Err(String::from(
+                        "open(/proc/self/stat) was made: the refusal is not in force",
+                    ));
+                }
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    return Err(format!(
+                        "open(/proc/self/stat) answered {error}, not the refusal"
+                    ));
+                }
+                fs::read_dir("/proc")
+                    .map(drop)
+                    .map_err(|error| format!("the listing's own open was refused too: {error}"))
+            }
+            Self::Rests => {
+                let request = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 1,
+                };
+                // SAFETY: `nanosleep` reads the one `timespec`, which lives
+                // for the call; the remainder pointer is null.
+                let answered = unsafe { libc::nanosleep(&request, std::ptr::null_mut()) };
+                refused_with(answered == -1, libc::EINTR, "nanosleep")
+            }
+            Self::Sends => {
+                let (mut sender, _receiver) = std::os::unix::net::UnixStream::pair()
+                    .map_err(|error| format!("a socket pair for the send: {error}"))?;
+                match sender.write(&[1]) {
+                    Err(error) if error.raw_os_error() == Some(libc::EINTR) => Ok(()),
+                    other => Err(format!(
+                        "a send on a Unix socket answered {other:?}, not the refusal"
+                    )),
+                }
+            }
+        }
+    }
+}
+
+/// Whether a call that answered `failed` answered `errno`, read at once: `Ok`
+/// for the refusal, and what the call answered otherwise.
+#[cfg(target_os = "linux")]
+fn refused_with(failed: bool, errno: libc::c_int, call: &str) -> Result<(), String> {
+    let error = std::io::Error::last_os_error();
+    match (failed, error.raw_os_error()) {
+        (true, Some(answered)) if answered == errno => Ok(()),
+        (true, _) => Err(format!("{call} answered {error}, not the refusal")),
+        (false, _) => Err(format!("{call} was made: the refusal is not in force")),
+    }
+}
+
+/// Install every refusal of `refusals` on this thread -- a refused stderr
+/// last, so that nothing installed after it can panic into a channel it has
+/// closed -- and ask each one call it must now refuse: the denial under test
+/// is entered, not assumed.
+#[cfg(target_os = "linux")]
+fn refuse_on_this_thread(refusals: &[Refusal]) -> Result<(), String> {
+    let (stderr, others): (Vec<Refusal>, Vec<Refusal>) = refusals
+        .iter()
+        .copied()
+        .partition(|refusal| matches!(refusal, Refusal::StderrWrites(_)));
+    for refusal in others.iter().chain(&stderr) {
+        refusal.install();
+    }
+    for refusal in refusals {
+        refusal
+            .in_force()
+            .map_err(|error| format!("{refusal:?}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Drop `owner` on a thread of its own under `refusals`, waiting for the drop
+/// within `bound`: how long it took. The refusals bind the dropping thread
+/// alone, the calling thread keeping every call, and each is asked one call
+/// it must refuse before the drop, so the drop meets the denial under test.
+/// Nothing on the dropping thread panics or prints -- a refused stderr would
+/// make either a hang or a silence -- and the caller asserts instead.
+///
+/// # Panics
+///
+/// When a refusal was not in force, when the drop panicked, or when it did
+/// not return within `bound`: the last is what a drop that makes a refused
+/// call again inside itself does, and its thread is then left to end with
+/// this process, whose group the scenario's wrapper kills once it has
+/// exited.
+#[cfg(target_os = "linux")]
+fn drop_under<T: Send + 'static>(
+    owner: T,
+    refusals: &'static [Refusal],
+    bound: Duration,
+) -> Duration {
+    let (answered, dropping) = on_a_thread_within(bound, move || {
+        refuse_on_this_thread(refusals)?;
+        let started = Instant::now();
+        drop(owner);
+        Ok::<Duration, String>(started.elapsed())
+    });
+    let took = settled_within(answered, bound, "the drop");
+    dropping.join().expect("the dropping thread ends");
+    took
+}
+
+/// Unwind through `owner` on a thread of its own under `refusals`: a failure
+/// of that thread's own, raised with `owner` in scope, so that its drop runs
+/// in the unwinding, and the unwinding caught -- whether it was, within
+/// `bound`. A drop that panicked while unwinding would abort the process,
+/// which the wrapper reads as a signal, never as a caught failure.
+///
+/// # Panics
+///
+/// As [`drop_under`].
+#[cfg(target_os = "linux")]
+fn unwind_through_under<T: Send + 'static>(
+    owner: T,
+    refusals: &'static [Refusal],
+    bound: Duration,
+) -> bool {
+    let (answered, unwinding) = on_a_thread_within(bound, move || {
+        refuse_on_this_thread(refusals)?;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _owner = owner;
+            panic!("the failure an owner's drop runs in the unwinding of");
+        }));
+        Ok::<bool, String>(unwound.is_err())
+    });
+    let caught = settled_within(answered, bound, "the unwinding through the owner");
+    unwinding.join().expect("the unwinding thread ends");
+    caught
+}
+
+/// The answer of a thread [`on_a_thread_within`] ran under refusals, or the
+/// panic that says why there is none: a refusal not in force, a thread that
+/// ended without answering -- it panicked -- or `what` not done within
+/// `bound`.
+#[cfg(target_os = "linux")]
+fn settled_within<T>(
+    answered: Result<Result<T, String>, std::sync::mpsc::RecvTimeoutError>,
+    bound: Duration,
+    what: &str,
+) -> T {
+    match answered {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(not_in_force)) => {
+            panic!("a refusal {what} was to meet was not in force: {not_in_force}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{what} ended its thread without an answer: it panicked, which it must not")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+            "{what} returned within {bound:?}; one that makes a refused or interrupted call again \
+             inside itself is the defect this holds"
+        ),
+    }
+}
+
+/// The sentinel proof under a named condition: with this process's copy of
+/// a socket end closed, the read on the other end answers EOF within the
+/// bound, so the parked fork holds no copy of it, and its `/proc` table is
+/// exactly stdio, the lease and its socket; the fork holds the lease, and is
+/// released. Linux only, as its two callers are: the conditions are seccomp
+/// policies, and a Unix-wide helper with Linux-only callers is dead code on
+/// macOS, where `-D warnings` makes that a failed build.
+#[cfg(target_os = "linux")]
+fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch(tag);
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) = sentinel_pair();
+    let identity = sentinel_identity(sentinel.as_raw_fd());
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    let [lease_number, socket_number] = parked.kept();
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "{under}: the parked fork {holder} holds the lease"
+    );
+    assert_the_forks_table_is_stdio_the_lease_and_its_socket(
+        holder,
+        lease_number,
+        socket_number,
+        under,
+    );
+    drop(sentinel);
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "{under}: with this process's copy of the sentinel closed the read answers EOF, so no \
+             copy of it survives in fork {holder}: {held}; {}",
+            sentinel_attribution(holder, &identity)
+        );
+    }
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "{under}: the released fork exited cleanly: {status:?}"
+    );
+}
+
+/// `close_range` unavailable -- `ENOSYS`, Linux before 5.9 -- makes the
+/// sweep close by number instead, and the child is isolated all the same:
+/// the sentinel proof under a policy that answers `ENOSYS` to `close_range`
+/// for this thread and the child it forks.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_isolates_its_child_when_close_range_is_unavailable() {
+    refuse_syscall_on_this_thread(libc::SYS_close_range, libc::ENOSYS);
+    assert_close_range_answers(libc::ENOSYS);
+    assert_a_parked_fork_isolates_a_sentinel(
+        "childlease-close-range-enosys",
+        "close_range unavailable",
+    );
+}
+
+/// `close_range` refused -- `EPERM`, a policy's answer -- makes the sweep
+/// close by number instead, and the child is isolated all the same.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_isolates_its_child_when_close_range_is_refused() {
+    refuse_syscall_on_this_thread(libc::SYS_close_range, libc::EPERM);
+    assert_close_range_answers(libc::EPERM);
+    assert_a_parked_fork_isolates_a_sentinel("childlease-close-range-eperm", "close_range refused");
+}
+
+/// How long [`run_parked_fork_scenario`] gives the scenario process before
+/// it kills it: a bound on a scenario that wedges, never a measure of one
+/// that runs, which ends in well under a second.
+#[cfg(unix)]
+const SCENARIO_BOUND: Duration = Duration::from_secs(120);
+
+/// How long each step of ending the scenario's group may take, once the
+/// scenario process has ended or its bound has passed: the collection of the
+/// killed leader, the observation of the group until no member is left, and
+/// the drain of the stderr to EOF. A scenario that ends leaves no process of
+/// its own behind, so each step ends at once; the bound is for a member the
+/// scenario left stopped or parked, or a copy of the pipe held outside the
+/// group.
+#[cfg(unix)]
+const SCENARIO_GROUP_BOUND: Duration = Duration::from_secs(2);
+
+/// How many reads one turn of the stderr drain makes before it returns to
+/// its caller with the pipe still readable, 4 KiB each: a bound on the work
+/// a turn can do, so that a scenario writing without pause cannot keep the
+/// owner inside the drain past the deadlines its caller checks between
+/// turns ([`drain_turn`]).
+#[cfg(unix)]
+const DRAIN_TURN_READS: usize = 64;
+
+/// Names, in a scenario process's environment, the process group of the
+/// test harness that holds the scenario's lifeline: the one group no warden
+/// may ever arm in ([`the_warden_may_arm`]). Its presence is also what tells
+/// a scenario that it was handed a lifeline, and a scenario passes it on to
+/// the scenarios it runs itself, with the lifeline ([`ScenarioLifeline`]).
+#[cfg(unix)]
+const SCENARIO_HARNESS_GROUP: &str = "UPSTROKE_TEST_SCENARIO_HARNESS_GROUP";
+
+/// The scenario a warden runs ([`end_the_group_when_the_lifeline_is_cut`]).
+#[cfg(unix)]
+const WARDEN: &str = "end-the-group-when-the-lifeline-is-cut";
+
+/// How long a scenario gives its warden to say whether it armed: a bound on
+/// a warden that wedges before it answers, never a measure of one that
+/// starts, which answers in milliseconds.
+#[cfg(unix)]
+const WARDEN_BOUND: Duration = Duration::from_secs(60);
+
+/// How long a test gives what a scenario left to be gone once the wrapper
+/// has returned, before the lifeline is cut: the wrapper observed the group
+/// empty before returning, so every process that held the lifeline has
+/// already exited, and the bound is for a copy a sibling's fork carried into
+/// its exec window, or for a leftover the wrapper failed to end, which a
+/// failing run then pays for once.
+#[cfg(unix)]
+const LEFTOVER_BOUND: Duration = Duration::from_secs(5);
+
+/// A scenario's lifeline, the test's two ends of it (`PR320-R6-REG-002`,
+/// `PR320-R6-MAIN-002`). The scenario process is handed the other two as its
+/// stdin and its stdout ([`ScenarioEnds`]), and every process it makes
+/// inherits them, except its warden.
+///
+/// **Presence.** Every process of the scenario holds a copy of the other end
+/// of `presence` as its stdin, the processes it forks and spawns keeping
+/// it, so `presence` answers EOF exactly when every one of them has exited
+/// ([`sentinel_closed_within`]): the kernel's answer, which no process
+/// number enters. The wardens hold none, so the answer is about the
+/// scenario's own processes and never about the wardens that end them.
+///
+/// **Cut.** The group's warden, started by every scenario that leads its own
+/// group ([`arm_this_groups_warden`]), holds the other end of `cut` as its
+/// stdin and blocks on it; shutting `cut` down for writing -- or this
+/// process's death, which closes it -- is EOF there, and the warden ends its
+/// own process group with `kill(0, SIGKILL)`: the one group id the kernel
+/// keeps for a live member, so no number is signalled that could have been
+/// handed out again, stopped members are ended with the rest, and a wrapper
+/// blocked on the scenario is released.
+///
+/// So a test owns the end of what it started however the wrapper under test
+/// behaves: it observes, cuts, observes again, and asserts only then
+/// ([`Lifeline::account`]). What escapes it is named there.
+#[cfg(unix)]
+struct Lifeline {
+    presence: std::os::unix::net::UnixStream,
+    cut: std::os::unix::net::UnixStream,
+}
+
+/// A scenario process's ends of a [`Lifeline`]: its stdin, the presence
+/// end, and its stdout, the end its wardens read the cut on.
+#[cfg(unix)]
+struct ScenarioEnds {
+    presence: std::process::Stdio,
+    cut: std::process::Stdio,
+}
+
+/// How a scenario process is handed its lifeline.
+#[cfg(unix)]
+enum ScenarioLifeline {
+    /// A lifeline the caller holds ([`lifeline`]): the scenario's stdin and
+    /// stdout are its ends, and the scenario is told the harness's group.
+    Held(ScenarioEnds),
+    /// The lifeline this process was handed, passed on unchanged -- its stdin
+    /// and stdout, and the harness's group in its environment -- when it has
+    /// one; when it has none, as in a test that runs a scenario owner in the
+    /// harness itself, the scenario's stdin and stdout are `/dev/null` and no
+    /// warden is started. Linux, as every scenario that runs a scenario of
+    /// its own is.
+    #[cfg(target_os = "linux")]
+    PassedOn,
+}
+
+/// A new lifeline: the test's ends and the scenario's.
+#[cfg(unix)]
+fn lifeline() -> (Lifeline, ScenarioLifeline) {
+    use std::os::fd::OwnedFd;
+
+    let (presence_given, presence) = sentinel_pair();
+    let (cut, cut_given) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for a lifeline's cut");
+    (
+        Lifeline { presence, cut },
+        ScenarioLifeline::Held(ScenarioEnds {
+            presence: std::process::Stdio::from(OwnedFd::from(presence_given)),
+            cut: std::process::Stdio::from(OwnedFd::from(cut_given)),
+        }),
+    )
+}
+
+/// What a test's lifeline found of a scenario once the wrapper had returned,
+/// in the order it was found ([`Lifeline::account`]).
+#[cfg(unix)]
+#[derive(Debug)]
+struct Leftovers {
+    /// Before anything was done: whether every process of the scenario had
+    /// exited, the presence end answering EOF within [`LEFTOVER_BOUND`].
+    when_the_wrapper_returned: Result<(Duration, u32), SentinelHeldPastBound>,
+    /// The cut's own answer, read by [`cut_answered`]: made, or nothing
+    /// held the other end any more; any other failure cut nothing.
+    cut: Result<Cut, String>,
+    /// After the cut, the same observation within [`LEASE_RELEASE_BOUND`].
+    after_the_cut: Result<(Duration, u32), SentinelHeldPastBound>,
+    /// After the cut, each group named, observed without a signal to have
+    /// no process running ([`group_observed_empty_within`]).
+    groups: Vec<(libc::pid_t, Result<(), String>)>,
+}
+
+#[cfg(unix)]
+impl Leftovers {
+    /// Whether the test ended everything it started: cut, every process of
+    /// the scenario gone, and every group named observed empty.
+    fn cleaned(&self) -> bool {
+        self.cut.is_ok()
+            && self.after_the_cut.is_ok()
+            && self.groups.iter().all(|(_, empty)| empty.is_ok())
+    }
+
+    /// The four findings as text, one bracketed line each.
+    fn notes(&self) -> String {
+        let mut notes = match &self.when_the_wrapper_returned {
+            Ok((took, _)) => format!(
+                "\n[the lifeline: every process of the scenario had exited when the wrapper \
+                 returned, its presence end answering EOF after {took:?}]"
+            ),
+            Err(held) => format!(
+                "\n[the lifeline: a process of the scenario still held it when the wrapper \
+                 returned: {held}]"
+            ),
+        };
+        notes.push_str(&match &self.cut {
+            Ok(Cut::Made) => String::from("\n[the lifeline was cut]"),
+            Ok(Cut::NothingHeldIt(answer)) => format!(
+                "\n[the lifeline was cut: no process held its other end any more ({answer})]"
+            ),
+            Err(error) => format!("\n[the lifeline could not be cut: {error}]"),
+        });
+        notes.push_str(&match &self.after_the_cut {
+            Ok((took, _)) => format!(
+                "\n[the lifeline: every process of the scenario had exited {took:?} after the cut]"
+            ),
+            Err(held) => format!(
+                "\n[the lifeline: a process of the scenario still held it after the cut: {held}]"
+            ),
+        });
+        for (group, empty) in &self.groups {
+            notes.push_str(&match empty {
+                Ok(()) => {
+                    format!("\n[the scenario's group {group} was observed empty after the cut]")
+                }
+                Err(why) => format!(
+                    "\n[the scenario's group {group} was not observed empty after the cut: {why}]"
+                ),
+            });
+        }
+        notes
+    }
+}
+
+/// What cutting a lifeline did ([`cut_answered`]).
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Cut {
+    /// The test's end was shut down: every warden holding the other end
+    /// reads its EOF.
+    Made,
+    /// No process held the other end any more -- the scenario process, its
+    /// descendants and every warden had closed their copies -- so no warden
+    /// was left to wake: macOS answers `ENOTCONN` for a stream socket whose
+    /// peer every holder has closed, where Linux shuts the end down all the
+    /// same. Taken only beside the presence end's EOF, read before the cut:
+    /// the platform's answer never stands in for the observation. The
+    /// answer, as the OS gave it.
+    NothingHeldIt(String),
+}
+
+/// Read the cut's `shutdown`, beside whether the presence end had already
+/// answered EOF (`presence_closed`): done is [`Cut::Made`]; not connected
+/// with the presence end closed is [`Cut::NothingHeldIt`], a lifeline whose
+/// other end every holder had already closed -- which native macOS answers
+/// once the wrapper's group kill has ended the scenario and its warden, and
+/// which was read as a cut not made until its CI run said so
+/// (`cutting_a_lifeline_whose_other_end_every_holder_has_closed_is_a_cut`).
+///
+/// # Errors
+///
+/// Not connected while the presence end was still held -- the two answers
+/// disagree, so the cut is not taken as made -- and any other answer: the
+/// cut was not made, and nothing the lifeline holds was released by it.
+#[cfg(unix)]
+fn cut_answered(answer: std::io::Result<()>, presence_closed: bool) -> Result<Cut, String> {
+    match answer {
+        Ok(()) => Ok(Cut::Made),
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected && presence_closed => {
+            Ok(Cut::NothingHeldIt(error.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => Err(format!(
+            "{error}, while a process of the scenario still held the presence end: the two \
+             answers disagree, and the cut is not taken as made"
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+impl Lifeline {
+    /// Account for a scenario the wrapper has returned from, before anything
+    /// about it is asserted: observe whether every process of the scenario
+    /// has exited ([`LEFTOVER_BOUND`]), then cut, then observe the same
+    /// within [`LEASE_RELEASE_BOUND`], then observe each of `groups` -- the
+    /// scenario's own and any it named as a leader of its own -- to have no
+    /// process running, without signalling it
+    /// ([`group_observed_empty_within`]). Every observation is bounded and
+    /// made one attempt at a time. The first finding is the state the
+    /// wrapper left, kept for the test's own assertions; the rest are this
+    /// test's cleanup of it, which ran whatever the wrapper did.
+    ///
+    /// The presence end's EOF says every holder has closed it, not that a
+    /// group is empty: a process that closed or replaced its stdin, or left
+    /// its group, escapes it, and the group observations cover the first.
+    /// None of the scenarios here does either: every process they make keeps
+    /// the stdin it inherits -- the children they spawn inherit it, a parked
+    /// fork keeps stdio, and a scenario owner inside a scenario passes the
+    /// lifeline on -- and none leaves its group but a scenario leader, which
+    /// leads a group of its own with a warden of its own; a warden holds the
+    /// cut end, never the presence end.
+    fn account(&mut self, groups: &[libc::pid_t]) -> Leftovers {
+        let when_the_wrapper_returned =
+            sentinel_closed_within(&mut self.presence, LEFTOVER_BOUND, &mut |_| {});
+        let cut = cut_answered(
+            self.cut.shutdown(std::net::Shutdown::Write),
+            when_the_wrapper_returned.is_ok(),
+        );
+        let after_the_cut =
+            sentinel_closed_within(&mut self.presence, LEASE_RELEASE_BOUND, &mut |_| {});
+        let groups = groups
+            .iter()
+            .map(|&group| {
+                (
+                    group,
+                    group_observed_empty_within(group, SCENARIO_GROUP_BOUND),
+                )
+            })
+            .collect();
+        Leftovers {
+            when_the_wrapper_returned,
+            cut,
+            after_the_cut,
+            groups,
+        }
+    }
+}
+
+/// Observe the process group `pgid` until no process of it is running or
+/// `bound` runs out, without signalling it: [`group_observed_empty_within_by`]
+/// with the wall clock.
+#[cfg(unix)]
+fn group_observed_empty_within(pgid: libc::pid_t, bound: Duration) -> Result<(), String> {
+    group_observed_empty_within_by(pgid, bound, &mut || Instant::now())
+}
+
+/// [`group_observed_empty_within`] with `now` as the clock: [`group_seen_by`],
+/// one pass at a time, each answering to the same absolute deadline, and one
+/// capped rest between two. `Err` with what was seen: a process of the group
+/// running -- at the end of the bound, or at the last pass that finished when
+/// a later one met the deadline, since a pass the deadline cuts short says
+/// nothing of the group and the rest before it, capped at the deadline, may
+/// leave it no step to take
+/// (`a_group_observation_that_found_a_process_running_says_so_when_a_later_pass_meets_its_deadline`)
+/// -- the deadline met before any pass finished, or an observation that
+/// failed.
+#[cfg(unix)]
+fn group_observed_empty_within_by(
+    pgid: libc::pid_t,
+    bound: Duration,
+    now: &mut dyn FnMut() -> Instant,
+) -> Result<(), String> {
+    let deadline = now() + bound;
+    let mut found_running = false;
+    loop {
+        match group_seen_by(pgid, deadline, now) {
+            Ok(GroupSeen::Ended) => return Ok(()),
+            Ok(GroupSeen::MemberRunning) => found_running = true,
+            Ok(GroupSeen::Unfinished { listed }) if found_running => {
+                return Err(format!(
+                    "a process of it was still running at the last pass that finished, and the \
+                     next met the deadline of {bound:?} after {listed} entries"
+                ));
+            }
+            Ok(GroupSeen::Unfinished { listed }) => {
+                return Err(format!(
+                    "the observation met its deadline after {listed} entries"
+                ));
+            }
+            Err(error) => return Err(format!("it could not be observed: {error}")),
+        }
+        let reading = now();
+        if reading >= deadline {
+            return Err(format!(
+                "a process of it was still running at the end of {bound:?}"
+            ));
+        }
+        rest_within(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(reading),
+        );
+    }
+}
+
+/// Whether a scenario's text says, in its lifeline's own notes
+/// ([`Leftovers::notes`]), that every process of the scenario had exited
+/// when the wrapper returned: the reading taken before the cut.
+#[cfg(unix)]
+fn every_process_had_exited_when_the_wrapper_returned(text: &str) -> bool {
+    text.contains(
+        "[the lifeline: every process of the scenario had exited when the wrapper returned",
+    )
+}
+
+/// Whether a scenario's lifeline notes say the cut was made -- or found no
+/// process holding the other end any more ([`Cut`]) -- and ended everything:
+/// every process of the scenario gone after it, and every group named
+/// observed empty.
+#[cfg(unix)]
+fn the_cut_ended_everything(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.starts_with("[the lifeline was cut"))
+        && text.lines().any(|line| {
+            line.starts_with("[the lifeline: every process of the scenario had exited")
+                && line.ends_with("after the cut]")
+        })
+        && !text.contains("was not observed empty after the cut")
+}
+
+/// The process groups a scenario's text names as its own: `pid`'s, and each
+/// that a scenario owner inside it wrote as `leader=`.
+#[cfg(unix)]
+fn scenario_groups(pid: libc::pid_t, text: &str) -> Vec<libc::pid_t> {
+    let mut groups = vec![pid];
+    groups.extend(
+        text.lines()
+            .filter_map(|line| line.strip_prefix("leader="))
+            .filter_map(|leader| leader.trim().parse::<libc::pid_t>().ok()),
+    );
+    groups
+}
+
+/// Run `parked_fork_isolation_kill_child` in a process of its own with the
+/// scenario named, bounded: its exit status and its stderr, or `None` and the
+/// stderr so far once it has been killed at the end of [`SCENARIO_BOUND`].
+/// It owns nothing of this process but the pipe and a [`Lifeline`], whose
+/// ends are its stdin and stdout.
+/// The process is owned from its spawn ([`ScenarioChild`]): it leads a
+/// process group of its own, so the processes it forks are the group's and a
+/// kill reaches them; its stderr is read as it arrives, a bounded turn at a
+/// time, and never joined; its exit is peeked before it is collected, so
+/// that the group can be killed while the group id is still its own; and
+/// once it has ended or run past its bound the group is killed, the leader
+/// collected, the group observed until no member is left and the pipe
+/// drained to EOF, each within [`SCENARIO_GROUP_BOUND`], the pipe's EOF being
+/// read as what it is -- every copy closed -- and never as the group empty.
+/// What the wrapper had to do, and what it could not, is appended to the
+/// text it returns; then what the lifeline found of the scenario once the
+/// wrapper had returned, and the cut that ended whatever was left
+/// ([`Lifeline::account`]), before the text is returned to any assertion.
+#[cfg(unix)]
+fn run_parked_fork_scenario(scenario: &str) -> (Option<std::process::ExitStatus>, String) {
+    let (mut held, given) = lifeline();
+    let owned = std::cell::Cell::new(0);
+    let (status, mut text) =
+        run_parked_fork_scenario_within(scenario, SCENARIO_BOUND, given, |pid| owned.set(pid));
+    let leftovers = held.account(&scenario_groups(owned.get(), &text));
+    text.push_str(&leftovers.notes());
+    (status, text)
+}
+
+/// [`run_parked_fork_scenario`] with `bound` in place of [`SCENARIO_BOUND`],
+/// the lifeline the caller hands it, and `once_owned` run with the scenario
+/// process's pid the moment it is owned: the seams through which the
+/// wrapper's own tests shorten its bound, hold the lifeline themselves --
+/// so that what the wrapper leaves is theirs to end, whatever the wrapper
+/// does -- and unwind through it.
+#[cfg(unix)]
+fn run_parked_fork_scenario_within(
+    scenario: &str,
+    bound: Duration,
+    lifeline: ScenarioLifeline,
+    once_owned: impl FnOnce(libc::pid_t),
+) -> (Option<std::process::ExitStatus>, String) {
+    let mut owned = ScenarioChild::spawn(scenario, lifeline);
+    once_owned(owned.pid());
+    let deadline = Instant::now() + bound;
+    let ended = loop {
+        owned.drain();
+        if owned.has_ended() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        rest_within(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(Instant::now()),
+        );
+    };
+    if !ended {
+        owned.note(&format!("the scenario did not end within {bound:?}"));
+    }
+    // Ended and not yet collected, or past its bound: either way the
+    // process's pid, and its group's id, is still its own, and the group is
+    // ended and accounted for before the leader is collected.
+    let status = owned.end(ended);
+    (status, owned.text())
+}
+
+/// The scenario process and every process it forks, owned from the spawn.
+/// The spawn puts it in a process group of its own, so a kill of the group
+/// reaches what it forked -- a parked fork it left stopped, which cannot read
+/// the EOF that would otherwise end it; its stderr is a pipe read without
+/// blocking, a bounded turn at a time, so what it wrote so far is always in
+/// hand and nothing is ever joined or retried; once the process has ended,
+/// or run past its bound, its group is killed while the id is still its own,
+/// the leader collected, the group observed until no member is left and the
+/// pipe drained, each step within [`SCENARIO_GROUP_BOUND`] and each step's
+/// failure -- a kill the OS refused, a leader not collected, a member or a
+/// pipe copy that outlived the bound -- noted and never read as done; and
+/// dropping this value with the process uncollected kills the group and
+/// collects the process within the same bound, never panicking and never
+/// waiting past it, so an unwinding caller leaves no child of this process
+/// behind and no descendant of the scenario stopped or parked, and says on
+/// stderr whatever of that it could not do, each state as it is. The kill
+/// always precedes the collection: a collected pid is a number the kernel
+/// may hand out again, and a group id with it. Every step is one attempt
+/// whatever the kernel answers: every rest between two turns one
+/// `nanosleep` a signal or a policy may cut short and nothing makes again
+/// (`rest_within`, `PR320-R5-MAIN-006`), every open of the group's
+/// observation one `open` (`open_once`, `PR320-R5-MAIN-002`), and the drop's
+/// report said through `say_on_stderr`, which neither retries a refused
+/// write nor panics on a failed one (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`, `PR320-R5-REG-002`).
+#[cfg(unix)]
+struct ScenarioChild {
+    child: std::process::Child,
+    stderr: std::process::ChildStderr,
+    text: Vec<u8>,
+    eof: bool,
+    notes: String,
+    collected: Option<std::process::ExitStatus>,
+}
+
+#[cfg(unix)]
+impl ScenarioChild {
+    /// Spawn the test binary on `parked_fork_isolation_kill_child` with
+    /// `scenario` named, in a group of its own, its stdin and stdout the
+    /// ends of the lifeline it is handed ([`ScenarioLifeline`]), its stderr
+    /// piped and made non-blocking once the process is owned.
+    fn spawn(scenario: &str, lifeline: ScenarioLifeline) -> Self {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let exe = std::env::current_exe().expect("test binary");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "rundir::tests::parked_fork_isolation_kill_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", scenario)
+            .stderr(std::process::Stdio::piped())
+            .process_group(0);
+        match lifeline {
+            ScenarioLifeline::Held(ends) => {
+                // SAFETY: `getpgrp` takes nothing and cannot fail.
+                let harness = unsafe { libc::getpgrp() };
+                command
+                    .stdin(ends.presence)
+                    .stdout(ends.cut)
+                    .env(SCENARIO_HARNESS_GROUP, harness.to_string());
+            }
+            #[cfg(target_os = "linux")]
+            ScenarioLifeline::PassedOn if std::env::var_os(SCENARIO_HARNESS_GROUP).is_some() => {
+                command
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit());
+            }
+            #[cfg(target_os = "linux")]
+            ScenarioLifeline::PassedOn => {
+                command
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null());
+            }
+        }
+        let mut child = command.spawn().expect("spawn the scenario child");
+        let stderr = child.stderr.take().expect("the child's stderr is piped");
+        let owned = Self {
+            child,
+            stderr,
+            text: Vec::new(),
+            eof: false,
+            notes: String::new(),
+            collected: None,
+        };
+        // SAFETY: `fcntl` with `F_GETFL` reads the flags of this process's
+        // own descriptor, the pipe's read end, and touches no memory. Made
+        // once the process is owned, so a failure here unwinds through the
+        // owner's drop.
+        let flags = unsafe { libc::fcntl(owned.stderr.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(
+            flags,
+            -1,
+            "read the pipe's flags: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `fcntl` with `F_SETFL` sets those flags and touches no
+        // memory; the descriptor is this value's own.
+        let set = unsafe {
+            libc::fcntl(
+                owned.stderr.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            )
+        };
+        assert_ne!(
+            set,
+            -1,
+            "make the pipe non-blocking: {}",
+            std::io::Error::last_os_error()
+        );
+        owned
+    }
+
+    /// The scenario process's pid, which is also its group's id.
+    fn pid(&self) -> libc::pid_t {
+        libc::pid_t::try_from(self.child.id()).expect("a pid fits its type")
+    }
+
+    /// One turn of the stderr drain ([`drain_turn`]), the text kept and a
+    /// failed read noted: `true` once the pipe has answered EOF or failed.
+    /// Never retries: the caller's loop, and its deadline, decide whether
+    /// another turn is made.
+    fn drain(&mut self) -> bool {
+        if self.eof {
+            return true;
+        }
+        match drain_turn(&mut self.stderr, &mut self.text) {
+            DrainTurn::Eof => self.eof = true,
+            DrainTurn::Failed(error) => {
+                self.note(&format!("the scenario's stderr could not be read: {error}"));
+                self.eof = true;
+            }
+            DrainTurn::Drained | DrainTurn::Interrupted | DrainTurn::Budget => {}
+        }
+        self.eof
+    }
+
+    /// Drain until the pipe answers EOF or `bound` runs out: whether it did.
+    fn drain_until_eof(&mut self, bound: Duration) -> bool {
+        let deadline = Instant::now() + bound;
+        loop {
+            if self.drain() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            rest_within(
+                Duration::from_millis(10),
+                deadline.saturating_duration_since(Instant::now()),
+            );
+        }
+    }
+
+    /// [`Self::drain_until_eof`], noting a pipe still open at the end of the
+    /// bound: every process of the group is dead by then, so a copy still
+    /// open is held outside it, which nothing here owns.
+    fn drain_until_eof_or_note(&mut self, bound: Duration) {
+        if !self.drain_until_eof(bound) {
+            self.note(&format!(
+                "the scenario's stderr did not answer EOF within {bound:?} of the group's kill: a \
+                 process outside the group holds a copy"
+            ));
+        }
+    }
+
+    /// Whether the scenario process has ended, asked without collecting it
+    /// (`waitid` with `WNOWAIT`), so that the answer leaves its pid, and its
+    /// group's id, reserved for the kill that may follow.
+    fn has_ended(&self) -> bool {
+        // SAFETY: `zeroed` is a valid `siginfo_t`, and a zero `si_pid` after
+        // the call is `WNOHANG`'s "nothing yet". `waitid` writes one
+        // `siginfo_t` through the pointer, which lives for the call, and
+        // takes the id and the flags by value; the pid is this value's own
+        // child, uncollected.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let asked = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                libc::id_t::try_from(self.child.id()).expect("a pid fits an id"),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(
+            asked,
+            0,
+            "waitid(P_PID, {}, WEXITED | WNOHANG | WNOWAIT): {}",
+            self.child.id(),
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `si_pid` reads the union field a child report fills, and
+        // the zeroing above makes it readable when nothing was reported.
+        unsafe { info.si_pid() != 0 }
+    }
+
+    /// `SIGKILL` to the group, before any collection: `true` when the group
+    /// is now dead or was already empty (`ESRCH`); a refusal by the OS is
+    /// noted and answered `false`, and nothing here reads it as a kill.
+    fn kill_group(&mut self) -> bool {
+        match crate::workspace_manager::fixture::kill_process_group(&mut self.child) {
+            Ok(()) => {
+                self.note("the scenario's process group was killed");
+                true
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                self.note("the scenario's process group was already empty");
+                true
+            }
+            Err(error) => {
+                self.note(&format!(
+                    "the scenario's process group could not be killed: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Collect the scenario process within `bound`, `try_wait` every 5 ms:
+    /// its status, or `None` for a process still there at the end of the
+    /// bound or one that could not be polled, either noted with the pid.
+    /// Never `Child::wait`, which would hold the owner for as long as the
+    /// process lives, a kill the OS refused included (`PR320-R3-MAIN-002`).
+    fn collect_within(&mut self, bound: Duration) -> Option<std::process::ExitStatus> {
+        if let Some(status) = self.collected {
+            return Some(status);
+        }
+        let deadline = Instant::now() + bound;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.collected = Some(status);
+                    return Some(status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.note(&format!(
+                        "the scenario process {} could not be polled: {error}",
+                        self.pid()
+                    ));
+                    return None;
+                }
+            }
+            if Instant::now() >= deadline {
+                self.note(&format!(
+                    "the scenario process {} was not collected within {bound:?}",
+                    self.pid()
+                ));
+                return None;
+            }
+            rest_within(
+                Duration::from_millis(5),
+                deadline.saturating_duration_since(Instant::now()),
+            );
+        }
+    }
+
+    /// End the scenario's group and account for it, the process having ended
+    /// (`ended`) or run past its bound: the group is killed while the
+    /// leader's id is still its own, the leader is collected, the group is
+    /// observed until no member of it is left ([`group_ended`]) and the
+    /// stderr is drained to EOF, each within [`SCENARIO_GROUP_BOUND`], and
+    /// whatever a step could not do is noted. The status is the scenario's
+    /// own, for a process that ended; a process killed at its bound has
+    /// none, whatever its collection read. A kill the OS refused leaves a
+    /// leader that has not ended uncollected and the pipe undrained, and
+    /// says so, rather than waiting on either: the status is then `None` and
+    /// the notes name the refusal and the pid. The pipe's EOF is never what
+    /// says the group is empty: it says every copy of the pipe is closed,
+    /// which a member that redirected or closed its stderr leaves true while
+    /// it lives (`PR320-R3-MAIN-001`).
+    fn end(&mut self, ended: bool) -> Option<std::process::ExitStatus> {
+        let killed = self.kill_group();
+        let status = if killed || ended {
+            self.collect_within(SCENARIO_GROUP_BOUND).filter(|_| ended)
+        } else {
+            self.note(&format!(
+                "the scenario process {} is left uncollected: alive, in a group that could not \
+                 be killed",
+                self.pid()
+            ));
+            None
+        };
+        if killed {
+            self.await_group_end_or_note(SCENARIO_GROUP_BOUND);
+            self.drain_until_eof_or_note(SCENARIO_GROUP_BOUND);
+        } else {
+            self.drain();
+            if !self.eof {
+                self.note("the scenario's stderr is left open: its holders could not be killed");
+            }
+        }
+        status
+    }
+
+    /// Observe the scenario's group, killed a moment ago, every 10 ms until
+    /// no member of it is left or `bound` runs out, and note which: whether
+    /// it was found empty. A group that could not be observed is noted as
+    /// not accounted for, never as empty. [`Self::await_group_end_or_note_by`]
+    /// with the wall clock.
+    fn await_group_end_or_note(&mut self, bound: Duration) -> bool {
+        self.await_group_end_or_note_by(bound, &mut || Instant::now())
+    }
+
+    /// [`Self::await_group_end_or_note`] with `now` as the clock: one
+    /// absolute deadline, `bound` from the first reading, that every pass
+    /// over the group answers to as well as this loop ([`group_seen_by`]).
+    /// Only a pass that completed before the deadline can say the group is
+    /// empty: a pass whose steps all succeed but together outlast it answers
+    /// that it was not finished, which is noted as the group not accounted
+    /// for and never read as empty, and the loop ends there -- the deadline
+    /// having passed, there is no second pass to make. A pass cut short after
+    /// one that found a member running notes that member as still running at
+    /// the last pass that finished, not only the unfinished pass: the rest
+    /// before it, capped at the deadline, may leave it no step to take
+    /// (`a_scenario_owners_group_observation_that_found_a_member_running_says_so_when_a_later_pass_meets_its_deadline`).
+    /// Before
+    /// `PR320-R6-MAIN-001` the pass took no deadline and an empty answer
+    /// returned before the loop looked at its own, so a pass of successful
+    /// steps held the owner 646 ms against a 100 ms bound and its drop 3.2 s
+    /// against 2 s. The clock is a parameter so that the permanent regression
+    /// drives it over the real `/proc`
+    /// (`a_scenario_owners_group_observation_whose_steps_all_succeed_but_outlast_its_deadline_is_not_read_as_empty`).
+    fn await_group_end_or_note_by(
+        &mut self,
+        bound: Duration,
+        now: &mut dyn FnMut() -> Instant,
+    ) -> bool {
+        let started = now();
+        let deadline = started + bound;
+        let mut found_running = false;
+        loop {
+            match group_seen_by(self.pid(), deadline, now) {
+                Ok(GroupSeen::Ended) => {
+                    self.note(&format!(
+                        "the scenario's group was empty {:?} after the kill",
+                        now().saturating_duration_since(started)
+                    ));
+                    return true;
+                }
+                Ok(GroupSeen::MemberRunning) => found_running = true,
+                Ok(GroupSeen::Unfinished { listed }) => {
+                    let seen = if found_running {
+                        "a member of it was still running at the last pass that finished, and the \
+                         next met the deadline"
+                    } else {
+                        "the observation met its deadline"
+                    };
+                    self.note(&format!(
+                        "the scenario's group was not observed to its end within {bound:?}: \
+                         {seen} after {listed} entries; its members are not accounted for"
+                    ));
+                    return false;
+                }
+                Err(error) => {
+                    self.note(&format!(
+                        "the scenario's group could not be observed: {error}; its members are \
+                         not accounted for"
+                    ));
+                    return false;
+                }
+            }
+            let reading = now();
+            if reading >= deadline {
+                self.note(&format!(
+                    "a member of the scenario's group was still running {bound:?} after the kill"
+                ));
+                return false;
+            }
+            rest_within(
+                Duration::from_millis(10),
+                deadline.saturating_duration_since(reading),
+            );
+        }
+    }
+
+    fn note(&mut self, note: &str) {
+        self.notes.push_str("\n[");
+        self.notes.push_str(note);
+        self.notes.push(']');
+    }
+
+    /// The stderr read so far and the notes, as text.
+    fn text(&self) -> String {
+        let mut text = String::from_utf8_lossy(&self.text).into_owned();
+        text.push_str(&self.notes);
+        text
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScenarioChild {
+    fn drop(&mut self) {
+        // Best effort by nature, as `ParkedFork`'s drop is: a caller that is
+        // unwinding has nothing to answer to, and a panic here would abort
+        // it. A process already collected has had its group killed, or the
+        // kill refused and noted, before the collection (`end`); one not yet
+        // collected is killed with its group, before the collection,
+        // collected within the bound and its group observed until no member
+        // is left -- or, after a kill the OS refused, polled once and left.
+        // Whichever of those steps could not be done is said on stderr, the
+        // one channel a drop has, each state as it is: a refused kill is a
+        // refusal whether or not the leader could be collected, and a
+        // collected leader is not the group ended (`PR320-R4-MAIN-003`,
+        // `PR320-R4-REG-003`). Said through `say_on_stderr`, not a print
+        // macro: the macro retries an interrupted write forever and panics on
+        // a failed one, and a panic here while the caller unwinds is an abort
+        // (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`, `PR320-R5-REG-002`).
+        if self.collected.is_some() {
+            return;
+        }
+        let killed = self.kill_group();
+        let bound = if killed {
+            SCENARIO_GROUP_BOUND
+        } else {
+            Duration::ZERO
+        };
+        let status = self.collect_within(bound);
+        let group_ended = killed && self.await_group_end_or_note(SCENARIO_GROUP_BOUND);
+        if killed && status.is_some() && group_ended {
+            return;
+        }
+        say_on_stderr(&format!(
+            "[the scenario process {} was dropped by its owner with its cleanup incomplete: the \
+             group {}; the process {}; the group {}:{}]\n",
+            self.pid(),
+            if killed {
+                "was killed"
+            } else {
+                "could not be killed"
+            },
+            match status {
+                Some(status) => format!("was collected ({status})"),
+                None => String::from("is left uncollected"),
+            },
+            if !killed {
+                "is not accounted for"
+            } else if group_ended {
+                "was empty"
+            } else {
+                "was not observed empty within the bound"
+            },
+            self.notes
+        ));
+    }
+}
+
+/// What ended one turn of a drain ([`drain_turn`]).
+#[cfg(unix)]
+#[derive(Debug)]
+enum DrainTurn {
+    /// The pipe answered EOF: every copy of its write end is closed.
+    Eof,
+    /// Nothing more to read now (`WouldBlock`).
+    Drained,
+    /// A handled signal ended a read (`Interrupted`): the turn ends, and the
+    /// caller's deadline decides whether another is made.
+    Interrupted,
+    /// The turn's work budget ran out with the pipe still readable.
+    Budget,
+    /// A read failed otherwise, with this error.
+    Failed(std::io::Error),
+}
+
+/// One turn of a non-blocking drain of `reader` into `text`: at most
+/// [`DRAIN_TURN_READS`] reads of 4 KiB, ended early by EOF, by nothing more
+/// to read, by an interruption or by an error, each returned to the caller
+/// as what it was. Nothing is retried here: the caller's loop checks its own
+/// deadline between turns, so no answer the pipe gives -- an interruption
+/// repeated, or output that never pauses -- can hold the owner inside the
+/// drain past that deadline (`PR320-R3-MAIN-003`). Any reader, so that the
+/// answers are driven in an order a test chooses.
+#[cfg(unix)]
+fn drain_turn(reader: &mut impl std::io::Read, text: &mut Vec<u8>) -> DrainTurn {
+    let mut buffer = [0_u8; 4096];
+    for _ in 0..DRAIN_TURN_READS {
+        match reader.read(&mut buffer) {
+            Ok(0) => return DrainTurn::Eof,
+            Ok(count) => text.extend_from_slice(buffer.get(..count).unwrap_or_default()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return DrainTurn::Drained;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return DrainTurn::Interrupted;
+            }
+            Err(error) => return DrainTurn::Failed(error),
+        }
+    }
+    DrainTurn::Budget
+}
+
+/// What one pass over a process group found ([`group_seen_by`]).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupSeen {
+    /// The pass completed before its deadline and no process of the group
+    /// was left running.
+    Ended,
+    /// A process of the group was running.
+    MemberRunning,
+    /// The deadline came before the pass completed -- after `listed`
+    /// entries of the listing, its last step included -- so the pass says
+    /// nothing of the group's end: not accounted for, and never read as
+    /// empty (`PR320-R6-MAIN-001`).
+    Unfinished {
+        /// How many entries the listing had produced when the deadline came.
+        listed: usize,
+    },
+}
+
+/// One pass over the group `pgid`, its leader collected already, answering
+/// to the absolute `deadline` as `now` reads it. On Linux, [`group_seen_in`]
+/// over the real `/proc` listing and each listed process's `stat`
+/// ([`proc_stat_of`]): no process whose group is `pgid` in a state other
+/// than dead-and-uncollected (`Z`), which is ended for every purpose here,
+/// since a zombie holds no descriptor and runs nothing, and a subreaper up
+/// the tree may keep the group's zombies until it collects them. Every step
+/// of the pass is one attempt, never retried: the listing's `opendir` and
+/// each `readdir`, each `stat`'s open ([`open_once`] -- `File::open` makes an
+/// interrupted open again inside itself, forever when every open is
+/// interrupted, `PR320-R5-MAIN-002`) and its one `read`; and the steps
+/// together answer to the caller's deadline, not only the pass between two
+/// of its turns (`PR320-R6-MAIN-001`).
+///
+/// # Errors
+///
+/// The listing could not be made, or a `/proc` entry could not be listed,
+/// opened or read for a reason other than its process having gone, an
+/// interruption included: the observation failed, and the caller says so
+/// rather than reading the group as empty.
+#[cfg(target_os = "linux")]
+fn group_seen_by(
+    pgid: libc::pid_t,
+    deadline: Instant,
+    now: &mut dyn FnMut() -> Instant,
+) -> std::io::Result<GroupSeen> {
+    let listing = fs::read_dir("/proc")?;
+    group_seen_in(
+        pgid,
+        &mut listing.map(|entry| entry.map(|entry| entry.file_name())),
+        &mut proc_stat_of,
+        deadline,
+        now,
+    )
+}
+
+/// The pass of [`group_seen_by`] over any listing and any reader of a listed
+/// process's `stat`, the seam through which the deadline's two checks are
+/// driven with answers a test chooses. Every step that returns -- the
+/// `readdir` that produced an entry, and the one that ended the listing --
+/// is followed by a reading of `now` against `deadline` before anything more
+/// is made of it: so a pass stops within one entry of its deadline however
+/// many successful steps lie ahead
+/// (`a_group_pass_whose_steps_outlast_its_deadline_stops_there_and_is_unfinished`),
+/// and a pass whose last step returns after the deadline is not accepted as
+/// having found the group empty
+/// (`a_group_pass_that_completes_after_its_deadline_is_unfinished_not_empty`).
+/// A listed name that is not a pid is not a process; a process gone between
+/// the listing and its read (`stat_of` answering `None`) is skipped.
+///
+/// # Errors
+///
+/// A listing step or a `stat` read that failed, as it was.
+#[cfg(target_os = "linux")]
+fn group_seen_in(
+    pgid: libc::pid_t,
+    listing: &mut dyn Iterator<Item = std::io::Result<std::ffi::OsString>>,
+    stat_of: &mut dyn FnMut(&std::ffi::OsStr) -> std::io::Result<Option<Vec<u8>>>,
+    deadline: Instant,
+    now: &mut dyn FnMut() -> Instant,
+) -> std::io::Result<GroupSeen> {
+    let mut listed = 0_usize;
+    loop {
+        let entry = listing.next();
+        if now() >= deadline {
+            return Ok(GroupSeen::Unfinished { listed });
+        }
+        let Some(entry) = entry else {
+            return Ok(GroupSeen::Ended);
+        };
+        listed += 1;
+        let name = entry?;
+        if !name
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Some(stat) = stat_of(&name)? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&stat);
+        // `pid (comm) state ppid pgrp ...`: the comm may hold spaces and
+        // parentheses, so the fields are read after the last `)`.
+        let Some((_, after_comm)) = text.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let state = fields.next().unwrap_or("");
+        let group = fields
+            .nth(1)
+            .and_then(|group| group.parse::<libc::pid_t>().ok());
+        if group == Some(pgid) && state != "Z" && state != "X" {
+            return Ok(GroupSeen::MemberRunning);
+        }
+    }
+}
+
+/// The `stat` of the process `/proc` listed as `name`: one open
+/// ([`open_once`]) and one `read`, each answered as it was, and `None` for a
+/// process gone between the listing and its read (`ENOENT`, `ESRCH`).
+///
+/// # Errors
+///
+/// The open or the read, for any other reason, an interruption included.
+#[cfg(target_os = "linux")]
+fn proc_stat_of(name: &std::ffi::OsStr) -> std::io::Result<Option<Vec<u8>>> {
+    let gone = |error: &std::io::Error| {
+        error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+    };
+    let mut stat = match open_once(&Path::new("/proc").join(name).join("stat")) {
+        Ok(stat) => stat,
+        Err(error) if gone(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut buffer = [0_u8; 4096];
+    match stat.read(&mut buffer) {
+        Ok(count) => Ok(Some(buffer.get(..count).unwrap_or_default().to_vec())),
+        Err(error) if gone(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Open `path` read-only, once: one `open(2)`, whatever it answers, and the
+/// descriptor owned by the `File` it returns. `File::open` makes an
+/// interrupted open again inside itself, so an observation whose opens a
+/// policy or a signal keeps interrupting never came back to the bound its
+/// caller keeps (`PR320-R5-MAIN-002`); this answers the interruption.
+///
+/// # Errors
+///
+/// What the open answered, an interruption included, as it was; a path
+/// holding a NUL byte is `InvalidInput`, and no open is made.
+#[cfg(target_os = "linux")]
+fn open_once(path: &Path) -> std::io::Result<File> {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: `open` reads the NUL-terminated name, which lives for the call,
+    // and takes the flags by value; it creates nothing without `O_CREAT`.
+    let descriptor = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` was opened just now by this call and is owned by
+    // nothing else; the `File` takes it and closes it once, on its drop.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+/// [`group_seen_by`] on the Unixes without `/proc`: `kill` with signal 0 to
+/// the group, which delivers nothing and answers `ESRCH` once no process of
+/// the group exists; a group the caller may not signal (`EPERM`) exists.
+/// Orphans there go to `launchd`, which collects them, so a killed member
+/// does not linger as a zombie of the group. The pass is that one call, and
+/// its answer, returned after `deadline`, is not accepted either.
+///
+/// # Errors
+///
+/// Any other answer than `0`, `ESRCH` or `EPERM`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn group_seen_by(
+    pgid: libc::pid_t,
+    deadline: Instant,
+    now: &mut dyn FnMut() -> Instant,
+) -> std::io::Result<GroupSeen> {
+    // SAFETY: signal 0 delivers nothing; the call only asks whether a
+    // process of the group exists, and hands over no memory.
+    let answered = unsafe { libc::kill(-pgid, 0) };
+    let error = std::io::Error::last_os_error();
+    if now() >= deadline {
+        return Ok(GroupSeen::Unfinished { listed: 0 });
+    }
+    if answered == 0 {
+        return Ok(GroupSeen::MemberRunning);
+    }
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(GroupSeen::Ended),
+        Some(libc::EPERM) => Ok(GroupSeen::MemberRunning),
+        _ => Err(error),
+    }
+}
+
+/// Every pid a scenario wrote to its stderr as `descendant=<pid>`, at least
+/// `expected` of them.
+#[cfg(unix)]
+fn descendants_named_in(text: &str, expected: usize) -> Vec<libc::pid_t> {
+    let named: Vec<libc::pid_t> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("descendant="))
+        .filter_map(|pid| pid.trim().parse().ok())
+        .collect();
+    assert!(
+        named.len() >= expected,
+        "the scenario named {expected} descendants before it was killed or exited: {text}"
+    );
+    named
+}
+
+/// The state letter of `pid` as `/proc` reads it -- `T` for a stopped
+/// process, `S` or `R` for one that runs, `Z` for one ended and uncollected
+/// -- or `gone` for a pid with no entry: what a scenario writes after its
+/// drop, for the parent to read. A reading, never a signal: a scenario reads
+/// its own uncollected children with it, or a member no one can have ended
+/// yet, its group's kill having been refused and the lifeline not yet cut.
+#[cfg(target_os = "linux")]
+fn state_by_proc(pid: libc::pid_t) -> String {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::from("gone"),
+        Err(error) => panic!("read /proc/{pid}/stat: {error}"),
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .and_then(|after_comm| after_comm.split_whitespace().next())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// A scenario that never ends is killed at the end of the wrapper's bound
+/// with every process of its group: the bound shortened to a second, the
+/// scenario parks a fork and stops it, spawns a child that holds its stderr,
+/// and waits to be killed. The wrapper returns `None` and the stderr the
+/// scenario wrote before the kill, within its own bounds and without joining
+/// anything; both processes the scenario left behind are dead -- the stopped
+/// fork, which could read neither a release nor an EOF, and the child that
+/// ran on holding the pipe; the scenario process is collected. The wrapper
+/// runs on a thread of its own with the test's failure bound around it, so a
+/// wrapper that blocked would fail this test rather than hang it.
+///
+/// This test owns the end of what it started, whatever the wrapper does
+/// (`PR320-R6-REG-002`, `PR320-R6-MAIN-002`): it holds the scenario's
+/// lifeline, and before any assertion it reads whether every process of the
+/// scenario had exited when the wrapper returned, cuts the lifeline -- the
+/// warden of the scenario's group then ends the group, stopped fork
+/// included, which also releases a wrapper blocked on it -- and reads again
+/// ([`Lifeline::account`]). No number is signalled, and the assertions are
+/// the ones this test always made, against the reading taken first.
+#[cfg(unix)]
+#[test]
+fn a_scenario_that_never_ends_is_killed_at_the_bound_with_the_fork_it_left_stopped() {
+    let (mut held, given) = lifeline();
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "park-a-stopped-fork-and-never-end",
+            Duration::from_secs(1),
+            given,
+            |pid| pid_sender.send(pid).expect("the test waits for the pid"),
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver.recv_timeout(Duration::from_secs(60));
+    let leftovers = held.account(&scenario_pid.iter().copied().collect::<Vec<_>>());
+    running.join().expect("the wrapper's thread ends");
+    let scenario_pid = scenario_pid.expect("the wrapper owned the scenario process and said which");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    let notes = leftovers.notes();
+    assert!(
+        status.is_none(),
+        "a scenario killed at the bound has no status: {status:?}\n{text}{notes}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}{notes}"
+    );
+    assert!(
+        text.contains("the scenario did not end within 1s")
+            && text.contains("the scenario's process group was killed"),
+        "the wrapper says what it did: {text}{notes}"
+    );
+    let descendants = descendants_named_in(&text, 2);
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    assert!(
+        leftovers.when_the_wrapper_returned.is_ok(),
+        "both processes the scenario left behind, {descendants:?}, had ended when the wrapper \
+         returned: {text}{notes}"
+    );
+    assert!(
+        leftovers.cleaned(),
+        "and the lifeline's cut ended whatever was left: {notes}"
+    );
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving a child that holds its stderr and runs on: the wrapper
+/// returns that status and the stderr written before it, within its bounds,
+/// and the group is killed once the scenario has ended, the pipe answering
+/// EOF once its holder is dead, so the wrapper never waits on a process that
+/// will not let go. As the test above, this test holds the scenario's
+/// lifeline and, before any assertion, reads what the scenario left, cuts,
+/// and reads again: a wrapper that skipped the group's kill failed this test
+/// at its assertions with the child still running, for the test's driver to
+/// end (`PR320-R6-REG-002`); now the cut ends it through the group's warden,
+/// before the assertion that fails.
+#[cfg(unix)]
+#[test]
+fn a_scenario_that_exits_leaving_a_child_holding_its_stderr_returns_its_status_and_kills_the_child()
+{
+    let (mut held, given) = lifeline();
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "exit-23-leaving-a-child-holding-stderr",
+            SCENARIO_BOUND,
+            given,
+            |pid| {
+                pid_sender.send(pid).expect("the test waits for the pid");
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver.recv_timeout(Duration::from_secs(60));
+    let leftovers = held.account(&scenario_pid.iter().copied().collect::<Vec<_>>());
+    running.join().expect("the wrapper's thread ends");
+    let scenario_pid = scenario_pid.expect("the wrapper owned the scenario process and said which");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    let notes = leftovers.notes();
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(23),
+        "the scenario's own exit status is returned: {status:?}\n{text}{notes}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}{notes}"
+    );
+    assert!(
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty")
+            && !text.contains("did not answer EOF"),
+        "the wrapper says what it did: {text}{notes}"
+    );
+    let descendants = descendants_named_in(&text, 1);
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    assert!(
+        leftovers.when_the_wrapper_returned.is_ok(),
+        "the child holding stderr, {descendants:?}, had ended when the wrapper returned: \
+         {text}{notes}"
+    );
+    assert!(
+        leftovers.cleaned(),
+        "and the lifeline's cut ended whatever was left: {notes}"
+    );
+}
+
+/// A caller that unwinds after the scenario process is spawned leaves no
+/// child behind: the process is owned from its spawn, and the unwinding
+/// drops the owner, which kills the scenario's group and collects the
+/// process. The test holds the scenario's lifeline and, before any
+/// assertion, reads what the unwinding left, cuts and reads again; an owner
+/// that left the process uncollected is then reported with the process
+/// ended by the cut and never signalled by number -- the reading that it was
+/// left is no longer a reap that frees the number before a signal
+/// (`PR320-R6-MAIN-002`).
+#[cfg(unix)]
+#[test]
+fn a_panic_after_the_scenario_process_is_spawned_leaves_no_child_behind() {
+    let (mut held, given) = lifeline();
+    let pid = std::cell::Cell::new(0);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_parked_fork_scenario_within(
+            "park-a-stopped-fork-and-never-end",
+            SCENARIO_BOUND,
+            given,
+            |owned| {
+                pid.set(owned);
+                panic!("a setup step after the spawn fails");
+            },
+        )
+    }));
+    let pid = pid.get();
+    let leftovers = held.account(
+        &[pid]
+            .into_iter()
+            .filter(|&pid| pid != 0)
+            .collect::<Vec<_>>(),
+    );
+    let notes = leftovers.notes();
+    assert!(unwound.is_err(), "the closure unwound");
+    assert_ne!(
+        pid, 0,
+        "the scenario process was spawned before the unwinding"
+    );
+    assert!(
+        is_reaped(pid),
+        "the unwinding dropped the scenario's owner, which kills and collects the scenario \
+         process: {pid} is still this process's child{notes}"
+    );
+    assert!(
+        leftovers.when_the_wrapper_returned.is_ok(),
+        "nothing the scenario made outlived the unwinding: {notes}"
+    );
+    assert!(
+        leftovers.cleaned(),
+        "and the lifeline's cut ended whatever was left: {notes}"
+    );
+}
+
+/// A scenario whose process exits leaving a member of its group that holds
+/// nothing of the scenario's -- its stderr sent to `/dev/null` -- so that the
+/// pipe answers EOF the moment the scenario exits while the member runs on:
+/// the wrapper returns the scenario's status only once the group has been
+/// killed and observed empty, so the member has ended by the time the
+/// wrapper returns, without any wait by this test. A pipe's EOF says every
+/// copy of it is closed and nothing about the group
+/// (`PR320-R3-MAIN-001`, `PR320-R3-REG-003`). The reading that says whether
+/// the member had ended is the lifeline's, made before any assertion, and a
+/// member the wrapper left running is ended by the cut that follows it,
+/// through its group's warden: this test no longer reads the member's state
+/// by its number and then signals the number (`PR320-R6-MAIN-002`). Linux,
+/// as it was: the group's observation after the cut reads `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scenario_that_exits_leaving_a_silent_member_in_its_group_has_the_group_ended_before_it_returns()
+ {
+    let (mut held, given) = lifeline();
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(60), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "exit-23-leaving-a-silent-member-in-the-group",
+            SCENARIO_BOUND,
+            given,
+            |pid| {
+                pid_sender.send(pid).expect("the test waits for the pid");
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver.recv_timeout(Duration::from_secs(60));
+    let leftovers = held.account(&scenario_pid.iter().copied().collect::<Vec<_>>());
+    running.join().expect("the wrapper's thread ends");
+    let scenario_pid = scenario_pid.expect("the wrapper owned the scenario process and said which");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within the test's bound; a wrapper that blocks past its own bounds \
+         is the defect this test holds",
+    );
+    let notes = leftovers.notes();
+    let descendants = descendants_named_in(&text, 1);
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(23),
+        "the scenario's own exit status is returned: {status:?}\n{text}{notes}"
+    );
+    assert!(
+        took < Duration::from_secs(20),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}{notes}"
+    );
+    assert!(
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty"),
+        "the wrapper killed the group and observed it empty: {text}{notes}"
+    );
+    assert!(
+        is_reaped(scenario_pid),
+        "the scenario process {scenario_pid} was collected"
+    );
+    assert!(
+        leftovers.when_the_wrapper_returned.is_ok(),
+        "the member the scenario left in its group, {descendants:?}, had ended when the wrapper \
+         returned, its stderr EOF notwithstanding: {text}{notes}"
+    );
+    assert!(
+        leftovers.cleaned(),
+        "and the lifeline's cut ended whatever was left: {notes}"
+    );
+}
+
+/// A group kill the OS refuses -- a policy answering `EPERM` to `kill`,
+/// installed on the wrapper's own thread the moment it owns the scenario --
+/// leaves the wrapper bounded: it returns within its own bounds with no
+/// status, saying that the group could not be killed and that the process
+/// is left alive and uncollected, and never waits on the process it could
+/// not kill (`PR320-R3-MAIN-002`, `PR320-R3-REG-004`).
+///
+/// The body runs in a process of its own
+/// (`run-a-wrapper-whose-group-kill-the-os-refuses`,
+/// [`run_a_wrapper_whose_group_kill_the_os_refuses`]): the policy binds the
+/// wrapper's thread for good, so a wrapper that waited on the process it
+/// could not kill, or made its refused kill again, would hold a thread
+/// nothing can release, and this test's join of it would never return.
+/// Hosted, that failure ends with the host process, and what the wrapper was
+/// given to run ends with the lifeline this test cuts; the host itself ends
+/// the group and collects the process the wrapper left it, the process being
+/// its own uncollected child, where this test used to signal the group by a
+/// number whose leader the wrapper under test might already have collected
+/// (`PR320-R6-MAIN-002`). Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_kill_the_os_refuses_leaves_the_wrapper_bounded_and_the_refusal_in_its_text() {
+    let text = assert_the_scenario_ran_to_its_end("run-a-wrapper-whose-group-kill-the-os-refuses");
+    assert!(
+        text.contains(
+            "the refused kill left the scenario process uncollected; this scenario ended its \
+             group and collected it"
+        ),
+        "the wrapper left its caller the process it could not kill: {text}"
+    );
+}
+
+/// Dropping a parked fork whose kill the OS refuses says so, and what is
+/// left: in a process of its own (`drop-a-parked-fork-whose-kill-is-refused`),
+/// the drop returns within its bounds and prints on stderr that the child
+/// was left uncollected, with the refused kill, its errno and the child
+/// alive at the last observation, and the stopped child is still there after
+/// it -- which the wrapper's kill of the scenario's group then ends
+/// (`PR320-R4-MAIN-003`). Linux, for the policy.
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_a_parked_fork_whose_kill_the_os_refuses_says_so_and_what_is_left() {
+    let (status, text) = run_parked_fork_scenario("drop-a-parked-fork-whose-kill-is-refused");
+    let pid = descendants_named_in(&text, 1)
+        .first()
+        .copied()
+        .expect("the scenario named its fork");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario ran to its end: {status:?}\n{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "[the parked child {pid} was left uncollected by its owner's drop: kill the parked \
+             child {pid} at the end of 100ms: Operation not permitted (os error 1); the child \
+             is left uncollected, alive at the last observation]"
+        )),
+        "the drop said what it could not do and what is left: {text}"
+    );
+    assert!(
+        text.lines().any(|line| line.ends_with("left=T")),
+        "the stopped child was still there after the drop: {text}"
+    );
+    assert!(
+        text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty"),
+        "the wrapper ended the group the scenario left: {text}"
+    );
+    assert!(
+        every_process_had_exited_when_the_wrapper_returned(&text),
+        "the stopped child had ended with the group when the wrapper returned: {text}"
+    );
+}
+
+/// Dropping a scenario owner whose group kill the OS refuses reports the
+/// refusal although its leader was collected: in a process of its own
+/// (`drop-a-scenario-owner-whose-group-kill-is-refused-after-its-leader-exited`),
+/// the owner's leader has exited 23 leaving a silent member in its group,
+/// the kill is refused, the leader is collected, and the drop prints on
+/// stderr the refusal with its errno, the collection with its status and the
+/// group not accounted for; the member is alive after the drop, and it is
+/// this test that ends it -- it is in the dropped leader's group, which the
+/// wrapper's kill of the scenario's group does not reach
+/// (`PR320-R4-MAIN-003`, `PR320-R4-REG-003`). Linux, for the policy.
+///
+/// This test ends it with the lifeline it holds, before any assertion: the
+/// member keeps the lifeline its dropped leader passed on, and the dropped
+/// leader's group has a warden of its own, which the cut sets off. The
+/// reading that the member was still running when the wrapper returned is
+/// the lifeline's -- the member is the one process of the scenario left to
+/// hold it, the wardens holding none -- where it was a reading of the
+/// member's number followed by a signal to it (`PR320-R6-MAIN-002`).
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_a_scenario_owner_whose_group_kill_the_os_refuses_reports_it_although_its_leader_was_collected()
+ {
+    let (status, text) = run_parked_fork_scenario(
+        "drop-a-scenario-owner-whose-group-kill-is-refused-after-its-leader-exited",
+    );
+    let leader: libc::pid_t = text
+        .lines()
+        .find_map(|line| line.strip_prefix("leader="))
+        .and_then(|pid| pid.trim().parse().ok())
+        .expect("the scenario named the leader it dropped");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario ran to its end: {status:?}\n{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "[the scenario process {leader} was dropped by its owner with its cleanup \
+             incomplete: the group could not be killed; the process was collected (exit \
+             status: 23); the group is not accounted for:"
+        )),
+        "the drop said the refusal, the collection and the group's standing: {text}"
+    );
+    assert!(
+        text.contains(
+            "the scenario's process group could not be killed: Operation not permitted (os \
+             error 1)"
+        ),
+        "with the refusal's errno: {text}"
+    );
+    assert!(
+        text.lines().any(|line| {
+            line.ends_with("left=S") || line.ends_with("left=R") || line.ends_with("left=D")
+        }),
+        "the member was alive after the drop: {text}"
+    );
+    assert!(
+        text.contains(
+            "[the lifeline: a process of the scenario still held it when the wrapper returned"
+        ),
+        "the member the refused kill could not end was still running when the wrapper \
+         returned: {text}"
+    );
+    assert!(
+        the_cut_ended_everything(&text)
+            && text.contains(&format!(
+                "[the scenario's group {leader} was observed empty after the cut]"
+            )),
+        "and this test ended it, through the dropped leader's group's own warden: {text}"
+    );
+}
+
+/// A reader whose every read answers what `answer` says: the seam through
+/// which the drain, the report read and the sentinel observation are driven
+/// with the answers a pipe or a socket gives -- bytes, EOF, `WouldBlock`,
+/// `TimedOut`, `Interrupted` -- in an order a test chooses, without a signal
+/// or a policy to arrange them.
+#[cfg(unix)]
+struct Answering<F: FnMut(&mut [u8]) -> std::io::Result<usize>>(F);
+
+#[cfg(unix)]
+impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> std::io::Read for Answering<F> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        (self.0)(buffer)
+    }
+}
+
+/// A writer whose every write answers what `answer` says: the seam through
+/// which the release write is driven with the answers a socket gives -- the
+/// byte taken, nothing taken, an interruption -- and its attempts counted.
+#[cfg(unix)]
+struct Writing<F: FnMut(&[u8]) -> std::io::Result<usize>>(F);
+
+#[cfg(unix)]
+impl<F: FnMut(&[u8]) -> std::io::Result<usize>> std::io::Write for Writing<F> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (self.0)(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A drain turn ends on the first interruption and hands the question of
+/// another turn back to its caller: a pipe that answers `Interrupted` to
+/// every read costs one read per turn, never a retry inside the drain
+/// (`PR320-R3-MAIN-003`, `PR320-R3-REG-005`).
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_ends_on_an_interruption_and_leaves_the_deadline_to_its_caller() {
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let mut text = Vec::new();
+    let turn = drain_turn(&mut interrupted, &mut text);
+    assert!(
+        matches!(turn, DrainTurn::Interrupted),
+        "an interrupted read ends the turn as what it was: {turn:?}"
+    );
+    assert_eq!(reads, 1, "and the drain made no second read of its own");
+    assert!(text.is_empty());
+}
+
+/// A drain turn has a work budget: a pipe that never pauses ends the turn
+/// after `DRAIN_TURN_READS` reads with what they read kept, so the caller's
+/// deadline is checked between turns however much the scenario writes.
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_with_output_that_never_pauses_ends_at_its_work_budget() {
+    let mut reads = 0_usize;
+    let mut endless = Answering(|buffer: &mut [u8]| {
+        reads += 1;
+        buffer.fill(b'x');
+        Ok(buffer.len())
+    });
+    let mut text = Vec::new();
+    let turn = drain_turn(&mut endless, &mut text);
+    assert!(
+        matches!(turn, DrainTurn::Budget),
+        "the turn ended at its budget: {turn:?}"
+    );
+    assert_eq!(reads, DRAIN_TURN_READS);
+    assert_eq!(
+        text.len(),
+        DRAIN_TURN_READS * 4096,
+        "everything read was kept"
+    );
+    let mut ending = Answering(|buffer: &mut [u8]| {
+        buffer.fill(b'y');
+        Ok(2)
+    });
+    let mut text = Vec::new();
+    let mut turns = 0;
+    let turn = loop {
+        turns += 1;
+        match drain_turn(&mut ending, &mut text) {
+            DrainTurn::Budget if turns < 3 => {}
+            other => break other,
+        }
+    };
+    assert!(matches!(turn, DrainTurn::Budget), "{turn:?}");
+    assert_eq!(
+        text.len(),
+        3 * DRAIN_TURN_READS * 2,
+        "three turns, each its budget of short reads"
+    );
+}
+
+/// A drain turn ends on EOF, on nothing more to read, and on a failed read,
+/// each returned as what it was with the bytes before it kept.
+#[cfg(unix)]
+#[test]
+fn a_drain_turn_returns_eof_a_pause_and_a_failure_as_what_they_were() {
+    let mut answers = vec![
+        Err(std::io::Error::other("the pipe's read failed")),
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        Ok(0),
+        Ok(3),
+    ];
+    let mut scripted = Answering(move |buffer: &mut [u8]| match answers.pop() {
+        Some(Ok(count)) => {
+            buffer
+                .get_mut(..count)
+                .expect("the answer fits the buffer")
+                .fill(b'a');
+            Ok(count)
+        }
+        Some(Err(error)) => Err(error),
+        None => Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+    });
+    let mut text = Vec::new();
+    assert!(matches!(
+        drain_turn(&mut scripted, &mut text),
+        DrainTurn::Eof
+    ));
+    assert_eq!(text, b"aaa", "the bytes before EOF were kept");
+    assert!(matches!(
+        drain_turn(&mut scripted, &mut text),
+        DrainTurn::Drained
+    ));
+    match drain_turn(&mut scripted, &mut text) {
+        DrainTurn::Failed(error) => assert_eq!(error.to_string(), "the pipe's read failed"),
+        other => panic!("a failed read ends the turn with its error: {other:?}"),
+    }
+}
+
+/// The `stat` line of a process `pid` in group 1 and running, which no
+/// group these seam tests observe contains.
+#[cfg(target_os = "linux")]
+fn a_stat_outside_the_group(pid: &std::ffi::OsStr) -> Vec<u8> {
+    format!("{} (sleeper) S 0 1 1 0 -1", pid.to_string_lossy()).into_bytes()
+}
+
+/// A pass over a process group whose every step succeeds but whose steps
+/// together outlast its deadline stops at the deadline and answers that it
+/// did not finish: fifty processes, none of them in the group, each `stat`
+/// read costing 10 ms of a clock the test drives, and the deadline 100 ms
+/// away. The pass reads ten, meets the deadline at the next step and
+/// answers `Unfinished` after ten entries -- never `Ended`, and never after
+/// all fifty. A pass that read its clock only between passes made all fifty
+/// reads and answered the group empty (`PR320-R6-MAIN-001`); one that read it
+/// only on completion made all fifty and answered late.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_pass_whose_steps_outlast_its_deadline_stops_there_and_is_unfinished() {
+    const STEP: Duration = Duration::from_millis(10);
+    let origin = Instant::now();
+    let deadline = origin + Duration::from_millis(100);
+    let clock = std::cell::Cell::new(origin);
+    let mut listing = (1..=50).map(|pid| Ok(std::ffi::OsString::from(pid.to_string())));
+    let mut reads = 0_usize;
+    let seen = group_seen_in(
+        4_000_000,
+        &mut listing,
+        &mut |name| {
+            reads += 1;
+            clock.set(clock.get() + STEP);
+            Ok(Some(a_stat_outside_the_group(name)))
+        },
+        deadline,
+        &mut || clock.get(),
+    )
+    .expect("every step succeeds");
+    assert_eq!(
+        seen,
+        GroupSeen::Unfinished { listed: 10 },
+        "the pass stops at the first step past its deadline and says it did not finish"
+    );
+    assert_eq!(
+        reads, 10,
+        "no stat is read once the deadline has come: {reads} of 50 were"
+    );
+}
+
+/// A pass whose steps all succeed and whose last step returns after its
+/// deadline is not accepted as having found the group empty: three
+/// processes outside the group, the driven clock short of the deadline until
+/// the third `stat` read carries it past, and the listing's end -- the one
+/// step left -- read after the deadline. The pass answers `Unfinished`: an
+/// empty answer made after the deadline is late whatever it says. The same
+/// listing with the clock left short answers `Ended`, so it is the deadline
+/// and not the listing that decides. A pass that accepted its completion
+/// without reading the clock again answered empty (`PR320-R6-MAIN-001`, the
+/// late completion).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_pass_that_completes_after_its_deadline_is_unfinished_not_empty() {
+    let origin = Instant::now();
+    let deadline = origin + Duration::from_millis(100);
+    let clock = std::cell::Cell::new(origin);
+    let names = ["11", "12", "13"];
+    let mut listing = names.iter().map(|name| Ok(std::ffi::OsString::from(*name)));
+    let late = group_seen_in(
+        4_000_000,
+        &mut listing,
+        &mut |name| {
+            if name == "13" {
+                clock.set(deadline + Duration::from_millis(1));
+            }
+            Ok(Some(a_stat_outside_the_group(name)))
+        },
+        deadline,
+        &mut || clock.get(),
+    )
+    .expect("every step succeeds");
+    assert_eq!(
+        late,
+        GroupSeen::Unfinished { listed: 3 },
+        "a pass whose last step returned after its deadline is not finished"
+    );
+
+    let mut listing = names.iter().map(|name| Ok(std::ffi::OsString::from(*name)));
+    let in_time = group_seen_in(
+        4_000_000,
+        &mut listing,
+        &mut |name| Ok(Some(a_stat_outside_the_group(name))),
+        deadline,
+        &mut || origin,
+    )
+    .expect("every step succeeds");
+    assert_eq!(
+        in_time,
+        GroupSeen::Ended,
+        "the same pass inside its deadline finds the group empty"
+    );
+}
+
+/// The report read keeps one deadline across interruptions: a socket that
+/// answers `Interrupted` to every read is asked again until the deadline,
+/// which no answer restarts, and the read then fails with `TimedOut`
+/// (`PR320-R3-MAIN-004`). `read_exact` would retry inside itself, each
+/// retry a fresh socket timeout.
+#[cfg(unix)]
+#[test]
+fn a_report_read_keeps_one_deadline_across_interruptions() {
+    use crate::workspace_manager::fixture::read_report_within;
+
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let bound = Duration::from_millis(100);
+    let started = Instant::now();
+    let error = read_report_within(&mut interrupted, started + bound)
+        .expect_err("a report that never arrives is a timeout, not a wait");
+    let took = started.elapsed();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        took >= bound && took < bound * 20,
+        "the deadline was kept, once: {took:?} against {bound:?} after {reads} interrupted reads"
+    );
+    assert!(reads > 1, "the interrupted read was made again: {reads}");
+    assert!(
+        error.to_string().contains("0 of 9 bytes read"),
+        "the error says how much arrived: {error}"
+    );
+}
+
+/// The report read keeps what a short read delivered: a socket answering one
+/// byte at a time, with timeouts and interruptions between, assembles the
+/// nine bytes; one that closes early fails with how much had arrived.
+#[cfg(unix)]
+#[test]
+fn a_report_read_assembles_short_answers_and_reports_an_early_close() {
+    use crate::workspace_manager::fixture::{REPORT_LEN, read_report_within};
+
+    let report: Vec<u8> = (1..=REPORT_LEN).map(|byte| byte as u8).collect();
+    let mut next = 0_usize;
+    let mut interruptions = 0_u32;
+    let mut byte_at_a_time = Answering(|buffer: &mut [u8]| {
+        if interruptions < 2 * next as u32 + 1 {
+            interruptions += 1;
+            return Err(std::io::Error::from(if next % 2 == 0 {
+                std::io::ErrorKind::Interrupted
+            } else {
+                std::io::ErrorKind::TimedOut
+            }));
+        }
+        let byte = *report
+            .get(next)
+            .expect("the script ends at the report's length");
+        *buffer.first_mut().expect("a buffer with room") = byte;
+        next += 1;
+        Ok(1)
+    });
+    let read = read_report_within(&mut byte_at_a_time, Instant::now() + Duration::from_secs(5))
+        .expect("the report assembles from short reads");
+    assert_eq!(read.to_vec(), report);
+    assert_eq!(next, REPORT_LEN);
+    let mut remaining = 3_usize;
+    let mut early_close = Answering(|buffer: &mut [u8]| {
+        if remaining == 0 {
+            return Ok(0);
+        }
+        remaining -= 1;
+        *buffer.first_mut().expect("a buffer with room") = 7;
+        Ok(1)
+    });
+    let error = read_report_within(&mut early_close, Instant::now() + Duration::from_secs(5))
+        .expect_err("a reader that closes before the report is an error");
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert!(
+        error.to_string().contains("after 3 of 9 report bytes"),
+        "{error}"
+    );
+}
+
+/// The report read looks at its deadline before every turn, a successful
+/// short read included: a reader answering one byte per read, under a clock
+/// that advances thirty milliseconds a reading against a fifty millisecond
+/// deadline, is asked twice and the third turn is the timeout, naming the
+/// two bytes; a deadline consulted only on a read that failed would accept
+/// all nine bytes at 270 ms (`PR320-R4-MAIN-002`, `PR320-R4-REG-001`).
+#[cfg(unix)]
+#[test]
+fn a_report_read_looks_at_its_deadline_before_every_turn_a_successful_short_read_included() {
+    use crate::workspace_manager::fixture::read_report_within_by;
+
+    let origin = Instant::now();
+    let mut readings = 0_u32;
+    let mut reads = 0_u32;
+    let mut one_byte = Answering(|buffer: &mut [u8]| {
+        reads += 1;
+        *buffer.first_mut().expect("a buffer with room") = 7;
+        Ok(1)
+    });
+    let error = read_report_within_by(&mut one_byte, origin + Duration::from_millis(50), || {
+        let now = origin + Duration::from_millis(30) * readings;
+        readings += 1;
+        now
+    })
+    .expect_err("a report still arriving when the deadline passes is a timeout");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert_eq!(
+        reads, 2,
+        "two reads were made before the deadline was found passed"
+    );
+    assert_eq!(
+        readings, 3,
+        "the clock was read at the top of each of the three turns"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("2 of 9 bytes read; the last read delivered bytes"),
+        "the error says how much arrived and what the last read answered: {error}"
+    );
+}
+
+/// A report complete only after its deadline is not accepted: a reader that
+/// answers the nine bytes in one read, under a clock that reads past the
+/// deadline on the completion turn, is a timeout naming nine of nine bytes,
+/// and the same reader under a clock that has not passed it is the report.
+/// One deadline, on completion as on progress.
+#[cfg(unix)]
+#[test]
+fn a_report_complete_only_after_its_deadline_is_not_accepted() {
+    use crate::workspace_manager::fixture::{REPORT_LEN, read_report_within_by};
+
+    let origin = Instant::now();
+    let deadline = origin + Duration::from_millis(50);
+    let whole = |buffer: &mut [u8]| {
+        assert_eq!(
+            buffer.len(),
+            REPORT_LEN,
+            "the first read is offered the whole report"
+        );
+        buffer.fill(7);
+        Ok(REPORT_LEN)
+    };
+    let mut readings = 0_u32;
+    let error = read_report_within_by(&mut Answering(whole), deadline, || {
+        readings += 1;
+        // Before the deadline at the first turn, before the read; past it at
+        // the second, the completion turn.
+        origin + Duration::from_millis(60) * (readings - 1)
+    })
+    .expect_err("a report complete only after the deadline is not accepted");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert_eq!(readings, 2, "the clock was read at both turns");
+    assert!(
+        error.to_string().contains("9 of 9 bytes read"),
+        "the error says the whole report had arrived, late: {error}"
+    );
+    let report = read_report_within_by(&mut Answering(whole), deadline, || origin)
+        .expect("a report complete before the deadline is accepted");
+    assert_eq!(report, [7; REPORT_LEN]);
+}
+
+/// The same deadline on a real socket with the constructor's own tick: a
+/// peer writing one report byte every sixty milliseconds against a two
+/// hundred millisecond deadline is timed out with the bytes that had
+/// arrived, never accepted at the 540 ms the nine take; the peer is joined
+/// before any assertion. How late the timeout is found is the box's, not the
+/// read's, and is bounded here only by twenty times the deadline.
+#[cfg(unix)]
+#[test]
+fn a_report_arriving_slower_than_its_deadline_on_a_real_socket_is_timed_out_with_what_arrived() {
+    use crate::workspace_manager::fixture::{READY_TICK, REPORT_LEN, read_report_within};
+
+    let (mut reader, mut writer) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for the report");
+    reader
+        .set_read_timeout(Some(READY_TICK))
+        .expect("the constructor's tick, set while both ends are open");
+    let sending = std::thread::spawn(move || {
+        for byte in 1..=REPORT_LEN {
+            std::thread::sleep(Duration::from_millis(60));
+            if writer.write_all(&[byte as u8]).is_err() {
+                break;
+            }
+        }
+    });
+    let bound = Duration::from_millis(200);
+    let started = Instant::now();
+    let answer = read_report_within(&mut reader, started + bound);
+    let took = started.elapsed();
+    drop(reader);
+    sending
+        .join()
+        .expect("the sending thread ends once its peer is gone");
+    let error =
+        answer.expect_err("nine bytes sixty milliseconds apart do not arrive within two hundred");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        took >= bound && took < bound * 20,
+        "the deadline was kept, once: {took:?} against {bound:?}"
+    );
+    let arrived: usize = error
+        .to_string()
+        .split(" of 9 bytes read")
+        .next()
+        .and_then(|head| head.rsplit(' ').next())
+        .and_then(|count| count.parse().ok())
+        .expect("the error says how many bytes arrived");
+    assert!(
+        arrived < REPORT_LEN,
+        "fewer than the nine had arrived: {arrived}, {error}"
+    );
+}
+
+/// A warden's word that a read begun within the deadline completes only
+/// after it is refused, on a real socket with the warden's own 100 ms read
+/// tick: the word is written twenty milliseconds after a twenty millisecond
+/// deadline, and the read waiting for it returns with it late
+/// (`PR320-R7-MAIN-001`, `PR320-R7-REG-001`). Before, the reader accepted
+/// the word the read had completed and looked at the deadline only before
+/// the next read, and this took the late word for the warden armed. A
+/// reader held off the processor past the deadline before its first read
+/// is refused for silence instead, which is a refusal all the same. The
+/// writer is joined before any assertion.
+#[cfg(unix)]
+#[test]
+fn a_warden_word_completed_after_the_deadline_on_a_real_socket_is_refused() {
+    use std::io::Write as _;
+
+    let (mut words, mut said) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for the warden's word");
+    words
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("the warden's read tick, set while both ends are open");
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(20);
+    let saying = std::thread::spawn(move || {
+        let late = deadline + Duration::from_millis(20);
+        while Instant::now() < late {
+            std::thread::sleep(late.saturating_duration_since(Instant::now()));
+        }
+        said.write_all(b"warden armed 123\n")
+    });
+    let answer = read_the_wardens_word_within(&mut words, deadline);
+    let took = started.elapsed();
+    saying
+        .join()
+        .expect("the saying thread ends")
+        .expect("the word was written");
+    let refusal = match answer {
+        Ok(word) => panic!(
+            "a word complete only after the deadline is refused, not taken for the warden \
+             armed: {word:?} after {took:?} against 20ms"
+        ),
+        Err(refusal) => refusal,
+    };
+    assert!(
+        refusal == "the warden's word was complete only after its deadline: warden armed 123"
+            || refusal.starts_with("the warden said nothing within"),
+        "refused as late, or for silence when the reader came to its first read only after \
+         the deadline: {refusal}"
+    );
+}
+
+/// The same word written before the wait, behind the lines libtest writes
+/// first, is accepted within its deadline: the refusal above is the word's
+/// lateness, not the reader's.
+#[cfg(unix)]
+#[test]
+fn a_warden_word_completed_within_the_deadline_on_a_real_socket_is_accepted() {
+    use std::io::Write as _;
+
+    let (mut words, mut said) =
+        std::os::unix::net::UnixStream::pair().expect("a socket pair for the warden's word");
+    words
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("the warden's read tick, set while both ends are open");
+    said.write_all(b"running 1 test\nwarden armed 123\n")
+        .expect("the word is written");
+    let word = read_the_wardens_word_within(&mut words, Instant::now() + Duration::from_secs(5))
+        .expect("a word complete within the deadline is accepted");
+    assert_eq!(word, "warden armed 123");
+}
+
+/// An interrupted sentinel read is made again within the same bound: it
+/// observed nothing, so it is neither counted nor acknowledged, and a socket
+/// that answers `Interrupted` to every read ends in the bound's report with
+/// zero observations, never a panic and never past the bound
+/// (`PR320-R3-MAIN-005`); interruptions between timeouts and the EOF change
+/// neither the count nor the acknowledgements.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_sentinel_read_is_made_again_within_the_same_bound() {
+    let mut reads = 0_u32;
+    let mut interrupted = Answering(|_: &mut [u8]| {
+        reads += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    });
+    let bound = Duration::from_millis(100);
+    let mut acknowledged = Vec::new();
+    let started = Instant::now();
+    let held = sentinel_closed_within(&mut interrupted, bound, &mut |read| acknowledged.push(read))
+        .expect_err("a sentinel that is never read as closed is reported at the bound");
+    let took = started.elapsed();
+    assert_eq!(
+        held.observations, 0,
+        "an interrupted read observed nothing: {held}"
+    );
+    assert!(
+        held.waited >= bound && took < bound * 20,
+        "the bound was kept, once, across {reads} interruptions: {took:?}"
+    );
+    assert!(reads > 1, "the interrupted read was made again: {reads}");
+    assert!(
+        acknowledged.is_empty(),
+        "and nothing was acknowledged: {acknowledged:?}"
+    );
+
+    let mut answers = vec![
+        Ok(0),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+    ];
+    let mut scripted = Answering(move |_: &mut [u8]| {
+        answers
+            .pop()
+            .expect("the script ends at EOF, which ends the observation")
+    });
+    let mut acknowledged = Vec::new();
+    let (_, observations) =
+        sentinel_closed_within(&mut scripted, Duration::from_secs(5), &mut |read| {
+            acknowledged.push(read);
+        })
+        .expect("EOF ends the observation");
+    assert_eq!(
+        observations, 3,
+        "two reads found a copy open and the third read EOF; the interruptions counted for nothing"
+    );
+    assert_eq!(
+        acknowledged,
+        vec![1, 2],
+        "each read that found a copy open was acknowledged, once"
+    );
+}
+
+/// An EOF that a sentinel read begun within the bound answers only after it
+/// is refused, on a real [`sentinel_pair`] with its own 50 ms read tick: the
+/// other end is closed twenty milliseconds after a twenty millisecond bound,
+/// and the read waiting on it returns EOF late
+/// (`PR320-R8-SENTINEL-READER-ACCEPTS-A-LATE-EOF`). Before, EOF was returned
+/// at once and the bound looked at only after a read that found a copy open,
+/// so this read as a close within the bound. A closing thread held off past
+/// the read's tick leaves the copy open at the tick instead, which is the
+/// bound's report all the same. The closing thread is joined before any
+/// assertion.
+#[cfg(unix)]
+#[test]
+fn a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused() {
+    let (sentinel, mut observer) = sentinel_pair();
+    let bound = Duration::from_millis(20);
+    let started = Instant::now();
+    let closing = std::thread::spawn(move || {
+        let late = started + bound + Duration::from_millis(20);
+        while Instant::now() < late {
+            std::thread::sleep(late.saturating_duration_since(Instant::now()));
+        }
+        drop(sentinel);
+    });
+    let answer = sentinel_closed_within(&mut observer, bound, &mut |_| {});
+    closing.join().expect("the closing thread ends");
+    let held = match answer {
+        Ok((took, observations)) => panic!(
+            "an EOF read only after the bound is not a close within it: read as one after \
+             {took:?} and {observations} reads, against {bound:?}"
+        ),
+        Err(held) => held,
+    };
+    assert!(
+        held.waited >= held.bound,
+        "reported at the bound's end, not before it: {held}"
+    );
+    let report = held.to_string();
+    assert!(
+        (held.eof_late && report.starts_with("the sentinel answered EOF only after the full 20ms"))
+            || (!held.eof_late && report.starts_with("a copy of the sentinel was still open")),
+        "the report says which it was, the EOF late or a copy open at the tick: {report}"
+    );
+}
+
+/// An end closed before the observation answers EOF at the first read, well
+/// within the bound, and is accepted: the refusal above is the EOF's
+/// lateness, not the reader's.
+#[cfg(unix)]
+#[test]
+fn a_sentinel_eof_read_within_the_bound_on_a_real_socket_is_accepted() {
+    let (sentinel, mut observer) = sentinel_pair();
+    drop(sentinel);
+    let (_, observations) =
+        sentinel_closed_within(&mut observer, Duration::from_secs(5), &mut |_| {})
+            .expect("an EOF read within the bound is a close within it");
+    assert_eq!(observations, 1, "the first read answered EOF");
+}
+
+/// A lookup that fails on a listed descriptor fails the identity scan with
+/// the number and the error, in place of a scan that reads absence through
+/// it: a failed metadata read is neither an absent descriptor nor a present
+/// one (`PR320-R3-MAIN-006`, `PR320-R3-REG-001`). The lookup's own answer
+/// for a number not open, `Ok(None)`, is what the scan skips.
+#[cfg(unix)]
+#[test]
+fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence() {
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("descriptor-scan-lookup-fails");
+    let target = root.join("target");
+    let held = File::create(&target).expect("the target, held open by this thread");
+    let number = held.as_raw_fd();
+    assert_eq!(
+        descriptors_open_on(&target),
+        vec![number],
+        "the real lookup reports the held descriptor"
+    );
+    let failing = |listed: libc::c_int| {
+        if listed == number {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        } else {
+            identity_of_the_descriptor(listed)
+        }
+    };
+    let payload =
+        std::panic::catch_unwind(|| descriptors_open_on_with(&target, &mut |_| {}, &failing))
+            .expect_err("a lookup that failed fails the scan rather than answering through it");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .expect("the panic carries a message");
+    assert!(
+        message.contains(&format!(
+            "the identity of descriptor {number} could not be read"
+        )) && message.contains("os error 5"),
+        "the scan names the descriptor and the error: {message}"
+    );
+    let absent = |listed: libc::c_int| {
+        if listed == number {
+            Ok(None)
+        } else {
+            identity_of_the_descriptor(listed)
+        }
+    };
+    assert!(
+        descriptors_open_on_with(&target, &mut |_| {}, &absent).is_empty(),
+        "a number the lookup answers as not open is skipped, which is the closed-in-window case"
+    );
+    drop(held);
+}
+
+/// The reading of a failed identity call is driven at the call itself, not
+/// above it: through `identity_answered_by`, the real `fstat` on the held
+/// number answers the target's identity, the real `fstat` on a number that
+/// is never open (-1) answers absence, `EBADF`, and a call that fails with
+/// any other errno -- a `waitpid` on this process's own pid, of which no
+/// process is the child, so `ECHILD`, an errno the kernel set -- answers the
+/// error and never absence. The shape the fourth reviews restored as a
+/// mutation, every failed call answered as absence, fails here, where the
+/// scan's own test above, driving the scan's three readings through an
+/// injected lookup, could not see it (`PR320-R4-MAIN-004`,
+/// `PR320-R4-REG-004`). No policy on `fstat` is needed and none is named:
+/// the errno is real, and the reading is the one the real call's answer
+/// goes through.
+#[cfg(unix)]
+#[test]
+fn a_failed_identity_call_is_read_at_the_call_ebadf_as_absence_and_any_other_errno_as_the_error() {
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("descriptor-identity-call-fails");
+    let target = root.join("target");
+    let held = File::create(&target).expect("the target, held open by this thread");
+    let number = held.as_raw_fd();
+    let expected = identity_at(&target).expect("the target's identity");
+    let real = |number: libc::c_int, identity: *mut libc::stat| {
+        // SAFETY: `fstat` takes the number by value and writes one `stat`
+        // through the pointer, which the seam keeps alive for the call.
+        unsafe { libc::fstat(number, identity) }
+    };
+    // SAFETY: the call is `fstat` itself, which keeps the seam's contract.
+    let identity = unsafe { identity_answered_by(number, real) }
+        .expect("the real fstat on a held number answers")
+        .expect("with an identity");
+    assert!(
+        identity.st_dev == expected.st_dev && identity.st_ino == expected.st_ino,
+        "the identity is the target's"
+    );
+    // SAFETY: as above; -1 is open in no process, so the call answers EBADF.
+    assert!(
+        unsafe { identity_answered_by(-1, real) }
+            .expect("a number that is not open is answered")
+            .is_none(),
+        "and the answer is absence"
+    );
+    let own = libc::pid_t::try_from(std::process::id()).expect("a pid fits its type");
+    let mut calls = 0_u32;
+    // SAFETY: the call writes nothing through the pointer and answers -1:
+    // `waitpid` writes one int through `status`, which lives for the call,
+    // and this process is no child of itself, so it answers -1 with ECHILD.
+    // The closure is inside this block, so the call is made under it.
+    let error = unsafe {
+        identity_answered_by(number, |_, _| {
+            calls += 1;
+            let mut status = 0;
+            libc::waitpid(own, &mut status, libc::WNOHANG)
+        })
+    }
+    .expect_err("a call that failed otherwise than by EBADF is the error, never absence");
+    assert_eq!(calls, 1, "the call was made once");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(libc::ECHILD),
+        "the error is the call's own: {error}"
+    );
+    drop(held);
+}
+
+/// A descriptor above the soft limit -- opened, then the limit lowered
+/// beneath it, as a test that narrows `RLIMIT_NOFILE` leaves one -- is
+/// still closed by the parked fork's sweep, whose ceiling comes from the
+/// table itself and not from `sysconf` alone. In a process of its own,
+/// because the limit is the process's.
+#[cfg(unix)]
+#[test]
+fn a_parked_fork_closes_a_descriptor_above_a_lowered_soft_limit() {
+    let (status, stderr) = run_parked_fork_scenario("a-descriptor-above-a-lowered-soft-limit");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A close the sweep cannot make fails the parked fork's constructor,
+/// naming the descriptor and the error, after the child has been
+/// collected: the helper never announces a child it could not isolate. In
+/// a process of its own, because the policy that refuses the close is the
+/// thread's for good and would refuse this process's own close of the
+/// sentinel.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_cannot_close_a_descriptor_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-that-fails");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// The child half of the isolation witnesses that change state the whole
+/// process shares -- its soft descriptor limit, and a policy on `close`
+/// itself -- which no test may do in the suite's shared process, and of the
+/// scenario wrapper's own witnesses, which leave a process behind or never
+/// end. Re-invoked as a subprocess with the scenario named in
+/// `UPSTROKE_TEST_PARKED_FORK_SCENARIO`; a witness exits 0 when its
+/// assertions hold, and its stderr carries the reason when they do not.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by the parked-fork isolation witnesses"]
+fn parked_fork_isolation_kill_child() {
+    let scenario =
+        std::env::var("UPSTROKE_TEST_PARKED_FORK_SCENARIO").expect("the parent names the scenario");
+    if scenario == WARDEN {
+        end_the_group_when_the_lifeline_is_cut();
+    }
+    let _warden = arm_this_groups_warden();
+    match scenario.as_str() {
+        "exit-23-leaving-a-silent-member-in-the-group" => {
+            exit_leaving_a_silent_member_in_the_group();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-parked-fork-whose-kill-is-refused" => drop_a_parked_fork_whose_kill_is_refused(),
+        #[cfg(target_os = "linux")]
+        "drop-a-scenario-owner-whose-group-kill-is-refused-after-its-leader-exited" => {
+            drop_a_scenario_owner_whose_group_kill_is_refused_after_its_leader_exited();
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-denied-with-ebadf" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EBADF);
+        }
+        "a-descriptor-above-a-lowered-soft-limit" => {
+            a_descriptor_above_a_lowered_soft_limit_is_closed();
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-that-fails" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EIO);
+        }
+        #[cfg(target_os = "linux")]
+        "a-close-denied-with-eintr" => {
+            a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(libc::EINTR);
+        }
+        "park-a-stopped-fork-and-never-end" => park_a_stopped_fork_and_never_end(),
+        "exit-23-leaving-a-child-holding-stderr" => exit_leaving_a_child_holding_stderr(),
+        "hold-stderr-and-never-end" => loop {
+            std::thread::sleep(Duration::from_secs(1));
+        },
+        "exit-0-after-200ms" => {
+            std::thread::sleep(Duration::from_millis(200));
+            std::process::exit(0)
+        }
+        #[cfg(target_os = "linux")]
+        "release-a-parked-fork-whose-every-observation-is-interrupted" => {
+            release_a_parked_fork_whose_every_observation_is_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-stopped-parked-fork-whose-every-observation-is-interrupted" => {
+            drop_a_stopped_parked_fork_whose_every_observation_is_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "observe-a-parked-fork-whose-every-observation-is-interrupted" => {
+            observe_a_parked_fork_whose_every_observation_is_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "fail-at-the-bound-holding-a-stopped-child-on-a-worker-that-never-answers" => {
+            fail_at_the_bound_holding_a_stopped_child_on_a_worker_that_never_answers();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-parked-fork-whose-kill-and-stderr-writes-are-refused" => {
+            drop_a_parked_fork_whose_kill_and_stderr_writes_are_refused();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-parked-forks-whose-kill-is-refused-and-stderr-answers-eio" => {
+            drop_parked_forks_whose_kill_is_refused_and_stderr_answers_eio();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-scenario-owner-whose-kill-and-stderr-writes-are-refused" => {
+            drop_a_scenario_owner_whose_kill_and_stderr_writes_are_refused();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio" => {
+            drop_a_scenario_owner_whose_kill_is_refused_and_stderr_answers_eio();
+        }
+        #[cfg(target_os = "linux")]
+        "unwind-through-a-scenario-owner-whose-kill-is-refused-and-stderr-answers-eio" => {
+            unwind_through_a_scenario_owner_whose_kill_is_refused_and_stderr_answers_eio();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-scenario-owner-whose-group-observation-opens-are-interrupted" => {
+            drop_a_scenario_owner_whose_group_observation_opens_are_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-stopped-parked-fork-whose-every-rest-is-refused" => {
+            drop_a_stopped_parked_fork_whose_every_rest_is_refused();
+        }
+        #[cfg(target_os = "linux")]
+        "run-a-scenario-wrapper-whose-every-rest-is-refused" => {
+            run_a_scenario_wrapper_whose_every_rest_is_refused();
+        }
+        #[cfg(target_os = "linux")]
+        "drop-a-stopped-parked-fork-whose-release-send-is-interrupted" => {
+            drop_a_stopped_parked_fork_whose_release_send_is_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "release-a-stopped-parked-fork-whose-release-send-is-interrupted" => {
+            release_a_stopped_parked_fork_whose_release_send_is_interrupted();
+        }
+        #[cfg(target_os = "linux")]
+        "run-a-wrapper-whose-group-kill-the-os-refuses" => {
+            run_a_wrapper_whose_group_kill_the_os_refuses();
+        }
+        "release-a-stopped-parked-fork-that-never-reads-its-release" => {
+            release_a_stopped_parked_fork_that_never_reads_its_release();
+        }
+        "drop-a-stopped-parked-fork" => drop_a_stopped_parked_fork(),
+        #[cfg(target_os = "linux")]
+        "a-lease-wait-whose-every-rest-is-refused" => a_lease_wait_whose_every_rest_is_refused(),
+        #[cfg(target_os = "linux")]
+        "a-readiness-wait-whose-every-rest-is-refused" => {
+            a_readiness_wait_whose_every_rest_is_refused();
+        }
+        #[cfg(target_os = "linux")]
+        "a-warden-refuses-to-arm-outside-its-scenarios-own-group" => {
+            a_warden_refuses_to_arm_outside_its_scenarios_own_group();
+        }
+        #[cfg(target_os = "linux")]
+        "ask-a-warden-to-arm-in-a-group-its-parent-does-not-lead" => {
+            ask_a_warden_to_arm_where_it_must_not("1", "is not led by its parent");
+        }
+        #[cfg(target_os = "linux")]
+        "ask-a-warden-to-arm-in-the-harnesss-group" => {
+            // SAFETY: `getpgrp` takes nothing and cannot fail.
+            let own = unsafe { libc::getpgrp() };
+            ask_a_warden_to_arm_where_it_must_not(&own.to_string(), "is the test harness's");
+        }
+        other => panic!("no such scenario: {other}"),
+    }
+}
+
+/// The warden of this scenario's process group, when this process leads
+/// its own group and was handed a lifeline ([`Lifeline`]): started before
+/// the scenario runs, so that no policy the scenario installs binds it, and
+/// armed before this returns, so that whatever the scenario makes is ended
+/// with the group when the caller cuts the lifeline or dies. `None` for a
+/// process that leads no group of its own -- a member of a group whose leader
+/// has the warden -- or that was handed no lifeline.
+///
+/// # Panics
+///
+/// When the warden could not be started, refused to arm, or said nothing
+/// within [`WARDEN_BOUND`]: a scenario whose group has no warden is not run.
+#[cfg(unix)]
+fn arm_this_groups_warden() -> Option<std::process::Child> {
+    let harness = std::env::var(SCENARIO_HARNESS_GROUP).ok()?;
+    // SAFETY: `getpgrp` and `getpid` take nothing and cannot fail.
+    if unsafe { libc::getpgrp() } != unsafe { libc::getpid() } {
+        return None;
+    }
+    Some(
+        spawn_a_warden(&harness)
+            .unwrap_or_else(|refusal| panic!("this scenario's group has no warden: {refusal}")),
+    )
+}
+
+/// Start a warden in this process's group, its stdin a copy of this
+/// process's stdout -- the lifeline's cut end, for a scenario handed one --
+/// and `harness` the group it must never arm in, and wait for its word
+/// within [`WARDEN_BOUND`] ([`read_the_wardens_word_within`]): the warden,
+/// armed, or why not.
+///
+/// # Errors
+///
+/// The warden could not be started, refused to arm -- it has then exited,
+/// having signalled nothing, and is collected here -- or said nothing within
+/// the bound, and is then killed and collected: it is this process's child,
+/// uncollected, so its number is still its own.
+#[cfg(unix)]
+fn spawn_a_warden(harness: &str) -> Result<std::process::Child, String> {
+    use std::os::fd::{AsFd as _, OwnedFd};
+
+    let cut = std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|error| {
+            format!("this process's stdout could not be copied for a warden: {error}")
+        })?;
+    let (said, mut words) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| format!("a socket pair for the warden's word: {error}"))?;
+    words
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|error| format!("bound each read of the warden's word: {error}"))?;
+    let exe = std::env::current_exe().map_err(|error| format!("this test binary: {error}"))?;
+    let mut warden = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", WARDEN)
+        .env(SCENARIO_HARNESS_GROUP, harness)
+        .stdin(std::process::Stdio::from(cut))
+        .stdout(std::process::Stdio::from(OwnedFd::from(said)))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("a warden could not be started: {error}"))?;
+    let word = read_the_wardens_word_within(&mut words, Instant::now() + WARDEN_BOUND);
+    match word {
+        Ok(word) if word.starts_with("warden armed ") => Ok(warden),
+        Ok(refusal) => {
+            let status = try_collect_within(&mut warden, SCENARIO_GROUP_BOUND);
+            Err(format!("{refusal} (the warden exited: {status:?})"))
+        }
+        Err(silence) => {
+            let killed = warden.kill();
+            let status = try_collect_within(&mut warden, SCENARIO_GROUP_BOUND);
+            Err(format!(
+                "{silence} (the warden was killed: {killed:?}; collected: {status:?})"
+            ))
+        }
+    }
+}
+
+/// The warden's one line of word, `warden armed <group>` or `warden refused:
+/// <why>`, read from `words` -- whose reads each wait at most their timeout
+/// -- one read per turn, `deadline` looked at before every turn: before a
+/// word a read completed is accepted, as well as before another read is
+/// made. A read begun in time can return after the deadline, its timeout
+/// being the socket's and not the caller's, and a word it completed then
+/// came late and is refused, as a report complete only after its deadline
+/// is (`read_report_within_by`); before, the word was accepted first and the
+/// deadline looked at only before the next read (`PR320-R7-MAIN-001`,
+/// `PR320-R7-REG-001`,
+/// `a_warden_word_completed_after_the_deadline_on_a_real_socket_is_refused`).
+/// The lines libtest itself writes first are skipped.
+///
+/// # Errors
+///
+/// No word by the deadline -- none said, or one complete only after it --
+/// the warden's end closed with none, or a read that failed.
+#[cfg(unix)]
+fn read_the_wardens_word_within(
+    words: &mut impl std::io::Read,
+    deadline: Instant,
+) -> Result<String, String> {
+    let mut text = Vec::new();
+    let mut buffer = [0_u8; 256];
+    loop {
+        let word = String::from_utf8_lossy(&text)
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .find(|line| line.starts_with("warden "))
+            .map(|word| word.trim_end().to_owned());
+        if Instant::now() >= deadline {
+            return Err(match word {
+                Some(word) => {
+                    format!("the warden's word was complete only after its deadline: {word}")
+                }
+                None => format!(
+                    "the warden said nothing within {WARDEN_BOUND:?}: {}",
+                    String::from_utf8_lossy(&text)
+                ),
+            });
+        }
+        if let Some(word) = word {
+            return Ok(word);
+        }
+        match words.read(&mut buffer) {
+            Ok(0) => {
+                return Err(format!(
+                    "the warden closed its end unsaid: {}",
+                    String::from_utf8_lossy(&text)
+                ));
+            }
+            Ok(count) => text.extend_from_slice(buffer.get(..count).unwrap_or_default()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(format!("the warden's word could not be read: {error}")),
+        }
+    }
+}
+
+/// Whether a warden may arm, and the group it would end: only its parent's
+/// own group -- the group its parent leads, which is the scenario's, a
+/// scenario leading a group of its own -- and never the group of the test
+/// harness named in its environment. `Err` with why not.
+#[cfg(unix)]
+fn the_warden_may_arm() -> Result<libc::pid_t, String> {
+    let harness = std::env::var(SCENARIO_HARNESS_GROUP)
+        .map_err(|_| String::from("no harness group was named"))?
+        .parse::<libc::pid_t>()
+        .map_err(|error| format!("the harness group named is not a group: {error}"))?;
+    // SAFETY: `getpgrp` and `getppid` take nothing and cannot fail.
+    let (group, parent) = unsafe { (libc::getpgrp(), libc::getppid()) };
+    if group != parent {
+        return Err(format!(
+            "its group {group} is not led by its parent {parent}, so it is no scenario's own"
+        ));
+    }
+    if group == harness {
+        return Err(format!("its group {group} is the test harness's"));
+    }
+    Ok(group)
+}
+
+/// A scenario group's warden ([`arm_this_groups_warden`]), in a process of
+/// its own: it arms only in its parent's own group and never the harness's
+/// ([`the_warden_may_arm`]), says which on stdout, and, refused, exits
+/// having signalled nothing. Armed, it blocks on its stdin -- the lifeline's
+/// cut end, a copy of the scenario's stdout -- until that answers EOF or
+/// anything but data, and then ends its own process group with `SIGKILL`,
+/// itself with it: `kill(0, ...)`, the group its arming verified, which the
+/// kernel keeps for as long as this process is a member of it, so the signal
+/// reaches the scenario's processes and nothing that was handed their
+/// numbers after them. A read that fails ends the group too: a lifeline that
+/// cannot be read no longer tells the warden anything.
+#[cfg(unix)]
+fn end_the_group_when_the_lifeline_is_cut() -> ! {
+    use std::io::Write as _;
+
+    let verdict = the_warden_may_arm();
+    let word = match &verdict {
+        Ok(group) => format!("warden armed {group}\n"),
+        Err(refusal) => format!("warden refused: {refusal}\n"),
+    };
+    let mut stdout = std::io::stdout();
+    let said = stdout
+        .write_all(word.as_bytes())
+        .and_then(|()| stdout.flush());
+    if verdict.is_err() || said.is_err() {
+        std::process::exit(3);
+    }
+    let mut stdin = std::io::stdin();
+    let mut buffer = [0_u8; 64];
+    while matches!(stdin.read(&mut buffer), Ok(read) if read > 0) {}
+    // SAFETY: `kill` takes a pid and a signal by value; 0 names this
+    // process's own group, which its arming verified is its parent's and not
+    // the harness's, and which it has not left.
+    unsafe { libc::kill(0, libc::SIGKILL) };
+    std::process::exit(4)
+}
+
+/// A scenario that never ends, in a process of its own, with two processes
+/// of its own behind it: a fork parked and then stopped, so that it can read
+/// neither its release nor an EOF, and a child that runs on holding the
+/// scenario's stderr ([`spawn_a_child_holding_stderr`]); each pid written to
+/// stderr for the parent to read. The scenario then waits to be killed. Both
+/// kinds, because the kernel ends a stopped member of a process group its
+/// leader's death orphans (`SIGHUP`, then `SIGCONT`), so the stopped fork
+/// alone would not tell a kill of the group from a kill of the scenario
+/// process; the running child is ended by nothing but a kill that reaches
+/// the group.
+#[cfg(unix)]
+fn park_a_stopped_fork_and_never_end() -> ! {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd());
+    stop_parked_child(parked.pid());
+    eprintln!("descendant={}", parked.pid());
+    let mut child = spawn_a_child_holding_stderr();
+    eprintln!("descendant={}", child.id());
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        child
+            .try_wait()
+            .expect("poll the child holding stderr, which lives until the group is killed");
+    }
+}
+
+/// This test binary on the `hold-stderr-and-never-end` scenario, its stderr
+/// inherited from the scenario process, in that process's group: a process
+/// that holds the scenario's stderr for as long as it lives, and lives until
+/// it is killed. Its stdin is inherited too -- the scenario's lifeline, when
+/// it was handed one ([`Lifeline`]) -- so the caller's reading of whether
+/// every process of the scenario has exited counts it.
+#[cfg(unix)]
+fn spawn_a_child_holding_stderr() -> std::process::Child {
+    let exe = std::env::current_exe().expect("test binary");
+    std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "UPSTROKE_TEST_PARKED_FORK_SCENARIO",
+            "hold-stderr-and-never-end",
+        )
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the child that holds stderr")
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving behind a member of its group that holds nothing of the
+/// scenario's: the same child as [`spawn_a_child_holding_stderr`] with its
+/// stderr sent to `/dev/null`, so that the scenario's pipe answers EOF the
+/// moment the scenario exits while the member runs on. The pid is written
+/// to stderr for the parent to read. The shape under test is a group whose
+/// emptiness the pipe cannot speak for. The member keeps the scenario's
+/// stdin, its lifeline when it was handed one: the lifeline is the caller's,
+/// not the scenario's, and it is how the caller reads the member's end.
+#[cfg(unix)]
+fn exit_leaving_a_silent_member_in_the_group() -> ! {
+    let exe = std::env::current_exe().expect("test binary");
+    let child = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "UPSTROKE_TEST_PARKED_FORK_SCENARIO",
+            "hold-stderr-and-never-end",
+        )
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the silent member of the group");
+    eprintln!("descendant={}", child.id());
+    std::process::exit(23)
+}
+
+/// A scenario, in a process of its own, that drops a parked fork whose kill
+/// the OS refuses: the fork is made and acknowledged, its child stopped so
+/// that no release can end it, a policy answering `EPERM` to `kill` is
+/// installed on this thread, and the owner is dropped with a reap bound of
+/// 100 ms. The drop's own line on stderr is what the parent reads; after it
+/// this writes the child's state from `/proc`, and the parent's kill of the
+/// group ends the child. The pid is written first, `descendant=`, for the
+/// parent to end whatever this could not.
+#[cfg(target_os = "linux")]
+fn drop_a_parked_fork_whose_kill_is_refused() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(Duration::from_millis(100));
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    eprintln!("descendant={pid}");
+    refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+    let started = Instant::now();
+    drop(parked);
+    eprintln!(
+        "dropped after {:?}; left={}",
+        started.elapsed(),
+        state_by_proc(pid)
+    );
+}
+
+/// A scenario, in a process of its own, that drops a scenario owner whose
+/// group kill the OS refuses after its leader exited: the owner spawns the
+/// silent-member scenario, waits for its leader's natural exit -- peeked,
+/// not collected -- writes the owner's text so far, which carries the
+/// member's pid as `descendant=`, and the leader's pid as `leader=`,
+/// installs a policy answering `EPERM` to `kill` on this thread, and drops
+/// the owner: the leader is collectible and the group is not killable. The
+/// drop's own line is what the parent reads; after it this writes the
+/// member's state from `/proc`. The member is in the leader's group, not
+/// this process's, and holds the lifeline the owner passed on: the parent
+/// ends it by cutting that lifeline, which the leader's group's own warden
+/// reads, never by its pid.
+#[cfg(target_os = "linux")]
+fn drop_a_scenario_owner_whose_group_kill_is_refused_after_its_leader_exited() {
+    let mut owned = ScenarioChild::spawn(
+        "exit-23-leaving-a-silent-member-in-the-group",
+        ScenarioLifeline::PassedOn,
+    );
+    let leader = owned.pid();
+    let deadline = Instant::now() + SCENARIO_BOUND;
+    while !owned.has_ended() {
+        assert!(
+            Instant::now() < deadline,
+            "the silent-member scenario exits by itself"
+        );
+        owned.drain();
+        rest_within(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(Instant::now()),
+        );
+    }
+    owned.drain();
+    let text = owned.text();
+    let member = descendants_named_in(&text, 1)
+        .first()
+        .copied()
+        .expect("the leader named its member");
+    eprintln!("{}", text.trim_end());
+    eprintln!("leader={leader}");
+    refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+    let started = Instant::now();
+    drop(owned);
+    eprintln!(
+        "dropped after {:?}; left={}",
+        started.elapsed(),
+        state_by_proc(member)
+    );
+}
+
+/// The body of
+/// [`a_release_whose_every_observation_is_interrupted_ends_at_its_bounds_and_says_the_child_is_uncollected`],
+/// in a process of its own
+/// (`release-a-parked-fork-whose-every-observation-is-interrupted`): its
+/// assertions are that test's, and a failed one fails this process, which the
+/// test reads.
+#[cfg(target_os = "linux")]
+fn release_a_parked_fork_whose_every_observation_is_interrupted() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, releasing) = on_a_thread_within(BOUND * 60, move || {
+        let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+        let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+        pid_sender
+            .send(parked.pid())
+            .expect("the test waits for the pid");
+        refuse_syscall_on_this_thread(libc::SYS_wait4, libc::EINTR);
+        let started = Instant::now();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parked.release()));
+        (
+            unwound.map_err(|payload| {
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default()
+            }),
+            started.elapsed(),
+        )
+    });
+    let pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the fork was made and said which pid");
+    // The answer is checked before the join: a thread spinning under a policy
+    // that is its own for good cannot be unblocked, so a bound that ran out is
+    // this scenario's failure, and the thread is left to end with this
+    // process. The child does not end with it by itself -- a stopped child
+    // cannot read the EOF its parent's death gives it -- and it is the
+    // wrapper's kill of this process's group, made once this process has
+    // exited and before its collection, that ends it (`PR320-R5-MAIN-004`,
+    // `PR320-R5-REG-004`).
+    let (released, took) = answered.expect(
+        "the release returned within sixty times its reap bound; a release that makes an \
+         interrupted observation again inside itself is the defect this test holds",
+    );
+    releasing.join().expect("the releasing thread ends");
+    let message =
+        released.expect_err("a release that could not observe its child is a panic, not a status");
+    assert!(
+        message.contains(&format!(
+            "release the parked child {pid}: the parked child {pid} was sent SIGKILL at the end \
+             of {BOUND:?} and not collected within another {BOUND:?}; unobserved, the last \
+             observation answering: "
+        )) && message.contains("(os error 4)"),
+        "the panic names the pid, the signal sent, the second bound and the interruption: \
+         {message}"
+    );
+    assert!(
+        took >= BOUND * 2 && took < BOUND * 60,
+        "the release spent the reap bound, then the reap bound again after the kill, and \
+         returned: {took:?}"
+    );
+    let status = collect_child_within(pid, Duration::from_secs(5))
+        .expect("the child is this test's to collect once its owner gave up");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the child read its release and ended by itself, unseen by its owner: {status:?}"
+    );
+    assert!(is_reaped(pid), "and is collected now");
+}
+
+/// The body of
+/// [`dropping_a_parked_fork_whose_every_observation_is_interrupted_returns_within_its_bounds`],
+/// in a process of its own
+/// (`drop-a-stopped-parked-fork-whose-every-observation-is-interrupted`): its
+/// assertions are that test's, and a failed one fails this process, which the
+/// test reads.
+#[cfg(target_os = "linux")]
+fn drop_a_stopped_parked_fork_whose_every_observation_is_interrupted() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (dropped, dropping) = on_a_thread_within(BOUND * 60, move || {
+        let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+        let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+        stop_parked_child(parked.pid());
+        pid_sender
+            .send(parked.pid())
+            .expect("the test waits for the pid");
+        refuse_syscall_on_this_thread(libc::SYS_wait4, libc::EINTR);
+        let started = Instant::now();
+        drop(parked);
+        started.elapsed()
+    });
+    let pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the fork was made and said which pid");
+    // The answer is checked before the join: a thread spinning under a policy
+    // that is its own for good cannot be unblocked, so a bound that ran out is
+    // this scenario's failure, and the thread is left to end with this
+    // process. The child does not end with it by itself -- a stopped child
+    // cannot read the EOF its parent's death gives it -- and it is the
+    // wrapper's kill of this process's group, made once this process has
+    // exited and before its collection, that ends it (`PR320-R5-MAIN-004`,
+    // `PR320-R5-REG-004`).
+    let took = dropped.expect(
+        "the drop returned within sixty times its reap bound; a drop that makes an interrupted \
+         observation again inside itself is the defect this test holds",
+    );
+    dropping.join().expect("the dropping thread ends");
+    assert!(
+        took >= BOUND * 2 && took < BOUND * 60,
+        "the drop spent the reap bound, then the reap bound again after the kill, and returned: \
+         {took:?}"
+    );
+    let status = collect_child_within(pid, Duration::from_secs(5))
+        .expect("the killed child is this test's to collect once its owner gave up");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child was killed at the end of the reap bound: {status:?}"
+    );
+    assert!(is_reaped(pid), "and is collected now");
+}
+
+/// The body of
+/// [`a_liveness_observation_interrupted_for_the_whole_bound_fails_instead_of_answering`],
+/// in a process of its own
+/// (`observe-a-parked-fork-whose-every-observation-is-interrupted`): its
+/// assertions are that test's, and a failed one fails this process, which the
+/// test reads.
+#[cfg(target_os = "linux")]
+fn observe_a_parked_fork_whose_every_observation_is_interrupted() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, observing) = on_a_thread_within(BOUND * 60, move || {
+        let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+        let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+        pid_sender
+            .send(parked.pid())
+            .expect("the test waits for the pid");
+        refuse_syscall_on_this_thread(libc::SYS_wait4, libc::EINTR);
+        let started = Instant::now();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parked.is_alive()));
+        let took = started.elapsed();
+        drop(parked);
+        (
+            unwound.map_err(|payload| {
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default()
+            }),
+            took,
+        )
+    });
+    let pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the fork was made and said which pid");
+    // The answer is checked before the join: a thread spinning under a policy
+    // that is its own for good cannot be unblocked, so a bound that ran out is
+    // this scenario's failure, and the thread is left to end with this
+    // process. The child does not end with it by itself -- a stopped child
+    // cannot read the EOF its parent's death gives it -- and it is the
+    // wrapper's kill of this process's group, made once this process has
+    // exited and before its collection, that ends it (`PR320-R5-MAIN-004`,
+    // `PR320-R5-REG-004`).
+    let (answer, took) = answered.expect(
+        "the observation returned within sixty times its reap bound; one that makes an \
+         interrupted observation again forever is the defect this test holds",
+    );
+    observing.join().expect("the observing thread ends");
+    let message = answer
+        .expect_err("an observation interrupted for the whole bound is a failure, not an answer");
+    assert!(
+        message.contains(&format!(
+            "waitpid({pid}, WNOHANG) was interrupted at every observation for {BOUND:?}"
+        )) && message.contains("(os error 4)"),
+        "the panic names the pid, the bound and the interruption: {message}"
+    );
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the observation spent its bound and no more: {took:?}"
+    );
+    let status = collect_child_within(pid, Duration::from_secs(5))
+        .expect("the child is this test's to collect once its owner gave up");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the child read the release the drop wrote and ended by itself: {status:?}"
+    );
+    assert!(is_reaped(pid), "and is collected now");
+}
+
+/// In a process of its own: a parked fork, stopped and acknowledged, handed
+/// to a worker that holds it and never answers -- as the owner's worker
+/// under a first-bad mutation spins, its policy the worker's for good -- and
+/// waited for within a second. The scenario fails at that bound, exactly as
+/// the interruption regressions fail on their failing path, and exits with
+/// the worker still holding the owner and the owner the stopped child:
+/// nothing in this process releases, kills or collects it. That is left to
+/// the wrapper's kill of this process's group
+/// ([`a_scenario_whose_owner_never_answers_fails_at_its_bound_and_its_stopped_child_ends_with_the_group`]).
+/// The pid is written first, `descendant=`.
+#[cfg(target_os = "linux")]
+fn fail_at_the_bound_holding_a_stopped_child_on_a_worker_that_never_answers() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd());
+    stop_parked_child(parked.pid());
+    eprintln!("descendant={}", parked.pid());
+    let (never_sent, never) = std::sync::mpsc::channel::<()>();
+    // Forgotten, so that no unwinding of this thread can end the worker's
+    // wait: the worker holds the owner for as long as this process lives.
+    std::mem::forget(never_sent);
+    let (answered, _holding) = on_a_thread_within(Duration::from_secs(1), move || {
+        let _held = parked;
+        if never.recv().is_ok() {
+            // Nothing is ever sent.
+        }
+    });
+    answered.expect(
+        "the worker answered within its bound; one that never answers is the failing path this \
+         scenario stands for",
+    );
+}
+
+/// In a process of its own: a parked fork, stopped and acknowledged, dropped
+/// with a reap bound of 100 ms on a thread whose kill and writes to stderr a
+/// policy refuses (`EPERM`, `EINTR`), each refusal seen in force first. The
+/// drop's time is written after it, with the child's state from `/proc`: a
+/// refused kill leaves the child stopped, and the wrapper's kill of this
+/// process's group ends it. The pid is written first, `descendant=`.
+#[cfg(target_os = "linux")]
+fn drop_a_parked_fork_whose_kill_and_stderr_writes_are_refused() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    eprintln!("descendant={pid}");
+    let took = drop_under(
+        parked,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EINTR)],
+        BOUND * 60,
+    );
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the drop spent the reap bound, met the refused kill and its refused line, and \
+         returned: {took:?}"
+    );
+    eprintln!("dropped after {took:?}; left={}", state_by_proc(pid));
+}
+
+/// In a process of its own: two parked forks, stopped and acknowledged, each
+/// under a policy that refuses its kill (`EPERM`) and answers `EIO` to every
+/// write to stderr, each refusal seen in force first; the first dropped
+/// plainly, the second dropped by the unwinding of a failure its thread
+/// raised with it in scope, the unwinding caught. The pids are written
+/// first, `descendant=`; both children are left stopped and the wrapper's
+/// kill of this process's group ends them.
+#[cfg(target_os = "linux")]
+fn drop_parked_forks_whose_kill_is_refused_and_stderr_answers_eio() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let anchor = File::open("/dev/null").expect("a descriptor for the forks to keep");
+    let dropped = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let unwound = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let (first, second) = (dropped.pid(), unwound.pid());
+    stop_parked_child(first);
+    stop_parked_child(second);
+    eprintln!("descendant={first}");
+    eprintln!("descendant={second}");
+    let took = drop_under(
+        dropped,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EIO)],
+        BOUND * 60,
+    );
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the drop spent the reap bound, met the refused kill and the failed line, and \
+         returned: {took:?}"
+    );
+    let caught = unwind_through_under(
+        unwound,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EIO)],
+        BOUND * 60,
+    );
+    assert!(
+        caught,
+        "the unwinding reached the caller's catch: the drop it ran did not panic"
+    );
+    eprintln!(
+        "dropped after {took:?}; unwound and caught; left={} {}",
+        state_by_proc(first),
+        state_by_proc(second)
+    );
+}
+
+/// A scenario owner whose leader has exited by itself, 23, leaving a silent
+/// member in its group, and the leader's pid: the owner holds the leader
+/// uncollected, peeked and not waited for. The leader is written to stderr
+/// as `leader=`, the member as `descendant=`. With `end_the_member` the
+/// member is killed first, by this thread, through the leader's group -- the
+/// leader uncollected, so the id is still that group's -- and the group seen
+/// with nothing running, read from `/proc` without a signal while the leader
+/// still holds its id ([`group_observed_empty_within`]), so that a drop whose
+/// own kill a policy refuses leaves nothing running, whatever becomes of the
+/// drop: the drop's kill is refused whatever the group holds, which is the
+/// state under test. Before, the member was seen ended by its number and
+/// killed by it again if not, a number nothing kept reserved
+/// (`PR320-R6-MAIN-002`). The scenario owner is handed the
+/// lifeline this process was handed, when it was handed one, so its group
+/// has a warden of its own.
+#[cfg(target_os = "linux")]
+fn an_owner_whose_leader_exited(end_the_member: bool) -> (ScenarioChild, libc::pid_t) {
+    let mut owned = ScenarioChild::spawn(
+        "exit-23-leaving-a-silent-member-in-the-group",
+        ScenarioLifeline::PassedOn,
+    );
+    let leader = owned.pid();
+    let deadline = Instant::now() + SCENARIO_BOUND;
+    while !owned.has_ended() {
+        assert!(
+            Instant::now() < deadline,
+            "the silent-member scenario exits by itself"
+        );
+        owned.drain();
+        rest_within(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(Instant::now()),
+        );
+    }
+    owned.drain();
+    let member = descendants_named_in(&owned.text(), 1)
+        .first()
+        .copied()
+        .expect("the leader named its member");
+    eprintln!("leader={leader}");
+    eprintln!("descendant={member}");
+    if end_the_member {
+        // SAFETY: `kill` takes a pid and a signal by value; the negative pid
+        // is the group of the leader this owner holds uncollected, so the id
+        // is still that group's.
+        assert_eq!(
+            unsafe { libc::kill(-leader, libc::SIGKILL) },
+            0,
+            "kill the leader's group {leader}: {}",
+            std::io::Error::last_os_error()
+        );
+        let ended = group_observed_empty_within(leader, Duration::from_secs(5));
+        assert!(
+            ended.is_ok(),
+            "the member {member} of the leader's group, killed by this scenario, has ended: \
+             {ended:?}"
+        );
+    }
+    (owned, leader)
+}
+
+/// In a process of its own: a scenario owner whose leader exited 23, dropped
+/// on a thread whose kill and writes to stderr a policy refuses (`EPERM`,
+/// `EINTR`), each refusal seen in force first. The drop's time is written
+/// after it.
+#[cfg(target_os = "linux")]
+fn drop_a_scenario_owner_whose_kill_and_stderr_writes_are_refused() {
+    let (owned, leader) = an_owner_whose_leader_exited(true);
+    let took = drop_under(
+        owned,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EINTR)],
+        SCENARIO_GROUP_BOUND * 3,
+    );
+    assert!(
+        is_reaped(leader),
+        "the drop collected the leader although its kill was refused"
+    );
+    eprintln!("dropped the owner of {leader} after {took:?}");
+}
+
+/// In a process of its own: a scenario owner whose leader exited 23, dropped
+/// on a thread that a policy refuses its kill (`EPERM`) and answers `EIO` to
+/// every write to stderr, each refusal seen in force first. The drop's time
+/// is written after it.
+#[cfg(target_os = "linux")]
+fn drop_a_scenario_owner_whose_kill_is_refused_and_stderr_answers_eio() {
+    let (owned, leader) = an_owner_whose_leader_exited(true);
+    let took = drop_under(
+        owned,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EIO)],
+        SCENARIO_GROUP_BOUND * 3,
+    );
+    assert!(
+        is_reaped(leader),
+        "the drop collected the leader although its kill was refused"
+    );
+    eprintln!("dropped the owner of {leader} after {took:?}");
+}
+
+/// In a process of its own: a scenario owner whose leader exited 23, its
+/// drop run by the unwinding of a failure raised with it in scope, on a
+/// thread that a policy refuses its kill (`EPERM`) and answers `EIO` to
+/// every write to stderr, each refusal seen in force first; the unwinding is
+/// caught. What happened is written after it.
+#[cfg(target_os = "linux")]
+fn unwind_through_a_scenario_owner_whose_kill_is_refused_and_stderr_answers_eio() {
+    let (owned, leader) = an_owner_whose_leader_exited(true);
+    let caught = unwind_through_under(
+        owned,
+        &[Refusal::Kill, Refusal::StderrWrites(libc::EIO)],
+        SCENARIO_GROUP_BOUND * 3,
+    );
+    assert!(
+        caught,
+        "the unwinding reached the caller's catch: the drop it ran did not panic"
+    );
+    assert!(
+        is_reaped(leader),
+        "the drop the unwinding ran collected the leader although its kill was refused"
+    );
+    eprintln!("unwound through the owner of {leader} and caught it");
+}
+
+/// In a process of its own: a scenario owner whose leader exited 23 with its
+/// member alive, dropped on a thread whose opens of anything but a directory
+/// a policy answers `EINTR`, the refusal seen in force first. The drop's own
+/// kill is made; its observation of the group lists `/proc` and meets the
+/// refusal at the first process it opens. The drop's time is written after
+/// it; the drop's own line, on stderr, says what it could observe.
+#[cfg(target_os = "linux")]
+fn drop_a_scenario_owner_whose_group_observation_opens_are_interrupted() {
+    let (owned, leader) = an_owner_whose_leader_exited(false);
+    let took = drop_under(
+        owned,
+        &[Refusal::NondirectoryOpens],
+        SCENARIO_GROUP_BOUND * 3,
+    );
+    assert!(
+        is_reaped(leader),
+        "the drop killed the group and collected the leader before it observed the group"
+    );
+    eprintln!("dropped the owner of {leader} after {took:?}");
+}
+
+/// In a process of its own: a parked fork, stopped and acknowledged, dropped
+/// with a reap bound of 100 ms on a thread whose every rest a policy refuses
+/// (`clock_nanosleep` answering `EINTR`), the refusal seen in force first.
+/// The drop spends its bound, kills the child and collects it. The pid is
+/// written first, `descendant=`.
+#[cfg(target_os = "linux")]
+fn drop_a_stopped_parked_fork_whose_every_rest_is_refused() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    eprintln!("descendant={pid}");
+    let took = drop_under(parked, &[Refusal::Rests], BOUND * 60);
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the drop spent the reap bound with every rest refused, then killed the child: {took:?}"
+    );
+    assert!(
+        is_reaped(pid),
+        "the drop killed the stopped child and collected it, its rests refused"
+    );
+    eprintln!("dropped after {took:?}; the child collected");
+}
+
+/// In a process of its own: the scenario wrapper run on a thread of its own,
+/// its every rest refused by a policy installed the moment it owns its
+/// scenario -- so the scenario, `exit-0-after-200ms`, is not the policy's --
+/// with a bound of 100 ms: the scenario outlives the bound, so the wrapper's
+/// loop meets refused rests from its first turn to its bound, and then kills
+/// the group and ends it. A wrapper that made a refused rest again inside
+/// itself would never come back to its bound; the scenario then ends by
+/// itself at 200 ms, and this fails at its own bound.
+#[cfg(target_os = "linux")]
+fn run_a_scenario_wrapper_whose_every_rest_is_refused() {
+    let (answered, running) = on_a_thread_within(SCENARIO_GROUP_BOUND * 3, || {
+        let mut in_force = Err(String::from("the wrapper never owned its scenario"));
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "exit-0-after-200ms",
+            Duration::from_millis(100),
+            ScenarioLifeline::PassedOn,
+            |_| {
+                in_force = refuse_on_this_thread(&[Refusal::Rests]);
+            },
+        );
+        in_force.map(|()| (answer, started.elapsed()))
+    });
+    let ((status, text), took) = settled_within(answered, SCENARIO_GROUP_BOUND * 3, "the wrapper");
+    running.join().expect("the wrapper's thread ends");
+    assert!(
+        status.is_none(),
+        "a scenario killed at the bound has no status: {status:?}\n{text}"
+    );
+    assert!(
+        text.contains("the scenario did not end within 100ms")
+            && text.contains("the scenario's process group was killed")
+            && text.contains("the scenario's group was empty"),
+        "the wrapper ended the scenario at its bound with every rest refused: {text}"
+    );
+    eprintln!("the wrapper ended its scenario after {took:?}, its rests refused");
+}
+
+/// The body of
+/// [`a_group_kill_the_os_refuses_leaves_the_wrapper_bounded_and_the_refusal_in_its_text`],
+/// in a process of its own (`run-a-wrapper-whose-group-kill-the-os-refuses`):
+/// the wrapper runs `hold-stderr-and-never-end`, handed on the lifeline this
+/// process was handed, on a thread whose `kill` a policy answers `EPERM` from
+/// the moment the wrapper owns the scenario, with a bound of 250 ms. The
+/// answer is checked before the join: a wrapper that waited on the process it
+/// could not kill, or made its refused kill again, never answers, and its
+/// thread is left to end with this process, the scenario it holds and that
+/// scenario's warden ended by the lifeline the test then cuts. A wrapper that
+/// answered left the scenario process uncollected, and it is this process's
+/// to end: its uncollected child -- found so without collecting anything,
+/// this process's only children being its own group's warden and this one,
+/// spawned after it -- so the group's id is still the scenario's, and its
+/// group is killed and the process collected, before the assertions.
+#[cfg(target_os = "linux")]
+fn run_a_wrapper_whose_group_kill_the_os_refuses() {
+    let (pid_sender, pid_receiver) = std::sync::mpsc::channel();
+    let (answered, running) = on_a_thread_within(Duration::from_secs(30), move || {
+        let started = Instant::now();
+        let answer = run_parked_fork_scenario_within(
+            "hold-stderr-and-never-end",
+            Duration::from_millis(250),
+            ScenarioLifeline::PassedOn,
+            |pid| {
+                pid_sender
+                    .send(pid)
+                    .expect("the scenario waits for the pid");
+                refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+            },
+        );
+        (answer, started.elapsed())
+    });
+    let scenario_pid = pid_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the wrapper owned the scenario process and said which");
+    let ((status, text), took) = answered.expect(
+        "the wrapper returned within its caller's bound although its kill was refused; a wrapper \
+         that waits on a process it could not kill is the defect this holds",
+    );
+    running.join().expect("the wrapper's thread ends");
+    let left_uncollected = !is_reaped(scenario_pid);
+    let collected = if left_uncollected {
+        // SAFETY: `kill` takes a pid and a signal by value; the negative pid
+        // is the group of this process's own child, which `is_reaped` found
+        // uncollected without collecting it and nothing here collects before
+        // this, so the id is still that group's.
+        let killed = unsafe { libc::kill(-scenario_pid, libc::SIGKILL) };
+        assert_eq!(
+            killed,
+            0,
+            "kill the scenario's group {scenario_pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        collect_child_within(scenario_pid, SCENARIO_GROUP_BOUND)
+    } else {
+        None
+    };
+    assert!(
+        left_uncollected,
+        "the wrapper whose kill was refused left the scenario process {scenario_pid} to its \
+         caller, uncollected: {text}"
+    );
+    assert!(
+        collected.is_some(),
+        "the scenario process was this process's to collect once its group was killed: {text}"
+    );
+    assert!(
+        status.is_none(),
+        "a scenario whose group could not be killed has no status: {status:?}\n{text}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "and the wrapper returned within its own bounds: {took:?}\n{text}"
+    );
+    assert!(
+        text.contains("the scenario did not end within 250ms")
+            && text.contains("the scenario's process group could not be killed")
+            && text.contains("is left uncollected"),
+        "the wrapper says what it could not do: {text}"
+    );
+    eprintln!(
+        "the refused kill left the scenario process uncollected; this scenario ended its group \
+         and collected it: {collected:?}"
+    );
+}
+
+/// The body of
+/// [`a_parked_child_that_never_reads_its_release_is_killed_and_reaped_within_the_bound`],
+/// in a process of its own
+/// (`release-a-stopped-parked-fork-that-never-reads-its-release`): the
+/// release runs on a thread of its own and its answer is checked before the
+/// join, so a release that blocked past every bound fails this scenario at
+/// thirty times its reap bound, the thread left to end with this process and
+/// the stopped child with this process's group. It was continued with
+/// `SIGCONT` by its number, which the release might already have collected
+/// (`PR320-R6-MAIN-002`).
+#[cfg(unix)]
+fn release_a_stopped_parked_fork_that_never_reads_its_release() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    const BOUND: Duration = Duration::from_secs(1);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    assert!(parked.is_alive(), "a stopped child has not ended");
+    let (released, releasing) = on_a_thread_within(BOUND * 30, move || {
+        let started = Instant::now();
+        (parked.release(), started.elapsed())
+    });
+    let (status, took) = released.expect(
+        "the release returned within thirty times its reap bound; a release that blocks past its \
+         bound is the defect this test holds",
+    );
+    releasing.join().expect("the releasing thread ends");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child was killed at the end of the reap bound: {status:?}"
+    );
+    assert!(
+        took >= BOUND,
+        "the reap bound was waited out before the kill: {took:?}"
+    );
+    assert!(is_reaped(pid), "and the killed child {pid} was collected");
+    eprintln!("released after {took:?}: {status}");
+}
+
+/// The body of
+/// [`dropping_a_parked_fork_reaps_its_child_even_when_the_child_is_stopped`],
+/// in a process of its own (`drop-a-stopped-parked-fork`): as
+/// [`release_a_stopped_parked_fork_that_never_reads_its_release`], for the
+/// drop.
+#[cfg(unix)]
+fn drop_a_stopped_parked_fork() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(500);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    let (dropped, dropping) = on_a_thread_within(BOUND * 30, move || {
+        let started = Instant::now();
+        drop(parked);
+        started.elapsed()
+    });
+    let took = dropped.expect(
+        "the drop returned within thirty times its reap bound; a drop that blocks past its bound \
+         is the defect this test holds",
+    );
+    dropping.join().expect("the dropping thread ends");
+    assert!(
+        took >= BOUND,
+        "the reap bound was waited out before the kill: {took:?}"
+    );
+    assert!(
+        is_reaped(pid),
+        "the drop killed the stopped child {pid} at the end of its reap bound and collected it"
+    );
+    eprintln!("dropped after {took:?}; the child collected");
+}
+
+/// The body of
+/// [`a_lease_wait_whose_every_rest_is_refused_returns_at_its_bound`], in a
+/// process of its own (`a-lease-wait-whose-every-rest-is-refused`): a parked
+/// fork holds a run's cleanup lease, and a thread whose every rest a policy
+/// refuses -- the refusal seen in force first -- waits for the lease's release
+/// with a bound of 100 ms. The answer is checked before the join: a wait
+/// that made a refused rest again inside itself never answers, and its
+/// thread is left to end with this process.
+#[cfg(target_os = "linux")]
+fn a_lease_wait_whose_every_rest_is_refused() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let root = scratch("lease-wait-rests-refused");
+    let public = public_dir(&root.join("repo"), "01LEASEWAITRESTS0000000000");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the parked fork {holder} holds the run's cleanup lease"
+    );
+    let observed = public.clone();
+    let (answered, waiting) = on_a_thread_within(BOUND * 60, move || {
+        refuse_on_this_thread(&[Refusal::Rests])?;
+        let started = Instant::now();
+        let held = lease_released_within(&observed, BOUND, &mut |_| {});
+        Ok::<_, String>((held, started.elapsed()))
+    });
+    let (held, took) = settled_within(answered, BOUND * 60, "the lease wait");
+    waiting.join().expect("the waiting thread ends");
+    let held = held.expect_err("a lease held for the whole bound is reported held past it");
+    assert!(
+        held.waited >= BOUND && took < BOUND * 60,
+        "the wait spent its bound and came back to it with every rest refused: {took:?}, {held}"
+    );
+    assert!(
+        parked.is_alive() && observe_cleanup_hold(&public, &mut NoHooks),
+        "the holder {holder} outlived the wait"
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+    eprintln!("the lease wait returned after {took:?} with every rest refused: {held}");
+}
+
+/// The body of
+/// [`a_readiness_wait_whose_every_rest_is_refused_times_out_at_its_bound`],
+/// in a process of its own (`a-readiness-wait-whose-every-rest-is-refused`):
+/// a producer that never publishes -- this test binary on
+/// `hold-stderr-and-never-end`, in this scenario's group -- and a thread whose
+/// every rest a policy refuses, the refusal seen in force first, waiting for
+/// its signal with a bound of 100 ms. The answer is checked before the join:
+/// a wait that made a refused rest again inside itself never answers. The
+/// producer is this process's own child, uncollected by the wait, which only
+/// polls it, and is killed and collected here.
+#[cfg(target_os = "linux")]
+fn a_readiness_wait_whose_every_rest_is_refused() {
+    const BOUND: Duration = Duration::from_millis(100);
+    let root = scratch("readiness-rests-refused");
+    let signal = root.join("never-published");
+    let producer = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "rundir::tests::parked_fork_isolation_kill_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            "UPSTROKE_TEST_PARKED_FORK_SCENARIO",
+            "hold-stderr-and-never-end",
+        )
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a producer that never publishes");
+    let (answered, waiting) = on_a_thread_within(BOUND * 60, move || {
+        let mut producer = producer;
+        refuse_on_this_thread(&[Refusal::Rests])?;
+        let started = Instant::now();
+        let waited = readiness::await_signal(&signal, &mut producer, BOUND);
+        Ok::<_, String>((waited, started.elapsed(), producer))
+    });
+    let (waited, took, mut producer) = settled_within(answered, BOUND * 60, "the readiness wait");
+    waiting.join().expect("the waiting thread ends");
+    let killed = producer.kill();
+    let collected = try_collect_within(&mut producer, SCENARIO_GROUP_BOUND);
+    assert!(
+        matches!(waited, readiness::Waited::TimedOut(bound) if bound == BOUND),
+        "a producer that never publishes times the wait out: {waited:?}"
+    );
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the wait spent its bound and came back to it with every rest refused: {took:?}"
+    );
+    assert!(
+        killed.is_ok() && collected.is_some(),
+        "the producer, this process's child, was killed and collected: {killed:?}, {collected:?}"
+    );
+    eprintln!("the readiness wait timed out after {took:?} with every rest refused");
+}
+
+/// The body of
+/// [`a_warden_refuses_to_arm_outside_its_scenarios_own_group_and_signals_nothing`],
+/// in a process of its own
+/// (`a-warden-refuses-to-arm-outside-its-scenarios-own-group`): a warden is
+/// asked to arm in two groups it must refuse, each a group of this
+/// scenario's own making, so that a warden that armed there anyway could end
+/// nothing but that group. First a group led by a keeper -- a child of this
+/// process that runs until it is killed -- which a helper joins without
+/// leading it: the warden the helper asks for has a parent that does not
+/// lead its group. Then a helper leading a group of its own that names that
+/// group as the harness's: the warden's group is the one it must never arm
+/// in. Each helper exits 0 only when its warden refused for that reason; the
+/// keeper is observed still running after the first -- nothing was signalled
+/// -- and its group, its leader uncollected, is then this process's to end.
+#[cfg(target_os = "linux")]
+fn a_warden_refuses_to_arm_outside_its_scenarios_own_group() {
+    use std::os::unix::process::CommandExt as _;
+
+    let helper = |scenario: &str| {
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--exact",
+                "rundir::tests::parked_fork_isolation_kill_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_TEST_PARKED_FORK_SCENARIO", scenario)
+            .env_remove(SCENARIO_HARNESS_GROUP)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    };
+    let mut keeper = helper("hold-stderr-and-never-end")
+        .process_group(0)
+        .spawn()
+        .expect("spawn the keeper that leads a group of this scenario's making");
+    let group = libc::pid_t::try_from(keeper.id()).expect("a pid fits its type");
+    let mut joined = helper("ask-a-warden-to-arm-in-a-group-its-parent-does-not-lead")
+        .process_group(group)
+        .spawn()
+        .expect("spawn the helper that joins the keeper's group");
+    let joined_status = try_collect_within(&mut joined, WARDEN_BOUND);
+    let keeper_running = the_process_is_running(group);
+    // SAFETY: `kill` takes a pid and a signal by value; the negative pid is
+    // the group the keeper leads, this process's own child, which nothing
+    // has collected -- it is collected just below, through its `Child` -- so
+    // the id is still that group's.
+    let killed = unsafe { libc::kill(-group, libc::SIGKILL) };
+    let keeper_status = try_collect_within(&mut keeper, SCENARIO_GROUP_BOUND);
+    let mut leading = helper("ask-a-warden-to-arm-in-the-harnesss-group")
+        .process_group(0)
+        .spawn()
+        .expect("spawn the helper that leads a group it names the harness's");
+    let leading_status = try_collect_within(&mut leading, WARDEN_BOUND);
+    assert!(
+        joined_status.is_some_and(|status| status.success()),
+        "the warden asked for in a group its parent does not lead refused, and said why: \
+         {joined_status:?}"
+    );
+    assert!(
+        keeper_running,
+        "and it signalled nothing: the keeper of that group ran on after the refusal"
+    );
+    assert!(
+        killed == 0 && keeper_status.is_some(),
+        "the keeper's group was this scenario's to end and was ended: {killed}, {keeper_status:?}"
+    );
+    assert!(
+        leading_status.is_some_and(|status| status.success()),
+        "the warden asked for in the harness's group refused, said why, and its parent ran on to \
+         say so: {leading_status:?}"
+    );
+    eprintln!("the warden refused both groups and signalled nothing");
+}
+
+/// A helper of [`a_warden_refuses_to_arm_outside_its_scenarios_own_group`],
+/// in a process of its own: ask for a warden with `harness` named as the
+/// harness's group, and exit 0 only when it refused saying `expected`.
+#[cfg(target_os = "linux")]
+fn ask_a_warden_to_arm_where_it_must_not(harness: &str, expected: &str) {
+    let refusal = spawn_a_warden(harness)
+        .map(drop)
+        .expect_err("a warden outside a scenario's own group refuses to arm");
+    assert!(
+        refusal.contains(expected),
+        "the warden refused for the reason it was given: {refusal}"
+    );
+}
+
+/// Whether `pid`, a child of this process, has not ended, asked without
+/// collecting it: `waitid` with `WNOWAIT` reports no ended child.
+#[cfg(target_os = "linux")]
+fn the_process_is_running(pid: libc::pid_t) -> bool {
+    // SAFETY: as `is_reaped`.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let answered = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            libc::id_t::try_from(pid).expect("a pid names a process, so it fits an id"),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // SAFETY: `si_pid` reads the union field a child report fills, and the
+    // zeroing above makes it readable when nothing was reported.
+    answered == 0 && unsafe { info.si_pid() } == 0
+}
+
+/// In a process of its own: a parked fork, stopped and acknowledged, dropped
+/// with a reap bound of 100 ms on a thread whose sends a policy answers
+/// `EINTR`, the refusal seen in force first: the release byte is not
+/// written, the child cannot read the EOF that would release it instead, and
+/// the drop kills it at the end of the bound and collects it. The drop's own
+/// line, on stderr, says both. The pid is written first, `descendant=`.
+#[cfg(target_os = "linux")]
+fn drop_a_stopped_parked_fork_whose_release_send_is_interrupted() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    eprintln!("descendant={pid}");
+    let took = drop_under(parked, &[Refusal::Sends], BOUND * 60);
+    assert!(
+        took >= BOUND && took < BOUND * 60,
+        "the drop spent the reap bound, then killed the child: {took:?}"
+    );
+    assert!(
+        is_reaped(pid),
+        "the drop killed the child its release could not reach and collected it"
+    );
+    eprintln!("dropped after {took:?}; the child collected");
+}
+
+/// In a process of its own: a parked fork, stopped and acknowledged, released
+/// with a reap bound of 100 ms on a thread whose sends a policy answers
+/// `EINTR`, the refusal seen in force first: the release panics, saying the
+/// release could not be written and that the child was killed and collected,
+/// with its status -- not that it was left uncollected. The pid is written
+/// first, `descendant=`.
+#[cfg(target_os = "linux")]
+fn release_a_stopped_parked_fork_whose_release_send_is_interrupted() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    const BOUND: Duration = Duration::from_millis(100);
+    let anchor = File::open("/dev/null").expect("a descriptor for the fork to keep");
+    let parked = ParkedFork::holding(anchor.as_raw_fd()).reap_bound(BOUND);
+    let pid = parked.pid();
+    stop_parked_child(pid);
+    eprintln!("descendant={pid}");
+    let (answered, releasing) = on_a_thread_within(BOUND * 60, move || {
+        refuse_on_this_thread(&[Refusal::Sends])?;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parked.release()));
+        Ok::<_, String>(unwound.map_err(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        }))
+    });
+    let released = settled_within(answered, BOUND * 60, "the release");
+    releasing.join().expect("the releasing thread ends");
+    let message = released.expect_err(
+        "a release whose child had to be killed after its release could not be written is a \
+         panic, not a status",
+    );
+    assert!(
+        message.contains(&format!(
+            "release the parked child {pid}: its release could not be written: Interrupted \
+             system call (os error 4); it was killed at the end of {BOUND:?} and collected: \
+             signal: 9 (SIGKILL)"
+        )),
+        "the panic says the release failed and the child was killed and collected, with its \
+         status: {message}"
+    );
+    assert!(is_reaped(pid), "and the child is collected");
+    eprintln!("released: {message}");
+}
+
+/// A scenario whose process exits abnormally -- 23, its own cleanup never
+/// run -- leaving behind a child that holds its stderr and runs on
+/// ([`spawn_a_child_holding_stderr`]), its pid written to stderr for the
+/// parent to read. A running child, not a stopped fork, because a stopped
+/// member of a process group that its leader's exit orphans is sent `SIGHUP`
+/// by the kernel and ends on its own; a child that runs on holding the pipe
+/// is ended by nothing but the wrapper. The child is abandoned on purpose:
+/// a scenario that exits without collecting what it spawned is the shape
+/// under test.
+#[cfg(unix)]
+fn exit_leaving_a_child_holding_stderr() -> ! {
+    let child = spawn_a_child_holding_stderr();
+    eprintln!("descendant={}", child.id());
+    std::process::exit(23)
+}
+
+/// In a process of its own: a sentinel copied to descriptor 128 by `dup2`,
+/// then the soft descriptor limit lowered to 64, so that the sentinel sits
+/// above what `sysconf(_SC_OPEN_MAX)` reports; on Linux `close_range` is
+/// refused as well, so that the sweep by number, whose ceiling is in
+/// question, is what runs there too. The parked fork's sweep closes the
+/// sentinel: the read answers EOF within the bound.
+#[cfg(unix)]
+fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    const HIGH: libc::c_int = 128;
+    let root = scratch("childlease-high-descriptor");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000009");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, mut observer) = sentinel_pair();
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through the pointer, which
+    // lives for the call.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) },
+        0,
+        "read RLIMIT_NOFILE: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        limits.rlim_cur > 128,
+        "this witness places its sentinel at descriptor {HIGH}, which needs a soft limit above \
+         it; the soft limit is {}",
+        limits.rlim_cur
+    );
+    // SAFETY: `dup2` takes two descriptors by value; this process is the
+    // witness's own and fresh, with nothing open at `HIGH`.
+    assert_eq!(
+        unsafe { libc::dup2(sentinel.as_raw_fd(), HIGH) },
+        HIGH,
+        "copy the sentinel to descriptor {HIGH}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `HIGH` is the copy `dup2` just made and nothing else owns; the
+    // stream owns it from here and closes it when dropped.
+    let high = unsafe { std::os::unix::net::UnixStream::from_raw_fd(HIGH) };
+    drop(sentinel);
+    let lowered = libc::rlimit {
+        rlim_cur: 64,
+        rlim_max: limits.rlim_max,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through the pointer, which
+    // lives for the call; the limit lowered is this witness process's own.
+    assert_eq!(
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) },
+        0,
+        "lower the soft descriptor limit to 64: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut now = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut now) },
+        0,
+        "read RLIMIT_NOFILE back: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_eq!(
+        now.rlim_cur, 64,
+        "the soft limit is below the sentinel's number while the sentinel stays open"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        refuse_syscall_on_this_thread(libc::SYS_close_range, libc::ENOSYS);
+        assert_close_range_answers(libc::ENOSYS);
+    }
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    let holder = parked.pid();
+    drop(high);
+    if let Err(held) = sentinel_closed_within(&mut observer, LEASE_RELEASE_BOUND, &mut |_| {}) {
+        panic!(
+            "the sentinel at descriptor {HIGH}, above the lowered soft limit of 64, was closed by \
+             fork {holder}'s sweep: {held}"
+        );
+    }
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+/// A close the policy answers `EINTR` to, without making it, is verified and
+/// found not made: the parked fork's constructor fails, naming the descriptor
+/// and the error, after the child has been collected -- the helper never
+/// announces a child whose sentinel copy the sweep left open. In a process
+/// of its own, as the `EIO` witness is, because the policy is the thread's
+/// for good. A native Linux witness of a denied operation: it says nothing
+/// about an `EINTR` an ordinary Linux or macOS `close` answers, which the
+/// same verification reads as the close it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-denied-with-eintr");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A close the policy answers `EBADF` to, without making it, is read from
+/// the descriptor table and found open: the parked fork's constructor fails,
+/// naming the descriptor and the error, after the child has been collected.
+/// `EBADF` is the answer the sweep takes as a number not open when the table
+/// says so, and a policy's `EBADF` says nothing about the table
+/// (`PR320-R3-REG-002`); in a process of its own, as the `EIO` and `EINTR`
+/// witnesses are.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcing_the_child() {
+    let (status, stderr) = run_parked_fork_scenario("a-close-denied-with-ebadf");
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the scenario held in its own process: {status:?}\n{stderr}"
+    );
+}
+
+/// A `close_range` that answers success without closing -- a policy's
+/// answer, `SECCOMP_RET_ERRNO` carrying 0 -- is found out by the reading of
+/// the numbers the parent listed at the fork: the constructor fails naming
+/// the first listed descriptor still open and that its close answered
+/// success, after the child has been collected. The policy is this thread's
+/// and its forks', and this thread makes no `close_range` of its own, so no
+/// fresh process is needed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_range_close_that_answers_success_without_closing_is_found_out_before_the_child_is_announced() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let root = scratch("childlease-range-close-lies");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000B");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (_sentinel, _observer) = sentinel_pair();
+    refuse_syscall_on_this_thread(libc::SYS_close_range, 0);
+    // SAFETY: a raw syscall over a numeric range the kernel refuses as
+    // empty (`EINVAL`), so an answer of 0 is the policy's alone; it closes
+    // nothing.
+    assert_eq!(
+        unsafe { libc::syscall(libc::SYS_close_range, 3_u32, 2_u32, 0_u32) },
+        0,
+        "the policy answers success to close_range: {}",
+        std::io::Error::last_os_error()
+    );
+    let unwound = std::panic::catch_unwind(|| ParkedFork::holding_the_lease_of(&public));
+    let payload = unwound
+        .err()
+        .expect("a range close that closed nothing fails the constructor");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .expect("the panic carries a message");
+    assert!(
+        message.contains("could not close inherited descriptor")
+            && message.contains("the close answered success and the descriptor read open after it"),
+        "the constructor names a descriptor left open and the success its close answered: {message}"
+    );
+    let pid: libc::pid_t = message
+        .strip_prefix("the parked child ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|pid| pid.parse().ok())
+        .expect("the message names the child's pid");
+    assert!(
+        is_reaped(pid),
+        "the child {pid} was collected before the constructor failed"
+    );
+}
+
+/// In a process of its own: a policy that answers `errno` to the `close` of
+/// one descriptor, the sentinel's, and `ENOSYS` to `close_range` so that the
+/// sweep reaches it. The parked fork's constructor fails, naming the
+/// descriptor and the error, and the child it forked has been collected
+/// before it fails: no child is announced that could not be isolated, and
+/// none is left behind. `EIO` is a close that failed; `EINTR` is the answer
+/// a policy gives without making the close, which the sweep verifies rather
+/// than trusts.
+#[cfg(target_os = "linux")]
+fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: libc::c_int) {
+    use crate::workspace_manager::fixture::ParkedFork;
+    use std::os::fd::AsRawFd as _;
+
+    let root = scratch("childlease-close-fails");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000A");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let (sentinel, _observer) =
+        std::os::unix::net::UnixStream::pair().expect("a sentinel socket pair");
+    let number = sentinel.as_raw_fd();
+    refuse_closing_on_this_thread(number, errno);
+    assert_close_range_answers(libc::ENOSYS);
+    let unwound = std::panic::catch_unwind(|| ParkedFork::holding_the_lease_of(&public));
+    let payload = unwound
+        .err()
+        .expect("a sweep that could not close the sentinel fails the constructor");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .expect("the panic carries a message");
+    let expected = format!(
+        "could not close inherited descriptor {number}: {}",
+        std::io::Error::from_raw_os_error(errno)
+    );
+    assert!(
+        message.contains(&expected),
+        "the constructor names the descriptor and the error: {message}"
+    );
+    let pid: libc::pid_t = message
+        .strip_prefix("the parked child ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|pid| pid.parse().ok())
+        .expect("the message names the child's pid");
+    assert!(
+        is_reaped(pid),
+        "the child {pid} was collected before the constructor failed"
+    );
+    // The policy refuses this thread's own close of the sentinel too, so
+    // the stream is forgotten rather than dropped into an error a drop
+    // cannot report; the process ends with the scenario.
+    std::mem::forget(sentinel);
 }
 
 /// A run directory that does not exist is an error, not a silent write with

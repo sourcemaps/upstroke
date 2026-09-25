@@ -610,6 +610,1227 @@ pub(crate) fn spawn_ready_helper(
 }
 
 // -----------------------------------------------------------------------
+// A fork parked with one inherited descriptor, held until it is released
+// -----------------------------------------------------------------------
+
+/// A child of this process, forked and parked before it exits, holding the
+/// one descriptor it was forked to hold.
+///
+/// A `fork` copies the whole descriptor table, so the child holds a copy of
+/// every descriptor this process had open at that instant, and a copy of a
+/// run's cleanup lease -- open in this process for the life of a ref write,
+/// `rundir::hold_cleanup_lease_for_child` -- holds the shared `flock` with
+/// it. That is the window every spawn in this process has between its
+/// `fork` and its `exec`; this value makes one such window last as long as
+/// a test needs, with the one descriptor it is meant to model and nothing
+/// of any other test's.
+///
+/// **The protocol, as it runs.** The parent computes the ceiling of its own
+/// descriptor table ([`descriptor_ceiling`]) and forks. The child, before
+/// anything else, closes every inherited descriptor above stdio except the
+/// one it keeps and its end of a socket pair, each close checked
+/// ([`close_above_stdio_except`]); writes one report to the socket -- its
+/// pid after a complete sweep, or the descriptor it could not close and
+/// the errno -- and then, parked, blocks on a read of the same socket until
+/// [`Self::release`] writes to it or the parent dies, on which it `_exit`s.
+/// The child never `exec`s: its exit closes its copy exactly as an `exec`'s
+/// `CLOEXEC` would, and there is no `Command`, no spawn whose return could
+/// come early and no thread to join. The report arriving is the proof that
+/// the child is alive, parked and holding its copy with nothing else, and
+/// the constructor returns only once it has; nothing about the child is
+/// inferred from a clock. A report of a failed sweep, or none within
+/// [`READY_BOUND`], fails the constructor after the child has been
+/// collected -- killed first if it is still there -- so a helper that could
+/// not isolate its child never announces one. The child's copy of the
+/// parent's socket end goes with the sweep, so the parent's death ends the
+/// read with EOF and the child does not outlive it parked.
+///
+/// Every stage that can block is bounded, and each bound starts when its
+/// stage does: the wait for the report by `READY_BOUND`, one deadline the
+/// reads look at before every turn; the reap after a release, or after a
+/// drop, by [`REAP_BOUND`] ([`Self::reap_bound`] lowers it), past which
+/// the child is killed and then collected within the same bound again --
+/// every observation one `waitpid` with `WNOHANG` that nothing retries,
+/// every rest between two of them one `nanosleep` that nothing makes again
+/// ([`rest_within`]), and the release one write that is not made again.
+/// [`Self::is_alive`] asks the kernel whether the child has ended rather
+/// than the signal table whether its pid exists, and collects a child that
+/// has, so a zombie never reads as alive. Dropping this value releases and
+/// reaps the child, while unwinding too, never panics doing it, and says on
+/// stderr ([`say_on_stderr`], nothing made again) what it could not do and
+/// the state the child is left in: collected with its status when only the
+/// release failed, uncollected with the step that failed otherwise.
+/// [`Self::kept`] names the two descriptors the child holds above stdio.
+#[cfg(unix)]
+pub(crate) struct ParkedFork {
+    pid: libc::pid_t,
+    kept: libc::c_int,
+    socket: libc::c_int,
+    release: Option<std::os::unix::net::UnixStream>,
+    reap_bound: std::time::Duration,
+    /// The status of a child already collected, by [`Self::is_alive`] or by
+    /// a release, so it is never waited for twice.
+    ended: Cell<Option<std::process::ExitStatus>>,
+}
+
+/// How long [`ParkedFork::holding`] waits for the child's report before it
+/// collects the child and fails: a bound on a child that wedges before it
+/// parks, never a measure of a healthy one, which reports in microseconds.
+#[cfg(unix)]
+pub(crate) const READY_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The tick of each read the constructor makes while it waits for the report:
+/// the handshake socket's own timeout, set once, before the fork, while both
+/// ends are open. The bound on the whole wait is [`READY_BOUND`], one deadline
+/// from the fork that no tick, interruption or short read restarts
+/// ([`read_report_within`]); the tick only bounds a single read so that the
+/// deadline is looked at.
+#[cfg(unix)]
+pub(crate) const READY_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long a release, or a drop, waits for the released child to exit
+/// before it kills it.
+#[cfg(unix)]
+pub(crate) const REAP_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The child's report: a tag byte and two native-endian `c_int`s -- the
+/// pid and zero after a complete sweep, the descriptor and the errno after
+/// a close that failed.
+#[cfg(unix)]
+pub(crate) const REPORT_LEN: usize = 9;
+#[cfg(unix)]
+const REPORT_PARKED: u8 = 0;
+#[cfg(unix)]
+const REPORT_CLOSE_FAILED: u8 = 1;
+
+#[cfg(unix)]
+impl ParkedFork {
+    /// Park a fork that holds a copy of the cleanup lease of the run whose
+    /// public directory is `public`, taken exactly as a ref write takes it.
+    ///
+    /// The copy is opened on a `Command` this never spawns, the fork is made
+    /// while the copy is open, and the copy is then closed: what remains is
+    /// the parked child's inherited descriptor, the shared `flock` with it.
+    pub(crate) fn holding_the_lease_of(public: &Path) -> Self {
+        use std::os::fd::AsRawFd as _;
+
+        let mut never_spawned = Command::new("true");
+        let copy = crate::rundir::hold_cleanup_lease_for_child(&mut never_spawned, public)
+            .expect("the run directory exists, so its lease can be taken")
+            .expect("Unix hands the child a hold");
+        let parked = Self::holding(copy.as_raw_fd());
+        drop(copy);
+        parked
+    }
+
+    /// Park a fork that keeps `kept`, a descriptor open in this process, and
+    /// nothing else of this process's above stdio. Returns once the child has
+    /// reported itself parked.
+    ///
+    /// # Panics
+    ///
+    /// When the child reports a descriptor its sweep could not close, or
+    /// reports nothing within [`READY_BOUND`] of the fork -- one deadline,
+    /// whatever interrupts or shortens the reads that wait for the report.
+    /// The child has been collected -- killed first if it was still there --
+    /// before the panic, whose message names its pid and, for a failed close,
+    /// the descriptor and the error.
+    pub(crate) fn holding(kept: libc::c_int) -> Self {
+        use std::os::fd::AsRawFd as _;
+
+        let (release, child_end) =
+            std::os::unix::net::UnixStream::pair().expect("a socket pair for the park handshake");
+        release
+            .set_read_timeout(Some(READY_TICK))
+            .expect("bound each read of the child's report, while both ends are open");
+        let socket = child_end.as_raw_fd();
+        let listed = listed_descriptors();
+        let ceiling = descriptor_ceiling(&listed);
+        // SAFETY: `fork` takes nothing and reads nothing. Its child runs
+        // `park` as its first act and nothing else: only async-signal-safe
+        // syscalls, no allocation, no lock, and it never returns into this
+        // process's state, which is what forking a threaded process asks of
+        // the child.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // SAFETY: this is that child, before anything else.
+            unsafe { park(kept, socket, ceiling, &listed) }
+        }
+        assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+        let report_deadline = std::time::Instant::now() + READY_BOUND;
+        // This process's copy of the child's end is closed now, so the
+        // child's read can only be ended by a release or by this process's
+        // death.
+        drop(child_end);
+        let parked = Self {
+            pid,
+            kept,
+            socket,
+            release: Some(release),
+            reap_bound: REAP_BOUND,
+            ended: Cell::new(None),
+        };
+        let mut parent_end = parked
+            .release
+            .as_ref()
+            .expect("the parent's end is open until a release");
+        let report = match read_report_within(&mut parent_end, report_deadline) {
+            Ok(report) => report,
+            Err(error) => {
+                let collected = parked.collect(std::time::Duration::ZERO);
+                panic!(
+                    "the parked child {pid} reported nothing within {READY_BOUND:?}: {error}; \
+                     killed and reaped: {collected:?}"
+                );
+            }
+        };
+        let (tag, first, second) = decode_report(&report);
+        match tag {
+            REPORT_PARKED => {
+                assert_eq!(
+                    first, pid,
+                    "the child that reported itself parked is the one that was forked"
+                );
+                parked
+            }
+            REPORT_CLOSE_FAILED => {
+                let collected = parked.collect(REAP_BOUND);
+                let reason = if second == 0 {
+                    String::from("the close answered success and the descriptor read open after it")
+                } else {
+                    std::io::Error::from_raw_os_error(second).to_string()
+                };
+                panic!(
+                    "the parked child {pid} could not close inherited descriptor {first}: {reason}; \
+                     it exited before parking and was reaped: {collected:?}"
+                );
+            }
+            other => {
+                let collected = parked.collect(std::time::Duration::ZERO);
+                panic!(
+                    "the parked child {pid} sent a report tagged {other}, which is neither \
+                     outcome; killed and reaped: {collected:?}"
+                );
+            }
+        }
+    }
+
+    /// The parked child's pid.
+    pub(crate) fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    /// The two descriptors the child holds above stdio, by the numbers this
+    /// process opened them under, which the child's table shares: the one it
+    /// was forked to hold, then its socket end.
+    pub(crate) fn kept(&self) -> [libc::c_int; 2] {
+        [self.kept, self.socket]
+    }
+
+    /// This fork with `bound` in place of [`REAP_BOUND`] as the time a
+    /// release or a drop gives the child to exit before killing it: for a
+    /// test whose child is meant to be killed, so that it does not pay ten
+    /// seconds to see the kill.
+    pub(crate) fn reap_bound(mut self, bound: std::time::Duration) -> Self {
+        self.reap_bound = bound;
+        self
+    }
+
+    /// Whether the child has not ended, as the kernel answers it: `waitpid`
+    /// with `WNOHANG` on this child's pid reports nothing while the child
+    /// runs or is stopped, and collects it once it has ended. A child found
+    /// ended is collected here and its status kept for the release, so a
+    /// zombie never reads as alive and the pid is never waited for twice.
+    /// An observation a signal interrupted observed nothing and is made
+    /// again, after a rest of the observation tick ([`rest_within`]), within
+    /// the reap bound of this call; one that failed otherwise, or was
+    /// interrupted for the whole bound, answered neither alive nor ended,
+    /// and this panics saying so rather than answer either.
+    pub(crate) fn is_alive(&self) -> bool {
+        if self.ended.get().is_some() {
+            return false;
+        }
+        let started = std::time::Instant::now();
+        loop {
+            match self.observe() {
+                Ok(Observed::NotEnded) => return true,
+                Ok(Observed::Ended(status)) => {
+                    self.ended.set(Some(status));
+                    return false;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    assert!(
+                        started.elapsed() < self.reap_bound,
+                        "waitpid({}, WNOHANG) was interrupted at every observation for {:?}: {error}",
+                        self.pid,
+                        self.reap_bound
+                    );
+                }
+                Err(error) => panic!("waitpid({}, WNOHANG): {error}", self.pid),
+            }
+            rest_within(
+                OBSERVE_TICK,
+                self.reap_bound.saturating_sub(started.elapsed()),
+            );
+        }
+    }
+
+    /// One observation of the child, `waitpid` with `WNOHANG`, as the
+    /// kernel answers it: ended with its status, not ended -- running or
+    /// stopped -- or the error the call answered, an interruption included.
+    /// Nothing is retried here: the caller's loop, and its deadline, decide
+    /// whether another observation is made (`PR320-R4-MAIN-001`,
+    /// `PR320-R4-REG-002`).
+    fn observe(&self) -> std::io::Result<Observed> {
+        observe_child(self.pid)
+    }
+
+    /// Let the child go on to its exit, and reap it: its exit status, within
+    /// the reap bound of the release or after a kill.
+    ///
+    /// # Panics
+    ///
+    /// When the release could not be written and the child then had to be
+    /// killed -- the message says both, and the status the killed child was
+    /// collected with -- or when the child could not be observed, killed or
+    /// collected within the bounds: the message names the pid, the step and
+    /// the state the child is left in, and the release's own failure when
+    /// there was one too. Whatever the kernel allowed has been collected
+    /// before the panic.
+    pub(crate) fn release(mut self) -> std::process::ExitStatus {
+        let reaped = self.release_and_reap();
+        match (reaped.collected, reaped.released) {
+            (Ok((status, false)), _) | (Ok((status, true)), Ok(())) => status,
+            (Ok((status, true)), Err(write)) => panic!(
+                "release the parked child {}: its release could not be written: {write}; it was \
+                 killed at the end of {:?} and collected: {status}",
+                self.pid, self.reap_bound
+            ),
+            (Err(collect), Ok(())) => panic!("release the parked child {}: {collect}", self.pid),
+            (Err(collect), Err(write)) => panic!(
+                "release the parked child {}: {collect}; its release could not be written \
+                 either: {write}",
+                self.pid
+            ),
+        }
+    }
+
+    /// The release and the reap, shared by [`Self::release`] and `Drop`: the
+    /// release byte is written once ([`write_release`]) -- a write that
+    /// neither waits for the child to read it, so a stopped child does not
+    /// block it, nor is made again, so an interruption does not hold the
+    /// owner outside its bound -- this process's end of the socket is
+    /// dropped, so a child the byte did not reach reads EOF instead, and the
+    /// child is then collected within the reap bound, killed first if it is
+    /// still there at the end. Never panics, so `Drop` can run it while
+    /// unwinding. The answer keeps the collection and the write apart
+    /// ([`Reaped`]): a child killed and collected after a write that failed
+    /// is collected, and the write failed, and neither is read as the other
+    /// (`PR320-R5-MAIN-003`, `PR320-R5-REG-003`). A child that ended by
+    /// itself, before or despite a failed write, ended the way its status
+    /// says.
+    fn release_and_reap(&mut self) -> Reaped {
+        if let Some(status) = self.ended.get() {
+            return Reaped {
+                collected: Ok((status, false)),
+                released: Ok(()),
+            };
+        }
+        let released = match self.release.take() {
+            // The stream is dropped at the end of this arm: the EOF that
+            // releases a child the byte did not reach.
+            Some(mut release) => write_release(&mut release),
+            None => Ok(()),
+        };
+        Reaped {
+            collected: self.collect(self.reap_bound),
+            released,
+        }
+    }
+
+    /// Collect the child within `bound`, killing it first if it is still
+    /// there at the end of it: its status, and whether the kill was needed.
+    /// Observed through `waitpid` with `WNOHANG` every [`OBSERVE_TICK`]
+    /// rather than blocked on, so the bound is the bound whatever the child
+    /// is doing and whatever the observations answer: one a signal
+    /// interrupted observed nothing and costs the tick, never a retry of its
+    /// own, a rest a signal or a policy cuts short costs less than the tick
+    /// and is not made again ([`rest_within`], `PR320-R5-MAIN-006`), and the
+    /// collection after the kill is observed the same way, within the reap
+    /// bound from the kill, never blocked on (`PR320-R4-MAIN-001`,
+    /// `PR320-R4-REG-002`). `bound` is how long the
+    /// child is given to end by itself -- the reap bound after a release,
+    /// nothing at all when the constructor failed -- and the reap bound is
+    /// how long a killed child is given to be collected.
+    ///
+    /// # Errors
+    ///
+    /// Each names the pid, the step and what was observed -- the child
+    /// alive at the last observation, or unobserved with the last answer --
+    /// never more than was observed: a kill that was sent is a kill that
+    /// was sent, and a child that read its release and ended on its own
+    /// while its owner's observations were interrupted is a child that was
+    /// sent a signal it never received, which the collection of it says by
+    /// its status. So that a release can panic with it and a drop can print
+    /// it: an observation that failed otherwise than by interruption, after
+    /// which nothing is killed -- a pid that a failed observation cannot
+    /// prove uncollected is not this fork's to signal; a kill the OS refused;
+    /// or a kill sent and the child not collected within the reap bound of it.
+    fn collect(
+        &self,
+        bound: std::time::Duration,
+    ) -> std::io::Result<(std::process::ExitStatus, bool)> {
+        if let Some(status) = self.ended.get() {
+            return Ok((status, false));
+        }
+        let before_the_kill = match self.observed_within(bound) {
+            Ok(Collected::Ended(status)) => return Ok((status, false)),
+            Ok(Collected::Outlasted(last)) => last,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "waitpid({}, WNOHANG): {error}; the child is left as it was, uncollected",
+                        self.pid
+                    ),
+                ));
+            }
+        };
+        // SAFETY: `kill` takes a pid and a signal by value. The pid is this
+        // fork's child, which no observation above collected -- each
+        // answered not ended, or nothing at all -- and so is still this
+        // process's uncollected child: it cannot have been reused.
+        if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "kill the parked child {} at the end of {bound:?}: {error}; the child is \
+                     left uncollected, {}",
+                    self.pid,
+                    match before_the_kill {
+                        None => String::from("alive at the last observation"),
+                        Some(last) => format!("unobserved, the last observation answering: {last}"),
+                    }
+                ),
+            ));
+        }
+        match self.observed_within(self.reap_bound) {
+            Ok(Collected::Ended(status)) => Ok((status, true)),
+            Ok(Collected::Outlasted(last)) => Err(std::io::Error::other(format!(
+                "the parked child {} was sent SIGKILL at the end of {bound:?} and not collected \
+                 within another {:?}; {}",
+                self.pid,
+                self.reap_bound,
+                match last {
+                    None => String::from("not ended at the last observation"),
+                    Some(last) => format!("unobserved, the last observation answering: {last}"),
+                }
+            ))),
+            Err(error) => Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "waitpid({}, WNOHANG) after the kill: {error}; the child was sent SIGKILL and \
+                     is left uncollected",
+                    self.pid
+                ),
+            )),
+        }
+    }
+
+    /// Observe the child every [`OBSERVE_TICK`] until it has ended or
+    /// `bound` runs out, from now: its status, kept for the release, or what
+    /// the last observation answered at the end of the bound -- nothing, or
+    /// the interruption. A `bound` of zero is one observation. Each rest
+    /// between two observations is one `nanosleep` of the tick, or of what
+    /// is left of `bound` when that is less, and a rest a signal or a policy
+    /// cuts short is not made again ([`rest_within`]): the loop looks at the
+    /// bound next, whatever the rest answered (`PR320-R5-MAIN-006`).
+    ///
+    /// # Errors
+    ///
+    /// An observation that failed otherwise than by interruption, as it was.
+    fn observed_within(&self, bound: std::time::Duration) -> std::io::Result<Collected> {
+        let started = std::time::Instant::now();
+        // What the observation answered, set by every observation that did
+        // not end the loop before it is read.
+        let mut interrupted: Option<std::io::Error>;
+        loop {
+            match self.observe() {
+                Ok(Observed::Ended(status)) => {
+                    self.ended.set(Some(status));
+                    return Ok(Collected::Ended(status));
+                }
+                Ok(Observed::NotEnded) => interrupted = None,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    interrupted = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+            if started.elapsed() >= bound {
+                return Ok(Collected::Outlasted(interrupted));
+            }
+            rest_within(OBSERVE_TICK, bound.saturating_sub(started.elapsed()));
+        }
+    }
+}
+
+/// What a release and reap came to ([`ParkedFork::release_and_reap`]): the
+/// collection and the release write, each as it answered. A write that
+/// failed and a child the kill then ended and the owner collected are both
+/// facts, and neither stands in for the other (`PR320-R5-MAIN-003`,
+/// `PR320-R5-REG-003`).
+#[cfg(unix)]
+struct Reaped {
+    /// The child's status and whether the kill was needed, or the error that
+    /// names the step and the state the child is left in
+    /// ([`ParkedFork::collect`]).
+    collected: std::io::Result<(std::process::ExitStatus, bool)>,
+    /// The release write's own answer: `Ok` when the byte was written or
+    /// there was nothing left to write.
+    released: std::io::Result<()>,
+}
+
+#[cfg(unix)]
+impl Drop for ParkedFork {
+    fn drop(&mut self) {
+        // Best effort by nature: a drop has no caller to answer to, the
+        // status is `release`'s to return, and a panic here would abort a
+        // test already unwinding through it. What a drop guarantees is what
+        // `release_and_reap` does before it returns anything at all: the
+        // child is released and collected, killed first past the reap bound,
+        // every step bounded. What it could not do is said on stderr, the
+        // one channel a drop has, each state as it is (`PR320-R4-MAIN-003`):
+        // a release that could not be written, with the child killed and
+        // collected after it and its status (`PR320-R5-MAIN-003`,
+        // `PR320-R5-REG-003`); or a child left uncollected -- alive after a
+        // kill the OS refused, killed and not collected, or not observed --
+        // with the error that names the step, and the release's failure too
+        // when there was one. Said through `say_on_stderr`, which writes the
+        // descriptor itself and makes nothing again: an interrupted or
+        // refused write ends the saying and never the drop's bound, and an
+        // error is never a panic (`PR320-R5-MAIN-001`, `PR320-R5-REG-001`).
+        // This file forbids the print macros (`PR6-LANEF-004`, the header).
+        // A stderr that cannot be written leaves a drop no channel at all.
+        let reaped = self.release_and_reap();
+        let line = match (&reaped.collected, &reaped.released) {
+            (Ok((_, false)), _) | (Ok((_, true)), Ok(())) => return,
+            (Ok((status, true)), Err(write)) => format!(
+                "[the parked child {} could not be released by its owner's drop: {write}; it was \
+                 killed at the end of {:?} and collected: {status}]\n",
+                self.pid, self.reap_bound
+            ),
+            (Err(collect), Ok(())) => format!(
+                "[the parked child {} was left uncollected by its owner's drop: {collect}]\n",
+                self.pid
+            ),
+            (Err(collect), Err(write)) => format!(
+                "[the parked child {} was left uncollected by its owner's drop: {collect}; its \
+                 release could not be written either: {write}]\n",
+                self.pid
+            ),
+        };
+        say_on_stderr(&line);
+    }
+}
+
+/// What one observation of a child answered ([`observe_child`]).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Observed {
+    /// The child has ended, with this status, and is now collected.
+    Ended(std::process::ExitStatus),
+    /// The child has not ended: running, or stopped.
+    NotEnded,
+}
+
+/// What observing a child until a bound answered
+/// ([`ParkedFork::observed_within`]).
+#[cfg(unix)]
+#[derive(Debug)]
+enum Collected {
+    /// The child ended within the bound, with this status.
+    Ended(std::process::ExitStatus),
+    /// The child had not ended at the end of the bound; the last observation
+    /// answered nothing, or this interruption.
+    Outlasted(Option<std::io::Error>),
+}
+
+/// How often a child is observed while it is given time to end: the tick of
+/// [`ParkedFork::collect`], [`ParkedFork::observed_within`] and an
+/// interrupted [`ParkedFork::is_alive`].
+#[cfg(unix)]
+const OBSERVE_TICK: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// One `waitpid` on `pid` with `WNOHANG`, as it answers: the child ended
+/// with its status, not ended, or the error -- an interruption included --
+/// and nothing retried.
+///
+/// # Errors
+///
+/// What `waitpid` answered, as it was.
+#[cfg(unix)]
+fn observe_child(pid: libc::pid_t) -> std::io::Result<Observed> {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut status = 0;
+    // SAFETY: `waitpid` writes one int through `status`, which lives for
+    // the call, and takes the pid and the flags by value; the pid is a
+    // child of this process.
+    let answered = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if answered == pid {
+        return Ok(Observed::Ended(std::process::ExitStatus::from_raw(status)));
+    }
+    if answered == 0 {
+        return Ok(Observed::NotEnded);
+    }
+    Err(std::io::Error::last_os_error())
+}
+
+/// The release byte, written once to `writer`: one attempt, made whatever
+/// it answers and never made again -- not on an interruption, not on a
+/// short write. A write that failed is answered as it was; what releases
+/// the child then is the EOF the caller's drop of the socket gives it, or
+/// the kill at the end of the reap bound. `write_all` would make an
+/// interrupted write again inside itself, outside every bound the owner
+/// keeps (`PR320-R4-REG-002`); the one byte cannot block, the socket's
+/// buffer being empty, so there is nothing a second attempt could wait for.
+///
+/// # Errors
+///
+/// The write's own error, or `WriteZero` for a write that answered fewer
+/// bytes than the one.
+#[cfg(unix)]
+pub(crate) fn write_release(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    match writer.write(&[1]) {
+        Ok(1) => Ok(()),
+        Ok(count) => Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("the release wrote {count} of 1 byte"),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// Rest for `span`, once: one `nanosleep`, whatever it answers. A signal that
+/// interrupts it, or a policy that refuses it, ends the rest early, and the
+/// rest is not made again: the caller's loop, and the bound it keeps, decide
+/// what happens next. `std::thread::sleep` makes an interrupted sleep again
+/// inside itself for what it had left, and a refused one again for all of it,
+/// so an owner whose rests were refused never came back to look at its bound
+/// (`PR320-R5-MAIN-006`).
+#[cfg(unix)]
+pub(crate) fn rest(span: std::time::Duration) {
+    let request = libc::timespec {
+        tv_sec: libc::time_t::try_from(span.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_nsec: libc::c_long::from(span.subsec_nanos()),
+    };
+    // SAFETY: `nanosleep` reads the one `timespec` it is handed, which lives
+    // for the call, and writes nothing: the remainder pointer is null.
+    if unsafe { libc::nanosleep(&request, std::ptr::null_mut()) } == -1 {
+        // Interrupted or refused: the rest ended early, which is all a rest
+        // can do wrong, and the caller's bound is what ends its loop.
+    }
+}
+
+/// [`rest`] on Windows: `std::thread::sleep`, which there is one wait of the
+/// span -- a high-resolution waitable timer, or `Sleep` where there is none --
+/// and nothing it makes again, no signal interrupting it and no thread policy
+/// refusing it. For the waits shared with the Unix suites
+/// (`wait_for_cleanup_hold_release_observing`, `await_signal_by`), whose rest
+/// is one attempt on every platform.
+#[cfg(windows)]
+pub(crate) fn rest(span: std::time::Duration) {
+    std::thread::sleep(span);
+}
+
+/// [`rest`] for `tick`, or for `remaining` when that is less: the rest an
+/// owner's loop takes between two turns never carries it past the bound it
+/// keeps, and one cut short costs less than the tick.
+#[cfg(any(unix, windows))]
+pub(crate) fn rest_within(tick: std::time::Duration, remaining: std::time::Duration) {
+    rest(tick.min(remaining));
+}
+
+/// Refuse every rest this thread takes, and every rest of every process it
+/// forks: a seccomp policy answering `EINTR` to `clock_nanosleep`, the call
+/// a sleep makes here, then one real `nanosleep`, which it must refuse, so
+/// that a test built on it enters the refused rest rather than assuming it.
+/// For the suites that cannot reach the rundir suite's own policies
+/// (`Refusal::Rests` is that module's): the recovery trunks' lease-wait
+/// regressions, which run it in a process of their own, a policy being its
+/// thread's for good (`PR320-R6-REG-001`).
+///
+/// # Errors
+///
+/// The refusal is not in force: the `nanosleep` was made, or answered
+/// something other than `EINTR`.
+///
+/// # Panics
+///
+/// When the kernel refuses the policy itself.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_rests_on_this_thread() -> Result<(), String> {
+    const NONE: libc::c_long = 0;
+    const NO_NEW_PRIVS: libc::c_long = 1;
+
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(libc::SYS_clock_nanosleep),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(libc::EINTR)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            NO_NEW_PRIVS,
+            NONE,
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            NONE,
+            NONE,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+    let request = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 1,
+    };
+    // SAFETY: `nanosleep` reads the one `timespec`, which lives for the call;
+    // the remainder pointer is null.
+    let answered = unsafe { libc::nanosleep(&request, std::ptr::null_mut()) };
+    let error = std::io::Error::last_os_error();
+    match (answered, error.raw_os_error()) {
+        (-1, Some(libc::EINTR)) => Ok(()),
+        (-1, _) => Err(format!("nanosleep answered {error}, not the refusal")),
+        _ => Err(String::from(
+            "nanosleep was made: the refusal is not in force",
+        )),
+    }
+}
+
+/// Say `line` on this process's standard error, as far as the descriptor
+/// takes it and no further: [`write_while_progressing`] on descriptor 2
+/// itself ([`StandardError`]), so every write is one `write(2)`, no lock is
+/// shared with the rest of the process, and the first answer that is not
+/// progress -- an interruption, a refusal, an error, nothing taken -- ends
+/// the saying, never a retry and never a panic. This is how an owner's drop
+/// reports what it could not do: a drop that retried a refused channel
+/// would not return, and one that panicked on a broken channel would abort
+/// the test it was cleaning up after (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`, `PR320-R5-REG-002`). A channel the OS refuses
+/// carries nothing, and that is the OS's answer, not the owner's failure.
+#[cfg(unix)]
+pub(crate) fn say_on_stderr(line: &str) {
+    if write_while_progressing(&mut StandardError, line.as_bytes()).is_err() {
+        // The channel refused, was interrupted or took nothing: there is no
+        // other channel to say so on, and nothing to do about it here.
+    }
+}
+
+/// Write `bytes` to `writer` for as long as every write makes progress: one
+/// write per turn, a turn that wrote something followed by a write of the
+/// rest, and the first answer that is not progress -- an error, an
+/// interruption included, or nothing written -- the end, answered as it was
+/// and never made again. At most `bytes.len()` writes, whatever the writer
+/// answers. `write_all` makes an interrupted write again inside itself, and
+/// forever when every write is interrupted (`PR320-R5-MAIN-001`,
+/// `PR320-R5-REG-001`).
+///
+/// # Errors
+///
+/// The first error a write answered, or `WriteZero` for a write that took
+/// nothing, saying how much had been written.
+#[cfg(unix)]
+pub(crate) fn write_while_progressing(
+    writer: &mut impl std::io::Write,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut written = 0_usize;
+    while let Some(rest) = bytes.get(written..).filter(|rest| !rest.is_empty()) {
+        match writer.write(rest) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    format!(
+                        "a write took nothing after {written} of {} bytes",
+                        bytes.len()
+                    ),
+                ));
+            }
+            Ok(count) => written = written.saturating_add(count),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// This process's standard error as descriptor 2 itself: each write one
+/// `write(2)`, answered as it was -- no buffer, no lock shared with the rest
+/// of the process, nothing made again. `std::io::stderr()` takes a lock every
+/// thread shares and retries an interruption in `write_all`; the print
+/// macros do the same and panic on an error ([`say_on_stderr`]).
+#[cfg(unix)]
+struct StandardError;
+
+#[cfg(unix)]
+impl std::io::Write for StandardError {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: `write` reads `bytes` for its length and writes no memory;
+        // descriptor 2 is whatever this process holds as its standard error,
+        // and a closed one is answered `EBADF`.
+        let written =
+            unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+        usize::try_from(written).map_err(|_| std::io::Error::last_os_error())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// This process's descriptor table as `/dev/fd` lists it now, sorted: the
+/// numbers the child's sweep is verified against after a range close, and
+/// what the ceiling below is read from. Computed by the parent before it
+/// forks: listing a directory is not something the forked child of a
+/// threaded process may do. The listing's own directory descriptor is among
+/// the numbers and is closed again before the fork, so the child finds it
+/// closed like any other.
+///
+/// # Panics
+///
+/// When `/dev/fd` cannot be listed: the domain of the child's sweep would
+/// then be a guess, and a helper that guesses announces an isolation it did
+/// not check. Linux and macOS, the two Unix targets CI runs, both have it.
+#[cfg(unix)]
+fn listed_descriptors() -> Vec<libc::c_int> {
+    let mut listed: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")
+        .expect("list this process's descriptor table through /dev/fd")
+        .filter_map(|entry| {
+            entry
+                .expect("an entry of /dev/fd")
+                .file_name()
+                .to_string_lossy()
+                .parse::<libc::c_int>()
+                .ok()
+        })
+        .collect();
+    listed.sort_unstable();
+    listed
+}
+
+/// One past the highest number a descriptor of this process can have at a
+/// fork made now: the larger of `_SC_OPEN_MAX` -- the soft limit every open
+/// made from here on stays below -- and one past the highest number this
+/// process's own table holds as `/dev/fd` lists it (`listed`, from
+/// [`listed_descriptors`]), which is where a descriptor opened before the
+/// soft limit was lowered still sits, above what `sysconf` alone would say.
+#[cfg(unix)]
+fn descriptor_ceiling(listed: &[libc::c_int]) -> libc::c_int {
+    // SAFETY: `sysconf` reads a process limit and touches no memory.
+    let soft = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    // A limit `sysconf` cannot report (-1) contributes nothing; the listing
+    // still covers every descriptor that exists. A limit above what a
+    // `c_int` holds exists on neither supported Unix and is read the same.
+    let soft = libc::c_int::try_from(soft).unwrap_or(0).max(0);
+    let highest = listed.last().copied().unwrap_or(-1);
+    soft.max(highest.saturating_add(1))
+}
+
+/// The child of [`ParkedFork::holding`]'s fork, from its first instruction
+/// to its `_exit`: the sweep, the report, the park, the exit. `listed` is the
+/// parent's table at the fork ([`listed_descriptors`]), read here and never
+/// written or freed: the child `_exit`s.
+///
+/// # Safety
+///
+/// For the child of a `fork` of a threaded process, as its first act, and
+/// nowhere else: it calls only async-signal-safe syscalls -- `close`,
+/// `close_range` through `syscall`, `fcntl`, `getpid`, `write`, `read`,
+/// `_exit` -- on descriptors the child inherited, allocates nothing and
+/// takes no lock.
+#[cfg(unix)]
+unsafe fn park(
+    kept: libc::c_int,
+    socket: libc::c_int,
+    ceiling: libc::c_int,
+    listed: &[libc::c_int],
+) -> ! {
+    // SAFETY: the sweep's own contract, which is this fn's.
+    let swept = unsafe { close_above_stdio_except([kept, socket], ceiling, listed) };
+    let (tag, first, second) = match swept {
+        // SAFETY: `getpid` takes nothing and reads nothing.
+        Ok(()) => (REPORT_PARKED, unsafe { libc::getpid() }, 0),
+        Err(failed) => (REPORT_CLOSE_FAILED, failed.descriptor, failed.errno),
+    };
+    let report = encode_report(tag, first, second);
+    // SAFETY: `write` reads `report` for its length; `socket` is the child's
+    // own end, which the sweep kept.
+    let reported = unsafe { write_fully(socket, &report) };
+    if reported.is_err() || tag != REPORT_PARKED {
+        // SAFETY: `_exit` ends this child without unwinding, which is the
+        // only way out of the forked child of a threaded process.
+        unsafe { libc::_exit(1) }
+    }
+    let mut byte = [0_u8; 1];
+    loop {
+        // SAFETY: `read` writes at most one byte into `byte`.
+        let read = unsafe { libc::read(socket, byte.as_mut_ptr().cast(), 1) };
+        // One byte is the release; zero is EOF, the parent gone.
+        if read >= 0 {
+            break;
+        }
+        if errno() != libc::EINTR {
+            // SAFETY: as above.
+            unsafe { libc::_exit(2) }
+        }
+    }
+    // SAFETY: as above.
+    unsafe { libc::_exit(0) }
+}
+
+/// The nine bytes of a report.
+#[cfg(unix)]
+fn encode_report(tag: u8, first: libc::c_int, second: libc::c_int) -> [u8; REPORT_LEN] {
+    let mut report = [0_u8; REPORT_LEN];
+    let (head, numbers) = report.split_at_mut(1);
+    let (first_bytes, second_bytes) = numbers.split_at_mut(4);
+    head.copy_from_slice(&[tag]);
+    first_bytes.copy_from_slice(&first.to_ne_bytes());
+    second_bytes.copy_from_slice(&second.to_ne_bytes());
+    report
+}
+
+/// The tag and the two numbers of a report.
+#[cfg(unix)]
+fn decode_report(report: &[u8; REPORT_LEN]) -> (u8, libc::c_int, libc::c_int) {
+    let (head, numbers) = report.split_at(1);
+    let (first_bytes, second_bytes) = numbers.split_at(4);
+    let mut first = [0_u8; 4];
+    let mut second = [0_u8; 4];
+    first.copy_from_slice(first_bytes);
+    second.copy_from_slice(second_bytes);
+    (
+        head.first().copied().unwrap_or(u8::MAX),
+        libc::c_int::from_ne_bytes(first),
+        libc::c_int::from_ne_bytes(second),
+    )
+}
+
+/// Read one report from `reader` before `deadline`: the nine bytes, or the
+/// error. One absolute deadline for the whole report, whatever the reads
+/// answer, looked at before every turn: a read that is interrupted, would
+/// block or times out -- the reader's own tick, [`READY_TICK`] on the
+/// handshake socket -- is made again against the same deadline and never a
+/// fresh one; the bytes a short read did deliver are kept and the next read
+/// is made against the same deadline too; and a report complete only after
+/// the deadline is not accepted, so progress and completion cross the one
+/// deadline exactly as interruptions do (`PR320-R4-MAIN-002`,
+/// `PR320-R4-REG-001`). `read_exact` would retry an interruption itself,
+/// each retry a fresh socket timeout, so a signal handled more often than
+/// the timeout would hold the caller for as long as the signals came
+/// (`PR320-R3-MAIN-004`). EOF before the report is the child gone before it
+/// reported: an error saying how much arrived.
+///
+/// # Errors
+///
+/// `TimedOut` once the deadline has passed, saying how many bytes had
+/// arrived and what the last read answered; `UnexpectedEof` for a reader
+/// that ended early; and any other error the reader answered, as it was.
+#[cfg(unix)]
+pub(crate) fn read_report_within(
+    reader: &mut impl std::io::Read,
+    deadline: std::time::Instant,
+) -> std::io::Result<[u8; REPORT_LEN]> {
+    read_report_within_by(reader, deadline, std::time::Instant::now)
+}
+
+/// [`read_report_within`] with `now` in place of `Instant::now`: the clock
+/// the deadline is read against, once at the top of every turn, so that a
+/// test drives what the clock answers between reads rather than arranging
+/// it with a scheduler -- the seam `readiness::await_signal_by` gives its
+/// wait, for the same reason.
+///
+/// # Errors
+///
+/// As [`read_report_within`].
+#[cfg(unix)]
+pub(crate) fn read_report_within_by(
+    reader: &mut impl std::io::Read,
+    deadline: std::time::Instant,
+    mut now: impl FnMut() -> std::time::Instant,
+) -> std::io::Result<[u8; REPORT_LEN]> {
+    let mut report = [0_u8; REPORT_LEN];
+    let mut filled = 0_usize;
+    let mut reads = 0_u32;
+    let mut last: Option<std::io::Error> = None;
+    loop {
+        if now() >= deadline {
+            let answered = match (reads, last.as_ref()) {
+                (0, _) => String::from("no read was made"),
+                (_, None) => String::from("the last read delivered bytes"),
+                (_, Some(error)) => format!("the last read answered: {error}"),
+            };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "the report deadline passed with {filled} of {REPORT_LEN} bytes read; {answered}"
+                ),
+            ));
+        }
+        let Some(rest) = report.get_mut(filled..).filter(|rest| !rest.is_empty()) else {
+            return Ok(report);
+        };
+        reads += 1;
+        match reader.read(rest) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("the child's end closed after {filled} of {REPORT_LEN} report bytes"),
+                ));
+            }
+            Ok(count) => {
+                filled += count;
+                last = None;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                last = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// `write` until every byte of `bytes` is written, `EINTR` retried; the
+/// errno of a write that failed otherwise.
+///
+/// # Safety
+///
+/// For the forked child only, as [`park`]: async-signal-safe because it is
+/// one syscall in a loop and nothing more.
+#[cfg(unix)]
+unsafe fn write_fully(fd: libc::c_int, bytes: &[u8]) -> Result<(), libc::c_int> {
+    let mut written = 0_usize;
+    while let Some(rest) = bytes.get(written..).filter(|rest| !rest.is_empty()) {
+        // SAFETY: `write` reads `rest` for its length from a live descriptor.
+        let count = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        match usize::try_from(count) {
+            Ok(count) => written += count,
+            Err(_) => {
+                let errno = errno();
+                if errno != libc::EINTR {
+                    return Err(errno);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The calling thread's errno, as the last OS error reports it.
+#[cfg(unix)]
+fn errno() -> libc::c_int {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// A descriptor the sweep left open: which, and what its close answered --
+/// the errno, or 0 for a close that answered success while the descriptor
+/// read open after it, which a policy can do as easily as it answers an errno.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct CloseFailed {
+    descriptor: libc::c_int,
+    errno: libc::c_int,
+}
+
+/// Close every descriptor of the calling process from 3 up to `ceiling`,
+/// exclusive, except the two in `keep`, and say so or say which descriptor
+/// is still open. Whether a descriptor is closed is read from the kernel's
+/// descriptor table, `fcntl` with `F_GETFD`, and never from what a close
+/// answered: a policy answers `EBADF`, `EINTR` or success without making the
+/// close, and an errno says nothing about whether the operation it names was
+/// made (`PR320-R2-MAIN-004`, `PR320-R3-REG-002`). On Linux, `close_range`
+/// over each gap between the kept descriptors and above the last
+/// ([`close_ranges_except`]); when every call answers success, each number the
+/// parent listed at the fork (`listed`) except the kept two is asked and must
+/// read `EBADF`, or it is reported with its close's answer, 0. When any of
+/// those calls fails -- unavailable, `ENOSYS` before Linux 5.9; refused,
+/// `EPERM` under a seccomp policy; or anything else -- and on every other
+/// Unix, one pass by number: a number that reads `EBADF` before any close is
+/// not open and is skipped, so a closed number costs what it cost before;
+/// one that reads open is closed and asked again, `EBADF` then being the
+/// close, and any other reading a descriptor still open, reported with the
+/// close's answer -- `EIO`, `EINTR`, `EBADF` or 0 alike
+/// (`rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_eintr_fails_before_announcing_the_child`,
+/// `rundir::tests::a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcing_the_child`).
+/// Nothing is retried: a close that did not close is a failed sweep, and the
+/// constructor collects the child and fails. The forked child is
+/// single-threaded and opens nothing, so the number a close was asked about
+/// is the number the readings before and after it are of. The ceiling is the
+/// caller's ([`descriptor_ceiling`]), never `sysconf` alone, because a soft
+/// limit lowered after a descriptor was opened leaves that descriptor above
+/// `_SC_OPEN_MAX`.
+///
+/// # Safety
+///
+/// For the child of a `fork` before it does anything else, and nowhere
+/// else: it closes descriptors the caller does not own, and it is
+/// async-signal-safe only because it makes syscalls and nothing more.
+#[cfg(unix)]
+unsafe fn close_above_stdio_except(
+    keep: [libc::c_int; 2],
+    ceiling: libc::c_int,
+    listed: &[libc::c_int],
+) -> Result<(), CloseFailed> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the range sweep's contract, which is this fn's.
+        if unsafe { close_ranges_except(keep) } {
+            for &descriptor in listed {
+                if descriptor < 3 || keep.contains(&descriptor) {
+                    continue;
+                }
+                // SAFETY: `fcntl` with `F_GETFD` reads one flag of this
+                // process's own descriptor table and touches no memory;
+                // async-signal-safe.
+                if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 && errno() == libc::EBADF
+                {
+                    continue;
+                }
+                return Err(CloseFailed {
+                    descriptor,
+                    errno: 0,
+                });
+            }
+            return Ok(());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = listed;
+    for descriptor in 3..ceiling {
+        if keep.contains(&descriptor) {
+            continue;
+        }
+        // SAFETY: `fcntl` with `F_GETFD` reads one flag of this process's
+        // own descriptor table and touches no memory; async-signal-safe.
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+            let unreadable = errno();
+            if unreadable == libc::EBADF {
+                continue;
+            }
+            return Err(CloseFailed {
+                descriptor,
+                errno: unreadable,
+            });
+        }
+        // SAFETY: a numeric close in the forked child; the fn's own contract.
+        let answered = if unsafe { libc::close(descriptor) } == -1 {
+            errno()
+        } else {
+            0
+        };
+        // SAFETY: as above, on the number the close was just asked about,
+        // which nothing in this child can have reused.
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 && errno() == libc::EBADF {
+            continue;
+        }
+        return Err(CloseFailed {
+            descriptor,
+            errno: answered,
+        });
+    }
+    Ok(())
+}
+
+/// `close_range` over every gap between the kept descriptors, from 3, and
+/// above the last of them: `true` when every call succeeded, `false` at the
+/// first that did not, after which the caller's loop closes everything
+/// itself and the ranges already closed answer `EBADF` to it.
+///
+/// # Safety
+///
+/// As [`close_above_stdio_except`].
+#[cfg(target_os = "linux")]
+unsafe fn close_ranges_except(keep: [libc::c_int; 2]) -> bool {
+    let mut keep = keep;
+    keep.sort_unstable();
+    let mut first = 3_u32;
+    for kept in keep {
+        let Ok(kept) = u32::try_from(kept) else {
+            continue;
+        };
+        if kept < first {
+            continue;
+        }
+        // SAFETY: a raw syscall over a numeric range; the fn's own contract.
+        if kept > first
+            && unsafe { libc::syscall(libc::SYS_close_range, first, kept - 1, 0_u32) } != 0
+        {
+            return false;
+        }
+        first = kept + 1;
+    }
+    // SAFETY: as above.
+    unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) == 0 }
+}
+
+// -----------------------------------------------------------------------
 // The ambient controls over `refs/replace/*`
 // -----------------------------------------------------------------------
 

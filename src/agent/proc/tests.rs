@@ -3719,23 +3719,41 @@ fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {
 
     let silent = scratch.join("never");
     let mut producer = readiness_producer("silent", Some(&silent), Stdio::null());
-    let mut spent = Vec::new();
+    const BOUND: Duration = Duration::from_millis(120);
+    let started = Instant::now();
+    match readiness::await_signal(&silent, producer.child(), BOUND) {
+        readiness::Waited::TimedOut(reported) => assert_eq!(reported, BOUND),
+        other => panic!("a silent producer must time the wait out, not give {other:?}"),
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= BOUND,
+        "ended before its own bound: {elapsed:?} < {BOUND:?}"
+    );
+
+    const STEP: Duration = Duration::from_millis(60);
+    let mut readings_per_bound = Vec::new();
     for bound in [Duration::from_millis(120), Duration::from_millis(480)] {
-        let started = Instant::now();
-        match readiness::await_signal(&silent, producer.child(), bound) {
+        let origin = Instant::now();
+        let readings = std::cell::Cell::new(0_u32);
+        let mut clock = || {
+            let reading = origin + STEP * readings.get();
+            readings.set(readings.get() + 1);
+            reading
+        };
+        match readiness::await_signal_by(&silent, producer.child(), bound, &mut clock) {
             readiness::Waited::TimedOut(reported) => assert_eq!(reported, bound),
             other => panic!("a silent producer must time the wait out, not give {other:?}"),
         }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= bound,
-            "ended before its own bound: {elapsed:?} < {bound:?}"
-        );
-        spent.push(elapsed);
+        readings_per_bound.push(readings.get());
     }
-    assert!(
-        spent[1] > spent[0],
-        "the wait spends the bound it was given, not one of its own: {spent:?}"
+    assert_eq!(
+        readings_per_bound,
+        [3, 9],
+        "the wait ends at the first reading of its clock past the bound it was given -- one \
+         reading for the deadline, then one per poll -- so a bound of 120 ms ends at the third \
+         reading of a clock that advances {STEP:?} a reading, and one of 480 ms at the ninth; a \
+         bound of the wait's own would end both at the same reading: {readings_per_bound:?}"
     );
     drop(producer);
 
