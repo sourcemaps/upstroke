@@ -30,8 +30,8 @@ use crate::ir::{
     ResolvedEffortPolicy, Task, TaskId, TaskKind, Usage, WorkerProfile,
 };
 use crate::review;
-use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::rundir::scratch_tree::ScratchTree;
+use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::CommandSpec;
 use crate::topology::effects::EventSite;
 use crate::workspace::Workspace;

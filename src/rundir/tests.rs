@@ -373,12 +373,14 @@ fn a_refused_acquisition_panics_and_names_what_it_refused() {
 #[test]
 fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
     let tag = format!("orphaned-{}", crate::ulid::ulid());
-    let orphan = PlantedRoot::at(std::env::temp_dir().join(format!(
-        "upstroke-scratch-{tag}-{}",
-        crate::ulid::ulid()
-    )));
-    fs::write(orphan.path().join("half-built"), b"a dead process's fixture")
-        .expect("what the dead process had written");
+    let orphan = PlantedRoot::at(
+        std::env::temp_dir().join(format!("upstroke-scratch-{tag}-{}", crate::ulid::ulid())),
+    );
+    fs::write(
+        orphan.path().join("half-built"),
+        b"a dead process's fixture",
+    )
+    .expect("what the dead process had written");
 
     let tree = scratch(&tag);
 

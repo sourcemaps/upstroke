@@ -873,7 +873,6 @@ mod tests {
         assert_eq!(answer, Answer::Unanswered);
     }
 
-
     fn residue_of(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
             .expect("list")

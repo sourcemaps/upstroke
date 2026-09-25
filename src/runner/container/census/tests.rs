@@ -19,6 +19,7 @@ use super::{
     private_root_label, run_startup_census, view_path,
 };
 use crate::error::UpstrokeError;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::intent::{
     ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT, LABEL_RUN,
     LABEL_RUN_DIR, containers_dir, decode_path_label, owner_run_dir, path_label,
@@ -30,7 +31,6 @@ use crate::runner::container::{
     ContainerHooks, DisposableDirView, FakeRuntime, RecordingHooks, TERMINATION_OBSERVATIONS,
     write_intent,
 };
-use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::{AgentId, InvocationId, ProbeTarget};
 use crate::topology::effects::ContainerSite;
 

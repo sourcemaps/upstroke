@@ -2410,10 +2410,7 @@ fn every_barrier_step_is_reachable_and_named() {
     }
 
     let tree = scratch("barrier-open-fails");
-    let missing = tree
-        .path()
-        .join("no-such-directory")
-        .join("events.jsonl");
+    let missing = tree.path().join("no-such-directory").join("events.jsonl");
     let mut warnings = Vec::new();
     let error = establish_stable_prefix(&missing, inputs(), None, &mut warnings, &mut NoEventHooks)
         .expect_err("an unopenable log refuses at the open");
