@@ -1170,7 +1170,7 @@ host runner.
 Every container effect in the tree goes through the funnel.
 
 The census beside the denylist, in the idiom of
-`runner::tests::every_production_process_start_is_classified`. Module
+`runner::contract::tests::every_production_process_start_is_classified`. Module
 privacy cannot make a bypass a compile error from inside this subtree — an
 item private to `runner::container` is visible to every module a lane adds
 beside this one — so the enforcement is the clippy denylist (a build error)

@@ -43,6 +43,51 @@ grant that no longer matches the command it is meant to authorize. The
 module comment used to argue that two copies of the quoting logic would be
 two chances to get it wrong. The right number was zero.
 
+## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]`
+
+The three governed lints are `forbid` in this file's production build,
+and `disallowed_methods` is conditional because of what sits at the bottom
+of the file.
+
+`forbid` is scoped by the module tree, so an unconditional
+`#![forbid(clippy::disallowed_methods)]` reaches the inline
+`#[cfg(test)] mod tests`, whose outer `#[allow]` of that lint (the Windows
+batch-shim witness, recorded in `effects/allowlist.toml`) is then `E0453`
+-- measured by both of #318's first reviews, and by clippy over all targets
+at `9bb177ea`-style probes since. `deny` was the first answer, and it is
+the wrong one: a `deny` is a level an inner `allow` lowers, and #318's MAIN
+review generated such an `allow` with a `macro_rules!` on a production `fn`
+here, called it from `engine::topology::integrate::prepared_pin_ref`, and
+wrote bytes while all-target clippy exited 0 and every governance test
+passed (`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`).
+
+So the `forbid` is applied in every build without `cfg(test)`: the lib
+target that CI's three clippy legs check and that the binary links. Under
+it a lowering `allow` in this file is `E0453` however it is written or
+generated (`~/orch-pr10/repair-318-r2-evidence/controls-tree/B1-*`,
+`controls/c03`, `c08`, `c09`). The lib test target -- the only build the
+test module exists in -- gets no `forbid`; its level for this lint is
+`-D warnings`', which the test module's allow lowers as it always did, and
+which a generated `allow` in the production region lowers there too:
+measured by a fully qualified run of the review's witness under
+`cargo test --lib` alone, one test selected, one passed, the file written
+to a path deleted first (`~/orch-pr10/repair-318-r3-evidence/probes/P4-L1-*`).
+The earlier receipt for the same claim, `controls-tree/L1-*` in the
+round-2 evidence, selected no test -- a bare name to `--exact` -- and
+copied the file its `B1` run had already written; it is VOID and stands
+as written. Every gate compiles the production build, and that
+is where the lint gate refuses it. The enforcement is clippy's: rustc
+resolves no `clippy::` lint, so `cargo build` and `cargo test` compile a
+downgrade under this `forbid` as they compile every other fence's violation
+(`controls/c15`-`c18`).
+
+`effects::lint_levels::file_level_lint_state` reads this attribute as the
+production build's statement, so
+`every_classified_module_carries_a_file_level_fence_or_allowance_of_a_governed_lint`
+counts the pair stated, and
+`no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+is the census that names this file the day it goes back to `deny`.
+
 ## `pub struct Invocation {`
 
 An agent CLI as a program string, and how to spawn it.
@@ -181,7 +226,14 @@ input at all.
 ## `mod tests {`
 
 LEGACY-EFFECT: this test module's Windows batch-shim witness is recorded in
-`effects/allowlist.toml`; production carries only CommandSpec data.
+`effects/allowlist.toml`; production carries only CommandSpec data. Its
+`#[allow]` is the reason the file's `forbid` of `disallowed_methods` is
+conditional on `not(test)` (the prologue's section above): an outer
+attribute on an inline module is still under the file's level, so an
+unconditional `forbid` would refuse it. The module is Unix and Windows
+both -- `a_batch_shim_runs_and_receives_its_argument` is `cfg(windows)`,
+and the non-Unicode fixture has an arm per platform -- while the file's
+fence attributes are unconditional on platform.
 
 ## `fn arguments_reach_the_command_untouched()` › `let args: Vec<String> = [`
 

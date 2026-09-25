@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/catalog.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::fmt;
 
 use crate::ir::Tier;

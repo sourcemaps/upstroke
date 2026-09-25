@@ -27,7 +27,7 @@ they create, and they stay in `super` because a file reached by a plain
 `census_domain::whole_file_test_modules` derives its skip set from the
 crate's `cfg(test)` module declarations alone, and this file is not one of
 them. Measured, not assumed: with those six helpers moved here,
-`runner::tests::every_production_process_start_is_classified` gains a
+`runner::contract::tests::every_production_process_start_is_classified` gains a
 `("src/effects/tests/policy.rs", 3, 0, 0)` row and
 `every_production_command_spec_payload_is_classified` a `(0, 2, 0)` row,
 and closing either means classifying a test file in `src/runner/mod.rs`'s

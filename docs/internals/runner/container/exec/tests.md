@@ -1010,7 +1010,7 @@ and `Sync`.
 PR11 turns `run` into a boxed `Send` future behind the same `&dyn
 Runner` its callers hold, so a container runner that stopped being
 object-safe would fail to compile here rather than at the migration —
-the same guard `runner::tests::the_runner_trait_is_object_safe` gives
+the same guard `runner::contract::tests::the_runner_trait_is_object_safe` gives
 the host.
 
 ## `fn the_container_runner_is_object_safe_and_send_and_sync()` › `let view: Box<dyn GitView> = Box::new(RoleGitView::new(ContainerTrace::off()));`

@@ -1368,7 +1368,7 @@ five:
   value: `ShellKind::spec` and `bin::Invocation::spec` are the only two
   spec constructors this crate has and both write `env: Vec::new()`,
   and no call site adds an overlay entry (asserted by
-  `runner::tests::every_production_command_spec_payload_is_classified`);
+  `runner::contract::tests::every_production_command_spec_payload_is_classified`);
 * **timeout** — each role's own production default, five distinct
   values.
 
@@ -1507,7 +1507,7 @@ constants, five distinct values, none of them this fixture's.
 Field 7: the overlay. Empty everywhere, because that is production's
 only value — both spec constructors write `env: Vec::new()` and no
 call site adds an entry
-(`runner::tests::every_production_command_spec_payload_is_classified`
+(`runner::contract::tests::every_production_command_spec_payload_is_classified`
 is the tripwire for a call site that starts to). Stated as an
 assertion rather than left to silence: the day production carries an
 overlay, this row has to become a varying dimension like the four
@@ -1671,7 +1671,7 @@ containment *operation* ran for this role's child. A funnel that fired
 the hooks for a probe while skipping the operation would pass the first
 and fail the third.
 
-`runner::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
+`runner::contract::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
 does **not** discharge this: counting that two roles fall outside the
 site's declared context proves the mismatch exists; it does not prove
 the hooks execute on those roles. A counted admission is not runtime
@@ -2400,7 +2400,7 @@ reintroduce: a resolution remembered anywhere — a `OnceLock`, a field, a
 process-wide cache — hands the first boundary's answer to the second,
 and a value that is correct on first use and wrong on the second is
 invisible to any test that constructs one runner.
-`agent::built_program_tests` holds that for the adapters; this holds it
+`agent::adapter::built_program_tests` holds that for the adapters; this holds it
 for the boundary, with real spawns.
 
 Both orders, because "the first caller wins" is a property of order, and
@@ -2752,7 +2752,7 @@ borrows that one runner for pre-flight and every attempt.
 each of the three agent CLIs runs by bare name exactly as it runs by
 path.
 
-The equivalence `agent::built_program_tests::the_host_runner_executes_a_
+The equivalence `agent::adapter::built_program_tests::the_host_runner_executes_a_
 bare_program_name_as_it_executes_the_resolved_path` claims, over the
 installation shape that one cannot express. That row uses `git` — a
 native `.exe`, which `CreateProcessW` reaches from a bare name whether or
@@ -2794,7 +2794,7 @@ difference in output can only be a difference in which file ran.
 
 The three names `bin::Invocation::named` ships, written here rather
 than read from the adapters' private `CLI` constants;
-`agent::built_program_tests::an_adapters_program_is_the_boundarys_…`
+`agent::adapter::built_program_tests::an_adapters_program_is_the_boundarys_…`
 is what ties each adapter to its own name.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {` › `let mut contents: Vec<String> = std::fs::read_dir(&bin)`

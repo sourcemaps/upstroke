@@ -495,7 +495,7 @@ The runtime tests above hold everything from `run_wired` down. `run` is
 the one link above them that no test can call — `Cli::parse` reads this
 process's real argv — so it is held the way this project already holds
 claims of exactly this shape: by reading the source
-(`runner::tests::every_production_process_start_is_classified`,
+(`runner::contract::tests::every_production_process_start_is_classified`,
 `every_production_runner_request_is_built_by_its_roles_builder`).
 
 The oracle is narrow on purpose. Both functions are pure delegations,

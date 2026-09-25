@@ -32,3 +32,21 @@ through the production CLI. The [engine facade](../../../src/engine/mod.rs) keep
 accept schemas 1 through 3. `WriterSelector::TopologyPreview` selects schema 4 for the topology
 machinery exercised by tests. Existing runs continue through the sequential engine; there is no
 in-flight upgrade from schema 3 to schema 4.
+
+## `#![forbid(`
+
+The three governed lints are `forbid` here since #318's third round: this file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read -- macro-written, or spelled apart -- lowers; #318's second MAIN review
+executed exactly that in `src/plan/mod.rs` and reached `std::fs::write` from
+a production topology body while clippy and every governance test passed
+(`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`). A lint level is scoped by the module tree, so this fence reaches the 31 files under `src/topology/` -- `census.rs`, `effects.rs` and its eight children, `events.rs`, `fold.rs` and its thirteen, `leases.rs`, `paths.rs`, `queue.rs`, `registry.rs`, `schema.rs` -- every one of which stated nothing of its own; measured at the third round (`~/orch-pr10/repair-318-r3-evidence/plan-class/M1-*`; with the fence removed the guard names 81 pairs, `controls/C1-unfence-topology-root-*`; a generated allow in `paths.rs` is `E0453`, `C2-inheritance-reach-*`).
+`forbid`, not `deny`, because it compiles: no topology module may carry an allowance (`the_legacy_section_never_contains_a_topology_module`) and the one funnel row under it, `src/topology/effects.rs`, records `allows = []`; the five whole-file test modules under it allow nothing either, so the `forbid` reaches them without `E0453`, and clippy over all targets exits 0. A downgrade beneath
+a `forbid` is `E0453` however it is written or generated, and the enforcement
+is the lint gate's -- rustc resolves no `clippy::` lint, so `cargo build` and
+`cargo test` compile what clippy refuses. `effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+names this file the day the fence is removed, and
+`every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile` the
+day it drops to `deny`.
+
