@@ -86,7 +86,35 @@ it already credits the `any` case, so `first_bad` is `5f8a0b53`. At `89099a7c` t
 credited too, but so is `cfg_attr(test, ..)`: that commit reads no predicate, so it cannot be said
 to misread this one. Between the two, only `src/engine/topology/recover/tests.rs` changes under
 `src/`, through the merge of `master`. The probe and its receipts are in
-`~/orch-pr10/findings-gate5-deferred-evidence/r5-main-01-provenance/`.
+`~/orch-pr10/findings-gate5-deferred-evidence/r5-main-01-provenance/`: `README.md`, `run.sh`,
+`probe-test.rs`, `summary.txt`, one `probe-<sha8>.log` per commit, and `SHA256SUMS`. Each counted
+run exited 0 and has a `Compiling upstroke v0.1.0 (<its copy>)` line. The first pass, made without
+the control, is kept in `run1-no-control/`. Its results agree with the second pass, and the second
+pass supersedes it.
+
+**What the probe establishes.** It establishes the guard's verdict at eight commits, for three
+lints, on exactly four sources: the test-only control, `target_os = b"linux"`, and the two `any`
+orders around that one literal. Among #318's commits, these eight include every commit that
+changed `src/effects.rs` or `src/effects/` from `89099a7c`, where the guard first exists, to the
+reviewed head. The ones not probed change neither. The first commit before `89099a7c` that touched
+the effects code, `96aa472f`, has no guard. So:
+
+- the `any` shapes are credited at every commit from `5f8a0b53` on;
+- the direct literal stops being credited at `c2f29951`;
+- before `5f8a0b53`, the guard does not tell a test-only `cfg_attr` from a production one.
+
+**What it does not establish.**
+
+- **Other literal forms at earlier commits.** Before the reviewed head it probed only the byte
+  string, never the other six malformed forms or the negated shapes. Their behaviour at earlier
+  commits is inferred from the code, not measured.
+- **The compiler's side.** It did not run the compiler. That rustc refuses these predicates with
+  E0539 is the reviewer's result at the reviewed head; the compiler's answer does not depend on
+  this repository's commit, but this probe did not re-measure it.
+- **Whether `89099a7c` is the same defect.** The same source earns credit there too, through a
+  guard that reads no predicate. Calling `5f8a0b53`, not `89099a7c`, the first bad commit is a
+  judgement about what this finding describes, the mis-evaluation of a predicate, and not
+  something the probe measured.
 
 ## What the change that takes this up should do
 
