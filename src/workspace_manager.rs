@@ -604,17 +604,22 @@ use self::containment::{
 ///
 /// A primitive's set is data ([`Primitive::acted_through`]) so that one helper
 /// can walk all of it immediately before the syscalls and one test can plant a
-/// link at each path in turn. The table is these nine roles and no more. It
-/// does not name Git's own repository-discovery paths — the `.git` file or
-/// link of the checkout and of the base, and `commondir`, `objects`, `refs`,
-/// `packed-refs`, `index` and `config` behind them — and the two commit-tree
-/// funnels have no variant. Git follows those on every command, so a link
-/// planted at `base/.git` after a check has passed lands a ref in the
-/// repository it names; that is the parent's funnel design and its sweep's
-/// (`standards/SWEEP.md` queue row 11), and the durable fix is
-/// directory-handle-relative operations or a stated trust boundary for what
-/// may write inside the execution root, a design question (`DESIGN.md` §4,
-/// `CODING_STANDARDS.md` §14).
+/// link at each path in turn.
+///
+/// **These nine roles are what the walk covers; they are not every path a
+/// primitive acts through, and the table says which ones it does not walk
+/// rather than leaving them unsaid.** Git resolves its repository from the
+/// working directory of every child a funnel spawns, before it does anything
+/// else, and no role here covers that resolution:
+/// [`Primitive::git_working_dirs`] names the working directories each
+/// primitive runs a Git child in, [`WorkspaceManager::git_discovery_paths`]
+/// resolves the discovery paths behind them — the `.git` directory, file or
+/// link of the base and of the checkout, and `commondir`, `objects`, `refs`,
+/// `packed-refs`, `index` and `config` read through it — and
+/// [`Primitive::git_working_dirs`] states the trust boundary those paths sit
+/// inside, what was measured about it, and what it is not
+/// (`DESIGN.md` §4, `CODING_STANDARDS.md` §14,
+/// `standards/SWEEP.md` queue row 11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActedThrough {
     /// The execution root, as a directory.
@@ -706,9 +711,85 @@ pub(crate) enum Primitive {
     CandidateWriteTree,
     ProposalCherryPick,
     RepairMaterialize,
+    SnapshotCommitTree,
+    CandidateCommitTree,
     CreateRef,
     CompareAndSwapRef,
     DeleteRef,
+}
+
+/// A working directory a funnel primitive runs a Git child in after its
+/// `Before` hook, and so the repository-discovery paths it acts through that
+/// `WorkspaceManager::revalidate_acted_through` does **not** walk.
+///
+/// **What Git resolves, and what the walk covers.** A Git child discovers its
+/// repository from its working directory before it does anything else: it
+/// reads `<cwd>/.git` — a directory in the managed base, a `gitdir:` file in a
+/// linked worktree's checkout — and reaches `commondir`, `objects`, `refs`,
+/// `packed-refs`, `index` and `config` through whatever that names. Not one of
+/// those is among the nine roles [`ActedThrough`] lists, so a link planted at
+/// one of them at the `Before` hook is followed: measured on git 2.43, with
+/// `A/.git` renamed away and `A/.git -> B/.git` planted, `git update-ref` in
+/// `A` exits `0`, creates the ref in `B`, and leaves `A` unchanged
+/// (`the_ref_funnel_follows_a_git_discovery_link_planted_at_the_before_hook`).
+///
+/// **The trust boundary these paths sit inside.** They are not walked because
+/// every writer that can reach them is one the execution root already trusts,
+/// and the redirect gives such a writer nothing it does not already hold:
+///
+/// * A repository's own hooks cannot plant one. Every command this manager
+///   builds runs with `core.hooksPath` at `hooks-none`, an empty directory
+///   proven real, link-free and empty adjacent to the spawn
+///   (`WorkspaceManager::command`, `WorkspaceManager::revalidate_hooks_path`);
+///   measured on git 2.43, a `post-checkout` hook in the repository does not
+///   run under it, and a `core.hooksPath` the repository's own config sets is
+///   overridden by the command line's.
+/// * A repository's own *content* cannot plant one: measured on git 2.43,
+///   `git worktree add` of a commit whose tree carries a top-level `.git`
+///   symlink fails with `error: invalid path '.git'`, exit `128`, and checks
+///   nothing out.
+/// * What can plant one is a process already executing inside the execution
+///   root as this engine's own user — an agent's file tools, or a
+///   repository-authored gate command. `design/15` states that boundary for
+///   the shipped host runner in terms: adapter deny rules are "defence in
+///   depth, not an OS boundary", repository-controlled gates "execute
+///   candidate build/test code as the Upstroke user", and untrusted input
+///   belongs on "a dedicated OS account or VM". Such a writer can already
+///   write wherever that user can, so redirecting a funnel's Git child adds
+///   no capability to it; under the container runner the same party is
+///   confined to its mounts and the authoritative common git dir is withheld
+///   from it (`runner::container`'s `Withheld::AuthoritativeGit`).
+///
+/// **What this is not.** Naming these paths does not close them, and it does
+/// not narrow the check-to-syscall window the nine walked roles leave either.
+/// One change closes both — directory-handle-relative operations (`openat`,
+/// `unlinkat` against a descriptor held from the check) — and that is what a
+/// writer this boundary does not cover would need.
+// `allow` and not `#[expect]`, which §16 otherwise asks for: `dead_code` fires
+// for these three on stable and does not fire for two of them on the 1.85 MSRV
+// (measured -- `cargo +1.85.0 check --locked --all-targets --all-features`
+// reports `this lint expectation is unfulfilled` at the enum and at
+// `git_working_dirs`, which CI's `RUSTFLAGS: -D warnings` makes an error on all
+// three platforms), so an expectation cannot be fulfilled on both legs and
+// `allow` is the only level that says the same thing to each.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the half of the table the walk does not read: it is the declaration of \
+                  what is *not* walked, held to the code by the suite instead \
+                  (`every_git_discovery_path_the_table_names_is_outside_the_walk` and \
+                  `no_primitive_acts_through_a_git_working_directory_the_table_does_not_name`)"
+    )
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitWorkingDirectory {
+    /// The managed base: where `worktree add`, `worktree prune`, `commit-tree`
+    /// and `update-ref` run, and where the manager's reads run.
+    ManagedBase,
+    /// The slot's checkout: where `add`, `write-tree`, `cherry-pick` and the
+    /// per-worktree reads run.
+    SlotCheckout,
 }
 
 impl Primitive {
@@ -737,7 +818,64 @@ impl Primitive {
             | Self::ProposalCherryPick
             | Self::RepairMaterialize => &[A::SlotCheckoutDirectory, A::HooksPath],
             Self::RemoveWorktree => &[A::SlotCheckoutEntry, A::HooksPath, A::Registration],
-            Self::CreateRef | Self::CompareAndSwapRef | Self::DeleteRef => &[A::HooksPath],
+            // The commit-tree funnels' one Git child writes an object and
+            // touches no path of the execution root but the hooks path, so
+            // their set is the ref primitives' set. Until this pull request
+            // they had no variant at all, and so no in-funnel walk: the base
+            // they run in was proven a real directory before the `Before`
+            // hook and never again (`WorkspaceManager::commit_tree`).
+            Self::SnapshotCommitTree
+            | Self::CandidateCommitTree
+            | Self::CreateRef
+            | Self::CompareAndSwapRef
+            | Self::DeleteRef => &[A::HooksPath],
+        }
+    }
+
+    /// The working directories this primitive's Git children run in after its
+    /// `Before` hook — the other half of the table, whose discovery paths the
+    /// walk does not cover and whose boundary [`GitWorkingDirectory`] states.
+    ///
+    /// Empty for a primitive that spawns no Git child inside its funnel: the
+    /// two intent primitives, and the two execution-root primitives, whose
+    /// only Git child is [`WorkspaceManager::revalidate`]'s enumeration
+    /// *before* the hook. What a primitive does before its `Before` hook is
+    /// outside this table, as it is outside [`Self::acted_through`].
+    ///
+    /// **Private**, where [`Self::acted_through`] is `pub(crate)`: this half
+    /// is read by this module and its own suite and by nothing else, and a
+    /// `pub(crate) fn` here joins the effect-classification domain
+    /// `effects/wrappers.toml` records, which is a governance record this
+    /// declaration has no business in.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the half of the table the walk does not read: it is the declaration of \
+                      what is *not* walked, held to the code by the suite instead \
+                      (`every_git_discovery_path_the_table_names_is_outside_the_walk` and \
+                      `no_primitive_acts_through_a_git_working_directory_the_table_does_not_name`)"
+        )
+    )]
+    fn git_working_dirs(self) -> &'static [GitWorkingDirectory] {
+        use GitWorkingDirectory as G;
+        match self {
+            Self::CreateExecutionRoot
+            | Self::RemoveExecutionRoot
+            | Self::WriteIntent
+            | Self::RemoveIntent => &[],
+            Self::AddWorktree
+            | Self::RemoveWorktree
+            | Self::SnapshotCommitTree
+            | Self::CandidateCommitTree
+            | Self::CreateRef
+            | Self::CompareAndSwapRef
+            | Self::DeleteRef => &[G::ManagedBase],
+            Self::VerifyWorktree => &[G::ManagedBase, G::SlotCheckout],
+            Self::CandidateStage
+            | Self::CandidateWriteTree
+            | Self::ProposalCherryPick
+            | Self::RepairMaterialize => &[G::SlotCheckout],
         }
     }
 }
@@ -1666,6 +1804,73 @@ impl WorkspaceManager {
                         paths.push((git_dir.clone(), admin.join("gitdir"), Leaf::Entry));
                         paths.push((git_dir, admin.join("locked"), Leaf::Entry));
                     }
+                }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Every Git repository-discovery path `primitive` acts through, resolved
+    /// for this manager, and the other half of the table: the half
+    /// [`Self::revalidate_acted_through`] does **not** walk. The boundary that
+    /// puts these paths outside the walk is stated on [`GitWorkingDirectory`].
+    ///
+    /// Two paths per working directory, because two is what Git resolves and
+    /// what a substitution can be planted at:
+    ///
+    /// * the working directory's `.git`, which Git reads first — and for the
+    ///   managed base that *is* the common git dir, named here by the
+    ///   canonical spelling the manager holds so that the two are one path on
+    ///   every platform rather than two spellings of one directory;
+    /// * the common git dir, which a linked worktree's `.git` names by way of
+    ///   its admin directory's `commondir`.
+    ///
+    /// `commondir`, `objects`, `refs`, `packed-refs`, `index` and `config` are
+    /// not listed separately: Git resolves each of them from the directory
+    /// `.git` names, so a substitution at either path here carries all of
+    /// them, and a test that plants a link at each path this returns drives
+    /// the whole class.
+    ///
+    /// # Errors
+    ///
+    /// [`GitWorkingDirectory::SlotCheckout`] named with no slot, which is the
+    /// programming error [`Self::acted_through_paths`] reports for the same
+    /// reason: a skipped path is exactly an unexamined one.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the half of the table the walk does not read: it is the declaration of \
+                      what is *not* walked, held to the code by the suite instead \
+                      (`every_git_discovery_path_the_table_names_is_outside_the_walk` and \
+                      `no_primitive_acts_through_a_git_working_directory_the_table_does_not_name`)"
+        )
+    )]
+    fn git_discovery_paths(
+        &self,
+        primitive: Primitive,
+        slot: Option<&Slot>,
+    ) -> Result<Vec<(PathBuf, Leaf)>, UpstrokeError> {
+        let mut paths: Vec<(PathBuf, Leaf)> = Vec::new();
+        for directory in primitive.git_working_dirs() {
+            let resolved = match directory {
+                GitWorkingDirectory::ManagedBase => vec![self.common_git_dir.clone()],
+                GitWorkingDirectory::SlotCheckout => {
+                    let slot = slot.ok_or_else(|| UpstrokeError::Refused {
+                        message: format!(
+                            "internal: {primitive:?} runs a Git child in a slot checkout but was \
+                             given no slot"
+                        ),
+                    })?;
+                    vec![
+                        self.slot_path(slot).join(".git"),
+                        self.common_git_dir.clone(),
+                    ]
+                }
+            };
+            for path in resolved {
+                if !paths.iter().any(|(already, _)| *already == path) {
+                    paths.push((path, Leaf::Entry));
                 }
             }
         }
@@ -3598,7 +3803,7 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// A Git error.
+    /// The containment refusals, the hooks path's among them, or a Git error.
     pub fn snapshot_commit_tree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -3608,6 +3813,7 @@ impl WorkspaceManager {
         self.commit_tree(
             hooks,
             EffectSiteId::Object(ObjectSite::SnapshotCommitTree),
+            Primitive::SnapshotCommitTree,
             tree,
             parent,
             "upstroke: ephemeral snapshot input",
@@ -3621,7 +3827,7 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// A Git error.
+    /// The containment refusals, the hooks path's among them, or a Git error.
     pub fn candidate_commit_tree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -3632,6 +3838,7 @@ impl WorkspaceManager {
         self.commit_tree(
             hooks,
             EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+            Primitive::CandidateCommitTree,
             tree,
             parent,
             message,
@@ -3654,11 +3861,22 @@ impl WorkspaceManager {
         &self,
         hooks: &mut dyn EffectHooks,
         site: EffectSiteId,
+        primitive: Primitive,
         tree: &str,
         parent: &str,
         message: &str,
     ) -> Result<String, UpstrokeError> {
         consult(hooks, site, HookPhase::Before)?;
+        // The in-funnel walk, as every other primitive's funnel makes it and
+        // these two did not until this pull request: the managed base is
+        // still a real directory, and the hooks path is still real, link-free
+        // and empty. The base is what the Git child below runs in, and
+        // `revalidate` proved it a real directory *before* the `Before` hook,
+        // so without this a base exchanged for a link at the hook was
+        // followed (`PR120-TABLE-OMITS-GIT-DISCOVERY-PATHS`). What the walk
+        // still does not cover is the discovery below `<base>/.git`
+        // ([`Primitive::git_working_dirs`]).
+        self.revalidate_acted_through(primitive, None, None)?;
         let output = self.git_with_identity(
             &self.base,
             &[
