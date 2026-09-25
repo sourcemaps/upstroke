@@ -1755,21 +1755,38 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-## `fn the_self_hosted_windows_leg_runs_these_fixtures_on_the_pinned_labels() {`
+## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
-The Windows suite's job runs these fixtures on the self-hosted labels, and
-on nothing else the contract can read.
+The Windows suite's job runs these fixtures on the curated guest for a pull
+request or push and on `windows-latest` for a merge-queue entry, and on
+nothing else the contract can read.
 
 The claim the `test` job discharges with an install step -- that
-`clippy-driver` is present for the fixtures -- is discharged here by the
-golden image the runner boots, which this contract cannot read; the decision
-record binds re-curation to it instead. What the contract *can* read is
-pinned: the labels exactly, the suite step exactly -- the command and the
-count that says it executed, see
-[`the_self_hosted_leg_counts_the_tests_it_ran`] -- the platform-default
-shell on every `run:` step, and a field set with no `if:` or
-`continue-on-error:`. The refusals are executed in [`WORKFLOW_ESCAPES`],
-every row named `MUT-TEST-WINDOWS-*` and both `MUT-WINDOWS-WITNESS-*`.
+`clippy-driver` is present for the fixtures -- is discharged on the
+pull-request lane by the golden image the runner boots, which this contract
+cannot read and re-curation is bound to instead, and on the queue lane by
+an install step pinned whole: one, first after the checkout, under the lane
+condition, at the image's version, with `clippy`. What the contract *can*
+read is pinned: the `runs-on:` expression exactly, the suite step exactly --
+the command and the count that says it executed, see
+[`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
+every `run:` step, and a field set with no `if:` or `continue-on-error:`
+anywhere but on that one install. The refusals are executed in
+[`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` and the three
+`MUT-WINDOWS-WITNESS-*`.
+
+## `fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {`
+
+The pinned `runs-on:` literal is the lane test, the hosted platform and the
+self-hosted labels this contract names, composed -- not a fourth string that
+happens to read back.
+
+The oracle compares `runs-on:` as one string because it cannot evaluate the
+expression. That leaves the literal free to name a different condition
+from the install step's `if:`, or a different runner from the one the cfg
+census models, while both equalities hold; this test closes that by
+building the literal from the same three constants and requiring the
+hosted runner to be a [`CI_TARGETS`] entry.
 
 ## `fn the_hosted_windows_leg_still_links_every_test_binary() {`
 
@@ -1817,9 +1834,19 @@ root `workspace.default-members = [...]` are one table to Cargo and three
 different strings to a line scan, which is how the first two versions of
 this check read and how each was shown a spelling it missed.
 
-## `fn the_self_hosted_leg_counts_the_tests_it_ran() {`
+## `fn the_windows_leg_counts_the_tests_it_ran() {`
 
-The leg whose tests left GitHub's runners reports that they ran.
+The leg whose tests leave GitHub's runners on the pull-request lane reports
+that they ran, on either lane, and refuses to run them on any compiler but
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
+will run, the step's PATH which `rustc` it names, and the step's PATH
+which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
+split there fails the rlib-linked fixtures rather than passing them
+(`WINDOWS_TEST_WITNESS` in the CI model notes). The script is pinned as text by
+the oracle; this test holds two numbers inside that text to the constants
+they must equal -- the floor and the compiler version -- and requires the
+compiler check to come before the suite, since a refusal after the run has
+already spent the run on the wrong compiler.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
 to do. Cargo can be asked for this suite and execute none of it: a

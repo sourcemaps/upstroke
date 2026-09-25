@@ -16,8 +16,8 @@ bash .github/scripts/test-pr-ready-audit.sh
 ```
 
 CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
-the suite on Linux and macOS, and `test (winguest)` runs it on Windows on a self-hosted ephemeral
-runner; `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
+the suite on Linux and macOS, and `test-windows` runs it on Windows, on a self-hosted ephemeral
+runner for a pull request or push and on `windows-latest` for a merge-queue entry; `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
 every target as the hosted Windows compile witness; `lint (macos)` runs Clippy natively;
 `upstroke-ci` aggregates every leg and is the required context. The `--locked` MSRV check is what
 proves the floor against the dependency set a release ships. `test-release-record.sh` needs `jq`, and `test-pr-policy.sh` only works from the root.

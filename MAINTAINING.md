@@ -14,8 +14,9 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite on its self-hosted ephemeral runner `test (winguest)`, the
-   MSRV matrix, the six Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
+   test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
+   pull request or push, on `windows-latest` for a merge-queue entry -- the MSRV matrix, the six
+   Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.
@@ -488,7 +489,7 @@ defect exactly as a change to the gate file does. `.cargo/` and the CI-contract 
 `src/effects/` were the second, and neither sits in any directory the earlier lists named: a root
 `.cargo/config.toml` that binds a target `runner` has Cargo compile every test harness and hand each
 one to a wrapper that exits zero, and the test that refuses such a file is itself in the tree and
-editable by the same pull request. `ci.yml` already names that mechanism, in the self-hosted step
+editable by the same pull request. `ci.yml` already names that mechanism, in the Windows test step
 that counts what libtest reported rather than trusting the exit status. **What the property turns on
 is what a file governs, not what kind of file it is**: the test that refuses a `.cargo/config.toml`
 decides what every other pull request may add, where a test asserting that `src/util/terminal.rs`
