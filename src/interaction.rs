@@ -478,6 +478,30 @@ pub fn defer_backoff(base: Duration, round: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::ir::{QuestionKind, TaskId};
+    use crate::rundir::scratch_tree::ScratchTree;
+
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// Each of these fixtures built `temp_dir()/upstroke-<what>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then left the root behind
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on a
+    /// ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
 
     fn question() -> Question {
         Question {
@@ -609,9 +633,8 @@ mod tests {
 
     #[test]
     fn questions_are_written_where_a_ui_can_read_them() {
-        let dir = std::env::temp_dir().join(format!("upstroke-questions-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let tree = scratch("questions");
+        let dir = tree.path().to_path_buf();
 
         let mut record = QuestionRecord::open(question());
         write_question(&dir, &record).expect("write open question");
@@ -691,9 +714,8 @@ mod tests {
 
     #[test]
     fn answers_survive_the_trip_through_a_file() {
-        let dir = std::env::temp_dir().join(format!("upstroke-answer-io-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let tree = scratch("answer-io");
+        let dir = tree.path().to_path_buf();
         let id = QuestionId::from("q-TEST");
 
         assert_eq!(
@@ -721,9 +743,8 @@ mod tests {
 
     #[test]
     fn a_detached_run_waits_for_an_answer_file_then_gives_up() {
-        let dir = std::env::temp_dir().join(format!("upstroke-answer-wait-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let tree = scratch("answer-wait");
+        let dir = tree.path().to_path_buf();
 
         let counting = CountingSleeper::default();
         let answers = EventLogAnswers::with_poll(
@@ -852,15 +873,6 @@ mod tests {
         assert_eq!(answer, Answer::Unanswered);
     }
 
-    fn answer_scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "upstroke-answer-record-{tag}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
-        dir
-    }
 
     fn residue_of(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
@@ -872,7 +884,8 @@ mod tests {
 
     #[test]
     fn an_attributed_answer_file_is_read_back_with_its_ruling() {
-        let dir = answer_scratch("ruling");
+        let tree = scratch("ruling");
+        let dir = tree.path().to_path_buf();
         let id = QuestionId::from("q-RULED");
         let convicted = AnswerRecord::convicted(
             Answer::Answered {
@@ -938,7 +951,8 @@ mod tests {
 
     #[test]
     fn an_unattributed_answer_file_keeps_the_bytes_the_writer_always_wrote() {
-        let dir = answer_scratch("bytes");
+        let tree = scratch("bytes");
+        let dir = tree.path().to_path_buf();
         for (index, answer) in [
             Answer::Answered {
                 text: "use base64 cursors".to_owned(),
@@ -991,7 +1005,8 @@ mod tests {
 
     #[test]
     fn the_writer_refuses_a_conviction_without_a_citation() {
-        let dir = answer_scratch("uncited");
+        let tree = scratch("uncited");
+        let dir = tree.path().to_path_buf();
         let id = QuestionId::from("q-UNCITED");
         for citation in [None, Some(String::new()), Some("   ".to_owned())] {
             let uncited = AnswerRecord {
@@ -1026,7 +1041,8 @@ mod tests {
 
     #[test]
     fn a_conviction_without_a_citation_in_the_file_reads_as_a_discovery() {
-        let dir = answer_scratch("hand-edited");
+        let tree = scratch("hand-edited");
+        let dir = tree.path().to_path_buf();
         let id = QuestionId::from("q-HAND");
         std::fs::write(
             answer_path(&dir, &id),

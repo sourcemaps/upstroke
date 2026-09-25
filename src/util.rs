@@ -657,11 +657,35 @@ mod tests {
         assert_eq!(rfc3339_utc_now().len(), "1970-01-01T00:00:00Z".len());
     }
 
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// Each of these fixtures built `temp_dir()/upstroke-util-<what>-<pid>`,
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`) and, on the
+    /// runs that matter -- the failing ones, where the teardown below the
+    /// assertions never runs -- left the root behind
+    /// (`PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an occupied root
+    /// rather than emptying it, keys on a ULID no recycled pid can supply,
+    /// and reclaims on drop however the test ends.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
+
     #[test]
     fn probe_extensions_never_resolves_a_bare_relative_name() {
-        let dir = std::env::temp_dir().join(format!("upstroke-util-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let tree = scratch("util-path");
+        let dir = tree.path();
         std::fs::write(dir.join("bait.txt"), "").expect("bait");
         assert!(
             probe_extensions(&dir.join("bait.txt")).is_some(),
@@ -672,8 +696,8 @@ mod tests {
 
     #[test]
     fn same_path_compares_directories_rather_than_spellings() {
-        let root = std::env::temp_dir().join(format!("upstroke-util-same-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let tree = scratch("util-same");
+        let root = tree.path();
         let inner = root.join("inner");
         std::fs::create_dir_all(&inner).expect("scratch directories");
 
@@ -686,7 +710,6 @@ mod tests {
             !same_path(&root.join("absent"), &root),
             "a path that does not resolve is not one that does"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -699,9 +722,8 @@ mod tests {
 
     #[test]
     fn the_directory_barrier_runs_on_this_platform() {
-        let root = std::env::temp_dir().join(format!("upstroke-util-fsync-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let tree = scratch("util-fsync");
+        let root = tree.path();
 
         let staged = root.join("record.tmp");
         std::fs::write(&staged, b"{}\n").expect("stage");
@@ -714,16 +736,13 @@ mod tests {
             absent.is_err(),
             "the barrier reported success for a directory that does not exist"
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
     #[test]
     fn the_directory_barrier_needs_exactly_the_access_it_asks_for() {
-        let root = std::env::temp_dir().join(format!("upstroke-util-mask-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let tree = scratch("util-mask");
+        let root = tree.path();
         std::fs::write(root.join("record"), b"{}\n").expect("a changed directory");
 
         windows_fsync_dir(&root, WINDOWS_DIRECTORY_ACCESS)
@@ -738,6 +757,5 @@ mod tests {
             "the refusal must be ERROR_ACCESS_DENIED, which is what makes the write \
              right load-bearing rather than incidental: {refusal:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

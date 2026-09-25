@@ -498,21 +498,37 @@ mod tests {
     use std::env;
     use std::process::Command as StdCommand;
 
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-gates-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-gates-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on a
+    /// ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = temp_dir("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    fn temp_dir(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
-    fn temp_repo(tag: &str) -> PathBuf {
-        let dir = temp_dir(tag);
+    fn temp_repo(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let tree = temp_dir(tag);
         let mut command = StdCommand::new("git");
-        command.arg("-C").arg(&dir).args(["init", "-q"]);
+        command.arg("-C").arg(tree.path()).args(["init", "-q"]);
         without_ambient_replacement_controls(&mut command);
         let out = command.output().expect("git");
         assert!(out.status.success());
-        dir
+        tree
     }
 
     fn host() -> crate::runner::host::HostRunner {
@@ -608,7 +624,8 @@ mod tests {
         }
         assert_replacement_controls_pinned("v1-gate");
 
-        let repo = temp_repo("legacy-replacement");
+        let tree = temp_repo("legacy-replacement");
+        let repo = tree.path();
         pin_replacement_refs_in(&repo);
         fs::write(repo.join("f.txt"), "A\n").expect("the recorded content");
         git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
@@ -706,7 +723,8 @@ mod tests {
 
     #[test]
     fn passing_and_failing_gates() {
-        let repo = temp_repo("passfail");
+        let tree = temp_repo("passfail");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
         assert!(matches!(
             gate("git --version", 30).check(&host(), gate_id(0), &ws),
@@ -723,7 +741,8 @@ mod tests {
 
     #[test]
     fn gate_timeout_fails_with_note() {
-        let repo = temp_repo("timeout");
+        let tree = temp_repo("timeout");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
         let cmd = if cfg!(windows) {
             "ping -n 30 127.0.0.1 > NUL"
@@ -818,7 +837,8 @@ mod tests {
             (None, true, true, false, "output limit"),
         ];
 
-        let repo = temp_repo("supervision-grid");
+        let tree = temp_repo("supervision-grid");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
         let mut passes = 0_usize;
         let mut fails = 0_usize;
@@ -870,9 +890,11 @@ mod tests {
 
     #[test]
     fn a_gate_whose_process_never_ran_returns_the_error_and_synthesizes_nothing() {
-        let repo = temp_repo("spawn-failure");
+        let tree = temp_repo("spawn-failure");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
-        let logs = temp_dir("spawn-failure-logs");
+        let tree = temp_dir("spawn-failure-logs");
+        let logs = tree.path();
 
         let runner = ScriptedRunner::new(Scripted::SpawnFailure);
         let error = gate("does-not-matter", 30)
@@ -909,7 +931,8 @@ mod tests {
 
     #[test]
     fn quoted_arguments_survive_the_windows_shell() {
-        let repo = temp_repo("quoting");
+        let tree = temp_repo("quoting");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
         let set = gate("git config --local test.quoted \"two words\"", 30);
         assert!(matches!(
@@ -944,9 +967,11 @@ mod tests {
 
     #[test]
     fn run_all_short_circuits_and_writes_logs_for_all_run_gates() {
-        let repo = temp_repo("shortcircuit");
+        let tree = temp_repo("shortcircuit");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
-        let logs = temp_dir("shortcircuit-logs");
+        let tree = temp_dir("shortcircuit-logs");
+        let logs = tree.path();
         let gates = vec![
             ShellGate {
                 name: "ok".to_owned(),
@@ -974,9 +999,11 @@ mod tests {
 
     #[test]
     fn hostile_gate_and_task_names_still_get_logs() {
-        let repo = temp_repo("hostile");
+        let tree = temp_repo("hostile");
+        let repo = tree.path();
         let ws = Workspace::open(&repo).expect("open");
-        let logs = temp_dir("hostile-logs");
+        let tree = temp_dir("hostile-logs");
+        let logs = tree.path();
         let gates = vec![ShellGate {
             name: "lint:fast/unit".to_owned(),
             cmd: "git frobnicate".to_owned(),
@@ -996,7 +1023,8 @@ mod tests {
     #[test]
     fn resolution_enforces_simple_commands_and_skips_shelly_ones() {
         let mut warnings = Vec::new();
-        let root = temp_dir("resolve-root");
+        let tree = temp_dir("resolve-root");
+        let root = tree.path();
         resolve_programs(&[gate("git --version", 30)], &root, &mut warnings).expect("git resolves");
 
         let err = resolve_programs(
@@ -1050,7 +1078,8 @@ mod tests {
     #[test]
     fn preview_resolution_warns_instead_of_refusing() {
         let mut warnings = Vec::new();
-        let root = temp_dir("preview-root");
+        let tree = temp_dir("preview-root");
+        let root = tree.path();
         preview_resolution(
             &[gate("definitely-not-a-real-tool-xyz build", 30)],
             &root,
@@ -1069,14 +1098,16 @@ mod tests {
 
     #[test]
     fn derive_recognizes_project_markers() {
-        let rust = temp_dir("derive-rust");
+        let tree = temp_dir("derive-rust");
+        let rust = tree.path();
         fs::write(rust.join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo");
         let gates = derive(&rust, ShellKind::native());
         assert_eq!(gates.len(), 2);
         assert!(gates[0].cmd.contains("cargo check"));
         assert!(gates[1].cmd.contains("cargo test"));
 
-        let node = temp_dir("derive-node");
+        let tree = temp_dir("derive-node");
+        let node = tree.path();
         fs::write(
             node.join("package.json"),
             r#"{"scripts":{"test":"vitest"}}"#,
@@ -1086,7 +1117,8 @@ mod tests {
         assert_eq!(gates.len(), 1);
         assert_eq!(gates[0].cmd, "npm test");
 
-        let node_placeholder = temp_dir("derive-node-placeholder");
+        let tree = temp_dir("derive-node-placeholder");
+        let node_placeholder = tree.path();
         fs::write(
             node_placeholder.join("package.json"),
             r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#,
@@ -1094,7 +1126,8 @@ mod tests {
         .expect("pkg");
         assert!(derive(&node_placeholder, ShellKind::native()).is_empty());
 
-        let empty = temp_dir("derive-none");
+        let tree = temp_dir("derive-none");
+        let empty = tree.path();
         assert!(derive(&empty, ShellKind::native()).is_empty());
     }
 

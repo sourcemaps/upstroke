@@ -5687,15 +5687,25 @@ mod termination {
             assert_eq!(execd(&rendered), Path::new("./docker"));
         }
 
-        fn reaper_stub(tag: &str, script: &str) -> (std::path::PathBuf, ReaperContainers) {
+        /// The guard comes back with the rendered argv because it owns the
+        /// root the stub is under: dropping it here would delete the stub
+        /// before the caller runs it. The helper here pre-cleaned a name it
+        /// had no claim on and left the root behind
+        /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+        fn reaper_stub(
+            tag: &str,
+            script: &str,
+        ) -> (crate::rundir::scratch_tree::ScratchTree, ReaperContainers) {
             use std::os::unix::fs::PermissionsExt as _;
-            let dir = std::env::temp_dir().join(format!(
-                "upstroke-reaper-rounds-{tag}-{}-{}",
-                std::process::id(),
-                crate::ulid::ulid()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch");
+            let parent = std::env::temp_dir();
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `{tag}` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let dir = tree.path();
             let stub = dir.join("docker-stub");
             std::fs::write(&stub, script).expect("write the stub");
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
@@ -5707,7 +5717,7 @@ mod termination {
             )
             .expect("a scope");
             let rendered = render_container_argv(&scope).expect("argv");
-            (dir, rendered)
+            (tree, rendered)
         }
 
         fn logged(dir: &std::path::Path, verb: &str) -> Vec<String> {
@@ -5722,7 +5732,7 @@ mod termination {
         #[test]
         fn the_reaper_performs_as_many_rounds_as_the_machine_needs() {
             const ROUNDS: usize = 12;
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "unbounded",
                 &format!(
                     "#!/bin/sh\n\
@@ -5736,6 +5746,7 @@ mod termination {
                      exit 0\n"
                 ),
             );
+            let dir = tree.path();
 
             reclaim_labeled_containers(&rendered);
 
@@ -5767,7 +5778,7 @@ mod termination {
         #[test]
         fn the_reaper_settles_more_containers_than_one_listing_holds() {
             const CONTAINERS: usize = 130;
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "over-buffer",
                 "#!/bin/sh\n\
                  d=$(dirname \"$0\")\n\
@@ -5778,6 +5789,7 @@ mod termination {
                  esac\n\
                  exit 0\n",
             );
+            let dir = tree.path();
             std::fs::create_dir_all(dir.join("ids")).expect("the id set");
             let expected: std::collections::BTreeSet<String> = (1..=CONTAINERS)
                 .map(|n| format!("{n:064}"))
@@ -5825,7 +5837,7 @@ mod termination {
 
         #[test]
         fn a_runtime_that_keeps_answering_the_same_listing_ends_the_loop() {
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "no-progress",
                 "#!/bin/sh\n\
                  d=$(dirname \"$0\")\n\
@@ -5837,6 +5849,7 @@ mod termination {
                  esac\n\
                  exit 0\n",
             );
+            let dir = tree.path();
 
             reclaim_labeled_containers(&rendered);
 

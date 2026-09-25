@@ -1624,10 +1624,35 @@ mod tests {
 
     use crate::agent::proc::test_support::readiness;
 
-    fn temp_repo(tag: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-ws-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create repo dir");
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-ws-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on a
+    /// ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
+    }
+
+    /// A git repository in a scratch tree this test owns. The guard comes back
+    /// with the path because it owns the root the path is under: dropping it
+    /// here would reclaim the repository before the caller's first assertion.
+    fn temp_repo(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, PathBuf) {
+        let tree = scratch(tag);
+        let dir = tree.path().to_path_buf();
         let run = |args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -1647,7 +1672,7 @@ mod tests {
         fs::write(dir.join("README.md"), "seed\n").expect("seed file");
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "seed"]);
-        dir
+        (tree, dir)
     }
 
     fn run_git(repo: &Path, args: &[&str]) -> Vec<u8> {
@@ -1679,7 +1704,7 @@ mod tests {
 
     #[test]
     fn open_requires_a_git_worktree() {
-        let repo = temp_repo("open");
+        let (_tree, repo) = temp_repo("open");
         assert!(Workspace::open(&repo).is_ok());
 
         let plain = env::temp_dir().join(format!("upstroke-ws-plain-{}", std::process::id()));
@@ -1689,7 +1714,7 @@ mod tests {
 
     #[test]
     fn sparse_checkout_is_refused_before_worker_spend() {
-        let repo = temp_repo("sparse-preflight");
+        let (_tree, repo) = temp_repo("sparse-preflight");
         run_git(&repo, &["update-index", "--skip-worktree", "README.md"]);
         run_git(&repo, &["update-index", "--assume-unchanged", "README.md"]);
         let workspace = Workspace::open(&repo).expect("open");
@@ -1722,7 +1747,7 @@ mod tests {
 
     #[test]
     fn clean_detection_and_rollback() {
-        let repo = temp_repo("clean");
+        let (_tree, repo) = temp_repo("clean");
         let ws = Workspace::open(&repo).expect("open");
         assert!(ws.is_clean().expect("clean check"));
 
@@ -1739,7 +1764,7 @@ mod tests {
 
     #[test]
     fn branch_diff_commit_cycle() {
-        let repo = temp_repo("cycle");
+        let (_tree, repo) = temp_repo("cycle");
         let ws = Workspace::open(&repo).expect("open");
         ws.create_branch("upstroke/run-TEST").expect("branch");
         assert_eq!(
@@ -1773,7 +1798,7 @@ mod tests {
 
     #[test]
     fn captured_candidate_keeps_one_parent_tree_and_diff() {
-        let repo = temp_repo("captured-candidate");
+        let (_tree, repo) = temp_repo("captured-candidate");
         let ws = Workspace::open(&repo).expect("open");
         let original_parent = ws.head_sha_full().expect("parent before capture");
         fs::write(repo.join("README.md"), "first candidate\n").expect("first edit");
@@ -1826,7 +1851,7 @@ mod tests {
 
     #[test]
     fn prepared_commit_uses_frozen_objects_identity_and_hook_free_ref_transactions() {
-        let repo = temp_repo("prepared");
+        let (_tree, repo) = temp_repo("prepared");
         let ws = Workspace::open(&repo).expect("open");
         let hook_marker = repo.join("hook-ran");
         ws.git(&["config", "core.hooksPath", ".githooks"])
@@ -1902,7 +1927,7 @@ mod tests {
 
     #[test]
     fn prepared_pins_reject_symbolic_refs_without_touching_the_victim() {
-        let repo = temp_repo("prepared-symbolic-pin");
+        let (_tree, repo) = temp_repo("prepared-symbolic-pin");
         let ws = Workspace::open(&repo).expect("open");
         let victim_before = ws.head_sha_full().expect("victim target");
         run_git(&repo, &["branch", "victim", &victim_before]);
@@ -1951,7 +1976,7 @@ mod tests {
 
     #[test]
     fn prepared_publication_refuses_same_oid_symbolic_head_change_after_capture() {
-        let repo = temp_repo("prepared-branch-binding");
+        let (_tree, repo) = temp_repo("prepared-branch-binding");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("README.md"), "reviewed candidate\n").expect("candidate");
         let candidate = ws.capture_candidate().expect("capture on main");
@@ -2021,7 +2046,7 @@ mod tests {
 
     #[test]
     fn run_exclusions_hide_upstroke_dir() {
-        let repo = temp_repo("exclude");
+        let (_tree, repo) = temp_repo("exclude");
         let ws = Workspace::open(&repo).expect("open");
         ws.ensure_run_exclusions().expect("exclude");
         ws.ensure_run_exclusions().expect("idempotent");
@@ -2036,7 +2061,7 @@ mod tests {
 
     #[test]
     fn exclusions_work_in_a_linked_worktree() {
-        let repo = temp_repo("worktree-main");
+        let (_tree, repo) = temp_repo("worktree-main");
         let linked = repo.parent().expect("parent").join(format!(
             "upstroke-ws-worktree-linked-{}",
             std::process::id()
@@ -2075,7 +2100,7 @@ mod tests {
 
     #[test]
     fn open_normalizes_to_the_worktree_toplevel() {
-        let repo = temp_repo("toplevel");
+        let (_tree, repo) = temp_repo("toplevel");
         let nested = repo.join("crates").join("inner");
         fs::create_dir_all(&nested).expect("nested dirs");
         let ws = Workspace::open(&nested).expect("open from a subdirectory");
@@ -2092,10 +2117,14 @@ mod tests {
     fn worktree_git_dir_preserves_non_utf8_repo_path() {
         use std::os::unix::ffi::OsStringExt;
 
-        let mut name = format!("upstroke-ws-non-utf8-git-dir-{}-", std::process::id()).into_bytes();
+        // The non-UTF-8 name is what this test is about, so it is built
+        // INSIDE an acquired tree rather than beside one: `acquire` names its
+        // own root and that name is UTF-8. The guard reclaims the tree, and
+        // the repository under it, however this test ends.
+        let tree = scratch("ws-non-utf8-git-dir");
+        let mut name = b"repo-".to_vec();
         name.push(0xff);
-        let repo = env::temp_dir().join(OsString::from_vec(name));
-        let _ = fs::remove_dir_all(&repo);
+        let repo = tree.path().join(OsString::from_vec(name));
         fs::create_dir(&repo).expect("create non-UTF-8 repo");
         run_git(&repo, &["init", "-q", "-b", "main"]);
         run_git(&repo, &["config", "user.email", "test@upstroke.local"]);
@@ -2118,12 +2147,11 @@ mod tests {
             .expect("canonical resolved git dir"),
             fs::canonicalize(repo.join(".git")).expect("canonical expected git dir")
         );
-        fs::remove_dir_all(repo).expect("remove non-UTF-8 repo");
     }
 
     #[test]
     fn capture_diff_is_immune_to_user_diff_config() {
-        let repo = temp_repo("extdiff");
+        let (_tree, repo) = temp_repo("extdiff");
         let set = |k: &str, v: &str| {
             let out = Command::new("git")
                 .arg("-C")
@@ -2146,7 +2174,7 @@ mod tests {
 
     #[test]
     fn opaque_git_diffs_are_rejected_before_review() {
-        let repo = temp_repo("opaque-diff");
+        let (_tree, repo) = temp_repo("opaque-diff");
         let ws = Workspace::open(&repo).expect("open");
 
         fs::write(repo.join(".gitattributes"), "hidden.rs -diff\n").expect("attributes");
@@ -2165,7 +2193,7 @@ mod tests {
 
     #[test]
     fn non_utf8_text_diff_is_refused_before_review() {
-        let repo = temp_repo("non-utf8-diff");
+        let (_tree, repo) = temp_repo("non-utf8-diff");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("invalid.rs"), b"fn changed() { // \xff\n}\n").expect("invalid text");
 
@@ -2177,7 +2205,7 @@ mod tests {
 
     #[test]
     fn ignored_worker_input_is_absent_from_gate_snapshot() {
-        let repo = temp_repo("ignored-gate-input");
+        let (_tree, repo) = temp_repo("ignored-gate-input");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join(".gitignore"), "worker-toggle\n").expect("ignore rule");
         ws.capture_diff().expect("stage ignore rule");
@@ -2209,7 +2237,7 @@ mod tests {
 
     #[test]
     fn filtered_paths_are_refused_before_gates_and_review() {
-        let repo = temp_repo("filtered-evidence");
+        let (_tree, repo) = temp_repo("filtered-evidence");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(
             repo.join(".gitattributes"),
@@ -2240,7 +2268,7 @@ mod tests {
 
     #[test]
     fn filter_on_unchanged_tracked_path_is_refused_before_materialization() {
-        let repo = temp_repo("filter-on-unchanged-path");
+        let (_tree, repo) = temp_repo("filter-on-unchanged-path");
         let ws = Workspace::open(&repo).expect("open");
         fs::write(repo.join("unchanged.txt"), "tracked baseline\n").expect("tracked file");
         ws.capture_diff().expect("stage baseline file");
@@ -2272,7 +2300,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_refuses_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("pre-add-filter-helper");
+        let (_tree, repo) = temp_repo("pre-add-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("filter-helper"),
@@ -2322,7 +2350,7 @@ mod tests {
 
     #[test]
     fn status_and_switch_refuse_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("status-filter-helper");
+        let (_tree, repo) = temp_repo("status-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("status-filter"),
@@ -2418,7 +2446,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_disables_candidate_fsmonitor() {
-        let repo = temp_repo("capture-fsmonitor");
+        let (_tree, repo) = temp_repo("capture-fsmonitor");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("fsmonitor"),
@@ -2459,7 +2487,7 @@ mod tests {
 
     #[test]
     fn capture_candidate_disables_post_index_change_hook() {
-        let repo = temp_repo("capture-post-index-change");
+        let (_tree, repo) = temp_repo("capture-post-index-change");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("post-index-change"),
@@ -2496,7 +2524,7 @@ mod tests {
 
     #[test]
     fn branch_creation_and_switch_do_not_execute_post_checkout_hook() {
-        let repo = temp_repo("branch-post-checkout");
+        let (_tree, repo) = temp_repo("branch-post-checkout");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("post-checkout"),
@@ -2529,7 +2557,7 @@ mod tests {
 
     #[test]
     fn branch_switch_refuses_filter_before_target_helper_executes() {
-        let repo = temp_repo("branch-filter-helper");
+        let (_tree, repo) = temp_repo("branch-filter-helper");
         fs::create_dir_all(repo.join(".githooks")).expect("helper directory");
         fs::write(
             repo.join(".githooks").join("smudge-helper"),
@@ -2577,7 +2605,7 @@ mod tests {
 
     #[test]
     fn commit_and_discard_do_not_execute_candidate_hooks() {
-        let repo = temp_repo("commit-reset-hooks");
+        let (_tree, repo) = temp_repo("commit-reset-hooks");
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
         fs::write(
             repo.join(".githooks").join("pre-commit"),
@@ -2625,7 +2653,7 @@ mod tests {
 
     #[test]
     fn discard_refuses_target_filter_before_candidate_helper_executes() {
-        let repo = temp_repo("reset-filter-helper");
+        let (_tree, repo) = temp_repo("reset-filter-helper");
         fs::write(
             repo.join(".gitattributes"),
             "README.md filter=upstroke-reset\n",
@@ -2672,7 +2700,7 @@ mod tests {
 
     #[test]
     fn gate_snapshot_does_not_execute_post_checkout_hook() {
-        let repo = temp_repo("snapshot-checkout-hook");
+        let (_tree, repo) = temp_repo("snapshot-checkout-hook");
         run_git(&repo, &["config", "core.autocrlf", "false"]);
         run_git(&repo, &["config", "core.hooksPath", ".githooks"]);
         fs::create_dir_all(repo.join(".githooks")).expect("hooks directory");
@@ -2713,7 +2741,7 @@ mod tests {
 
     #[test]
     fn failed_gate_snapshot_add_cleans_registered_worktree() {
-        let repo = temp_repo("failed-snapshot-add-cleanup");
+        let (_tree, repo) = temp_repo("failed-snapshot-add-cleanup");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
@@ -2757,7 +2785,7 @@ mod tests {
 
     #[test]
     fn unexpected_materialization_residue_is_rejected_and_cleaned() {
-        let repo = temp_repo("snapshot-residue-cleanup");
+        let (_tree, repo) = temp_repo("snapshot-residue-cleanup");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
@@ -2830,7 +2858,7 @@ mod tests {
 
     #[test]
     fn hard_killed_snapshot_owner_is_reclaimed_before_resume() {
-        let repo = temp_repo("snapshot-hard-kill");
+        let (_tree, repo) = temp_repo("snapshot-hard-kill");
         let store = env::temp_dir().join(format!(
             "upstroke-snapshot-store-{}-{}",
             std::process::id(),
@@ -2903,7 +2931,7 @@ mod tests {
     fn gate_snapshot_target_is_atomically_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let repo = temp_repo("private-snapshot-target");
+        let (_tree, repo) = temp_repo("private-snapshot-target");
         let system_temp = env::temp_dir();
         let system_temp_mode = fs::metadata(&system_temp)
             .expect("system temp metadata")
@@ -3018,14 +3046,17 @@ mod tests {
     fn gate_snapshot_accepts_non_utf8_tmpdir_on_linux() {
         use std::os::unix::ffi::OsStringExt;
 
-        let repo = temp_repo("non-utf8-snapshot-root");
+        let (_tree, repo) = temp_repo("non-utf8-snapshot-root");
         let ws = Workspace::open(&repo).expect("open");
         let parent = ws.head_sha_full().expect("parent");
         let tree = ws.staged_tree_oid().expect("tree");
-        let mut name = format!("upstroke-non-utf8-tmp-{}-", std::process::id()).into_bytes();
+        // Built inside an acquired tree for the reason
+        // `worktree_git_dir_preserves_non_utf8_repo_path` gives: `acquire`
+        // names its own root, and that name is UTF-8.
+        let snapshot_tree = scratch("non-utf8-tmp");
+        let mut name = b"tmp-".to_vec();
         name.push(0xff);
-        let temp_root = env::temp_dir().join(OsString::from_vec(name));
-        let _ = fs::remove_dir_all(&temp_root);
+        let temp_root = snapshot_tree.path().join(OsString::from_vec(name));
         fs::create_dir(&temp_root).expect("non-UTF-8 temp root");
 
         let snapshot = ws
@@ -3039,8 +3070,8 @@ mod tests {
 
     #[test]
     fn dirty_submodule_worktree_is_refused_before_gates() {
-        let child = temp_repo("dirty-submodule-child");
-        let repo = temp_repo("dirty-submodule-parent");
+        let (_tree, child) = temp_repo("dirty-submodule-child");
+        let (_tree, repo) = temp_repo("dirty-submodule-parent");
         let add = Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -3077,8 +3108,8 @@ mod tests {
 
     #[test]
     fn clean_unchanged_submodule_is_refused_before_gate_snapshot() {
-        let child = temp_repo("clean-submodule-child");
-        let repo = temp_repo("clean-submodule-parent");
+        let (_tree, child) = temp_repo("clean-submodule-child");
+        let (_tree, repo) = temp_repo("clean-submodule-parent");
         let output = Command::new("git")
             .arg("-C")
             .arg(&repo)

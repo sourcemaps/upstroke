@@ -4085,17 +4085,25 @@ fn real_docker_prints_the_transcribed_unreachable_diagnostics() {
         format!("unix:///nonexistent-{}/docker.sock", std::process::id()),
     ));
 
+    // The unreadable directory is built INSIDE an acquired tree rather than
+    // beside one. The fixture here built `temp_dir()/upstroke-r2-denied-<pid>`
+    // and pre-cleaned it with a discarded `remove_dir_all` before it had any
+    // claim on the name (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`); a chmod-000
+    // directory is also one a reclaim cannot descend, so it is the child and
+    // not the root, and the permissions are restored below before the guard
+    // reclaims the tree (`PR7-SCRATCH-FIXTURE-LEAK`).
+    #[cfg(unix)]
+    let denied_tree = scratch("r2-denied");
     #[cfg(unix)]
     let denied = {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("upstroke-r2-denied-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = denied_tree.path().join("denied");
+        fs::create_dir(&dir).expect("a scratch directory");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         let reachable = fs::read_dir(&dir).is_ok();
         if reachable {
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
-            let _ = fs::remove_dir_all(&dir);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+                .expect("restore the directory the guard has to reclaim");
             None
         } else {
             cases.push((
@@ -4132,11 +4140,14 @@ fn real_docker_prints_the_transcribed_unreachable_diagnostics() {
         "the permission case did not run: this process may be root"
     );
 
+    // The permissions go back before the guard drops: a chmod-000 directory
+    // is one `remove_dir_all` cannot descend, so leaving it would turn the
+    // reclaim into a reported failure. The removal itself is the guard's.
     #[cfg(unix)]
     if let Some(dir) = denied {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
-        let _ = fs::remove_dir_all(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+            .expect("restore the directory the guard has to reclaim");
     }
 }
 
