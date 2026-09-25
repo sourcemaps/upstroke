@@ -1373,11 +1373,7 @@ fn the_windows_leg_counts_the_tests_it_ran() {
     let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
     for (variable, tool, asked) in [
         ("rustc", "rustc", "the compiler Cargo will run"),
-        (
-            "path_rustc",
-            "rustc",
-            "the `rustc` on PATH, which the suite's fixtures spawn",
-        ),
+        ("path_rustc", "rustc", "the `rustc` on the step's PATH"),
         ("cargo", "cargo", "the `cargo` on PATH"),
     ] {
         assert!(

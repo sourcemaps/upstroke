@@ -129,20 +129,36 @@ and throws unless every one is
 carries and its environment selects, on the hosted lane what the install
 selected, and `the_windows_leg_counts_the_tests_it_ran` holds the number
 in the script to the constant, so re-curation edits both or neither.
+Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
 
-What the three questions bound is the compiler a lane selects by accident:
-a rustup default that did not move, a `RUSTC` in the service environment, a
-PATH that names another install. They are asked from the step's own
-process, and the test executables get a process of their own: Cargo builds
-their environment, prepends its output directories to their PATH, and
-applies a Cargo config's `[env]` table to them, so a config written with
-`[env] PATH = { value = "...", force = true }` answers all three questions
-with one compiler and hands the fixtures another. That is not a
-misconfiguration the questions can catch; it is a config written to defeat
-them, a forgery in the paragraph above's sense, on a machine the operator
-provisions, and no reading of `ci.yml` sees it -- the same standing the
-witness gives a wrapper that answers `--version` with one compiler and
-compiles with another. Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
+What the three questions bound is the step's own process: a rustup default
+that did not move, a `RUSTC` in the service environment, a PATH that names
+another install. The test executables get a process of their own, which
+Cargo builds: it sets the platform's library-path variable on every one --
+on Windows that is `PATH`, its output directories prepended -- and then
+applies a Cargo config's `[env]` table, skipping any key it has already
+set. That skip is a case-sensitive lookup and Windows' environment is not,
+so on the guest `[env] PATH = { value = "...", force = true }` is ignored
+and the same table spelled `Path` replaces the fixtures' PATH: all three
+questions answer the image's compiler and the fixtures spawn another
+(frontier review 9, executed on the dev guest; Cargo's source at
+`c980f4866`). The questions do not see that split. The suite does: four of
+the five fixtures that spawn a compiler hand it this crate's rlib with
+`--extern` -- `every_declared_effect_denial_refuses_for_the_reason_it_declares`
+and `every_denied_path_this_host_can_resolve_does_resolve` here,
+`every_declared_build_refusal_fails_for_the_reason_it_declares` in the log
+tests, `a_private_half_deletion_without_a_proof_does_not_compile_for_the_stated_reason`
+in the run-directory tests -- and `rustc` refuses an rlib another version
+built. Under the split all four fail with E0514 and `cargo test` exits 101
+(review 9, executed at `fb136de5` on Linux, where Cargo sets no `PATH` and
+the plain spelling applies; on Windows the E0514 was executed in a probe
+crate, and the suite itself was not run). The fifth,
+`the_file_level_lint_reader_answers_what_rustc_does`, links nothing and
+passes on the other compiler, but only in a run the other four have already
+failed. So no green run of this step has spawned a fixture compiler other
+than the one Cargo built with. That bound is the fixtures', not the
+questions', and it rests on those four tests running on the Windows leg,
+which nothing here pins by name: the floor counts tests, not which ones.
 
 Every other pin in this contract is an equality over `ci.yml`, and each
 refuses one named way of arriving at a green job over a suite that never
@@ -242,8 +258,12 @@ guest, because a pull request waits on it. What the queue's hosted run does
 not prove is behaviour that differs between the two machines: a test whose
 outcome depends on the runner passes on `windows-latest` in the queue and
 fails on the guest, and the push to master, which runs the guest, is the
-first run to see it. The compiler pin narrows that gap to runtime
-differences; it does not close it.
+first run to see it. The compiler pin and the witness's compiler questions
+remove the compiler a lane selects by accident -- a default that did not
+move, an environment override, a PATH naming another install -- and a
+compiler split between Cargo and the fixtures fails the suite rather than
+passing it. None of that closes the gap: the two machines' runtime
+differences remain.
 
 ## `pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";`
 
