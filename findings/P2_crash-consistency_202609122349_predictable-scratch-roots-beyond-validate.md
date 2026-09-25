@@ -122,7 +122,7 @@ per-file conversion this row asks for over the fixture **pre-cleans**, so the tw
 that read "already carried at `P1`" no longer have a row to point at; the class this row names is
 what is left after them, and it is smaller.
 
-Re-run at `9d42322c24372033a145f7cf52d8fb65018ef74e` with this row's own two patterns, reimplemented from the definitions above
+Re-run at `b10c07ffe8822c7eaa5dc8b5fc8ff2fa7faaa874` with this row's own two patterns, reimplemented from the definitions above
 (a `temp_dir()` naming statement — the line plus continuations to the terminating `;` — that names
 `std::process::id()` and does not name `ulid`; and a line matching
 `let _ = <path>remove_dir_all(`), over `git ls-files src` with comment-only lines skipped. The
@@ -143,6 +143,13 @@ that file first on its B count; on the split this row itself draws — predictab
 discarded result — it buys the least, because what is left there leaks only on the failing runs and
 cannot delete another holder's content. The pre-clean-then-create shape B's four-line refinement
 counted is **0** at this head, against 29 at `d724fb16` by the same script.
+
+The figures above are those of the tree `b10c07ff` carries — the commit that wrote this
+paragraph — re-run there after a rebase rewrote the commit they were first stamped with. At
+`6137824d4c6b2294bed74bec9759ecec0446fb7c`, this branch's last commit to touch `src/`, B is
+**106** in 14 files, 47 of them still `src/runner/host/tests.rs`'s — the Windows lint repair
+deleted one discarded teardown from `src/runner/container/tests.rs` — and A, A2 and the four-line
+shape are unchanged.
 
 **The allowlist cost this row predicted came due and was not paid.** "Repairing that helper — three
 lines — falsifies both, so the repair reaches an effect allowlist and stops being a delegated

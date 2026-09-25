@@ -4,7 +4,7 @@ severity: P3
 disposition: deferred
 category: docs-contract
 pr: 321
-reviewed_sha: 9d42322c24372033a145f7cf52d8fb65018ef74e
+reviewed_sha: f3e7003975c85d4a95e3f6b8e12050fec4f174d0
 location: effects/allowlist.toml:704
 provenance: introduced_by_feature
 first_bad: PR64-CLEANUP-003-SCRATCH-PRECLEAN
