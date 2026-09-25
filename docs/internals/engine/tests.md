@@ -1247,6 +1247,82 @@ t1 commits; the process dies inside t2's first attempt.
 Only reachable if the adapter never got a second invocation, which
 would mean this test is not exercising what it claims to.
 
+## `const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\`
+
+A gate whose verdict *is* the object graph it reads, and nothing else.
+
+`probe-recorded` is a tag on a commit that `refs/replace/*` sends to the
+commit `probe-replacing` names. Reading replacements, the two names are one
+object and `git diff --exit-code` exits 0; reading the recorded graph they
+are two commits one blob apart and it exits 1. No shell builtin, no `grep`,
+no platform-specific quoting — the whole of the Windows leg is `git` and two
+ref names.
+
+## `fn v1_object_graph_helper()` › `crate::workspace_manager::fixture::REPLACEMENT_WITNESS`
+
+The marker the helper refuses to run without, for the reason every
+`#[ignore]` helper in this crate has one: a run with `--include-ignored`
+would otherwise execute its body in a process whose environment nobody
+prepared, which is the one environment this witness must never be measured
+in. It is
+[`fixture`](../../../src/workspace_manager/fixture.rs)'s rather than this
+module's because every replacement witness in the crate now shares one, and
+one marker beside one door is the whole of that (PR #271, round 4).
+
+## `fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote()` › `run_replacement_witness_child`
+
+The helper runs in a child because what it measures is
+`HostEnvironment::from_process()`, which is production's own read of the
+environment this process was started in. There is no seam to filter it at,
+so the environment is prepared instead —
+[`without_ambient_replacement_controls`](../../../src/workspace_manager/fixture.rs)
+states what it takes away and why, and
+`assert_replacement_controls_pinned` refuses in the child if any of it
+survived.
+
+The spawn itself was this module's own function until round 4. It is
+`fixture::run_replacement_witness_child` now, shared with
+`src/workspace_manager/tests.rs` and `src/gates.rs`, because three copies of
+a door is three places a later repair can reach two of.
+
+## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {`
+
+An engine repository carrying a replacement the run itself never touches.
+
+The two probe commits are made on a branch off `main` and the branch is
+deleted, so `probe.txt` is in no tree the engine reads, the worktree is
+clean when the run starts, and the tags are what keeps the commits alive.
+The replacement is installed last, after the checkouts that would otherwise
+resolve through it.
+
+## `#[test]`
+
+The v0.1 conductor runs and resumes on the graph its own workspace wrote
+(PR #271, round 2's fix-check finding).
+
+`src/gates.rs`'s `a_v1_gate_judges_the_tree_its_own_workspace_materialised`
+supplies `ObjectGraph::AsReplaced` **itself**, so it measures what that
+value does and not whether the conductor selects it; the environment test
+beside it checks the constructor independently, and
+`production_reaches_a_spawn_through_one_host_runner_per_run` accepts either
+constructor by design. Measured at head `aa2728d`: reverting the two calls,
+then in `src/engine/mod.rs` and since 2026-09-20 in `src/engine/coordinator.rs`
+and `src/engine/resume.rs`, to `HostRunner::new()` left all of them green at `0`,
+so the whole legacy repair could have been reverted without a guard
+noticing.
+
+This drives `engine::run_with` and `engine::resume_with` — the production
+facades, one call above each of those two sites — so each is guarded on its
+own. Measured with `run_harness` alone reverted: the run parks, `GateFailed`,
+Git exit 1, exit `101`. Measured with `resume_harness` alone reverted: the
+first run parks as it is meant to, the answer un-parks it, and the resumed
+attempt parks on the same gate, exit `101`.
+
+The resume leg takes `a_parked_run_is_answered_out_of_band_and_resumed`'s
+shape — `Effect::NoEdit` parks the task before any gate runs, the answer is
+written by the CLI path, and the resumed attempt is the first one to reach
+a gate — because a resume of a completed run replays and runs nothing.
+
 ## `let repo = temp_engine_repo("answerresume");`
 
 §21's definition-of-done (d) across processes: the run ends parked,
@@ -2111,7 +2187,7 @@ three fields that vary *inside* an attempt's identity never vary in it:
 `AttemptNumber`, the review pass index, and pass-versus-re-ask. Each of
 those is a distinct call site in `engine::attempt`, and a call site that
 passes a constant where it should pass its argument is invisible to a grid
-of hand-built identities (`runner::tests::invocation_ids_are_unique_within_a_run…`
+of hand-built identities (`runner::contract::tests::invocation_ids_are_unique_within_a_run…`
 synthesizes its tuples; `review::tests::the_one_format_reask_is_its_own_invocation…`
 is handed a correct pair). `invocation_identity` requires "unique per
 process" and "a retry attempt has a new attempt number", and INV-20 makes
@@ -2198,6 +2274,18 @@ unchanged", and `modules["src/engine/mod.rs"]` lists the facade item by
 item: the five `pub use` groups, `pub fn run/run_with/run_harness`, and
 `pub fn resume/resume_with/resume_harness`.
 
+**The six functions are re-exports since 2026-09-20, and the public paths are
+the packet's still.** Their definitions moved into `engine::coordinator` and
+`engine::resume`, the conductor modules they drive, so that the facade calls
+nothing denied and carries no allow (`PR306-FACADE-INLINE-ESCAPE`; the facade's
+own notes say why a file a topology module descends from cannot carry one). So
+the census reads the facade's `pub use` statements for them: the names
+re-exported from the two conductor modules are exactly the six, the facade
+declares no `pub fn` of its own, each conductor module's top-level `pub fn`s
+are exactly the ones re-exported from it -- so a seventh cannot be defined
+beside them and left unexported, waiting for a `pub use` -- and everything
+else re-exported is still the packet's five groups, eighteen names.
+
 This slice added `run_harness_on` and `resume_harness_on`, which take the
 boundary as a parameter. Inside the crate that is exactly right — it is how
 `engine::tests` drives a recording runner. Public, it is a hole in
@@ -2220,9 +2308,15 @@ in the file — so the census failed on its own explanation.
 `PR4-CENSUS-COMMENT-ORACLE`, and the same trick would have let any of the
 six widenings be smuggled past by writing it in a comment.
 
-## `let public_fns: BTreeSet<&str> = source`
+## `top_level_public_fns(source),`
 
-Every `pub fn` at the facade's top level.
+Every `pub fn` at the facade's top level, and there are none: the entry points
+are defined in the conductor modules and re-exported.
+
+## `let entry_points: BTreeSet<String> = public_facade_entry_points().into_iter().collect();`
+
+The six the packet enumerates, read from the facade's re-exports of the two
+conductor modules.
 
 ## `for widening in [`
 
@@ -2241,10 +2335,10 @@ this build's own recovery refuses — the frontier review of
 `75da796`, finding 1. A census that forbids five widenings and not
 the sixth is the shape of every fail-open needle this slice found.
 
-## `let mut reexported: BTreeSet<&str> = BTreeSet::new();`
+## `let reexported: BTreeSet<&str> = facade_reexports(source)`
 
-The re-exports, flattened. `pub use` is the other way a name reaches the
-public path, and the packet enumerates these too.
+The re-exports other than the entry points, flattened. `pub use` is the other
+way a name reaches the public path, and the packet enumerates these too.
 
 ## `"RunOptions",`
 
@@ -2266,15 +2360,33 @@ crate::events
 
 crate::ladder
 
-## `for private in ["fn run_harness_on(", "fn resume_harness_on("] {`
+## `let conductors = [`
 
-The boundary-taking helpers exist and are *not* public: this test would
-pass just as well if they had been deleted, which is not what it is for.
+The two conductor modules the entry points are re-exported from, each with its
+boundary-taking seam. The seams exist, as `pub(super)` items of their modules
+— which is `engine` and its descendants, the set the facade's private items
+were visible to — and are *not* public, by either spelling, and are not
+re-exported: this test would pass just as well if they had been deleted, which
+is not what it is for.
 
-## `fn public_facade_entry_points() -> Vec<&'static str> {`
+## `const CONDUCTOR_MODULES: [&str; 2] = ["coordinator", "resume"];`
+
+The modules whose re-exported functions are the engine's write-coordinator
+entry points.
+
+## `fn top_level_public_fns(production: &str) -> std::collections::BTreeSet<&str> {`
+
+Every `pub fn` written at the top level of a module's production code.
+
+## `fn facade_reexports(production: &str) -> Vec<(&str, Vec<&str>)> {`
+
+Each `pub use` statement of the facade as the path it re-exports from and the
+names it re-exports.
+
+## `fn public_facade_entry_points() -> Vec<String> {`
 
 The six public entry points of the facade, as the facade's own text spells
-them.
+them: the names it re-exports from the conductor modules.
 
 Read from `mod.rs` rather than written out, so a seventh public entry point
 cannot be added without appearing here — and therefore without being
@@ -2377,3 +2489,128 @@ The same ordering, for the other coordinator. A resume is a write command:
 The resume's own refusal names the run directory it looked in; the
 containment refusal cannot, because it happens before the coordinator
 resolves anything.
+
+## `const PARKING_SETTLEMENT_KILL_CHILD: &str = "engine::tests::parking_settlement_kill_child";`
+
+The first kill child of the question-payload witnesses: the run dies once its parking settlement
+is durable.
+
+## `const QUESTION_PAYLOAD_KILL_CHILD: &str = "engine::tests::question_payload_kill_child";`
+
+The second: the payload's write dies at one of its phases.
+
+## `const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);`
+
+The deadline both kill children are given through `workspace_manager::fixture::run_kill_child_within`:
+the topology scaffold's `KILL_CHILD_BOUND`, which this module cannot name, at the same 120 seconds. A
+child still running at the bound is killed and reaped, and the witness fails naming its tag.
+
+## `const ASKING_PLAN: &str =`
+
+One implementer task, whose worker (`Effect::AskQuestion`) stops and asks.
+
+## `const PARKING_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\`
+
+Never asks anyone and one attempt per rung, so the worker's question parks the task, and a resume
+with no answer parks it again.
+
+## `struct KillOnceTheParkingSettlementIsDurable {`
+
+The legacy log's hooks (`RunOptions::log_hooks`, the seam the legacy append tests use), aborting
+the process at the after phase of the append whose line is the `attempt_finished` carrying a
+parking decision. The after phase is consulted once the line is written and synced, and the
+coordinator's next effect is the payload write (`coordinator.rs`: `materialize_question` follows
+the settlement's `emit`, with only the settlement's error check between them), so the process dies
+with exactly the durable prefix `RunDir.WriteQuestionPayload`'s before phase has.
+
+## `fn parking_settlement_kill_child() {`
+
+Runs `ASKING_PLAN` under `PARKING_CONFIG` with the hooks above. Reaching the panic means the run
+went past its settlement.
+
+## `struct QuestionPayloadKilledAt {`
+
+The run-directory funnels' production adapter with a kill at one phase of
+`RunDir.WriteQuestionPayload`, exported before it is handed back.
+
+## `fn payload_phase_named(name: &str) -> crate::topology::effects::HookPhase {`
+
+The phase `UPSTROKE_TEST_KILL_COORDINATE` names, in the parent's `Debug` spelling.
+
+## `fn question_payload_kill_child() {`
+
+Over the run the first child left, writes the parked question's payload through
+`rundir::write_question_payload` with the adapter above, and dies at the phase. The arguments are
+the ones `interaction::write_question` passes it (the record's filename component, the questions
+directory, the record the log's settlement holds): the legacy engine reaches the funnel only
+through that wrapper, which passes `NoHooks`, and has no seam to arm it, so this is how a kill at
+the payload's own phase is constructed and observed under the production adapter. This child's
+record holds the coordinate.
+
+## `fn a_run_killed_once_its_parking_settlement_is_durable(`
+
+Makes the repository, seeds the plan, runs the first kill child, and reads back what it left: the
+log ends at the `attempt_finished` with its parking decision, the replayed state holds exactly one
+open question, no payload exists, and the run lock went with the process.
+
+The repository and its sibling private root (`private_root_for`) are made inside one
+`rundir::scratch_tree` tree, which the helper hands back with them, and each caller holds it for
+its whole body. Both are reclaimed when the witness returns and when it unwinds. A reclaim that
+fails on the return fails the test naming the root; one that fails while the test unwinds is
+reported on stderr beside the failure, without a second panic (`rundir::scratch_tree`'s own tests
+witness both). Before #292's review round 6 they were `upstroke-engine-<tag>-<pid>` and its
+`-home` in the temporary directory, which nothing removed.
+
+The kill child is given the tree as its temporary directory too (`TMPDIR`, and the `TMP` and
+`TEMP` Windows reads), so the pools file `options` makes it through `no_pools`, named for the
+child's process, lies inside the tree (#292's review round 7: it was
+`upstroke-engine-nopools-<pid>` in the temporary directory, which the child's abort left there).
+
+## `fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {`
+
+Where the question's payload lives.
+
+## `fn resume_options_in(`
+
+`resume_options`, with its empty pools file written in the witness's tree instead of through
+`no_pools`, which makes one per test process in the temporary directory and which nothing removes.
+The payload witnesses and the ambient-join witness resume through this, so a run of them alone
+leaves nothing in the temporary directory (#292's review round 7).
+
+## `fn resume_parked(`
+
+The tabled recovery: `resume_harness_inner`, the legacy resume, whose question rewrite
+(`resume.rs`, every record of the replayed state written through `interaction::write_question`) is
+the production payload writer's recovery. With no answer the run parks again, the payload holds
+exactly the record the settlement recorded, the report names that one question, and the resumed
+state and report equal a replay of the log on each of two loads. It resumes with
+`resume_options_in` over the witness's tree.
+
+## `fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(`
+
+Rows 85 and 86 of Gate 5's audit, `RunDir.WriteQuestionPayload` before and after, where the
+payload's only production writer runs: the legacy engine (#292's round-1 fix-check lens, finding 1,
+found the topology witness this replaced resuming a planted schema-4 run, which never runs that
+recovery). The first child leaves the settlement durable with no payload; the second dies at the
+phase, leaving the payload exactly where the authority's rows put R21 (absent before the write,
+present after it). The legacy resume then writes or adopts it: after the after-phase kill, its
+rewrite is byte-identical to what the killed write left. It appends after the durable prefix, and
+its state replays equal on two loads. With the rewrite made to clear each record's options (the
+lens's mutation), both witnesses fail on the payload's equality with the recorded question. The
+second child is given the witness's tree as its temporary directory, as the first is.
+
+## `struct CreationsRecorded {`
+
+The process funnel's production adapter, recording every `child_created` callback.
+
+## `fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges() {`
+
+Row 145 of Gate 5's audit on Windows, `Process.Spawn`'s `AmbientJobJoined` point in error-return
+mode, at the write-command containment boundary with a continuation that can be seen: the legacy
+resume facade `resume_contained`, given a run that the first payload child left parked with its
+settlement durable. Its containment step is the production `contain_write_command` under the
+adapter above with the point armed. The facade refuses with the injected error and the point
+fired. Nothing the continuation does happened: no process was created (no `child_created`
+callback), the runner ran nothing, the log's bytes are unchanged, the question's payload was not
+written, and nothing holds the run lock. The next resume converges as `resume_parked` requires.
+Both resumes run with `resume_options_in` over the witness's tree.

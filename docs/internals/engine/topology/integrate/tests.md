@@ -41,7 +41,8 @@ merge_prepared append in `integrate`, so an append that does not complete
 — the stable-prefix barrier's sync failing before it returns is one way —
 aborts the sequence through `?` before any CAS, so no ref moves. What a
 resume then derives from the durable prefix — a lost unsynced line, or a
-kept one — is `recover`'s `unsynced_merge_prepared_lost_to_power_failure`
+kept one — is `recover`'s
+`unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`
 and `events::log`'s barrier tests; here the point is only that the ref
 never ran ahead of the append.
 
@@ -96,6 +97,16 @@ Declined-after-park is `fold`'s
 `recover`'s `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue`
 (a resume terminal, never a live one).
 
+## `fn terminal_shape_coverage_table_drives_every_shape_and_eac…` › `let rejected = rejected_of(&run);`
+
+R11: "protected while the run can resume, whatever the candidate's
+state". Read the rejected candidate's candidates ref and its object
+after the rejection `integrate` produced, so a production caller of
+`Ref.DeleteCandidatesRef` on either rejection arm fails this table
+rather than only the dispatch-side `refuse_absent_source`
+(`G4-O1-REJECTION-KEEPS-CANDIDATES-REF-UNWITNESSED`; G4 run 3
+mutations M22 and M23 survived the suite without these reads).
+
 ## `fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay() {` › `if !matches!(shape, Shape::Fast | Shape::Conflict) {`
 
 Every verifying shape judged exactly the commit its
@@ -119,16 +130,16 @@ so Git validates the head atomically; it just moves nothing.
 The rejection registered the repair atomically: beta is AwaitingRepair,
 a new Pending repair task exists, and the lineage lease is held.
 
+## `fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect() {` › `assert!(`
+
+The staging worktree of the rejected transaction is gone.
+
 ## `fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect() {` › `let mut expected_kinds = kinds_before;`
 
 "merge_rejected before any repair effect": the sequence appended
 exactly the rejection, dispatched nothing, and performed no task
 worktree effect — no intent written, no worktree added — for the
 repair it registered, whose slot does not exist.
-
-## `fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect() {` › `assert!(`
-
-The staging worktree of the rejected transaction is gone.
 
 ## `fn a_human_required_verdict_parks_the_task() {` › `assert!(`
 
@@ -189,12 +200,6 @@ A rejection's frozen repair spec and the record it was built from. What PR9
 dispatches from is the spec's body; the record is what the spec was built out
 of, and a repair that reaches one and not the other is not a repair.
 
-## `fn a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec() {` › `verification.detail.contains("- restore it")`
-
-`attempt::review_failure` renders each `required_changes` entry as its own `- `
-line and leaves the verdict's reasons in the summary, so the `- ` prefix is what
-makes this the reviewer's demand and not a restatement of why the pass failed.
-
 ## `fn a_failing_gates_own_output_reaches_the_frozen_repair_spec() {`
 
 The two witnesses that a rejection's evidence reaches the frozen spec, written
@@ -203,6 +208,12 @@ rejecting reviewer through the production loop to a durable `merge_rejected`,
 and read both the `VerificationRecord` and the frozen repair spec's body. Each
 asserts the summary is still there beside the evidence, so a repair that
 replaced one with the other fails too, and each ends `replay_twice_equal`.
+
+## `fn a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec() {` › `verification.detail.contains("- restore it")`
+
+`attempt::review_failure` renders each `required_changes` entry as its own `- `
+line and leaves the verdict's reasons in the summary, so the `- ` prefix is what
+makes this the reviewer's demand and not a restatement of why the pass failed.
 
 ## `fn a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize() {`
 

@@ -36,14 +36,17 @@
 //! line above holds for the names this module reads itself. It does not hold
 //! for what it reads *through*: the parent's inspections still fold some Git
 //! failures into an answer before the `?` here ever sees them — a failed
-//! `worktree list` or `cat-file`, a `show-ref` that could not run, a `fsck`
-//! that did not finish. Making those trustworthy means reading a repository
-//! the way Git reads it (its gitfile grammar, its linked-worktree reader, its
-//! trace-polluted streams, with a bound on every read of a
-//! repository-controlled file), which is the parent's work and not a child
-//! classifier's: `reviews/findings/` carries a file per case for the sweep of
+//! `cat-file`, a `show-ref` that could not run, a `fsck` that did not finish.
+//! Making those trustworthy means reading a repository the way Git reads it
+//! (its gitfile grammar, its trace-polluted streams, with a bound on every
+//! read of a repository-controlled file), which is the parent's work and not
+//! a child classifier's: `findings/` carries a file per case for the sweep of
 //! `src/workspace_manager.rs`, the queue's last row of this family, and
-//! `reviews/FINDINGS.md` §51 is where they were derived.
+//! `reviews/FINDINGS.md` §51 is where they were derived. The one inspection
+//! this module used to make through `git worktree list` — whether the
+//! repository registers the worktree — is now the parent's byte-safe read of
+//! the store itself (`registration_for`), since a registration an interrupted
+//! add left half-written is exactly what that enumeration cannot report.
 
 // **This child states its own lint level and inherits nothing.** A Rust lint
 // level is scoped by the module tree rather than by the file, so an out-of-line
@@ -54,7 +57,7 @@
 // governed primitive, so all three are DENIED and this module takes no
 // `effects/allowlist.toml` row: a row records an allowance, and this module
 // takes none.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
@@ -69,7 +72,7 @@ use crate::topology::effects::{
 };
 
 use super::{
-    git_dir_of, head_commit, index_differs_from_head, object_exists, record_for,
+    git_dir_of, head_commit, index_differs_from_head, object_exists, registration_for,
     temporary_object_files, unreachable_objects, worktree_has_unstaged_changes,
 };
 
@@ -305,8 +308,12 @@ fn after_reference_present(
             Ok(target.base.is_some_and(|base| head != base))
         }
         // `cherry-pick --no-commit` publishes its merge objects through the
-        // repair worktree's index. CHERRY_PICK_HEAD survives a *successful*
-        // `--no-commit`, so it is never the discriminator here.
+        // repair worktree's index. `--no-commit` never writes CHERRY_PICK_HEAD
+        // — not on a clean pick, not on a conflicting one (measured on git
+        // 2.43; `repair_materialize`'s doc) — so the file cannot be the
+        // discriminator here, and the index against `HEAD` is. (This comment
+        // said until PR #249's fifth repair round that CHERRY_PICK_HEAD
+        // "survives a successful `--no-commit`"; the record review found it.)
         EffectSiteId::Object(ObjectSite::RepairMaterialize) => {
             if index_lock_present(worktree)? {
                 return Ok(false);
@@ -355,6 +362,11 @@ pub fn observed_residue_elements(
         Some(dir) => name_present(dir, name),
         None => Ok(false),
     };
+    // A state file, committed or still held under its lock.
+    let state_in_git_dir = |name: &str| match git_dir.as_deref() {
+        Some(dir) => state_file_present(dir, name),
+        None => Ok(false),
+    };
     for element in site.residue_elements() {
         let seen = match element {
             ResidueElement::UnreferencedObject => {
@@ -366,10 +378,10 @@ pub fn observed_residue_elements(
             }
             ResidueElement::TemporaryObjectFile => temporary_object_files(repository)?,
             ResidueElement::IndexLock => in_git_dir("index.lock")?,
-            ResidueElement::CherryPickHead => in_git_dir("CHERRY_PICK_HEAD")?,
-            ResidueElement::MergeHead => in_git_dir("MERGE_HEAD")?,
-            ResidueElement::MergeMsg => in_git_dir("MERGE_MSG")?,
-            ResidueElement::OrigHead => in_git_dir("ORIG_HEAD")?,
+            ResidueElement::CherryPickHead => state_in_git_dir("CHERRY_PICK_HEAD")?,
+            ResidueElement::MergeHead => state_in_git_dir("MERGE_HEAD")?,
+            ResidueElement::MergeMsg => state_in_git_dir("MERGE_MSG")?,
+            ResidueElement::OrigHead => state_in_git_dir("ORIG_HEAD")?,
             ResidueElement::SequencerState => in_git_dir("sequencer")?,
             ResidueElement::RegisteredUnpopulatedWorktree => {
                 add_state(repository, worktree)? == AddState::Unpopulated
@@ -424,6 +436,18 @@ pub const fn element_breaks_quiescence(element: ResidueElement) -> bool {
 /// as evidence of an interrupted command would close generations that are
 /// perfectly reusable. Recorded rather than silently dropped.
 ///
+/// Each state *file* is read in both the forms Git's lockfile API gives it:
+/// committed under its own name, or still held as `<name>.lock` by a writer
+/// that was killed between creating the lock and renaming it into place. The
+/// held form is the same interrupted command's state, and it is the form that
+/// blocks the next writer of that name outright (`could not lock 'MERGE_MSG':
+/// File exists`), so a verifier that read only the committed form would pass a
+/// worktree on which the very command that is about to be re-run cannot
+/// complete. Measured by PR9's repair-materialization kill sampler: a
+/// `cherry-pick --no-commit` killed inside `write_message` leaves exactly
+/// `MERGE_MSG.lock`, a merged index and no `MERGE_MSG` (`index.lock` is
+/// already released by then). The directories have no held form.
+///
 /// # Errors
 ///
 /// An I/O error naming a name in the git dir this process could not inspect.
@@ -431,21 +455,33 @@ pub(super) fn administrative_residue_at(
     git_dir: &Path,
 ) -> Result<Vec<ResidueElement>, UpstrokeError> {
     let mut present = Vec::new();
+    if name_present(git_dir, "index.lock")? {
+        present.push(ResidueElement::IndexLock);
+    }
     for (name, element) in [
-        ("index.lock", ResidueElement::IndexLock),
         ("CHERRY_PICK_HEAD", ResidueElement::CherryPickHead),
         ("MERGE_HEAD", ResidueElement::MergeHead),
         ("MERGE_MSG", ResidueElement::MergeMsg),
-        ("sequencer", ResidueElement::SequencerState),
-        ("rebase-merge", ResidueElement::SequencerState),
-        ("rebase-apply", ResidueElement::SequencerState),
-        ("REVERT_HEAD", ResidueElement::SequencerState),
     ] {
-        if name_present(git_dir, name)? {
+        if state_file_present(git_dir, name)? {
             present.push(element);
         }
     }
+    for name in ["sequencer", "rebase-merge", "rebase-apply"] {
+        if name_present(git_dir, name)? {
+            present.push(ResidueElement::SequencerState);
+        }
+    }
+    if state_file_present(git_dir, "REVERT_HEAD")? {
+        present.push(ResidueElement::SequencerState);
+    }
     Ok(present)
+}
+
+/// Whether a Git state file is present in either of its two forms: committed
+/// as `name`, or still held as `name.lock` by an interrupted writer.
+fn state_file_present(git_dir: &Path, name: &str) -> Result<bool, UpstrokeError> {
+    Ok(name_present(git_dir, name)? || name_present(git_dir, &format!("{name}.lock"))?)
 }
 
 /// What one of the three adds left behind: their three residue classes.
@@ -470,19 +506,26 @@ enum AddState {
     Populated,
 }
 
+/// Which of the three the store shows for `worktree`.
 ///
-/// What it reads is the parent's `record_for` and `git_dir_of`, so it is only
-/// as trustworthy as those are: `record_for` answers `None` for a `worktree
-/// list` that failed, and `git_dir_of` accepts any target text after
-/// `gitdir:`. Both are open findings for the parent's sweep in
-/// `reviews/findings/`; this function's own contribution is that the after
-/// phase and the residue element are two arms of one reading rather than two
-/// hand-written complements.
+/// What it reads is the parent's `registration_for` and `git_dir_of`, so it
+/// is only as trustworthy as those are: `registration_for` binds a
+/// registration by its `gitdir` bytes the way the removal does and passes an
+/// entry that names nothing (`locked` with no `gitdir`, or with an empty one,
+/// the two states an add killed before it wrote the path leaves), so that
+/// worktree reads as unregistered — Git's own reading of the store, which
+/// lists no such entry — while the states killed later (an empty `HEAD` or
+/// `commondir`, which make Git's enumeration refuse or die) read as
+/// registered and unpopulated; and `git_dir_of` accepts any target text
+/// after `gitdir:`, an open finding for the parent's sweep in `findings/`.
+/// This function's own contribution is that the after phase and the residue
+/// element are two arms of one reading rather than two hand-written
+/// complements.
 fn add_state(repository: &Path, worktree: &Path) -> Result<AddState, UpstrokeError> {
-    let Some(record) = record_for(repository, worktree)? else {
+    let Some(registration) = registration_for(repository, worktree)? else {
         return Ok(AddState::Unregistered);
     };
-    if record.locked.as_deref() == Some("initializing") || git_dir_of(worktree)?.is_none() {
+    if registration.initializing || git_dir_of(worktree)?.is_none() {
         return Ok(AddState::Unpopulated);
     }
     Ok(AddState::Populated)

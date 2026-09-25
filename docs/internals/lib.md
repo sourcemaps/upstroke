@@ -28,3 +28,16 @@ The capacity engine (§13) ships **read-only**: `connect` discovers the agent
 CLIs and writes the pools file, `capacity` and the dry-run preview estimate
 what is left and what each strategy *would* do, and budgets stop a run at a
 ceiling — but nothing routes on any of it. Capacity-driven binding is v0.2.
+
+## Held to declarations
+
+This file declares the crate's modules and nothing else, and since #318's
+third round `effects::tests::a_declaring_module_holds_declarations_and_re_exports_and_nothing_else`
+holds it to that shape beside `src/engine/mod.rs`: a `fn`, a constant, an
+inline module, `include!` or a macro written here is a red test. The reason
+is the lint level: every allowance in the crate sits below this file, so it
+can neither `forbid` a governed lint (`E0453` at the first allowance) nor
+usefully `deny` one (a `deny` is a level an inner `allow` lowers), and a
+file that states nothing and holds no code hosts nothing -- which is what
+`every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid`
+takes as the reason to pass over it.

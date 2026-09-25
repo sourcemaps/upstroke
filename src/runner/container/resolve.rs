@@ -1,10 +1,10 @@
 //! Extended notes: `docs/internals/runner/container/resolve.md`
 
-#![deny(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
+#![cfg_attr(
+    not(test),
+    forbid(clippy::disallowed_methods, clippy::disallowed_types)
 )]
+#![forbid(clippy::disallowed_macros)]
 use std::collections::BTreeMap;
 
 use thiserror::Error;

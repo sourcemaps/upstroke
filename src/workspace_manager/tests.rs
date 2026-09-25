@@ -31,7 +31,14 @@ use std::collections::BTreeSet;
 // The repository fixture and the three Git helpers are `fixture`'s, not
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
-use super::fixture::{Fixture, died_by_abort, died_by_kill, git, git_out, run_kill_child, scratch};
+use super::fixture::{
+    Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
+    ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
+    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git, git_os,
+    git_out, replacement_liveness, run_kill_child, run_kill_child_within,
+    run_replacement_witness_child, scratch, tear_registration,
+    without_ambient_replacement_controls, write_file, write_include_path,
+};
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
 /// snapshot input is built from.
@@ -51,13 +58,14 @@ use crate::rundir::scratch_tree::acquire;
 // `src/workspace_manager.rs` no longer imports these and `use super::*` no
 // longer carries them. Same names, same crate paths, no new dependency.
 //
-// `OsStr` carries the `cfg` of its only user. It is named here for the same
-// reason as the rest -- the root pruned `use std::ffi::{OsStr, OsString};` to
-// `OsString` -- but its one call site is inside a `#[cfg(unix)]` test, so on
-// Windows the item is compiled out and an ungated import is an `unused_imports`
-// error under the guest's `-D warnings`. The gate is on the import rather than
-// the call site so the moved line stays byte-identical.
-#[cfg(unix)]
+// `OsStr` is named here for the same reason as the rest -- the root pruned
+// `use std::ffi::{OsStr, OsString};` to `OsString`. It carried a `#[cfg(unix)]`
+// while its only call site was inside a `#[cfg(unix)]` test: on Windows the
+// item was compiled out and an ungated import is an `unused_imports` error
+// under the guest's `-D warnings`. `hostile_replacement_environments` names it
+// on both platforms, so the gate is gone -- and it was the gate that broke the
+// three Windows legs of CI while ubuntu and macos were green, which is the one
+// thing this box cannot measure for itself.
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
@@ -66,6 +74,18 @@ use crate::topology::effects::{
     ResidueElement, ResourceRow, SamplingRecord, SnapshotSite, SyntheticRecord,
 };
 use crate::topology::paths::GitPath;
+
+// The replacement-isolation witnesses run a **role process** over a snapshot,
+// which is the half `command`'s own isolation never covered. They need the
+// production runner and the production request builder, not a `Command` of
+// their own: what is being asserted is that `HostEnvironment::compose` puts the
+// pair in the vector `HostRunner::run` installs after `env_clear`.
+use crate::agent::ProcessOutput;
+use crate::runner::host::{HostEnvironment, HostRunner, KeyCase, ObjectGraph};
+use crate::runner::invocation::{AttemptRole, InvocationId};
+use crate::runner::{CommandSpec, Runner};
+use crate::topology::events::{AttemptNumber, GenerationId};
+use crate::topology::registry::TaskKey;
 
 /// A harness that answers `Proceed` and records everything.
 fn harness() -> (HarnessEffects, Arc<Mutex<HookHarness>>) {
@@ -1155,6 +1175,242 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
             );
         }
     }
+}
+
+/// The classifier's read of a registration marker across a delete-pending
+/// name: the deterministic form of what CI's Windows leg met at random in
+/// PR10's round 6 (`Worktree.Add`, one sample of eight, `locked: Access is
+/// denied (os error 5)`), where a `git worktree add` the sampler had just
+/// terminated still held the marker it was unlinking. The sampler proves the
+/// condition exists and cannot be re-run to prove a fix; here the name is
+/// held delete-pending on purpose, the way the removal control above holds
+/// its file, and released against an attempt the seam reports rather than
+/// against a clock (`PR109-ORACLE-OBSERVES-TIMING-NOT-ATTEMPTS`).
+///
+/// Two cases. **Closing**: the holder closes once the read's first attempt
+/// has provably returned against the delete-pending name, so a later attempt
+/// finds the name gone — the marker its deleter meant to remove — and the
+/// populated worktree classifies `After`. **Held**: the name is held through
+/// the classifier's whole budget, and the classifier answers `Internal` —
+/// the lock the add holds, the class the inventory names for a `locked`
+/// marker that stands — rather than the inspection error CI recorded, since
+/// ST-07 requires every sampled residue classified. The attempt count is
+/// asserted in both, so a read that never retried (one attempt, answering
+/// the held class at once) fails the closing case by its answer and by its
+/// count, and a read that propagated the error after the budget fails the
+/// held case by its answer.
+#[cfg(windows)]
+#[test]
+fn a_locked_marker_a_terminated_add_still_holds_is_read_across_its_closing_and_as_held_past_it() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+
+    /// One deadline per case, the wedge detector the removal control explains.
+    const FAIL_SAFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    for (releases_after_the_first_attempt, expected) in [
+        (true, ObjectResidue::After),
+        (false, ObjectResidue::Internal),
+    ] {
+        let fixture = Fixture::created("held-locked-marker");
+        let slot = fixture.task("alpha", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &slot)
+            .expect("the intent must be durable");
+        let path = fixture
+            .manager
+            .add_worktree(&mut NoHooks, &slot, &fixture.head)
+            .expect("a populated worktree, its add complete");
+        let admin = git_dir_of(&path)
+            .expect("the pointer reads")
+            .expect("a populated worktree has a git dir behind its pointer");
+        let locked = admin.join("locked");
+        fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+        let base = fixture.base.clone();
+        let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+        assert_eq!(
+            classify_object_residue(site, &target).expect("the classifier answers"),
+            ObjectResidue::Internal,
+            "premise: a readable `initializing` marker is the unpopulated class"
+        );
+
+        let deadline = Instant::now() + FAIL_SAFE;
+        let (opened, ready) = mpsc::channel::<()>();
+        let (close_now, may_close) = mpsc::channel::<()>();
+        let (closed, has_closed) = mpsc::channel::<()>();
+        let held = locked.clone();
+        let holder = std::thread::spawn(move || {
+            // The marking handle itself is what holds the name: a delete
+            // disposition set through a handle that stays open leaves the
+            // name in the directory, delete-pending, until that handle closes
+            // -- the shape a terminated add's last unlink leaves behind. Not
+            // `fs::remove_file`, which sets the disposition through a handle
+            // of its own and closes it at once, so that the name is gone
+            // before anything can meet it delete-pending (measured on the
+            // guest: the premise below then read `NotFound`). The technique
+            // is `runner::container::tests::windows_posix_delete_pending`'s.
+            let file = fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&held)
+                .expect("hold the marker open for deletion");
+            let disposition = FILE_DISPOSITION_INFO_EX {
+                Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            };
+            let size = u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                .expect("a small struct");
+            // SAFETY: `file` is open for the duration of the call, `disposition`
+            // is a fully initialised `FILE_DISPOSITION_INFO_EX` and `size` is
+            // its size, which is the contract `FileDispositionInfoEx` documents.
+            let set = unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileDispositionInfoEx,
+                    (&raw const disposition).cast(),
+                    size,
+                )
+            };
+            assert_ne!(
+                set,
+                0,
+                "mark the held name delete-pending: {}",
+                std::io::Error::last_os_error()
+            );
+            opened.send(()).expect("announce the delete-pending name");
+            // `Ok` is the closing case, told from inside the read that its
+            // first attempt has returned; `Disconnected` is the held case,
+            // released after the classifier has answered; `Timeout` is the
+            // fail-safe, and the join below re-raises whatever it left.
+            let _ = may_close.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            drop(file);
+            let _ = closed.send(());
+        });
+        ready
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the marker is delete-pending before the classifier runs");
+        let premise = fs::read(&locked).expect_err("premise: a delete-pending name refuses a read");
+        assert_eq!(
+            premise.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "premise: the kernel answers a read of a delete-pending name with error 5: {premise}"
+        );
+
+        let mut release = Some(close_now);
+        let observing = if releases_after_the_first_attempt {
+            let tell = release.take().expect("the closing case's release");
+            super::fixture::observe_marker_read_attempts(Box::new(move |attempt| {
+                if attempt != 1 {
+                    return;
+                }
+                // Ordered against the attempt rather than a clock: attempt 1
+                // has already returned against the delete-pending name, and
+                // waiting for the close here means attempt 2 runs after it.
+                let _ = tell.send(());
+                let _ = has_closed.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            }))
+        } else {
+            drop(has_closed);
+            super::fixture::observe_marker_read_attempts(Box::new(|_| {}))
+        };
+        let answer = classify_object_residue(site, &target);
+        let attempts = observing.count();
+        drop(observing);
+        // The held case's release, after the answer: the only thing that
+        // closes its handle. Then the holder is joined on every path, so a
+        // failing assertion never leaves the tree locked against the
+        // fixture's own removal.
+        drop(release);
+        let joined = holder.join();
+        if let Err(payload) = joined {
+            std::panic::resume_unwind(payload);
+        }
+
+        let answer = answer.unwrap_or_else(|error| {
+            panic!(
+                "releases after the first attempt: {releases_after_the_first_attempt}: the \
+                 classifier refused a marker a terminated add still holds, after {attempts} \
+                 attempt(s): {error}"
+            )
+        });
+        assert_eq!(
+            answer, expected,
+            "releases after the first attempt: {releases_after_the_first_attempt}: after \
+             {attempts} attempt(s)"
+        );
+        if releases_after_the_first_attempt {
+            assert!(
+                attempts > 1 && attempts < ATTEMPTS,
+                "the closing case is crossed by a retry, and before the budget is spent: \
+                 {attempts} attempt(s) of {ATTEMPTS}"
+            );
+            assert!(
+                !locked.exists(),
+                "the delete-pending marker is gone once its holder closed"
+            );
+        } else {
+            assert_eq!(
+                attempts, ATTEMPTS,
+                "the held case spends the whole budget before the marker is read as held"
+            );
+        }
+    }
+}
+
+/// The Unix arm of the marker read makes exactly one attempt, and the seam
+/// reports that one — the removal seam's Unix pin, for the classifier's
+/// read: the retry and the held answer exist for the Windows control above,
+/// so on every other leg this pins the seam where CI runs it every time, and
+/// reads the two answers the Unix arm does give through the classifier.
+#[cfg(not(windows))]
+#[test]
+fn a_marker_read_records_the_one_attempt_the_unix_arm_makes() {
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    let fixture = Fixture::created("marker-read-once");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the intent must be durable");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("a populated worktree, its add complete");
+    let admin = git_dir_of(&path)
+        .expect("the pointer reads")
+        .expect("a populated worktree has a git dir behind its pointer");
+    let locked = admin.join("locked");
+    let base = fixture.base.clone();
+    let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+
+    fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::Internal, 1),
+        "a readable `initializing` marker is the unpopulated class, read in one attempt"
+    );
+    drop(observing);
+
+    fs::remove_file(&locked).expect("release the marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::After, 1),
+        "an absent marker is the populated class, read in one attempt"
+    );
 }
 
 /// The Unix arm makes exactly one attempt, and the seam reports that one.
@@ -2515,12 +2771,12 @@ impl SubstitutionCase {
                 .verify_worktree(hooks, slot_of(), &Quiescence::AtBase(head.clone()))
                 .map(drop),
             P::RemoveWorktree => manager.remove_worktree(hooks, slot_of()),
-            P::CandidateStage => manager.candidate_stage(hooks, slot_of()),
+            P::CandidateStage => manager.candidate_stage(hooks, slot_of(), &[]),
             P::CandidateWriteTree => manager.candidate_write_tree(hooks, slot_of()).map(drop),
             P::ProposalCherryPick => manager
                 .proposal_cherry_pick(hooks, slot_of(), side)
                 .map(drop),
-            P::RepairMaterialize => manager.repair_materialize(hooks, slot_of(), side),
+            P::RepairMaterialize => manager.repair_materialize(hooks, slot_of(), side).map(drop),
             P::CreateRef => {
                 manager.create_ref_zero_old(hooks, RefSite::CreateCandidates, &self.refname, head)
             }
@@ -3440,8 +3696,16 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.remove_worktree(&mut NoHooks, slot)),
         ),
         (
+            "remove_worktree_proving",
+            Box::new(|slot| {
+                manager
+                    .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_stage",
-            Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot)),
+            Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),
         (
             "candidate_write_tree",
@@ -3474,6 +3738,18 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
         (
             "proposal_state",
             Box::new(|slot| manager.proposal_state(slot, &head).map(drop)),
+        ),
+        (
+            "unresolved_conflicts",
+            Box::new(|slot| manager.unresolved_conflicts(slot).map(drop)),
+        ),
+        (
+            "resolution_manifest",
+            Box::new(|slot| manager.resolution_manifest(slot).map(drop)),
+        ),
+        (
+            "resolved_conflicts",
+            Box::new(|slot| manager.resolved_conflicts(slot).map(drop)),
         ),
     ];
 
@@ -4732,6 +5008,661 @@ fn reclaim_removes_the_registration_whose_commondir_is_empty() {
         .expect("Git enumeration works again");
 }
 
+/// Git's enumeration dies on the registration at `admin`, whose `commondir`
+/// holds no bytes.
+///
+/// Read by that signature — a read of no bytes, and a message naming the file
+/// — and never by the word the platform renders for the errno nothing set:
+/// glibc prints `Success` and macOS `Undefined error: 0` for this same failure
+/// (`PR5-RD-002`), so a check on either word misses the other platform.
+fn assert_enumeration_dies_on(fixture: &Fixture, admin: &Path) {
+    assert_eq!(
+        fs::metadata(admin.join("commondir"))
+            .expect("the torn commondir")
+            .len(),
+        0,
+        "the read Git fails is a read of no bytes"
+    );
+    let message = refusal_of(
+        &fixture
+            .manager
+            .worktree_records()
+            .expect_err("Git's enumeration dies on a zero-length commondir"),
+    );
+    let name = admin
+        .file_name()
+        .expect("an administrative directory has a name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains(&name) && message.contains("commondir"),
+        "the enumeration dies on {name}'s commondir: {message}"
+    );
+}
+
+/// `PR5-RD-002`'s fixture V8: two intents, and the registration of the one
+/// that sorts **second** is the one a killed `git worktree add` leaves —
+/// `locked` holding `initializing` and a zero-length `commondir`.
+struct TornBehindAnother {
+    alpha: Slot,
+    bravo: Slot,
+    alpha_path: PathBuf,
+    bravo_path: PathBuf,
+    alpha_admin: PathBuf,
+    bravo_admin: PathBuf,
+}
+
+impl TornBehindAnother {
+    /// Build it in `fixture`, asserting the premise rather than assuming it:
+    /// the torn slot sorts behind an intent a reclaim reaches first — with the
+    /// torn slot first, reclaiming slot by slot converged as well — and Git's
+    /// enumeration dies on it.
+    fn build(fixture: &Fixture) -> Self {
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let bravo = fixture.add_task(&mut NoHooks, "bravo", 1);
+        let alpha_path = fixture.manager.slot_path(&alpha);
+        let bravo_path = fixture.manager.slot_path(&bravo);
+        let admin_of = |path: &Path| {
+            fixture
+                .manager
+                .revalidate_removal(path)
+                .expect("admin dir")
+                .expect("registered")
+        };
+        let alpha_admin = admin_of(&alpha_path);
+        let bravo_admin = admin_of(&bravo_path);
+        fs::write(bravo_admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(bravo_admin.join("commondir"), [])
+            .expect("the file the add opened and never wrote");
+        assert_eq!(
+            fixture.manager.intents().expect("intents"),
+            vec![alpha.clone(), bravo.clone()],
+            "the torn slot sorts second, behind an intent the reclaim reaches first"
+        );
+        assert_enumeration_dies_on(fixture, &bravo_admin);
+        Self {
+            alpha,
+            bravo,
+            alpha_path,
+            bravo_path,
+            alpha_admin,
+            bravo_admin,
+        }
+    }
+
+    /// Both slots reclaimed: no intent, no checkout, no registration, and Git
+    /// enumerates again without either.
+    fn assert_reclaimed(&self, fixture: &Fixture) {
+        assert!(
+            fixture.manager.intents().expect("intents").is_empty(),
+            "both intents are reclaimed"
+        );
+        assert!(
+            !self.alpha_path.exists() && !self.bravo_path.exists(),
+            "both checkouts are gone"
+        );
+        assert!(
+            !self.bravo_admin.exists(),
+            "the torn registration is removed as the proved registration it is"
+        );
+        assert!(!self.alpha_admin.exists(), "and the healthy one is pruned");
+        let records = fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates again");
+        assert!(
+            records.iter().all(|record| {
+                !record.path().ends_with("kalpha-g1") && !record.path().ends_with("kbravo-g1")
+            }),
+            "neither slot is registered: {records:?}"
+        );
+    }
+}
+
+/// **One torn registration does not wedge the reclaim of the intents that
+/// sort before it** (`PR5-RD-002`, fixture V8).
+///
+/// Every `remove_intent` revalidates through Git's enumeration, and at
+/// `db523cd3` only the torn slot's own forced removal repaired what makes that
+/// enumeration die. Reclaimed slot by slot, `alpha`'s intent was removed before
+/// `bravo`'s worktree, so the reclaim refused there on every attempt — the
+/// intents stayed `[alpha, bravo]` and `bravo` untouched — and never reached
+/// the removal that would have repaired the store. The torn-registration tests
+/// above build one slot each, which a reclaim reaches first in either order,
+/// so none of them could see it. The intent removal's own repair
+/// (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`) is pinned by
+/// `an_intents_removal_repairs_a_torn_registration_another_intent_names`; this
+/// reclaim reaches every torn registration through its slot's own removal
+/// first, as the phase order below pins.
+#[test]
+fn a_torn_registration_behind_another_intent_does_not_wedge_the_reclaim() {
+    let fixture = Fixture::created("torn-behind-another");
+    let torn = TornBehindAnother::build(&fixture);
+
+    let reclaimed = fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("one torn registration does not wedge the reclaim of the others");
+    assert_eq!(
+        reclaimed.slots,
+        vec![torn.alpha.clone(), torn.bravo.clone()]
+    );
+    torn.assert_reclaimed(&fixture);
+}
+
+/// A reclaim of fixture V8 stopped at any phase of any of its funnels leaves no
+/// checkout or registration without its intent, and the next reclaim converges
+/// from it.
+///
+/// The stop is an error return at the phase, which leaves on disk what a kill
+/// at that phase leaves: `Before` is consulted before the primitive runs and
+/// `After` once it has returned, and nothing between the stop and the
+/// reclaim's return writes. What it does not model is a power loss, which the
+/// removal funnel's own barrier answers for the checkout. The phase log of the
+/// reclaim that ran to the end pins the order that reaches the torn
+/// registration before any enumeration: every worktree's removal, then every
+/// intent's.
+#[test]
+fn a_torn_reclaim_stopped_at_any_phase_converges_on_the_next() {
+    struct StopAt {
+        stop: usize,
+        seen: Vec<(EffectSiteId, HookPhase)>,
+    }
+
+    impl EffectHooks for StopAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            self.seen.push((site, phase));
+            if self.seen.len() == self.stop {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let mut stop = 0;
+    let completed = loop {
+        stop += 1;
+        assert!(
+            stop <= 32,
+            "a reclaim of two intents consults a bounded number of phases"
+        );
+        let fixture = Fixture::created(&format!("torn-reclaim-stop-{stop}"));
+        let torn = TornBehindAnother::build(&fixture);
+        let mut hooks = StopAt {
+            stop,
+            seen: Vec::new(),
+        };
+        let stopped = fixture.manager.reclaim_intents(&mut hooks);
+        for (slot, path, admin) in [
+            (&torn.alpha, &torn.alpha_path, &torn.alpha_admin),
+            (&torn.bravo, &torn.bravo_path, &torn.bravo_admin),
+        ] {
+            if path.exists() || admin.exists() {
+                assert!(
+                    fixture.manager.intent_path(slot).exists(),
+                    "stopped at phase {stop}: {} outlives its intent",
+                    path.display()
+                );
+            }
+        }
+        fixture
+            .manager
+            .reclaim_intents(&mut NoHooks)
+            .expect("the next reclaim converges wherever the last one stopped");
+        torn.assert_reclaimed(&fixture);
+        if stopped.is_ok() {
+            break hooks.seen;
+        }
+    };
+    let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
+    let remove_intent = EffectSiteId::Worktree(WorktreeSite::RemoveIntent);
+    assert_eq!(
+        completed,
+        vec![
+            (remove, HookPhase::Before),
+            (remove, HookPhase::After),
+            (remove, HookPhase::Before),
+            (remove, HookPhase::After),
+            (remove_intent, HookPhase::Before),
+            (remove_intent, HookPhase::After),
+            (remove_intent, HookPhase::Before),
+            (remove_intent, HookPhase::After),
+        ],
+        "every worktree is removed before any intent"
+    );
+}
+
+/// **The fail-closed half, pinned so that no later simplification turns the
+/// repair fail-open:** a torn registration that no intent of this execution
+/// root names is never removed, skipped, scanned around or read as absent, and
+/// the reclaim refuses on Git's enumeration of it — the same refusal whichever
+/// order the reclaim removes worktrees and intents in.
+///
+/// Two shapes, each torn the way a killed `git worktree add` tears it: the
+/// user's own linked worktree outside the execution root, and a checkout in
+/// one of this root's slot namespaces that no intent names. The forced
+/// removal repairs only an administrative directory it has bound to the slot
+/// being removed, and an intent's removal only one bound to a slot another
+/// intent names (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`), so neither is the
+/// reclaim's: both are left byte for byte, with their checkouts, and the
+/// reclaim's one intent outlives the refusal. The path reaches Git as the
+/// bytes it is, so a scratch root whose name no UTF-8 spells tears the
+/// registration of the checkout the test names and not of another.
+#[test]
+fn a_torn_registration_no_intent_names_still_refuses_the_reclaim() {
+    for shape in ["foreign", "unintended"] {
+        let fixture = Fixture::created(&format!("torn-unproved-{shape}"));
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let torn = if shape == "foreign" {
+            fixture.root.join("user-worktree")
+        } else {
+            fixture.manager.slot_path(&fixture.task("charlie", 1))
+        };
+        git_os(
+            &fixture.base,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("-q"),
+                OsStr::new("--detach"),
+                torn.as_os_str(),
+                OsStr::new(&fixture.head),
+            ],
+        );
+        let admin = tear_registration(&fixture.manager, &torn);
+        assert_enumeration_dies_on(&fixture, &admin);
+        let admin_before = tree_bytes(&admin);
+        let checkout_before = tree_bytes(&torn);
+
+        let message = refusal_of(
+            &fixture
+                .manager
+                .reclaim_intents(&mut NoHooks)
+                .expect_err("a torn registration no intent names refuses the reclaim"),
+        );
+        assert!(
+            message.contains("commondir"),
+            "{shape}: the refusal is Git's enumeration dying on the torn registration: {message}"
+        );
+        assert_eq!(
+            tree_bytes(&admin),
+            admin_before,
+            "{shape}: the torn registration is untouched"
+        );
+        assert_eq!(
+            tree_bytes(&torn),
+            checkout_before,
+            "{shape}: and so is its checkout"
+        );
+        assert!(
+            fixture.manager.intent_path(&alpha).exists(),
+            "{shape}: the refusal comes before the reclaim removes its intent"
+        );
+        assert_enumeration_dies_on(&fixture, &admin);
+    }
+}
+
+/// **An intent's removal repairs a torn registration another intent names**
+/// (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`): fixture V8 removed slot by slot, the
+/// order every reclaim loop of the engine takes — `alpha`'s worktree, then
+/// `alpha`'s intent, then `bravo`'s pair.
+///
+/// At `dfab458b` `alpha`'s intent removal refused on Git's enumeration dying
+/// on `bravo`'s `commondir`, on every attempt, and nothing reached `bravo`'s
+/// forced removal. Now it runs that forced removal itself and asks Git again:
+/// `bravo`'s checkout and registration go, and `bravo`'s intent is left for
+/// `bravo`'s own step, whose forced removal then finds nothing to remove and
+/// converges — the state the repair leaves, taken up.
+#[test]
+fn an_intents_removal_repairs_a_torn_registration_another_intent_names() {
+    let fixture = Fixture::created("torn-repaired-by-intent-removal");
+    let torn = TornBehindAnother::build(&fixture);
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &torn.alpha)
+        .expect("alpha's worktree");
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &torn.alpha)
+        .expect("alpha's intent goes although bravo's registration is torn");
+    assert!(
+        !torn.bravo_admin.exists() && !torn.bravo_path.exists(),
+        "bravo's torn registration went, through bravo's forced removal, with its checkout"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.bravo).exists(),
+        "and bravo's intent stays for bravo's own step"
+    );
+    assert!(!fixture.manager.intent_path(&torn.alpha).exists());
+    let records = fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.path().ends_with("kbravo-g1")),
+        "bravo is no longer registered: {records:?}"
+    );
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &torn.bravo)
+        .expect("bravo's forced removal converges with nothing left to remove");
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &torn.bravo)
+        .expect("and bravo's intent goes");
+    torn.assert_reclaimed(&fixture);
+}
+
+/// **The repair never takes the registration of the slot whose intent is
+/// being removed.** That intent goes next, so a checkout whose registration
+/// went with it would be residue no reclaim finds: nothing names it any more.
+/// The slot's own torn registration keeps the enumeration's refusal, the
+/// checkout keeps the intent that names it, and the slot's forced removal is
+/// what repairs it. It holds at `dfab458b` too, where the intent removal
+/// repaired nothing.
+#[test]
+fn an_intents_removal_leaves_its_own_slots_torn_registration_to_its_removal() {
+    let fixture = Fixture::created("torn-own-slot");
+    let torn = TornBehindAnother::build(&fixture);
+    let admin_before = tree_bytes(&torn.bravo_admin);
+    let checkout_before = tree_bytes(&torn.bravo_path);
+
+    let message = refusal_of(
+        &fixture
+            .manager
+            .remove_intent(&mut NoHooks, &torn.bravo)
+            .expect_err("bravo's own torn registration keeps the enumeration's refusal"),
+    );
+    assert!(
+        message.contains("commondir"),
+        "the refusal is Git's enumeration dying on bravo's registration: {message}"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_admin),
+        admin_before,
+        "bravo's registration is untouched"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_path),
+        checkout_before,
+        "and so is its checkout"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.bravo).exists(),
+        "and the intent that names the checkout stays"
+    );
+    assert_enumeration_dies_on(&fixture, &torn.bravo_admin);
+
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("the reclaim converges from it");
+    torn.assert_reclaimed(&fixture);
+}
+
+/// **Verifying a slot whose own registration is torn repairs it, and the
+/// slot reads as unregistered** (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`). A resume
+/// verifies an open generation's worktree before it reuses or recreates it,
+/// and the add a killed conductor tore may be that generation's own.
+/// At `dfab458b` the verification's revalidation refused on Git's enumeration
+/// dying on it, on every attempt. Now the slot's forced removal runs first —
+/// its checkout and registration go, its intent stays — the verification
+/// reports [`VerifyFailure::NotRegistered`], and the forced removal and fresh
+/// add its caller then makes converge on a worktree that verifies.
+#[test]
+fn verifying_a_slot_whose_own_registration_is_torn_repairs_it_and_reports_it_unregistered() {
+    let fixture = Fixture::created("torn-verified");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&alpha);
+    let admin = tear_registration(&fixture.manager, &path);
+    assert_enumeration_dies_on(&fixture, &admin);
+    let at_base = Quiescence::AtBase(fixture.head.clone());
+
+    let verified = fixture
+        .manager
+        .verify_worktree(&mut NoHooks, &alpha, &at_base)
+        .expect("the verification repairs the torn registration rather than refusing");
+    assert_eq!(verified, Err(VerifyFailure::NotRegistered));
+    assert!(
+        !path.exists() && !admin.exists(),
+        "the slot's forced removal took its checkout and its registration"
+    );
+    assert!(
+        fixture.manager.intent_path(&alpha).exists(),
+        "and left the intent that names the slot"
+    );
+    fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .expect("the caller's forced removal finds nothing to remove");
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &alpha, &fixture.head)
+        .expect("and its fresh add succeeds");
+    assert_eq!(
+        fixture
+            .manager
+            .verify_worktree(&mut NoHooks, &alpha, &at_base)
+            .expect("verify"),
+        Ok(()),
+        "the recreated worktree verifies"
+    );
+}
+
+/// **A repair the removal's gate refuses to plan removes nothing and keeps
+/// the refusal.** The repair binds every other intent's registration under
+/// `WriterProof::Unknown`, whatever the caller holds, because an intent's
+/// removal is not told what the caller can prove about writers; that gate
+/// refuses a registration whose `gitdir` is empty beside a `locked`, the
+/// state an add killed inside its first two writes leaves (on disk, an add in
+/// flight). Here the user's own worktree outside the root is in that state,
+/// beside fixture V8. `alpha`'s forced removal passes it over under
+/// `WriterProof::NoWriterAlive`, as finalization's does; `alpha`'s intent
+/// removal then finds Git's enumeration dying on `bravo`, cannot plan the
+/// repair, removes nothing, and returns the enumeration's own refusal — the
+/// best-effort repair's failure path, observed.
+#[test]
+fn a_repair_the_removal_gate_cannot_plan_removes_nothing_and_keeps_the_refusal() {
+    let fixture = Fixture::created("torn-unplannable");
+    let foreign = fixture.root.join("user-worktree");
+    git_os(
+        &fixture.base,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            OsStr::new("--detach"),
+            foreign.as_os_str(),
+            OsStr::new(&fixture.head),
+        ],
+    );
+    let unbindable = fixture
+        .manager
+        .revalidate_removal(&foreign)
+        .expect("admin dir")
+        .expect("registered");
+    let torn = TornBehindAnother::build(&fixture);
+    fs::write(unbindable.join("locked"), "initializing\n")
+        .expect("the lock the add holds until it finishes");
+    fs::write(unbindable.join("gitdir"), []).expect("the gitdir the add opened and never wrote");
+    let bravo_before = tree_bytes(&torn.bravo_admin);
+
+    let passed_over = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &torn.alpha, WriterProof::NoWriterAlive)
+        .expect("alpha's worktree, the unbindable registration passed over");
+    assert_eq!(passed_over, vec![unbindable.clone()]);
+    let message = refusal_of(
+        &fixture
+            .manager
+            .remove_intent(&mut NoHooks, &torn.alpha)
+            .expect_err("a repair that cannot be planned keeps the enumeration's refusal"),
+    );
+    assert!(
+        message.contains("kbravo-g1") && message.contains("commondir"),
+        "the refusal is Git's enumeration dying on bravo's registration: {message}"
+    );
+    assert_eq!(
+        tree_bytes(&torn.bravo_admin),
+        bravo_before,
+        "bravo's torn registration is untouched"
+    );
+    assert!(
+        unbindable.join("locked").exists(),
+        "and so is the unbindable one"
+    );
+    assert!(
+        fixture.manager.intent_path(&torn.alpha).exists(),
+        "and alpha's intent stays"
+    );
+}
+
+/// Two intended slots: `bravo`, whose registration is torn the way a killed
+/// `git worktree add` leaves it, and `charlie`, whose registration has lost
+/// its `gitdir` — no `locked`, its checkout and its intent kept — so that no
+/// registration binds `charlie`'s checkout and a repair's plan passes it over.
+/// Git's enumeration skips that entry and `git worktree prune` deletes it.
+/// `charlie`'s forced removal converges from it while `<common git
+/// dir>/worktrees` exists
+/// (`an_absent_registration_gitdir_is_already_gone_for_forced_cleanup`) and
+/// refuses the checkout once that directory is absent
+/// (`a_missing_stored_worktree_directory_refuses_before_checkout_deletion`).
+struct TornBesideUnbound {
+    bravo: Slot,
+    charlie: Slot,
+    bravo_path: PathBuf,
+    charlie_path: PathBuf,
+    bravo_admin: PathBuf,
+}
+
+impl TornBesideUnbound {
+    fn build(fixture: &Fixture) -> Self {
+        let bravo = fixture.add_task(&mut NoHooks, "bravo", 1);
+        let charlie = fixture.add_task(&mut NoHooks, "charlie", 1);
+        let bravo_path = fixture.manager.slot_path(&bravo);
+        let charlie_path = fixture.manager.slot_path(&charlie);
+        let charlie_admin = fixture
+            .manager
+            .revalidate_removal(&charlie_path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::remove_file(charlie_admin.join("gitdir"))
+            .expect("charlie's registration loses its gitdir");
+        assert_eq!(
+            fixture
+                .manager
+                .revalidate_removal(&charlie_path)
+                .expect("the gate reads the store"),
+            None,
+            "no registration binds charlie's checkout"
+        );
+        let bravo_admin = tear_registration(&fixture.manager, &bravo_path);
+        assert_enumeration_dies_on(fixture, &bravo_admin);
+        Self {
+            bravo,
+            charlie,
+            bravo_path,
+            charlie_path,
+            bravo_admin,
+        }
+    }
+
+    /// `charlie`'s forced removal and its retry both converge, and its
+    /// checkout is gone.
+    fn assert_charlie_reclaimable(&self, fixture: &Fixture) {
+        for attempt in ["charlie's forced removal", "and its retry"] {
+            fixture
+                .manager
+                .remove_worktree(&mut NoHooks, &self.charlie)
+                .unwrap_or_else(|error| panic!("{attempt} converges: {error}"));
+        }
+        assert!(
+            !self.charlie_path.exists(),
+            "charlie's checkout is reclaimed"
+        );
+    }
+}
+
+/// **An intent's removal leaves every other intended checkout reclaimable**
+/// (the round-2 regression lens of #308, P2, executed). `alpha`'s worktree has
+/// gone, and its intent's removal repairs `bravo`'s torn registration and
+/// passes over `charlie`, which no registration binds. At `db67a82b` that
+/// repair, `bravo`'s forced removal, ended in `git worktree prune`, which
+/// deleted `charlie`'s registration and then the emptied `<common git
+/// dir>/worktrees`, and `charlie`'s forced removal refused its checkout on
+/// every attempt. Now the empty-`commondir` branch stops at the registration
+/// it removed, so the prune that deletes `charlie`'s registration is
+/// `charlie`'s own, after its checkout has gone.
+#[test]
+fn an_intents_removal_repair_leaves_another_intended_checkout_reclaimable() {
+    let fixture = Fixture::created("torn-repair-keeps-store");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .expect("alpha's worktree");
+    let slots = TornBesideUnbound::build(&fixture);
+
+    let repaired = fixture.manager.remove_intent(&mut NoHooks, &alpha);
+    slots.assert_charlie_reclaimable(&fixture);
+    repaired.expect("alpha's intent goes although bravo's registration is torn");
+    assert!(
+        !slots.bravo_admin.exists() && !slots.bravo_path.exists(),
+        "the repair took bravo's checkout and registration"
+    );
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("bravo's and charlie's intents go");
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+    fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+}
+
+/// **A torn registration's own forced removal leaves every other intended
+/// checkout reclaimable**: the same wedge without the repair, through the
+/// empty-`commondir` branch, which at `db523cd3` also ended in `git worktree
+/// prune`. There `bravo`'s removal deleted its torn registration, and the
+/// prune then deleted `charlie`'s and the emptied store, so `charlie`'s
+/// removal refused its checkout on every attempt.
+#[test]
+fn a_torn_registrations_removal_leaves_another_intended_checkout_reclaimable() {
+    let fixture = Fixture::created("torn-removal-keeps-store");
+    let slots = TornBesideUnbound::build(&fixture);
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &slots.bravo)
+        .expect("bravo's forced removal repairs its torn registration");
+    assert!(
+        !slots.bravo_admin.exists() && !slots.bravo_path.exists(),
+        "bravo's checkout and registration are gone"
+    );
+    slots.assert_charlie_reclaimable(&fixture);
+    fixture
+        .manager
+        .reclaim_intents(&mut NoHooks)
+        .expect("bravo's and charlie's intents go");
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+}
+
 /// `target` relative to `from`, both canonicalised: `..` up to the common
 /// ancestor, then down. What Git 2.48's `worktree.useRelativePaths` writes.
 fn relative_from(from: &Path, target: &Path) -> PathBuf {
@@ -4822,31 +5753,144 @@ fn a_relative_registration_still_binds_its_checkout() {
     );
 }
 
-/// Git failing to enumerate is an error, never "not registered": a zero-length
-/// `commondir`, the interrupted-add residue `revalidate_removal` documents,
-/// makes `git worktree list` fail, and the classifier propagates that rather
-/// than reading the registered-but-unpopulated worktree as absent.
+/// The registration `git worktree add` leaves when it is killed after it has
+/// written `gitdir` but before `commondir` or `HEAD` holds its bytes — the
+/// files it writes one at a time, each opened and truncated before it is
+/// written, so a kill inside either leaves it empty (measured by PR10's ST-07
+/// sampler, `~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 20 and
+/// 22 of thirty). Git's own enumeration cannot report it: an empty
+/// `commondir` makes `git worktree list` die before any record, and an empty
+/// `HEAD` prints a record with neither a branch nor a detached mark, which the
+/// parser refuses (`PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`). So a
+/// classifier that asked Git answered an error where the frozen enums
+/// register a class (`SWEEP-WORKTREE-012`). It reads the registration itself,
+/// byte-safe, as the removal binds it, and answers the class the state is:
+/// registered, locked by the add that never finished, unpopulated. Forced
+/// removal converges on both, and Git enumerates again afterwards.
 #[test]
-fn a_failed_worktree_list_is_an_error_not_an_absent_registration() {
-    let fixture = Fixture::created("failed-list");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let path = fixture.manager.slot_path(&slot);
-    let admin = fixture
-        .manager
-        .revalidate_removal(&path)
-        .expect("admin dir")
-        .expect("registered");
-    fs::write(admin.join("commondir"), []).expect("truncate commondir");
-    let error = record_for(&fixture.base, &path).expect_err("Git could not enumerate");
+fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges() {
+    for torn in ["commondir", "HEAD"] {
+        let fixture = Fixture::created(&format!("torn-{}", torn.to_lowercase()));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let path = fixture.manager.slot_path(&slot);
+        let admin = fixture
+            .manager
+            .revalidate_removal(&path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::write(admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(admin.join(torn), []).expect("the file the add opened and never wrote");
+        fixture.manager.worktree_records().expect_err(&format!(
+            "{torn}: Git's enumeration cannot report this registration"
+        ));
+
+        let site = EffectSiteId::Worktree(WorktreeSite::Add);
+        let target = ResidueTarget::new(&fixture.base).at(&path);
+        assert_eq!(
+            classify(site, &target),
+            ObjectResidue::Internal,
+            "{torn}: registered, locked by the add that never finished, unpopulated"
+        );
+        assert_eq!(
+            observed_residue_elements(site, &target).expect("observe"),
+            vec![ResidueElement::RegisteredUnpopulatedWorktree],
+            "{torn}"
+        );
+
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &slot)
+            .expect("forced removal converges on a registration that names its checkout");
+        assert!(
+            !path.exists() && !admin.exists(),
+            "{torn}: the checkout and the registration are gone"
+        );
+        assert!(
+            fixture
+                .manager
+                .worktree_records()
+                .expect("Git enumerates again")
+                .iter()
+                .all(|record| !record.path().ends_with("kalpha-g1")),
+            "{torn}"
+        );
+    }
+}
+
+/// The registration reader the classifier gained in PR10's round 3
+/// (`registration_for`) enters `common_git_dir`, which read Git's answer as
+/// UTF-8: in a repository whose path holds a byte no UTF-8 spells, an absent
+/// add target — no registration, no checkout, the shape every first `add`
+/// starts from — errored where the merge base's reader, which decoded Git's
+/// NUL-delimited enumeration byte for byte, answered `ObjectResidue::None`
+/// (the round-4 regression lens, P2-2; the decoder defect for a populated
+/// worktree is `PR128-REVIEW2-PATHS-READ-AS-UTF8`'s and stays filed). A raw
+/// repository, not `Fixture::created`: the fixture's own manager derivation
+/// reaches the same reader. Unix, where such a path exists at all — and not
+/// on every Unix filesystem: APFS refuses the name with `EILSEQ` ("Illegal
+/// byte sequence", errno 92 on macOS; CI's `test (macos-latest)` job at
+/// `96bf1944`), so the directory is probed first and the test is skipped,
+/// saying why and with the errno it saw, where the name cannot be made — on
+/// such a filesystem the shape the test guards against cannot arise either.
+/// Linux makes the name and measures the decoder.
+#[cfg(unix)]
+#[test]
+fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let root = scratch("byte-named-repository");
+    let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    match fs::create_dir_all(&repo) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 — {error} \
+                 (errno {:?}, EILSEQ) — so the byte-named repository the decoder is measured on \
+                 cannot exist here, and neither can the shape this test guards against",
+                error.raw_os_error()
+            );
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
+    }
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "tests@upstroke.local"],
+        &["config", "user.name", "upstroke tests"],
+    ] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repo.join("a.txt"), "one\n").expect("seed file");
+    for args in [&["add", "-A"][..], &["commit", "-q", "-m", "seed"]] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let target = root.join("not-added");
     assert!(
-        error.to_string().contains("worktree list"),
-        "the error names the command: {error}"
+        !target.exists(),
+        "the add target is absent: nothing was ever added there"
     );
-    classify_object_residue(
-        EffectSiteId::Worktree(WorktreeSite::Add),
-        &ResidueTarget::new(&fixture.base).at(&path),
-    )
-    .expect_err("the classifier propagates the failure and does not answer for Git");
+
+    assert_eq!(
+        classify_object_residue(
+            EffectSiteId::Worktree(WorktreeSite::Add),
+            &ResidueTarget::new(&repo).at(&target),
+        )
+        .expect("valid Unix repository path"),
+        ObjectResidue::None,
+        "an absent target in a byte-named repository is unregistered, as at the merge base"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -4889,6 +5933,15 @@ enum TreeEntry {
 /// regular file with its bytes, every symbolic link or junction with its target. Nothing
 /// is followed, so replacing a file with a link to equal bytes is a
 /// difference, and so is a deleted empty directory.
+impl WorkspaceManager {
+    /// The binding the plain funnel makes: `revalidate_removal_proving` under
+    /// `WriterProof::Unknown`, its admin directory alone.
+    fn revalidate_removal(&self, target: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
+        self.revalidate_removal_proving(target, WriterProof::Unknown)
+            .map(|binding| binding.admin)
+    }
+}
+
 fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, TreeEntry> {
     fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, TreeEntry>) {
         for entry in fs::read_dir(dir).expect("list a directory the test created") {
@@ -5023,7 +6076,10 @@ fn tree_bytes_detects_a_directory_replaced_by_a_link_to_equal_contents() {
 /// indistinguishable from an add in flight in the same window -- `locked` is
 /// present in both -- and a skip here was measured to delete the checkout
 /// beneath a live writer's registration (PR #151 pass 1), so the refusal is
-/// not to be relaxed on disk state alone.
+/// not to be relaxed on disk state alone. What relaxes it is a proof about
+/// writers, `WriterProof::NoWriterAlive`, and the sibling
+/// `a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive`
+/// holds that form to what it may and may not touch.
 ///
 /// What each refusal is checked against is a snapshot -- relative path to
 /// directory, bytes or link target -- of four trees, taken before and compared
@@ -5084,9 +6140,12 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
     let site = EffectSiteId::Worktree(WorktreeSite::Add);
     let target = ResidueTarget::new(&fixture.base).at(&path);
     assert!(
-        record_for(&fixture.base, &path)
+        !fixture
+            .manager
+            .worktree_records()
             .expect("Git enumerates")
-            .is_none(),
+            .iter()
+            .any(|record| canonical_prefix(record.path()).ok() == canonical_prefix(&path).ok()),
         "`git worktree list` skips a zero-length gitdir"
     );
     assert_eq!(classify(site, &target), ObjectResidue::None);
@@ -5145,6 +6204,148 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
             .iter()
             .any(|record| record.path().ends_with("kbeta-g1")),
         "the unrelated slot is still registered"
+    );
+}
+
+/// The same two torn registrations under the proof the plain funnel lacks —
+/// no writer of the execution root is alive, which terminal finalization
+/// holds (a durable `run_finished` proves every add of the run passed) and
+/// the kill samplers hold once their child is reaped
+/// (`WriterProof::NoWriterAlive`), and nothing that resumes: each entry that names no checkout
+/// is passed over and reported, never bound by its Git-generated name and
+/// never touched, and the slot's contained checkout and intent converge.
+/// The two states are the ones an add leaves when killed inside its first
+/// two writes: `locked` alone (opened, never written), and `locked` beside
+/// an empty `gitdir` — PR10's ST-07 sampler measured both
+/// (`~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 17 and 22).
+/// What is checked is the whole `.git/worktrees/` store byte for byte, an
+/// unrelated populated slot's checkout, and Git's enumeration; and that the
+/// plain funnel still refuses over the same store.
+#[test]
+fn a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive() {
+    let fixture = Fixture::created("torn-passed-over");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture.manager.slot_path(&slot);
+    let name = path
+        .file_name()
+        .expect("a slot path has a final component")
+        .to_os_string();
+    let worktrees = fixture.manager.common_git_dir.join("worktrees");
+    let stale = worktrees.join(&name);
+    fs::create_dir_all(&stale).expect("the admin directory the add makes first");
+    fs::write(stale.join("locked"), "initializing\n").expect("the lock the add writes next");
+    fs::write(stale.join("gitdir"), []).expect("the gitdir the add opened and never wrote");
+    fs::create_dir_all(&path).expect("the checkout directory the add made, still empty");
+    let earlier = worktrees.join("kalpha-g0");
+    fs::create_dir_all(&earlier).expect("the admin directory of an earlier torn add");
+    fs::write(earlier.join("locked"), []).expect("its lock, opened and never written");
+
+    let other = fixture.add_task(&mut NoHooks, "beta", 1);
+    let other_path = fixture.manager.slot_path(&other);
+    fs::write(other_path.join("witness.txt"), "unrelated slot\n").expect("plant a file");
+    let store_before = tree_bytes(&worktrees);
+    let other_before = tree_bytes(&other_path);
+    assert!(
+        store_before.len() > 6,
+        "the store holds the two torn entries and the unrelated slot's registration: {:?}",
+        store_before.keys().collect::<Vec<_>>()
+    );
+
+    let passed_over = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("a registration that names nothing is passed over, not refused");
+    assert_eq!(
+        passed_over,
+        vec![earlier.clone(), stale.clone()],
+        "both torn entries are reported, sorted, whichever slot left them"
+    );
+    assert!(!path.exists(), "the contained checkout is reclaimed");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "neither torn entry nor the unrelated slot's registration was touched"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before);
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &slot)
+        .expect("intent removal converges");
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        vec![other.clone()],
+        "the torn slot's intent is gone and the unrelated slot's stands"
+    );
+    assert!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates: it lists neither torn entry")
+            .iter()
+            .all(|record| !record.path().ends_with("kalpha-g1")),
+        "Git registers nothing for the slot"
+    );
+
+    let again = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("idempotent");
+    assert_eq!(again, passed_over, "and still reported");
+    assert_eq!(tree_bytes(&worktrees), store_before);
+
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel still refuses over this store");
+    let text = error.to_string();
+    assert!(
+        text.contains("has an empty gitdir") || text.contains("is locked and has no gitdir"),
+        "the refusal names whichever torn entry the scan met first: {text}"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before, "and changed nothing");
+    let unrelated = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("the unrelated slot converges under the proof");
+    assert_eq!(
+        unrelated, passed_over,
+        "reporting the same two torn entries"
+    );
+    assert!(!other_path.exists());
+    assert!(
+        stale.join("gitdir").exists() && earlier.join("locked").exists(),
+        "the torn entries outlive every removal: Git's, or an operator's, to remove"
+    );
+
+    // The same store with both torn entries in the first shape — `locked`,
+    // no `gitdir` — which the plain funnel skipped instead of refusing until
+    // PR10's round 4, while the rustdoc promised one boundary for both (the
+    // round-4 record lens, P2-2): the refusal names the missing file, the
+    // proof passes both over, and neither is touched.
+    fs::remove_file(stale.join("gitdir")).expect("the second torn entry now lacks gitdir too");
+    let store_before = tree_bytes(&worktrees);
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel refuses a locked entry without gitdir");
+    assert!(
+        error.to_string().contains("is locked and has no gitdir"),
+        "the refusal names the missing gitdir: {error}"
+    );
+    assert_eq!(tree_bytes(&worktrees), store_before, "and changed nothing");
+    let both = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("under the proof both entries are passed over");
+    assert_eq!(both, passed_over, "the same two, reported");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "and neither is touched"
     );
 }
 
@@ -5730,8 +6931,38 @@ fn a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_
 /// raw tree, since the head is unchanged under a tree replacement and a test
 /// that read only the head could not see this. Witnessed failing with the
 /// environment variable removed from `command`: the checkout holds `B`.
+///
+/// **The work is in a neutralised child** (PR #271, round 4), for the reason
+/// [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`] is: the
+/// manager's own `git` children inherit this process's environment, so an
+/// operator's `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request
+/// makes upstroke's own gates supply -- would hand this witness the very
+/// protection it exists to prove the manager installs, and the checkout would
+/// hold `A` with the repair removed. The child is where
+/// [`assert_replacement_controls_pinned`] can be stated, and it is stated there
+/// before anything is measured.
 #[test]
 fn a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree() {
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::snapshot_replacement_helper");
+    assert!(
+        status.success(),
+        "the child witnesses an exact snapshot over a replaced tree with every \
+         ambient control over `refs/replace/*` taken away from it, and ended \
+         {status:?}"
+    );
+}
+
+/// Spawned by
+/// [`a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree`].
+#[test]
+#[ignore = "subprocess helper"]
+fn snapshot_replacement_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("snapshot");
+
     let fixture = Fixture::created("replace-objects");
     let file = fixture.base.join("replaced.txt");
 
@@ -5802,6 +7033,910 @@ fn a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree() {
         .manager
         .remove_snapshot(&mut NoHooks, &snapshot)
         .expect("Snapshot.Remove + Snapshot.RemoveIntent");
+}
+
+/// A base that does not carry [`NO_REPLACEMENT_OBJECTS`] **and carries no other
+/// ambient control over `refs/replace/*` either**, so a role process composed
+/// from it cannot pass by inheriting one.
+///
+/// `HostEnvironment::from_process` is the production base and `HostRunner::run`
+/// clears the ambient environment before installing what `compose` returned; a
+/// suite that took the process environment unfiltered would be asserting about
+/// whatever the machine running it happened to export.
+///
+/// **Removing one name was not enough, and that is round 3's blocking finding**
+/// (PR #271). Until now this filtered `GIT_NO_REPLACE_OBJECTS` out of
+/// `std::env::vars_os()` and passed everything else through, so mutating
+/// `HostRunner::run` to discard the pair from the composed environment exited
+/// `101` normally and **`0`** under `GIT_CONFIG_COUNT=1
+/// GIT_CONFIG_KEY_0=core.useReplaceRefs GIT_CONFIG_VALUE_0=false` -- measured,
+/// all seven non-ignored `replacement` tests green against unrepaired code. The
+/// base is now [`environment_without_ambient_replacement_controls`] with that
+/// one pair taken out of it, which is the enumeration; the measurement that
+/// does not depend on the enumeration is
+/// [`assert_a_role_process_sees_replacements`].
+fn base_without_replacement_isolation() -> HostEnvironment {
+    let case = KeyCase::current();
+    let base: Vec<(OsString, OsString)> = environment_without_ambient_replacement_controls()
+        .into_iter()
+        .filter(|(key, _)| !case.same_key(key, std::ffi::OsStr::new(NO_REPLACEMENT_OBJECTS.0)))
+        .collect();
+    HostEnvironment::with_base(base, case)
+}
+
+/// Refuse to measure the role-process path through a runner whose own role
+/// processes cannot see a replacement in the first place.
+///
+/// [`assert_replacement_controls_pinned`] answers for *this* process, and this
+/// process is not where the claim lives: `HostRunner::run` calls `env_clear`
+/// and installs what `compose` returned, so the only environment a role process
+/// has is the composed one. This probe is that exact runner --
+/// [`base_without_replacement_isolation`], read as [`ObjectGraph::AsReplaced`],
+/// which is the one setting that makes `compose` leave the pair off -- run over
+/// a throwaway repository carrying a replacement. It must read the
+/// **replacing** object. If it reads the recorded one, replacements are dead in
+/// the composed environment and the witness below would read the judged tree
+/// whatever production did.
+///
+/// This is the half that depends on no list of names: an eighteenth mechanism
+/// costs this panic rather than a silent pass.
+fn assert_a_role_process_sees_replacements(tag: &str) {
+    let root = scratch(&format!("role-replacement-live-{tag}"));
+    let repo = root.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "tests@upstroke.local"]);
+    git(&repo, &["config", "user.name", "upstroke tests"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
+    git(&repo, &["config", "core.eol", "lf"]);
+
+    write_file(&repo.join("probe.txt"), b"recorded\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = git(&repo, &["rev-parse", "HEAD"]);
+
+    write_file(&repo.join("probe.txt"), b"replacing\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "replacing"]);
+    git(&repo, &["replace", &recorded, "HEAD"]);
+    assert_eq!(
+        git(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
+        ),
+        format!("refs/replace/{recorded}"),
+        "`{tag}`: `git replace` did not write under `refs/replace/`, so this \
+         probe would answer a question it was not asked"
+    );
+
+    let runner = HostRunner::new()
+        .with_environment(base_without_replacement_isolation().reading(ObjectGraph::AsReplaced));
+    let shown = gate_in(&runner, &repo, &["show", &format!("{recorded}:probe.txt")]);
+    assert_eq!(
+        shown.stdout,
+        "replacing\n",
+        "`{tag}`: a role process composed from this base does not honour \
+         `refs/replace/*` at all, so the witness below would read the judged \
+         tree whatever production installed. The enumerated controls this \
+         process carries are {:?}; if none of them explains this, the \
+         enumeration is missing a mechanism and closing it is the fix",
+        ambient_replacement_controls()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// One `git` gate, run through the production runner in `workspace`.
+fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutput {
+    let request = crate::runner::gate_request(
+        CommandSpec {
+            program: "git".to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env: Vec::new(),
+            stdin: Vec::new(),
+        },
+        workspace.to_path_buf(),
+        std::time::Duration::from_secs(120),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output = runner.run(&request).expect("the gate ran");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "git {args:?} in {}: {output:?}",
+        workspace.display()
+    );
+    output
+}
+
+/// A **role process** inside a snapshot reads the judged tree too (PR #130,
+/// pass 3's P1, `PR130-REVIEW3-REPLACEMENT-ISOLATION-STOPS-AT-THE-MANAGER`).
+///
+/// `a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree`
+/// pins the snapshot's *filesystem*, and that was the whole of the guarantee:
+/// it asserts bytes and the raw commit and never runs a role process, so it
+/// could not see that a gate or a reviewer inside the snapshot got the
+/// environment its runner composes -- which clears the ambient one -- and read
+/// the replacement through Git. Measured on git 2.43 before the repair: `git
+/// show HEAD:replaced.txt` printed `B` and `git status --porcelain` reported
+/// `M  replaced.txt` against a checkout nothing had touched, so a gate reading
+/// the tree through Git judged one tree and a gate reading the filesystem
+/// judged another.
+///
+/// The witness is the production [`HostRunner`] over the production
+/// [`WorkspaceManager`] snapshot, because the composition is exactly what was
+/// missing: a unit assertion on `compose` alone would not have caught a runner
+/// that composed the pair and then dropped it. The base deliberately carries no
+/// `GIT_NO_REPLACE_OBJECTS`, so nothing here can pass by inheritance.
+///
+/// Witnessed failing with the pair removed from `HostEnvironment::compose`:
+/// `git show` printed `B`, and `git status --porcelain` printed `M
+/// replaced.txt`.
+///
+/// **The work is in a neutralised child, and it states two preconditions**
+/// (PR #271, round 4). Round 3's blocking finding was that this witness -- *the
+/// role-process path, which is the core of the finding* -- was the one the
+/// round-3 neutraliser was never given: mutating `HostRunner::run` to discard
+/// the pair from the composed environment exited `101` normally and **`0`**
+/// under `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.useReplaceRefs
+/// GIT_CONFIG_VALUE_0=false`. The child closes the enumerated mechanisms and
+/// [`assert_replacement_controls_pinned`] states that by name and by
+/// measurement; [`assert_a_role_process_sees_replacements`] then measures the
+/// one thing a list of names cannot reach, through this witness's own runner.
+#[test]
+fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::role_process_replacement_helper");
+    assert!(
+        status.success(),
+        "the child witnesses a role process reading the judged tree with every \
+         ambient control over `refs/replace/*` taken away from it, and ended \
+         {status:?}"
+    );
+}
+
+/// Spawned by
+/// [`a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement`].
+#[test]
+#[ignore = "subprocess helper"]
+fn role_process_replacement_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("role-process");
+    assert_a_role_process_sees_replacements("role-process");
+
+    let fixture = Fixture::created("replace-role-process");
+    let file = fixture.base.join("replaced.txt");
+
+    fs::write(&file, "A\n").expect("the judged content");
+    git(&fixture.base, &["add", "replaced.txt"]);
+    git(&fixture.base, &["commit", "-q", "-m", "the judged tree"]);
+    let judged_commit = git(&fixture.base, &["rev-parse", "HEAD"]);
+    let judged_tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+
+    fs::write(&file, "B\n").expect("the other content");
+    git(&fixture.base, &["add", "replaced.txt"]);
+    git(&fixture.base, &["commit", "-q", "-m", "the other tree"]);
+    let other_commit = git(&fixture.base, &["rev-parse", "HEAD"]);
+    let other_tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+    assert_ne!(judged_tree, other_tree, "two distinct trees");
+
+    git(
+        &fixture.base,
+        &["checkout", "--detach", "--quiet", &judged_commit],
+    );
+    git(&fixture.base, &["replace", &judged_tree, &other_tree]);
+    // `git replace -l` lists under `GIT_REPLACE_REF_BASE`, so it would answer
+    // `yes` about a namespace nothing reads; name `refs/replace/` itself.
+    assert_eq!(
+        git(
+            &fixture.base,
+            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
+        ),
+        format!("refs/replace/{judged_tree}"),
+        "the replacement is in place, under the namespace a reader looks in"
+    );
+
+    let snapshot = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(1, 1),
+            &SnapshotInput::Tree {
+                tree: oid(&judged_tree),
+                parent: oid(&other_commit),
+            },
+        )
+        .expect("the judged tree is a tree of this repository");
+
+    // The fixture pins `core.autocrlf=false` and `core.eol=lf`, so what a role
+    // process reads back is the blob and not the platform's line endings.
+    assert_eq!(
+        fs::read_to_string(snapshot.path().join("replaced.txt")).expect("the checkout"),
+        "A\n",
+        "the manager's own commands already materialise the judged tree"
+    );
+
+    let runner = HostRunner::new().with_environment(base_without_replacement_isolation());
+    let shown = gate_in(&runner, snapshot.path(), &["show", "HEAD:replaced.txt"]);
+    assert_eq!(
+        shown.stdout, "A\n",
+        "a gate reading the snapshot through Git read the object `git replace` \
+         points at, not the tree the snapshot was taken of"
+    );
+    let status = gate_in(&runner, snapshot.path(), &["status", "--porcelain"]);
+    assert_eq!(
+        status.stdout.trim(),
+        "",
+        "a gate saw the untouched snapshot as dirty, because Git compared its \
+         index against the replacing tree"
+    );
+
+    fixture
+        .manager
+        .remove_snapshot(&mut NoHooks, &snapshot)
+        .expect("Snapshot.Remove + Snapshot.RemoveIntent");
+}
+
+/// Where [`the_neutraliser_defeats_every_ambient_control_it_enumerates`] tells
+/// its probe to do the work, and which of the two questions to answer;
+/// `#[ignore]`-guarded for the reason [`REPLACEMENT_WITNESS`] is.
+///
+/// `pinned` is the neutralised leg: the names and then the measurement. `live`
+/// is the controlled leg, and it asks **only** the measurement -- a controlled
+/// leg that also checked the pinned names would fail for want of the pins
+/// whatever the hostile value did, which would make it no evidence that the row
+/// is a control at all, and so no evidence that the neutralised leg above it
+/// means anything.
+const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROBE";
+
+/// Whether a row of [`hostile_replacement_environments`] has to be a control on
+/// every Git this suite runs on, or only on the ones that have it.
+///
+/// [`Reach::SomeGits`] is not a loophole: the row's neutralised leg is asserted
+/// either way, and a row that is inert on this Git cannot be a masking vector
+/// on this Git. What it admits is that Git changed. The one row that needs it
+/// is the uncounted indexed configuration pair, and the reason is now measured
+/// rather than assumed -- see that row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Reach {
+    EveryGit,
+    SomeGits,
+}
+
+/// Which of a row's three legs to run.
+///
+/// The two that matter are [`Leg::Controlled`] and [`Leg::Treated`], and they
+/// differ **only** by the row's treatment: both start from the neutralised
+/// environment, both lift exactly the pins that would mask the row, and the
+/// first must be replacement-live. That is what makes the second's failure
+/// attributable to the row (PR #271, round 4). Until now the treated leg took
+/// this process's environment raw, so `GIT_CONFIG_NOSYSTEM=1` exported into the
+/// suite made the `GIT_CONFIG_SYSTEM` row inert and the grid exited `101`
+/// blaming the row; and in the masking direction, an inert treatment
+/// substituted for a real one exited `101` cleanly but **`0`** under an
+/// exported `GIT_NO_REPLACE_OBJECTS=1`, because the grid credited the
+/// environment's own suppression to the row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Leg {
+    /// Neutralised, the row's masking pins lifted, the row's controlled values
+    /// applied, and **no treatment**. Must be replacement-live.
+    Controlled,
+    /// [`Leg::Controlled`] plus the row's treatment. This is where the row is
+    /// measured to be a control at all.
+    Treated,
+    /// The row's controlled values and treatment applied as an operator's
+    /// environment would have them, and *then* the neutralisation. Must be
+    /// replacement-live: this is the claim the whole grid exists for.
+    Neutralised,
+}
+
+/// One hostile environment per mechanism the enumeration claims to close,
+/// built over `root`.
+///
+/// Every row is a way an operator, a wrapper or a machine can decide Git's
+/// replacement behaviour for a child, measured one at a time on git 2.43.0.
+/// The last row sets all of them at once, because a neutraliser that closes
+/// each in isolation and leaves one open in combination is the shape this
+/// pull request has already shipped twice.
+struct HostileEnvironment {
+    name: &'static str,
+    reach: Reach,
+    /// Pins [`without_ambient_replacement_controls`] installs that would mask
+    /// this row, lifted from the controlled and treated legs alike so the row
+    /// can act at all -- and never from the neutralised leg, which is the one
+    /// asserting those pins win.
+    ///
+    /// Measured, git 2.43.0: `GIT_CONFIG_SYSTEM` is ignored outright while
+    /// `GIT_CONFIG_NOSYSTEM` is set, and `HOME`/`XDG_CONFIG_HOME` are not read
+    /// at all while `GIT_CONFIG_GLOBAL` is. A row whose pin is not lifted is
+    /// not a weaker row, it is no row.
+    lifted: &'static [&'static str],
+    /// What puts the *dimension* this row acts in into a known,
+    /// replacement-live state once its pins are lifted. Applied to the
+    /// controlled leg and to the treated leg.
+    controlled: Vec<(String, OsString)>,
+    /// What makes the row hostile: the only difference between the controlled
+    /// leg and the treated one.
+    treatment: Vec<(String, OsString)>,
+}
+
+fn hostile_replacement_environments(root: &Path) -> Vec<HostileEnvironment> {
+    let disables = root.join("disables.cfg");
+    write_file(&disables, b"[core]\n\tuseReplaceRefs = false\n");
+    // Written by Git's own configuration writer rather than by `format!`
+    // (PR #271, round 4). A path is not a config value: measured on git
+    // 2.43.0, an unquoted `.display()` of a directory containing `#` is
+    // truncated at the comment character and the row silently stops being a
+    // control, and one containing a backslash is read as an escape -- `git
+    // config --list` over it exits `128`, `bad config line 2`. `git config
+    // --file` quotes the first and doubles the second, and both then resolve.
+    let including = root.join("including.cfg");
+    write_include_path(&including, &disables);
+    let home = root.join("home");
+    write_file(
+        &home.join(".gitconfig"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
+    let xdg = root.join("xdg");
+    write_file(
+        &xdg.join("git").join("config"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
+    let empty_home = root.join("empty-home");
+    create_dir(&empty_home);
+    let empty_xdg = root.join("empty-xdg");
+    create_dir(&empty_xdg);
+    // A template directory is the seventeenth mechanism, and it acts at
+    // repository *creation*: `git init` copies this `config` into the new
+    // repository's own, above everything `git init` writes there (measured,
+    // git 2.43.0). Nothing an environment does afterwards can undo it, which
+    // is why the probe's own `git init` runs in the environment under test.
+    let template = root.join("template");
+    write_file(
+        &template.join("config"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
+
+    let set = |key: &str, value: &OsStr| (key.to_owned(), value.to_owned());
+    let row = |name: &'static str,
+               reach: Reach,
+               lifted: &'static [&'static str],
+               controlled: Vec<(String, OsString)>,
+               treatment: Vec<(String, OsString)>| HostileEnvironment {
+        name,
+        reach,
+        lifted,
+        controlled,
+        treatment,
+    };
+    // Both file-backed rows below read a `HOME`/`XDG_CONFIG_HOME` pair, and
+    // both legs of each get the same pair: only the one variable under test
+    // differs between them.
+    let neutral_dirs = || {
+        vec![
+            set("HOME", empty_home.as_os_str()),
+            set("XDG_CONFIG_HOME", empty_xdg.as_os_str()),
+        ]
+    };
+    let rows: Vec<HostileEnvironment> = vec![
+        row(
+            "GIT_NO_REPLACE_OBJECTS",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_NO_REPLACE_OBJECTS", OsStr::new("1"))],
+        ),
+        row(
+            "an indexed config pair, counted",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![
+                set("GIT_CONFIG_COUNT", OsStr::new("1")),
+                set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
+                set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
+            ],
+        ),
+        // `Reach::SomeGits`, and the measurement behind it is corrected here
+        // (PR #271, round 4). The claim this row used to carry -- that a lone
+        // `GIT_CONFIG_KEY_0` takes effect on git 2.43.0 with no count -- was an
+        // artefact of the environment it was measured in: this box's build
+        // wrapper exports `GIT_CONFIG_COUNT=1` with an indexed pair of its own
+        // into every `cargo test`, so the "uncounted" pair was counted. With
+        // the count genuinely lifted, `git config --get core.useReplaceRefs`
+        // exits `1` and prints nothing on git 2.43.0, and exits `0` printing
+        // `false` with the count at `1`. The row is inert on this Git, kept as
+        // `SomeGits` because the pair is real wherever a count reaches it and
+        // the neutralised leg is asserted either way.
+        row(
+            "an indexed config pair, uncounted",
+            Reach::SomeGits,
+            &["GIT_CONFIG_COUNT"],
+            Vec::new(),
+            vec![
+                set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
+                set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
+            ],
+        ),
+        row(
+            "GIT_CONFIG_PARAMETERS",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set(
+                "GIT_CONFIG_PARAMETERS",
+                OsStr::new("'core.usereplacerefs'='false'"),
+            )],
+        ),
+        row(
+            "GIT_CONFIG_GLOBAL",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_CONFIG_GLOBAL", disables.as_os_str())],
+        ),
+        row(
+            "GIT_CONFIG_SYSTEM",
+            Reach::EveryGit,
+            &["GIT_CONFIG_NOSYSTEM"],
+            Vec::new(),
+            vec![set("GIT_CONFIG_SYSTEM", disables.as_os_str())],
+        ),
+        row(
+            "GIT_CONFIG_GLOBAL through include.path",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_CONFIG_GLOBAL", including.as_os_str())],
+        ),
+        row(
+            "HOME",
+            Reach::EveryGit,
+            &["GIT_CONFIG_GLOBAL"],
+            neutral_dirs(),
+            vec![set("HOME", home.as_os_str())],
+        ),
+        row(
+            "XDG_CONFIG_HOME",
+            Reach::EveryGit,
+            &["GIT_CONFIG_GLOBAL"],
+            neutral_dirs(),
+            vec![set("XDG_CONFIG_HOME", xdg.as_os_str())],
+        ),
+        row(
+            "GIT_REPLACE_REF_BASE",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_REPLACE_REF_BASE", OsStr::new("refs/elsewhere/"))],
+        ),
+        row(
+            "GIT_TEMPLATE_DIR",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_TEMPLATE_DIR", template.as_os_str())],
+        ),
+    ];
+    let mut everything: Vec<(String, OsString)> = rows
+        .iter()
+        .flat_map(|row| row.treatment.iter().cloned())
+        .collect();
+    // `GIT_CONFIG` is enumerated and neutralised but is not a row of its own,
+    // because it is not a control over what a Git child *reads*: measured, a
+    // probe under it still honours `refs/replace/*`, and git-config(1) says the
+    // variable has no effect on commands other than `git config`. What it
+    // captures is a fixture's own `git config` **write**, which
+    // `a_redirected_git_config_cannot_capture_a_fixtures_own_pin` measures
+    // directly. It rides in the combination so the neutralised leg still has to
+    // survive it beside everything else.
+    everything.push(set("GIT_CONFIG", disables.as_os_str()));
+    let mut rows = rows;
+    rows.push(row(
+        "all of them at once",
+        Reach::EveryGit,
+        // Every pin any row lifts, because the combination is every row.
+        &[
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+        ],
+        neutral_dirs(),
+        everything,
+    ));
+    rows
+}
+
+/// Run [`replacement_control_probe_helper`] as one leg of `row`, and return its
+/// exit status.
+fn run_replacement_control_probe(row: &HostileEnvironment, leg: Leg) -> std::process::ExitStatus {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args([
+            "--exact",
+            "workspace_manager::tests::replacement_control_probe_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(
+            REPLACEMENT_CONTROL_PROBE,
+            if leg == Leg::Neutralised {
+                "pinned"
+            } else {
+                "live"
+            },
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if leg == Leg::Neutralised {
+        // The operator's environment first, the neutralisation second: the
+        // neutralisation is what this leg asserts wins.
+        for (key, value) in row.controlled.iter().chain(&row.treatment) {
+            command.env(key, value);
+        }
+        without_ambient_replacement_controls(&mut command);
+    } else {
+        // The controlled base first -- which is where this leg's baseline comes
+        // from -- then the pins this row would otherwise be masked by, then the
+        // row's own values.
+        without_ambient_replacement_controls(&mut command);
+        for key in row.lifted {
+            command.env_remove(key);
+        }
+        for (key, value) in &row.controlled {
+            command.env(key, value);
+        }
+        if leg == Leg::Treated {
+            for (key, value) in &row.treatment {
+                command.env(key, value);
+            }
+        }
+    }
+    command.status().expect("spawn the control probe")
+}
+
+/// A probe leg's exit status, said in a sentence a CI log's reader can use.
+fn probe_outcome(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(0) => "replacements live".to_owned(),
+        Some(code) if code == REPLACEMENT_DISABLED_EXIT => {
+            "a Git child did not honour `refs/replace/*`".to_owned()
+        }
+        Some(code) => format!("the probe itself failed, exit {code}"),
+        None => format!("the probe was killed by a signal ({status:?})"),
+    }
+}
+
+/// Every name in the enumeration earns its place, and the measurement catches
+/// what no name list reaches (PR #271, rounds 3 and 4).
+///
+/// The neutralisation is only *exercised* when the control it removes is
+/// actually set, and CI sets none of them -- so without this grid a name could
+/// be dropped from [`without_ambient_replacement_controls`] and nothing would
+/// go red until a reviewer exported it, which is exactly how rounds 1 and 2
+/// were found.
+///
+/// **Each row is run three times, and the first run is why the other two mean
+/// anything** (round 4). [`Leg::Controlled`] establishes that the row's own
+/// dimension is replacement-live before the treatment goes in;
+/// [`Leg::Treated`] adds the treatment and nothing else, so a failure there is
+/// the row's; [`Leg::Neutralised`] sets the hostile values as an operator would
+/// and requires the neutralisation to win. A treated leg that ends in anything
+/// but `0` or [`REPLACEMENT_DISABLED_EXIT`] is a **setup failure** and is
+/// reported as one rather than counted as suppression -- a malformed
+/// configuration file makes `git` exit `128`, and a grid that reads that as
+/// evidence is a grid that passes for the wrong reason.
+///
+/// Every row is reported rather than the first failing one, because a grid that
+/// stops at row 3 tells a CI run's reader nothing about rows 4 to 12.
+///
+/// `HOME`, `XDG_CONFIG_HOME` and `GIT_TEMPLATE_DIR` are in the grid and in
+/// **neither** name list: the first two are closed by pinning
+/// `GIT_CONFIG_GLOBAL`, the third by a name of its own in
+/// `REPLACEMENT_CONTROLS_REMOVED`, and their treated legs fail in the
+/// measurement rather than in the name check. That is the half of the closure
+/// that does not depend on the enumeration being complete, and this is where it
+/// is witnessed doing the work.
+#[test]
+fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
+    let root = scratch("replacement-controls");
+    let rows = hostile_replacement_environments(&root);
+    assert_eq!(
+        rows.len(),
+        12,
+        "one row per mechanism, plus the combination"
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    let mut inert: Vec<&str> = Vec::new();
+    for row in &rows {
+        let name = row.name;
+        let controlled = run_replacement_control_probe(row, Leg::Controlled);
+        let attributable = controlled.code() == Some(0);
+        if !attributable {
+            wrong.push(format!(
+                "`{name}`: the controlled baseline for this row is not \
+                 replacement-live -- {} -- so nothing the treatment does below \
+                 is attributable to the treatment",
+                probe_outcome(controlled)
+            ));
+        }
+
+        let treated = run_replacement_control_probe(row, Leg::Treated);
+        match treated.code() {
+            Some(0) => {
+                if row.reach == Reach::EveryGit && attributable {
+                    wrong.push(format!(
+                        "`{name}` is not a control at all on this Git: the probe \
+                         passed with it set over a controlled baseline, so the \
+                         neutralised leg above it proves nothing"
+                    ));
+                }
+                inert.push(name);
+            }
+            Some(code) if code == REPLACEMENT_DISABLED_EXIT => {}
+            _ => wrong.push(format!(
+                "`{name}`: the treated leg neither observed a live read nor a \
+                 suppressed one -- {} -- and a setup that never ran is not \
+                 evidence that this row suppresses anything",
+                probe_outcome(treated)
+            )),
+        }
+
+        let neutralised = run_replacement_control_probe(row, Leg::Neutralised);
+        if !neutralised.success() {
+            wrong.push(format!(
+                "`{name}` survived the neutralisation: {}",
+                probe_outcome(neutralised)
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the enumeration does not hold on this Git: {wrong:#?}"
+    );
+    assert!(
+        inert.len() < rows.len(),
+        "no row is a control on the Git running this suite, so this grid \
+         measured nothing at all"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `GIT_CONFIG` captures a fixture's own configuration write, and the
+/// neutralisation takes it away before the write happens (PR #271, round 3).
+///
+/// It is the one enumerated name that is not a control over what a Git child
+/// *reads* -- measured, a probe under it still honours `refs/replace/*`, and
+/// git-config(1) says the variable has no effect on commands other than `git
+/// config`. What it does is redirect that command's **write**, so
+/// [`pin_replacement_refs_in`]'s pin would succeed, land in the operator's
+/// file, and leave the repository saying nothing about the question the fixture
+/// thought it had answered. That is why it is removed rather than tolerated,
+/// and this is the measurement rather than the argument.
+#[test]
+fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
+    let root = scratch("git-config-redirect");
+    let repo = root.join("repo");
+    create_dir(&repo);
+    // Neutralised, because `GIT_TEMPLATE_DIR` writes into a repository at
+    // creation and this one's local file is the whole measurement below.
+    let mut init = Command::new("git");
+    init.arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]);
+    without_ambient_replacement_controls(&mut init);
+    assert!(
+        init.status().expect("run git").success(),
+        "the repository this test measures in was never created"
+    );
+    let elsewhere = root.join("elsewhere.cfg");
+    write_file(&elsewhere, b"");
+
+    let pin = |neutralised: bool| {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "core.useReplaceRefs", "true"])
+            .env("GIT_CONFIG", &elsewhere);
+        if neutralised {
+            without_ambient_replacement_controls(&mut command);
+        }
+        assert!(
+            command.status().expect("run git").success(),
+            "the pin itself failed, so neither leg below measures where it landed"
+        );
+        // **The read-back is neutralised too, and its exit status is asserted**
+        // (PR #271, round 4). It was not, and that was the same read-back bug
+        // this pull request had already fixed in `gates.rs`: with an ambient
+        // `GIT_CONFIG` pointing anywhere, `git config --local --get` exits
+        // `129` on `only one config file at a time`, prints nothing, and an
+        // observer that reads empty stdout as "the key is absent" reports a pin
+        // that succeeded as a pin that never landed. Measured: this test exited
+        // `101` under `GIT_CONFIG` at an empty file and `0` with it unset. A
+        // silent observer is not a weaker observer, it is a wrong one, and the
+        // rule is every observer's rather than the one a reviewer named.
+        let mut read_back = Command::new("git");
+        read_back
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--local", "--get", "core.useReplaceRefs"]);
+        without_ambient_replacement_controls(&mut read_back);
+        let read = read_back.output().expect("run git");
+        // `--get` exits `1` when the key is absent, which is an answer about
+        // the repository; anything else means the read never happened.
+        assert!(
+            matches!(read.status.code(), Some(0 | 1)),
+            "the read-back did not answer about the repository: {:?}, {}",
+            read.status.code(),
+            String::from_utf8_lossy(&read.stderr)
+        );
+        (
+            String::from_utf8_lossy(&read.stdout).trim().to_owned(),
+            fs::read_to_string(&elsewhere).expect("the redirected file"),
+        )
+    };
+
+    let (local, redirected) = pin(false);
+    assert_eq!(
+        local, "",
+        "the repository's own config answered, so `GIT_CONFIG` did not capture \
+         the write and this test measures nothing"
+    );
+    assert!(
+        redirected.contains("useReplaceRefs"),
+        "`GIT_CONFIG` did not take the write either: {redirected}"
+    );
+
+    write_file(&elsewhere, b"");
+    let (local, redirected) = pin(true);
+    assert_eq!(
+        local, "true",
+        "the pin did not reach the repository it names with `GIT_CONFIG` removed"
+    );
+    assert_eq!(
+        redirected, "",
+        "the pin still reached the operator's file: {redirected}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].
+///
+/// The `live` arm exits [`REPLACEMENT_DISABLED_EXIT`] rather than panicking,
+/// because *observing* that a treatment disabled replacements is the answer
+/// that leg exists to collect, and a panic would spell it `101` -- the same
+/// code a `git` that never ran gives. Keeping the two apart is half of the
+/// round-4 repair to this grid: a backslash in `TMPDIR` used to make the raw
+/// leg fail at `git config`'s parser, and the grid credited that as evidence
+/// that the row suppressed replacement.
+#[test]
+#[ignore = "subprocess helper"]
+fn replacement_control_probe_helper() {
+    match std::env::var_os(REPLACEMENT_CONTROL_PROBE) {
+        None => (),
+        Some(mode) if mode == *"pinned" => assert_replacement_controls_pinned("control-probe"),
+        Some(_) => {
+            // Bound rather than tested inline so the verdict is one value: a
+            // `RefsElsewhere` and a `NotHonoured` are the same answer to the
+            // grid and a different answer to a reader.
+            let verdict = replacement_liveness("control-probe");
+            if verdict != ReplacementLiveness::Live {
+                std::process::exit(REPLACEMENT_DISABLED_EXIT);
+            }
+        }
+    }
+}
+
+/// Quiescence answers about the tree the worktree holds, not about whatever
+/// `git replace` points that tree at (PR #130, pass 3's P1).
+///
+/// **The work is in a child process, and the child is why this test exists in
+/// this shape** (PR #271, round 1's blocking finding). `quiescence` reaches Git
+/// through the free [`read_only_git`], whose child inherits this process's
+/// environment; run in-process, the body below passes with the `.env` call
+/// removed from [`read_only_git`] whenever the suite itself was started under
+/// `GIT_NO_REPLACE_OBJECTS=1` -- measured, exit `0` and all six
+/// replacement-focused tests green against unrepaired code. That is the
+/// environment this pull request makes both runners supply to gates, so the
+/// witness would have false-greened in upstroke's own CI from here on. The child
+/// is spawned with the variable *removed*, so its verdict is about what
+/// `read_only_git` installs and never about what the machine exported.
+///
+/// `Quiescence::HoldsTree` is answered by `diff-index --cached --quiet <tree>`,
+/// and Git resolves `<tree>` through `refs/replace/*` like any other name:
+/// measured on git 2.43, that exit code moves from 0 to 1 the moment a
+/// replacement of the recorded tree is installed, and an untouched worktree
+/// becomes a `TreeMismatch` that routes to forced removal and a fresh add.
+///
+/// Witnessed failing with the pair removed from `read_only_git`, once under
+/// **each** ambient control the parent neutralises, every one of them exported
+/// into that parent: a clean environment; `GIT_NO_REPLACE_OBJECTS=1`;
+/// `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_0`/`VALUE_0`; those two with no
+/// count; `GIT_CONFIG_PARAMETERS`; `GIT_CONFIG_GLOBAL`; `GIT_CONFIG_SYSTEM`; a
+/// `GIT_CONFIG_GLOBAL` reaching the same value through `include.path`;
+/// `GIT_CONFIG`; a `HOME` carrying `~/.gitconfig`; an `XDG_CONFIG_HOME`
+/// carrying `git/config`; and `GIT_REPLACE_REF_BASE`. All twelve exited `101`
+/// on `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s)
+/// differ: b.txt" })` over a worktree nothing had written to -- `b.txt` being
+/// what the seed tree the replacement points at does not carry. The same twelve
+/// exit `0` against the repaired code.
+#[test]
+fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::quiescence_replacement_helper");
+    assert!(
+        status.success(),
+        "the child witnesses quiescence over a replaced tree with every ambient \
+         control over `refs/replace/*` taken away from it, and ended {status:?}"
+    );
+}
+
+/// Spawned by [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`].
+///
+/// [`assert_replacement_controls_pinned`] is the round-3 repair, and it is the
+/// first statement for a reason: it refuses the enumerated controls by name and
+/// then measures, over a throwaway repository in *this* environment, that
+/// `refs/replace/*` is honoured at all. The witness below is worth nothing
+/// unless it is, and a mechanism nobody enumerated fails there rather than
+/// passing here.
+#[test]
+#[ignore = "subprocess helper"]
+fn quiescence_replacement_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("quiescence");
+
+    let fixture = Fixture::created("replace-quiescence");
+    let slot = fixture.add_task(&mut NoHooks, "q", 1);
+    let path = fixture
+        .manager
+        .slot_target(&slot)
+        .expect("the worktree path");
+
+    let held = git(&path, &["rev-parse", "HEAD^{tree}"]);
+    let other = git(
+        &fixture.base,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.seed)],
+    );
+    assert_ne!(held, other, "two distinct trees");
+
+    assert!(
+        matches!(
+            fixture
+                .manager
+                .verify_worktree(&mut NoHooks, &slot, &Quiescence::HoldsTree(held.clone()))
+                .expect("verify"),
+            Ok(())
+        ),
+        "the worktree holds its own tree before anything is installed"
+    );
+
+    git(&fixture.base, &["replace", &held, &other]);
+    assert_eq!(
+        git(&fixture.base, &["replace", "-l"]),
+        held,
+        "the replacement is in place"
+    );
+
+    let verdict = fixture
+        .manager
+        .verify_worktree(&mut NoHooks, &slot, &Quiescence::HoldsTree(held.clone()))
+        .expect("verify");
+    assert!(
+        matches!(verdict, Ok(())),
+        "a worktree nothing wrote to is quiescent; Git answered about \
+         `refs/replace/{held}` instead: {verdict:?}"
+    );
 }
 
 /// A full object id of the wrong type for its role is refused as what it is:
@@ -6152,6 +8287,14 @@ fn worktree_verify_answers_every_non_quiescence_by_name() {
         ("CHERRY_PICK_HEAD", ResidueElement::CherryPickHead),
         ("MERGE_HEAD", ResidueElement::MergeHead),
         ("MERGE_MSG", ResidueElement::MergeMsg),
+        // The held form of each state file: a writer killed between creating
+        // its lock and renaming it into place. It is the same command's state,
+        // and the form that makes the next writer of that name fail outright.
+        ("CHERRY_PICK_HEAD.lock", ResidueElement::CherryPickHead),
+        ("MERGE_HEAD.lock", ResidueElement::MergeHead),
+        ("MERGE_MSG.lock", ResidueElement::MergeMsg),
+        ("REVERT_HEAD", ResidueElement::SequencerState),
+        ("REVERT_HEAD.lock", ResidueElement::SequencerState),
     ] {
         fs::write(git_dir.join(name), "x\n").expect("plant residue");
         assert_eq!(
@@ -6694,6 +8837,578 @@ fn a_worktree_of_another_repository_at_the_recorded_path_is_not_this_ones() {
     );
 }
 
+/// The root-level name the resolution manifest reserves, in every state a
+/// task worktree can hold it in, and what the two readers of that state do.
+///
+/// `resolution_manifest` is the read a conflict repair makes, and
+/// `candidate_stage` decides from the same reading whether to exclude the
+/// name from its `add -A`, whether to stage what the index held under it
+/// first, and whether to consume it afterwards; the index and the disk
+/// afterwards say what it decided. The attempt-level tests drive each state
+/// through a capture; this one pins the classification itself, the symbolic
+/// link, the tracked and the untracked case variants, and the ignored
+/// manifest standing where a tracked directory was included — and that the
+/// worker's manifest, by whichever spelling the checkout lists it, never
+/// outlives a staging.
+#[test]
+fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_workers() {
+    let fixture = Fixture::created("manifest-name");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+    let manifest = path.join(RESOLUTION_MANIFEST);
+    let staged = || {
+        git(
+            &path,
+            &[
+                "ls-files",
+                "--",
+                &format!(":(top,literal,icase){RESOLUTION_MANIFEST}"),
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    let stage = || {
+        fixture
+            .manager
+            .candidate_stage(&mut NoHooks, &slot, &[])
+            .expect("stage")
+    };
+    let declared = |path: &str| {
+        ResolutionManifest::Declared(vec![Declaration {
+            path: path.to_owned(),
+            kind: ResolutionKind::Resolved,
+        }])
+    };
+
+    // Absent.
+    assert_eq!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        ResolutionManifest::Absent
+    );
+    stage();
+    assert!(staged().is_empty());
+
+    // The worker's manifest: read; kept out of the index by the exclusion;
+    // and removed by the staging, which does not know — and does not ask —
+    // whether the capture read it. Twice, because the second write is the
+    // shape PR #249's fifth-round reviews found kept: a manifest a capture
+    // had no use for, standing until a later capture had.
+    for _ in 0..2 {
+        fs::write(&manifest, "resolved c.txt\n").expect("write");
+        assert_eq!(
+            fixture.manager.manifest_name(&path).expect("classify"),
+            ManifestName::Manifest {
+                spelling: RESOLUTION_MANIFEST.to_owned(),
+                ignored: false,
+                displaces_directory: false,
+            }
+        );
+        assert_eq!(
+            fixture.manager.resolution_manifest(&slot).expect("read"),
+            declared("c.txt")
+        );
+        stage();
+        assert!(
+            staged().is_empty(),
+            "an untracked manifest is excluded from the `add -A`"
+        );
+        assert!(
+            !manifest.exists(),
+            "and no staging leaves the worker's manifest behind: a declaration is applied once, \
+             by the capture of the attempt that wrote it, and a manifest nothing governed is \
+             removed unread"
+        );
+    }
+
+    // The same, ignored: read all the same, kept out by the ignore rules, and
+    // removed the same way (`clean -x`).
+    fs::write(&manifest, "resolved c.txt\n").expect("write");
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: true,
+            displaces_directory: false,
+        }
+    );
+    assert!(matches!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        ResolutionManifest::Declared(_)
+    ));
+    stage();
+    assert!(staged().is_empty());
+    assert_eq!(
+        git(&path, &["ls-files", "--", ".gitignore"]),
+        ".gitignore",
+        "the `add -A` ran: the ignore file itself is staged"
+    );
+    assert!(!manifest.exists(), "`clean -x` reaches an ignored manifest");
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+
+    // A symbolic link: not a regular file, so not the worker's manifest;
+    // refused by the read, staged as the link it is by the `add -A`, and
+    // left where it is — the removal is of the worker's manifest only.
+    #[cfg(unix)]
+    {
+        fs::write(path.join("elsewhere.txt"), "resolved c.txt\n").expect("target");
+        std::os::unix::fs::symlink("elsewhere.txt", &manifest).expect("link");
+        let refused = fixture
+            .manager
+            .resolution_manifest(&slot)
+            .expect_err("a link is not the manifest");
+        assert!(
+            matches!(&refused, UpstrokeError::Refused { message }
+                if message.contains("is a symbolic link")),
+            "{refused}"
+        );
+        stage();
+        assert_eq!(staged(), vec![RESOLUTION_MANIFEST.to_owned()]);
+        assert!(manifest.symlink_metadata().is_ok(), "the link stays");
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+        );
+        fs::remove_file(&manifest).expect("unlink");
+        fs::remove_file(path.join("elsewhere.txt")).expect("target removed");
+        git(&path, &["rm", "--quiet", "--cached", "--", "elsewhere.txt"]);
+    }
+
+    // A directory: the same refusal, its contents ordinary paths, and the
+    // directory left where it is.
+    fs::create_dir(&manifest).expect("directory");
+    fs::write(manifest.join("data.txt"), "data\n").expect("data");
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("a directory is not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message } if message.contains("is a directory")),
+        "{refused}"
+    );
+    stage();
+    assert_eq!(
+        staged(),
+        vec![format!("{RESOLUTION_MANIFEST}/data.txt")],
+        "a directory of the name holds ordinary paths, and they are staged"
+    );
+    assert!(manifest.is_dir());
+
+    // A regular file standing where that directory was: the index still holds
+    // the directory's file, the working tree holds the worker's manifest. The
+    // read is the worker's; the staging stages the directory's deletion —
+    // which the exclusion, a directory prefix too, would have kept out — and
+    // the worker's file stays out and goes.
+    fs::remove_dir_all(&manifest).expect("the worker removes the directory");
+    fs::write(&manifest, "resolved c.txt\n").expect("and writes its manifest at the name");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: false,
+            displaces_directory: true,
+        }
+    );
+    assert!(
+        matches!(
+            fixture.manager.resolution_manifest(&slot).expect("read"),
+            ResolutionManifest::Declared(_)
+        ),
+        "a regular file at the name is the worker's, whatever the index held under the name"
+    );
+    stage();
+    assert!(
+        staged().is_empty(),
+        "the directory's file is gone from the index and the worker's file is not in it: {:?}",
+        staged()
+    );
+    assert!(!manifest.exists());
+
+    // The same transition with the manifest ignored (PR #249's fifth-round
+    // regression review): the fourth round's `add -A` of what the index held
+    // under the name collected the ignored file at the name as a path its
+    // pathspec named, and exited 1 after staging the deletion, which aborted
+    // the capture. `add -u` walks the index alone.
+    fs::create_dir(&manifest).expect("the directory again");
+    fs::write(manifest.join("data.txt"), "data\n").expect("data");
+    git(
+        &path,
+        &["add", "--", &format!("{RESOLUTION_MANIFEST}/data.txt")],
+    );
+    fs::remove_dir_all(&manifest).expect("the worker removes the directory");
+    fs::write(&manifest, "resolved c.txt\n").expect("and writes its manifest at the name");
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: true,
+            displaces_directory: true,
+        }
+    );
+    fixture
+        .manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("an ignored manifest standing where a tracked directory was stages");
+    assert!(
+        staged().is_empty(),
+        "the directory's deletion is staged and the ignored file is not: {:?}",
+        staged()
+    );
+    assert_eq!(git(&path, &["ls-files", "--", ".gitignore"]), ".gitignore");
+    assert!(!manifest.exists(), "and the ignored manifest is removed");
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+
+    // Tracked, as spelt: the repository's file, whatever the working tree
+    // holds there; refused by the read, its edit staged by the `add -A`, and
+    // the file left where it is.
+    fs::write(&manifest, "application data\n").expect("write");
+    git(&path, &["add", "--", RESOLUTION_MANIFEST]);
+    fs::write(&manifest, "resolved c.txt\n").expect("the worker overwrites it");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Tracked {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+        }
+    );
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("a tracked file is not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message }
+            if message.contains("tracks `.upstroke-resolved`")),
+        "{refused}"
+    );
+    stage();
+    assert_eq!(
+        git(&path, &["show", &format!(":{RESOLUTION_MANIFEST}")]),
+        "resolved c.txt",
+        "the edit to the repository's file is staged like any other"
+    );
+    assert!(manifest.is_file(), "the repository's file is not removed");
+    git(
+        &path,
+        &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+    );
+    fs::remove_file(&manifest).expect("remove");
+
+    // Tracked in another case: the repository's on every platform, refused
+    // naming the index's spelling. On a checkout that folds case the
+    // lowercase name *is* that file (PR #249's fourth-round manifest-contract
+    // review, natively on the Windows guest, where the exact-spelling reads
+    // answered nothing and the repository's file was read as the manifest);
+    // on one that does not, a file the worker writes there is a second file,
+    // staged as one, because a name the index holds in any case is the
+    // repository's and no exclusion is made for it.
+    let upper = path.join(".UPSTROKE-RESOLVED");
+    fs::write(&upper, "application data\n").expect("write");
+    git(&path, &["add", "--", ".UPSTROKE-RESOLVED"]);
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("a tracked case variant is not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message }
+            if message.contains("tracks `.UPSTROKE-RESOLVED`")
+                && message.contains("by case alone")),
+        "{refused}"
+    );
+    fs::write(&manifest, "resolved c.txt\n").expect("the worker writes the lowercase name");
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("still not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message }
+            if message.contains("tracks `.UPSTROKE-RESOLVED`")),
+        "{refused}"
+    );
+    stage();
+    let folds_case = fs::read(&upper).expect("the tracked file") == b"resolved c.txt\n";
+    assert_eq!(
+        folds_case,
+        cfg!(any(windows, target_os = "macos")),
+        "whether the lowercase write landed in the tracked file is the checkout's answer, \
+         recorded for the platform the suite runs on"
+    );
+    if folds_case {
+        assert_eq!(
+            git(&path, &["show", ":.UPSTROKE-RESOLVED"]),
+            "resolved c.txt",
+            "the worker's write was to the tracked file, staged like any other edit"
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".UPSTROKE-RESOLVED"],
+        );
+    } else {
+        assert_eq!(
+            staged(),
+            vec![
+                ".UPSTROKE-RESOLVED".to_owned(),
+                RESOLUTION_MANIFEST.to_owned()
+            ],
+            "a second file, staged as one"
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".UPSTROKE-RESOLVED"],
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+        );
+        fs::remove_file(&manifest).expect("remove the second file");
+    }
+    fs::remove_file(&upper).expect("remove the tracked variant");
+    assert!(staged().is_empty() && !manifest.exists() && !upper.exists());
+
+    // Untracked in another case (PR #249's fifth-round manifest-contract
+    // review, natively on the Windows guest): the directory already holds an
+    // untracked `.Upstroke-Resolved` when the worker writes its declaration
+    // through the lowercase name. On a checkout that folds case the two names
+    // are one file, listed by the directory's spelling, which the
+    // exact-spelling reads at `6448262e` did not find: the worker's manifest
+    // was classified ignored, staged into the candidate under that spelling
+    // by the bare `add -A`, and left on disk. The spelling the checkout lists
+    // is now the spelling the exclusion and the removal use; on a checkout
+    // that does not fold case the variant is a second file, staged as one,
+    // and the file spelt as written is the manifest.
+    let variant = path.join(".Upstroke-Resolved");
+    fs::write(&variant, "resolved c.txt\n").expect("the variant first");
+    fs::write(&manifest, "resolved d.txt\n").expect("then the lowercase name");
+    let folds_case = fs::read(&variant).expect("the variant") == b"resolved d.txt\n";
+    assert_eq!(folds_case, cfg!(any(windows, target_os = "macos")));
+    let spelling = if folds_case {
+        ".Upstroke-Resolved"
+    } else {
+        RESOLUTION_MANIFEST
+    };
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: spelling.to_owned(),
+            ignored: false,
+            displaces_directory: false,
+        },
+        "the worker's manifest is the file the checkout lists, by its spelling"
+    );
+    assert_eq!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        declared("d.txt"),
+        "read by that spelling: the lowercase write's bytes"
+    );
+    stage();
+    if folds_case {
+        assert!(
+            staged().is_empty(),
+            "one file, excluded under the spelling the checkout lists: {:?}",
+            staged()
+        );
+        assert!(
+            !manifest.exists() && !variant.exists(),
+            "and removed under that spelling"
+        );
+    } else {
+        assert_eq!(
+            staged(),
+            vec![".Upstroke-Resolved".to_owned()],
+            "the variant is a second file, staged as one; the manifest is excluded"
+        );
+        assert!(
+            !manifest.exists() && variant.is_file(),
+            "the manifest is removed and the second file is not"
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".Upstroke-Resolved"],
+        );
+        fs::remove_file(&variant).expect("remove the second file");
+    }
+    assert!(staged().is_empty());
+
+    // The same variant, ignored: the ignore rules keep it out, no exclusion is
+    // appended for it, and the removal reaches it under its spelling.
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    fs::write(&variant, "resolved c.txt\n").expect("the variant first");
+    fs::write(&manifest, "resolved d.txt\n").expect("then the lowercase name");
+    // `check-ignore` exits 1 for a path the rules do not reach, so not the
+    // panicking helper: whether `.upstroke-resolved` in `.gitignore` reaches
+    // `.Upstroke-Resolved` is the checkout's answer (`core.ignorecase`).
+    let ignored_variant = git_out(
+        &path,
+        &[
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "--",
+            ".Upstroke-Resolved",
+        ],
+    )
+    .status
+    .success();
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: spelling.to_owned(),
+            ignored: if folds_case { ignored_variant } else { true },
+            displaces_directory: false,
+        },
+        "whether the ignore rules reach the variant's spelling is the checkout's answer"
+    );
+    stage();
+    assert!(
+        staged().is_empty() || staged() == vec![".Upstroke-Resolved".to_owned()],
+        "{:?}",
+        staged()
+    );
+    assert!(
+        !manifest.exists(),
+        "removed under its spelling, `-x` reaching an ignored file"
+    );
+    if !folds_case {
+        assert!(variant.is_file());
+        if staged() == vec![".Upstroke-Resolved".to_owned()] {
+            git(
+                &path,
+                &["rm", "--quiet", "--cached", "--", ".Upstroke-Resolved"],
+            );
+        }
+        fs::remove_file(&variant).expect("remove the second file");
+    }
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+}
+
+/// The one rule that picks the manifest's entry out of the index's records
+/// and out of the directory's ([`name_spelling`]): the exact spelling when it
+/// is listed, else the one that differs by ASCII case alone, else nothing —
+/// and never an entry under the name. Pinned on every platform, because only a
+/// checkout that folds case exercises the variant arm through a capture.
+#[test]
+fn the_manifests_spelling_is_the_exact_one_when_listed_and_the_case_variant_otherwise() {
+    let name = RESOLUTION_MANIFEST.as_bytes();
+    let exact: &[u8] = b".upstroke-resolved";
+    let variant: &[u8] = b".Upstroke-Resolved";
+    let upper: &[u8] = b".UPSTROKE-RESOLVED";
+    let under: &[u8] = b".upstroke-resolved/data.txt";
+    let under_variant: &[u8] = b".UPSTROKE-RESOLVED/data.txt";
+    assert_eq!(name_spelling(&[], name), None);
+    assert_eq!(name_spelling(&[under, under_variant], name), None);
+    assert_eq!(name_spelling(&[variant], name), Some(variant));
+    assert_eq!(name_spelling(&[under_variant, upper], name), Some(upper));
+    assert_eq!(
+        name_spelling(&[variant, exact], name),
+        Some(exact),
+        "exact first, whatever the order"
+    );
+    assert_eq!(name_spelling(&[exact, variant], name), Some(exact));
+    assert_eq!(
+        name_spelling(&[b".upstroke-resolved.bak", b".upstroke-resolve"], name),
+        None
+    );
+}
+
+/// PR #249's fourth-round regression review, finding 2: the read of the
+/// paths the index still holds passed every recorded path as one argument,
+/// and a valid index of 13,000 resolved conflicts of 180 characters each had
+/// `Argument list too long (os error 7)` abort the capture before any gate,
+/// while `add -A`, `write-tree` and the unfiltered reads all succeeded. The
+/// index is built with `update-index --index-info` over stdin — fixture
+/// setup, not a staging privilege the worker has — and the read is the
+/// production one. The files are not checked out: the read consults the
+/// index, 13,000 paths of that length are what Linux's argument limit
+/// needs, and a name of that length exceeds Windows' path limit on disk
+/// (measured on the guest: `checkout-index` failed "Filename too long").
+#[test]
+fn the_resolved_conflict_read_passes_no_recorded_path_as_an_argument() {
+    use std::io::Write as _;
+
+    let fixture = Fixture::created("resolved-read-argument-limit");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+    let with_input = |args: &[&str], bytes: &[u8]| -> Vec<u8> {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("fixture git starts");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(bytes)
+            .expect("fixture input");
+        let output = child.wait_with_output().expect("fixture git ends");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let blobs: Vec<String> = ["ancestor\n", "ours\n", "theirs\n"]
+        .iter()
+        .map(|content| {
+            String::from_utf8(with_input(
+                &["hash-object", "-w", "--stdin"],
+                content.as_bytes(),
+            ))
+            .expect("an object id")
+            .trim()
+            .to_owned()
+        })
+        .collect();
+    let resolved_blob = blobs.get(1).expect("three blobs").clone();
+    const COUNT: usize = 13_000;
+    let paths: Vec<String> = (0..COUNT)
+        .map(|i| format!("conflicts/{i:05}_{}.txt", "x".repeat(160)))
+        .collect();
+    let mut records = Vec::new();
+    for name in &paths {
+        for (stage, blob) in blobs.iter().enumerate() {
+            records.extend_from_slice(format!("100644 {blob} {}\t{name}\0", stage + 1).as_bytes());
+        }
+    }
+    with_input(&["update-index", "-z", "--index-info"], &records);
+    records.clear();
+    for name in &paths {
+        records.extend_from_slice(format!("100644 {resolved_blob} 0\t{name}\0").as_bytes());
+    }
+    with_input(&["update-index", "-z", "--index-info"], &records);
+    fixture
+        .manager
+        .candidate_write_tree(&mut NoHooks, &slot)
+        .expect("`write-tree` handles this index");
+    assert!(
+        fixture
+            .manager
+            .unresolved_conflicts(&slot)
+            .expect("the unmerged read")
+            .is_empty()
+    );
+    let recorded = git_out(&path, &["ls-files", "--resolve-undo", "-z"]);
+    assert!(recorded.status.success());
+    assert_eq!(
+        parsers::stage_record_paths(&recorded.stdout).len(),
+        COUNT * 3
+    );
+    let read = fixture.manager.resolved_conflicts(&slot).expect(
+        "the read of what the index resolved and still holds passes no path as an argument",
+    );
+    assert_eq!(read.len(), COUNT);
+    assert_eq!(read.first(), paths.first());
+}
+
 /// The recorded base is honoured **after the worktree's HEAD has moved off
 /// it** (`PR5-WORKSPACE-038`).
 ///
@@ -6713,7 +9428,7 @@ fn changed_paths_honour_the_recorded_base_after_head_has_moved_off_it() {
     fs::write(path.join("staged.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Move the worktree's HEAD to the seed, keeping the index. `head` is
@@ -6868,7 +9583,7 @@ fn changed_paths_come_from_the_index_of_the_recorded_worktree() {
     fs::write(path.join("nested/new.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     let captured = fixture
@@ -6923,7 +9638,7 @@ fn every_change_kind_reaches_the_region_including_both_rename_endpoints() {
 
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Git really did detect a rename here, rather than reporting a delete
@@ -7010,7 +9725,7 @@ fn the_candidate_diff_is_of_the_recorded_objects_and_survives_operator_diff_conf
     fs::write(path.join("bin.dat"), [0_u8, 1, 2, 0xff]).expect("a binary file");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     let tree = fixture
         .manager
@@ -7103,7 +9818,7 @@ fn a_repository_path_a_string_cannot_carry_makes_the_region_repo_wide() {
     }
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     assert!(
         fixture
@@ -7139,7 +9854,7 @@ fn after_each_object_primitive_the_object_is_referenced_by_the_row_row_names() {
     let blob = git(&task_path, &["hash-object", "staged.txt"]);
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &task)
+        .candidate_stage(&mut NoHooks, &task, &[])
         .expect("stage");
     assert_eq!(ObjectSite::CandidateStage.row(), ResourceRow::R9);
     assert!(
@@ -7459,19 +10174,19 @@ fn a_kill_at_id_unread_aborts_before_the_id_is_recorded() {
     );
     // **And it must be an abort by this platform's own measure, not merely
     // an exit that is neither success nor a panic** (PR #136 pass 2,
-    // finding 2). `died_by_abort` names `SIGABRT` on Unix, but on Windows it
-    // is a negation — unsuccessful and not the panic's 101 — because
-    // `abort()` reaches `__fastfail`, whose code has moved between CRT
-    // versions and so cannot be written down. A negation accepts far too
-    // much: change only the Windows arm of `Injection::Kill` from `abort()`
-    // to `process::exit(1)` and the helper still dies at `IdUnread`, still
-    // leaves the object, and still satisfies every assertion here.
+    // finding 2). Until #292, `died_by_abort` named `SIGABRT` on Unix but was
+    // a negation on Windows — unsuccessful and not the panic's 101 — and a
+    // negation accepts far too much: change only the Windows arm of
+    // `Injection::Kill` from `abort()` to `process::exit(1)` and the helper
+    // still dies at `IdUnread`, still leaves the object, and still satisfies
+    // every assertion here. Its Windows arm now names the status an abort
+    // exits with there; this comparison stays beside it.
     //
-    // What cannot be written down can still be **measured**. This runs one
-    // child whose whole body is `std::process::abort()`, on this machine and
-    // this CRT, moments before the comparison — so the oracle is the exit
-    // status an abort actually produces here, and `exit(1)` is not equal to
-    // it on either platform.
+    // It **measures** that status rather than naming it. This runs one child
+    // whose whole body is `std::process::abort()`, on this machine, moments
+    // before the comparison — so the oracle is the exit status an abort
+    // actually produces here, and `exit(1)` is not equal to it on either
+    // platform.
     let aborted = run_kill_child(
         "workspace_manager::tests::abort_probe_helper",
         &[(ABORT_PROBE, std::ffi::OsStr::new("1"))],
@@ -7545,33 +10260,72 @@ fn exit_one_probe_helper() {
     std::process::exit(1);
 }
 
-/// The abort oracle is tested, on every platform, against the thing it must
-/// not accept (PR #136 pass 2, finding 2).
+/// Set to make [`exit_134_probe_helper`] exit 134.
+const EXIT_134_PROBE: &str = "UPSTROKE_PR292_EXIT_134_PROBE";
+
+/// Exit 134, the number a shell gives a death by `SIGABRT`, which is what
+/// #292's review turned its kill children's aborts into.
+#[test]
+#[ignore = "subprocess helper"]
+fn exit_134_probe_helper() {
+    if std::env::var_os(EXIT_134_PROBE).is_none() {
+        return;
+    }
+    std::process::exit(134);
+}
+
+/// How long [`the_abort_oracle_separates_an_abort_from_an_exit_of_one`] waits
+/// for each probe. A probe ends at once when it ends as its name says, so the
+/// bound bounds a probe that does not, never a healthy one.
+const PROBE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Launch the probe `helper` with `switch` set, and return how it ended.
 ///
-/// The finding is Windows-shaped: there `died_by_abort` is a *negation* —
-/// unsuccessful, and not the panic's 101 — because `abort()` reaches
-/// `__fastfail`, whose code has moved between CRT versions. A negation admits
+/// Through `run_kill_child_within`, so a probe still running at
+/// [`PROBE_BOUND`] is killed and reaped there, and this fails naming it rather
+/// than waiting on it (#292's review round 6: the oracle's test waited on its
+/// probes without a deadline).
+fn probe_end(helper: &str, switch: &str) -> std::process::ExitStatus {
+    run_kill_child_within(helper, &[(switch, std::ffi::OsStr::new("1"))], PROBE_BOUND)
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe `{helper}` did not end within {PROBE_BOUND:?}, and was killed and reaped"
+            )
+        })
+}
+
+/// The abort oracle is tested, on every platform, against the ends it must
+/// not accept (PR #136 pass 2, finding 2; #292's review round 5, finding 1).
+///
+/// The finding was Windows-shaped: there `died_by_abort` was a *negation* —
+/// unsuccessful, and not the panic's 101. A negation admits
 /// `process::exit(1)`, so changing only the Windows arm of `Injection::Kill`
 /// from `abort()` to `exit(1)` left `a_kill_at_id_unread_aborts_before_the_id_is_recorded`
-/// green there. **The Unix legs cannot see that mutation** — measured: with
-/// `Injection::Kill` changed to `exit(1)`, that test fails on Linux at the
-/// reviewed head as well, because the Unix arm names `SIGABRT` — so Linux was
-/// never going to witness the repair through that test.
+/// green there, and #292's kill witnesses passed over children that exited
+/// 134 instead of aborting. **The Unix legs cannot see that mutation** —
+/// measured: with `Injection::Kill` changed to `exit(1)`, that test fails on
+/// Linux at the reviewed head as well, because the Unix arm names `SIGABRT` —
+/// so Linux was never going to witness the repair through that test.
 ///
 /// This one witnesses it everywhere, by testing the oracle rather than the
-/// funnel: two real children, one aborting and one exiting 1, and the two
-/// predicates applied to both. It says in one place what the repair claims —
-/// that the shared predicate accepts an exit this suite must reject, and that
-/// comparing against a *measured* abort does not.
+/// funnel: real children, one aborting, one exiting 1 and one exiting 134, and
+/// the predicates applied to each. The negation the Windows arm was accepts
+/// all three; `died_by_abort`, whose Windows arm now names the status an abort
+/// exits with, and a comparison against a *measured* abort accept only the
+/// abort. The abort is real, so a Windows whose abort ended with another
+/// status fails the first premise. Each probe is launched with a deadline
+/// ([`probe_end`]): one that does not end fails the test at [`PROBE_BOUND`],
+/// killed and reaped, instead of holding it.
 #[test]
 fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
-    let aborted = run_kill_child(
-        "workspace_manager::tests::abort_probe_helper",
-        &[(ABORT_PROBE, std::ffi::OsStr::new("1"))],
-    );
-    let exited = run_kill_child(
+    let aborted = probe_end("workspace_manager::tests::abort_probe_helper", ABORT_PROBE);
+    let exited = probe_end(
         "workspace_manager::tests::exit_one_probe_helper",
-        &[(EXIT_ONE_PROBE, std::ffi::OsStr::new("1"))],
+        EXIT_ONE_PROBE,
+    );
+    let exited_134 = probe_end(
+        "workspace_manager::tests::exit_134_probe_helper",
+        EXIT_134_PROBE,
     );
 
     // The premises: each child really ended the way its name says.
@@ -7584,20 +10338,33 @@ fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
         Some(1),
         "the exit probe must exit 1: {exited:?}"
     );
+    assert_eq!(
+        exited_134.code(),
+        Some(134),
+        "the second exit probe must exit 134: {exited_134:?}"
+    );
 
-    // What `died_by_abort` is on Windows, written out and applied here so the
-    // weakness is demonstrated rather than described: unsuccessful, and not
-    // the panic's 101. It accepts BOTH children.
+    // What `died_by_abort` was on Windows until #292, written out and applied
+    // here so the weakness stays demonstrated rather than described:
+    // unsuccessful, and not the panic's 101. It accepts EVERY child.
     let windows_form = |status: &std::process::ExitStatus| {
         const PANIC: i32 = 101;
         !status.success() && status.code() != Some(PANIC)
     };
     assert!(
-        windows_form(&aborted) && windows_form(&exited),
-        "the negation accepts both ends, which is the finding: {aborted:?} vs {exited:?}"
+        windows_form(&aborted) && windows_form(&exited) && windows_form(&exited_134),
+        "the negation accepts every end, which is the finding: {aborted:?} vs {exited:?} vs \
+         {exited_134:?}"
     );
 
-    // And what the repair uses does not.
+    // And the oracle does not, on any platform.
+    assert!(
+        !died_by_abort(&exited) && !died_by_abort(&exited_134),
+        "`died_by_abort` must reject an exit of 1 and an exit of 134 on every platform: \
+         {exited:?}, {exited_134:?}"
+    );
+
+    // Nor does a comparison against the measured abort.
     assert!(
         !same_end(&aborted, &exited),
         "an abort and an exit of 1 must not be the same end on any platform: {aborted:?} \
@@ -7611,9 +10378,9 @@ fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
 
 /// Whether two exit statuses are the **same end**, by value.
 ///
-/// Not "both unsuccessful": that is the negation `died_by_abort` has to fall
-/// back on for Windows, and it accepts every failing exit there is. On Unix an
-/// end is a signal or a code; on Windows it is a code. Two ends are the same
+/// Not "both unsuccessful": that is the negation `died_by_abort` fell back on
+/// for Windows until #292, and it accepts every failing exit there is. On Unix
+/// an end is a signal or a code; on Windows it is a code. Two ends are the same
 /// when those agree.
 fn same_end(left: &std::process::ExitStatus, right: &std::process::ExitStatus) -> bool {
     #[cfg(unix)]
@@ -8001,7 +10768,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             // `after_reference_present`.
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage, so the index already reflects the tree");
             fs::write(git_dir.join("index.lock"), "").expect("plant the lock");
             let internal = classify(site, &ResidueTarget::new(&base).at(&path));
@@ -8009,7 +10776,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             fs::write(path.join("a.txt"), "edited again\n").expect("a second unstaged change");
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage");
             let after = classify(site, &ResidueTarget::new(&base).at(&path));
             [none, internal, after]
@@ -8095,16 +10862,17 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             // never leaves. It is still constructed synthetically, because
             // `ObjectSite::RepairMaterialize.residue_elements()` registers
             // it and PR3 froze that; it will simply never appear in a
-            // sampled histogram.
+            // sampled histogram. The funnel removes the `MERGE_MSG` (and
+            // `AUTO_MERGE`) the pick did write, so the after phase is the
+            // index and nothing `Worktree.Verify` reads as merge state.
             assert!(
                 !git_dir.join("CHERRY_PICK_HEAD").exists(),
                 "a successful `cherry-pick --no-commit` sets no CHERRY_PICK_HEAD"
             );
             assert!(
-                git_dir.join("MERGE_MSG").exists(),
-                "what it does leave is MERGE_MSG, which this site's element list does not \
-                     register and which `Worktree.Verify` reads as merge state — so the tabled \
-                     recovery is entered either way"
+                !git_dir.join("MERGE_MSG").exists() && !git_dir.join("AUTO_MERGE").exists(),
+                "the funnel clears the pick's state files: a completed materialization is \
+                     quiescent at its base and a retained repair generation can verify"
             );
             let after = classify(site, &ResidueTarget::new(&base).at(&path));
             [none, internal, after]
@@ -8204,6 +10972,63 @@ fn every_registered_residue_element_is_constructed_and_recovers() {
         );
         assert!(!evidence.claims_execution());
     }
+
+    // The synthetic half of the residue-class evidence, the tracked file the
+    // sequential registry (`engine::topology::coverage`) embeds: one record
+    // per (site, element), exactly what this test asserted above.
+    // Deterministic by construction -- every field is what the assertions
+    // required -- so unlike the histogram it is pinned rather than
+    // machine-varying, and this test holds the tracked bytes to what it
+    // constructed instead of rewriting them: an ordinary test that rewrote
+    // a tracked input in place left a truncation window for the ordinary
+    // coverage tests that read it (PR10's round-3 regression lens, P2), and
+    // rewrote it on every machine. `UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1`
+    // regenerates it, as it does the residue-class declarations.
+    let sites: Vec<serde_json::Value> = residue_classified_sites()
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "site": site.name(),
+                "synthetic": records
+                    .iter()
+                    .filter(|(seen, _)| seen == site)
+                    .map(|(_, record)| *record)
+                    .collect::<Vec<SyntheticRecord>>(),
+            })
+        })
+        .collect();
+    let emitted = serde_json::to_string_pretty(&serde_json::json!({
+        "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of \
+                 the residue-class evidence: one record per (site, element) the frozen enums \
+                 register, written by \
+                 workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers \
+                 from what it constructed, classified and recovered, and held to on every run. \
+                 Deterministic, so it is pinned (regenerate with \
+                 UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1); effects/sequential-registry.json \
+                 embeds it.",
+        "sites": sites,
+    }))
+    .expect("the synthetic evidence serializes");
+    let tracked =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::effects::RESIDUE_SYNTHETIC_JSON);
+    let generated = format!("{emitted}\n");
+    if std::env::var_os(crate::effects::REGENERATE).is_some() {
+        write_file(&tracked, generated.as_bytes());
+    }
+    let on_disk = fs::read_to_string(&tracked).unwrap_or_else(|error| {
+        panic!(
+            "{} is tracked; regenerate it with {}=1: {error}",
+            crate::effects::RESIDUE_SYNTHETIC_JSON,
+            crate::effects::REGENERATE
+        )
+    });
+    assert_eq!(
+        on_disk.replace("\r\n", "\n"),
+        generated,
+        "{} is stale against what this test constructed; regenerate it with {}=1",
+        crate::effects::RESIDUE_SYNTHETIC_JSON,
+        crate::effects::REGENERATE
+    );
 }
 
 /// Construct one element at one site, classify it, check quiescence, and
@@ -8360,8 +11185,18 @@ fn construct_element(fixture: &Fixture, path: &Path, element: ResidueElement) ->
             "an object an interrupted command wrote\n",
         )),
         ResidueElement::TemporaryObjectFile => {
+            // In a fan-out directory the store already holds, beside real
+            // objects, where the common loose write leaves it. Planted at
+            // the object root this exercised only the arm the scan always
+            // had, and the grid the per-element evidence rests on stayed
+            // green with the fan-out loop deleted
+            // (`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
             let objects = object_directory(&fixture.base).expect("object directory");
-            fs::write(objects.join("tmp_obj_synthetic"), b"partial").expect("temp object");
+            fs::write(
+                fan_out_directory(&objects).join("tmp_obj_synthetic"),
+                b"partial",
+            )
+            .expect("temp object");
             None
         }
         ResidueElement::IndexLock => {
@@ -8557,6 +11392,16 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             4 * SAMPLING_N as usize,
             "every sampled site must launch exactly its frozen N children, \
                  and an observation is pushed whether or not one was"
+        );
+        let group_end = log
+            .iter()
+            .map(|launch| launch.group_ended)
+            .max()
+            .unwrap_or_default();
+        println!(
+            "residue sampling: every killed group was gone within {group_end:?} of its leader's \
+             reap (the bound is {:?})",
+            super::fixture::GROUP_END_BOUND
         );
         for (label, fixed) in [
             ("git add", WorkspaceManager::CANDIDATE_STAGE_ARGV[0]),
@@ -8942,7 +11787,20 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
             "the commit is the dynamic argument, the path is a PathBuf; the one literal is \
              the `operation: \"create\"` field of a Filesystem error, not a Git argument",
         ),
-        ("pub fn candidate_stage(", 0, 0, "none of either"),
+        (
+            "pub fn candidate_stage(",
+            2,
+            0,
+            "two dynamic arguments and no literal: `CANDIDATE_STAGE_MANIFEST_EXCLUSION` \
+             completed by the manifest's spelling, appended to the shared list only when an \
+             untracked, unignored regular file holds the manifest's name (`manifest_name`), \
+             which the sampler's populated worktree never does, so its child runs the list \
+             bare as the funnel does there; and `CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC` \
+             completed the same way, the argument of the separate `clean` child that removes \
+             the worker's manifest; the declared-resolution children it runs before the \
+             sampled `add -A` take their argv from `DeclaredResolution::argv`, whose fixed \
+             words are `RESOLUTION_ADD_ARGV` and `RESOLUTION_RM_ARGV`",
+        ),
         ("pub fn candidate_write_tree(", 0, 0, "none of either"),
         (
             "pub fn proposal_cherry_pick(",
@@ -9578,6 +12436,10 @@ struct SampledLaunch {
     /// asserted on — see the note at that printing.
     kill_error: Option<String>,
     end: LaunchEnd,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`): zero off Unix, where the child is no
+    /// group.
+    group_ended: std::time::Duration,
 }
 
 /// Every Git child the sampler actually launched, in order.
@@ -9641,24 +12503,40 @@ struct SampledChild {
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`), or `None` until [`Self::wait`] has run.
+    group_ended: Option<std::time::Duration>,
 }
 
 impl SampledChild {
+    /// Spawn the child in a process group of its own on Unix, so that
+    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
+    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
+    /// sampler killed the leader alone (round 2's group kill reached
+    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
+    /// macOS leg at `869e336a` met that child still populating the checkout
+    /// — `PR136`'s first fingerprint — at the forced removal.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let child = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(cwd)
             .args(["-c", "core.fsmonitor=false"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the sampled git child");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("spawn the sampled git child");
         Self {
             child,
             spawned: std::time::Instant::now(),
             fired: None,
+            group_ended: None,
         }
     }
 
@@ -9678,13 +12556,24 @@ impl SampledChild {
     /// but a real kill produces.
     fn kill(&mut self) -> std::io::Result<()> {
         let fired = self.spawned.elapsed();
-        let outcome = self.child.kill();
+        let outcome = super::fixture::kill_process_group(&mut self.child);
         self.fired = Some(fired);
         outcome
     }
 
+    /// Reap the leader, then wait until its whole process group is gone
+    /// (`fixture::await_group_end`, bounded): the proof `recover_sample`
+    /// runs under is that no writer the child started is alive, and the
+    /// leader's reap alone is not that proof.
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+        let status = self.child.wait()?;
+        let pgid = i32::try_from(self.child.id()).expect("a pid fits in i32");
+        self.group_ended = Some(
+            super::fixture::await_group_end(pgid).unwrap_or_else(|outlived| {
+                panic!("the sampled git child's group outlived its leader: {outlived}")
+            }),
+        );
+        Ok(status)
     }
 }
 
@@ -9708,6 +12597,7 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
             fired: child.fired,
             kill_error,
             end: launch_end(&status),
+            group_ended: child.group_ended.unwrap_or_default(),
         });
 }
 
@@ -9715,9 +12605,17 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
 fn recover_sample(fixture: &Fixture, slot: &Slot) -> bool {
+    // The sampled child's whole process group is gone before this runs —
+    // the leader reaped and every member it started, `git worktree add`'s
+    // own `reset --hard` among them, dead and reaped
+    // (`fixture::await_group_end`; until PR10's round 5 the leader alone was
+    // killed and reaped here, and CI's macOS leg at `869e336a` met the
+    // member still writing: `PR136`'s first fingerprint) — so no writer of
+    // the execution root is alive: the proof under which a registration the
+    // kill left naming nothing is passed over rather than refused.
     fixture
         .manager
-        .remove_worktree(&mut NoHooks, slot)
+        .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
         .expect("forced removal converges");
     fixture
         .manager
@@ -9782,7 +12680,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("quiescent");
     fs::write(task_path.join("worker.txt"), "worker\n").expect("worker edit");
     manager
-        .candidate_stage(&mut hooks, &task)
+        .candidate_stage(&mut hooks, &task, &[])
         .expect("Object.CandidateStage");
     let tree = manager
         .candidate_write_tree(&mut hooks, &task)
@@ -9889,7 +12787,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("worktree");
     fs::write(fast_path.join("fast.txt"), "fast\n").expect("edit");
     manager
-        .candidate_stage(&mut hooks, &fast_task)
+        .candidate_stage(&mut hooks, &fast_task, &[])
         .expect("stage");
     let fast_tree = manager
         .candidate_write_tree(&mut hooks, &fast_task)
@@ -10125,5 +13023,1050 @@ fn a_worktree_inspecting_read_writes_no_index() {
         before == after,
         "a read that classifies residue rewrote the {}-byte index it was classifying",
         before.len()
+    );
+}
+
+/// How a name is planted for the table below.
+#[derive(Clone, Copy)]
+enum Planted {
+    File,
+    Directory,
+}
+
+/// The paths this git's own `prune -n` names as stale temporaries — "Removing
+/// stale temporary file …" and "… directory …" — with `\` read as `/` so a
+/// Windows spelling of the store compares the same.
+fn prune_names(repository: &Path) -> Vec<String> {
+    let output = git_out(repository, &["prune", "-n"]);
+    assert!(
+        output.status.success(),
+        "git prune -n: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Removing stale temporary file ")
+                .or_else(|| line.strip_prefix("Removing stale temporary directory "))
+        })
+        .map(|path| path.replace('\\', "/"))
+        .collect()
+}
+
+/// [`temporary_object_files`] answers for the thirteen names planted below
+/// as `git prune -n` answers for them — the same `git prune -n` is read after
+/// each planting, so the table is Git's and not this test's.
+///
+/// `resource_accounting[R27]` says "Git prunes temporary object files itself",
+/// so `git prune` is the authority on which files these are. Measured on
+/// git 2.43.0 by planting one candidate name in each plausible place and
+/// reading `git prune -n`
+/// (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`,
+/// `21-r5-git-prune-producers-outside-the-sample.log`): every row below
+/// marked `true` was named "Removing stale temporary file" — or "directory",
+/// for the one directory — and the rows marked `false` were not:
+/// `objects/ab/tmp_other_fanout` is reported as a *bad sha1 file* and counted
+/// in `garbage`, `objects/info/tmp_info` is left alone, and `repack`'s
+/// `.tmp-<pid>-pack-*` is not named. The
+/// same `git prune -n` is run here after each planting: a row the predicate
+/// and this git disagree on fails, so for the thirteen names planted below
+/// the table is this git's and not this test's
+/// (`PR258-PRUNE-SET-IS-A-SELF-ORACLE`). That is the whole of what the
+/// cross-check establishes. It plants fixed names and discovers none from a
+/// producer, so a git that adopts a new temporary spelling while `prune`
+/// keeps naming the old ones passes every row here with the scan blind to
+/// the new name (`PR258-PRUNE-ORACLE-FUTURE-COVERAGE-OVERSTATED`).
+///
+/// The fan-out rows are the ones that were missed. A loose object's
+/// temporary file is written in the fan-out directory the object's final
+/// name will live in by `hash-object -w` and `write-tree`
+/// (`02-strace-where-git-writes.log`), so a scan of the root and `pack`
+/// alone never saw the file a killed write leaves: a real `SIGKILL`
+/// requested at half of a separately measured 3.878 s write left
+/// `objects/b7/tmp_obj_ybqfZf` and this function answered `false`
+/// (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`, `01-real-kill-frozen.log`). The root
+/// rows are real too: a streamed object above `core.bigFileThreshold` is
+/// written at the root, its fan-out unknown until the stream ends
+/// (`20-r5-strace-git-writes-in-three-places.log`). `00` and `ff` are the
+/// two ends of the range the scan probes, and a range short by one at either
+/// end answers `false` for exactly one of them
+/// (`PR258-FANOUT-RANGE-BOUNDS-UNWITNESSED`).
+///
+/// Each name is planted **alone** and removed again, so each row is this
+/// function's answer to that name and nothing else.
+#[test]
+fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
+    let fixture = Fixture::new("temp-object-scan");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    // `pack` and `info` are created empty by `git init` itself (git 2.43.0,
+    // `32-r6-git-init-directories.log`). The planting places are made to
+    // exist here whatever the fixture's history, and `create_dir_all` is a
+    // no-op for the ones already there.
+    for directory in ["pack", "info", "00", "ab", "ff"] {
+        fs::create_dir_all(objects.join(directory)).expect("a store directory");
+    }
+
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a store Git has not been killed inside holds none"
+    );
+    assert_eq!(
+        prune_names(&fixture.base),
+        Vec::<String>::new(),
+        "and this git's `prune -n` names no stale temporary in it"
+    );
+
+    for (relative, planted_as, git_calls_it_its_own) in [
+        // The object root: any `tmp_` name ...
+        ("tmp_obj_root", Planted::File, true),
+        ("tmp_other_root", Planted::File, true),
+        // ... including receive-pack's quarantine directory, which is there
+        // for the length of a push into the repository and which prune
+        // removes as "a stale temporary directory".
+        ("tmp_objdir-incoming-AbCdEf", Planted::Directory, true),
+        // The pack directory: any `tmp_` name, which is the pack Git was
+        // writing, the index it writes beside it, and the reverse index.
+        ("pack/tmp_pack_p", Planted::File, true),
+        ("pack/tmp_idx_p", Planted::File, true),
+        ("pack/tmp_rev_p", Planted::File, true),
+        // A fan-out directory: `tmp_obj_` is Git's temporary loose object —
+        // at both ends of the range the scan probes, and in the middle.
+        ("00/tmp_obj_first", Planted::File, true),
+        ("ab/tmp_obj_fanout", Planted::File, true),
+        ("ff/tmp_obj_last", Planted::File, true),
+        // A fan-out name that is not `tmp_obj_`: `git prune -n` reported the
+        // planted `ab/tmp_other_fanout` as a bad sha1 file, counted in
+        // `garbage`, and did not name it, so it is not this element.
+        ("ab/tmp_other_fanout", Planted::File, false),
+        // `git prune -n` left the planted `info/tmp_info` alone.
+        ("info/tmp_info", Planted::File, false),
+        // `repack` names its in-flight pack `.tmp-<pid>-pack-*`; `git prune -n`
+        // did not name the two planted here, so R27's "Git prunes temporary
+        // object files itself" does not cover them and neither does this.
+        (".tmp-1-pack-x.pack", Planted::File, false),
+        ("pack/.tmp-1-pack-y.pack", Planted::File, false),
+    ] {
+        let planted = objects.join(relative);
+        match planted_as {
+            Planted::File => fs::write(&planted, b"half an object\n").expect("plant"),
+            Planted::Directory => {
+                fs::create_dir(&planted).expect("plant");
+                fs::write(planted.join("held"), b"an object in quarantine\n").expect("plant");
+            }
+        }
+        assert_eq!(
+            temporary_object_files(&fixture.base).expect("scan"),
+            git_calls_it_its_own,
+            "{relative}: `git prune` {} call it a stale temporary",
+            if git_calls_it_its_own {
+                "does"
+            } else {
+                "does not"
+            }
+        );
+        let named = prune_names(&fixture.base);
+        assert_eq!(
+            named
+                .iter()
+                .any(|name| name.ends_with(&format!("objects/{relative}"))),
+            git_calls_it_its_own,
+            "{relative}: this git's own `prune -n` {} name it, and the table says it {}: {named:?}",
+            if git_calls_it_its_own {
+                "does not"
+            } else {
+                "does"
+            },
+            if git_calls_it_its_own {
+                "does"
+            } else {
+                "does not"
+            }
+        );
+        match planted_as {
+            Planted::File => fs::remove_file(&planted).expect("unplant"),
+            Planted::Directory => fs::remove_dir_all(&planted).expect("unplant"),
+        }
+        assert!(
+            !temporary_object_files(&fixture.base).expect("scan"),
+            "{relative}: and removing it leaves the store with none"
+        );
+    }
+}
+
+/// The scan reads a store's real shape without walking what is not a fan-out.
+///
+/// A loose object's own name is 38 hexadecimal characters in a two-character
+/// directory, and neither is a temporary file; `pack` holds packs and their
+/// indexes; `info` holds `alternates` and `packs`. None of them is an answer.
+/// The scan resolves Git's 256 canonical two-digit names by construction, so
+/// `objects/abc` is never a candidate against the shipped design; the decoy
+/// assertion below cannot fail against it and is kept as the guard against a
+/// revert to name filtering with a loose prefix match
+/// (`PR258-DECOY-DOC-OVERSTATES-ITS-GUARD`). A regular file at a two-digit
+/// name resolves but is not a directory, so it is not a fan-out and is not
+/// read as one — without that guard `read_dir` on it would be an inspection
+/// error, `NotADirectory`, for a store nothing is wrong with
+/// (`PR258-IS-DIR-GUARD-UNWITNESSED`).
+#[test]
+fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
+    let fixture = Fixture::new("temp-object-scan-negative");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "the fixture's own objects are not temporary files"
+    );
+
+    // A directory that begins with two hex digits but is not a fan-out, and a
+    // `tmp_obj_` name inside it: not Git's, not descended into.
+    let decoy = objects.join("abc");
+    fs::create_dir_all(&decoy).expect("a decoy directory");
+    fs::write(decoy.join("tmp_obj_decoy"), b"not in a fan-out\n").expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "`objects/abc` is not a fan-out directory, so nothing in it is one of Git's"
+    );
+
+    // And a fan-out directory that holds only real loose objects.
+    let fan_out = objects.join("cd");
+    fs::create_dir_all(&fan_out).expect("a fan-out directory");
+    fs::write(
+        fan_out.join("ef0123456789abcdef0123456789abcdef0123"),
+        b"a loose object's name is not a temporary file\n",
+    )
+    .expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a fan-out holding only objects holds no temporary object file"
+    );
+
+    // And a regular file at a fan-out name: resolved, not a directory, not
+    // read.
+    let (file_at_a_fan_out_name, _) = unused_alphabetic_fan_out_pair(&objects);
+    fs::write(
+        &file_at_a_fan_out_name,
+        b"a file where a fan-out could be\n",
+    )
+    .expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base)
+            .expect("a regular file at a fan-out name is not an inspection failure"),
+        "a regular file at a two-digit name is not a fan-out"
+    );
+}
+
+/// Reserve an absent pair, independently of the fixture's timestamp-dependent
+/// object names. Checking both spellings also works on case-sensitive stores.
+fn unused_alphabetic_fan_out_pair(objects: &Path) -> (PathBuf, PathBuf) {
+    for prefix in 0_u8..=255 {
+        let name = format!("{prefix:02x}");
+        let upper_name = name.to_ascii_uppercase();
+        if name == upper_name {
+            continue;
+        }
+        let lower = objects.join(name);
+        let upper = objects.join(upper_name);
+        let absent = [&lower, &upper]
+            .into_iter()
+            .all(|path| match fs::symlink_metadata(path) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => panic!("inspect unused fan-out {}: {error}", path.display()),
+            });
+        if absent {
+            return (lower, upper);
+        }
+    }
+    panic!("the small fixture must leave an unused alphabetic fan-out pair");
+}
+
+/// The declaration under which
+/// `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
+/// *requires* its native casefold branch rather than observing it. Set to
+/// `1`, it says that the temporary directory this suite runs under folds
+/// case: `ci.yml` sets it on the `macos-latest` test step and on the
+/// `winguest` step, and nowhere else. Unset, empty, or anything but `1`, the
+/// test asserts the scan against whatever the filesystem does.
+const TEMP_FOLDS_CASE: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
+
+/// Every platform constructs the upper-case witness and asserts the scan
+/// against its native lookup result. An occupied `ab` cannot suppress it.
+/// Unix additionally supplies a lower-case symlink alias when the filesystem
+/// distinguishes the spellings, so ordinary case-sensitive CI also executes
+/// positive alias detection.
+///
+/// **Which branch guards what.** The native branch — Git's lower-case path
+/// resolving to the stored upper-case fan-out — is the one that guards
+/// `PR258-CASEFOLD-FANOUT-INVISIBLE`, and it is *required* only where the
+/// leg declares it: `ci.yml` sets `TEMP_FOLDS_CASE` to `1` on the
+/// `macos-latest` test step and on the `winguest` step, whose temporary
+/// directories fold case (both legs passed the round-5 assertion of that
+/// branch at `f4a351be`), so a green there records that this branch ran.
+/// Anywhere the variable is not `1` the branch is observed, not required:
+/// on a case-sensitive volume — the ubuntu leg, the build box the ten gates
+/// run on, a developer whose `TMPDIR` is a case-sensitive APFS volume — the
+/// native assertion is `false == false`, which any implementation that
+/// answers `false` there satisfies, the round-2 name filter included, and
+/// the symlink half then guards the link-following repair and nothing about
+/// case. Round 5 keyed the requirement on the target OS instead,
+/// `cfg!(any(target_os = "macos", windows))`, which fails this test on a
+/// supported case-sensitive volume before the scan is checked; the round-5
+/// regression lens executed the equivalent `cfg!(unix)` branch on Linux
+/// (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`). So the casefold P1 is
+/// guarded by a gate on the two legs that declare the variable, and by no
+/// gate on the ubuntu leg or on this box
+/// (`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`).
+#[test]
+fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
+    let fixture = Fixture::new("temp-object-case-alias");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    fs::create_dir_all(objects.join("ab")).expect("an occupied ordinary fan-out");
+    let (lower, upper) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&upper).expect("the upper-case fan-out");
+    fs::write(upper.join("tmp_obj_case_alias"), b"half an object\n").expect("plant");
+    let native_alias = match fs::metadata(&lower) {
+        Ok(metadata) => {
+            assert!(
+                metadata.is_dir(),
+                "the native alias resolves to a directory"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("inspect the lower-case lookup {}: {error}", lower.display()),
+    };
+    // Required only where the leg declares it: `ci.yml` sets
+    // `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` on the macOS and winguest test steps,
+    // and a green there records that the native branch of this guard ran.
+    // Everywhere else the branch is observed, so a case-sensitive volume —
+    // a developer's `TMPDIR` on case-sensitive APFS — takes the negative
+    // branch below instead of failing here.
+    if std::env::var_os(TEMP_FOLDS_CASE).is_some_and(|value| value == "1") {
+        assert!(
+            native_alias,
+            "{TEMP_FOLDS_CASE}=1 declares that the temporary directory {} folds case, but Git's \
+             lower-case path {} did not resolve to the stored upper-case fan-out: the leg's \
+             declaration and its filesystem disagree",
+            std::env::temp_dir().display(),
+            lower.display()
+        );
+    }
+    assert_eq!(
+        temporary_object_files(&fixture.base).expect("scan stored upper-case fan-out"),
+        native_alias,
+        "Git reaches the stored upper-case directory exactly when its lower-case path resolves"
+    );
+
+    #[cfg(unix)]
+    {
+        if !native_alias {
+            std::os::unix::fs::symlink(&upper, &lower).expect("provide the lower-case alias");
+        }
+        assert!(
+            temporary_object_files(&fixture.base).expect("scan through the lower-case alias"),
+            "the lower-case alias reaches the temporary object on every Unix test filesystem"
+        );
+    }
+
+    fs::remove_file(upper.join("tmp_obj_case_alias")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan after removing residue"),
+        "removing the temporary object leaves neither spelling with residue"
+    );
+}
+
+/// Execute with TMPDIR (Unix) or the system temporary directory (Windows) on a
+/// case-insensitive filesystem. This fails its prerequisite instead of silently
+/// passing on a case-sensitive volume. It never runs in CI — nothing passes
+/// `--ignored` — and on a case-sensitive volume the default alias test above
+/// takes its negative branch, which a `read_dir` filter that discards stored
+/// upper-case names before resolving Git's lower-case path also satisfies; so
+/// this witness is what rejects that filter on Linux, and it was executed on
+/// ext4 casefold (`09-r3-targeted.log`, `13-r3-mutations-M9-native-casefold.log`)
+/// rather than by a gate.
+#[test]
+#[ignore = "requires a case-insensitive temporary filesystem; run explicitly with --ignored"]
+fn a_native_case_insensitive_fan_out_alias_is_detected() {
+    let fixture = Fixture::new("temp-object-native-case-alias");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let (lower, upper) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&upper).expect("the stored upper-case fan-out");
+    assert!(
+        fs::metadata(&lower)
+            .expect("this integration test requires native case-insensitive path lookup")
+            .is_dir(),
+        "Git's lower-case path resolves to the stored upper-case directory"
+    );
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan the empty alias"),
+        "an empty alias is not temporary residue"
+    );
+    fs::write(upper.join("tmp_obj_native_alias"), b"half an object\n").expect("plant");
+    assert!(
+        temporary_object_files(&fixture.base).expect("scan the native case alias"),
+        "a temporary object reachable through Git's canonical path must be detected"
+    );
+    fs::remove_file(upper.join("tmp_obj_native_alias")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan after removing residue"),
+        "removing the temporary object leaves the native alias empty"
+    );
+}
+
+/// A symlinked fan-out directory is one Git writes into and prunes from, so
+/// the scan follows it.
+///
+/// `DirEntry::file_type` reports the **link**, not its target, so a scan that
+/// read it walked straight past `objects/93 -> elsewhere` and answered `false`
+/// for a file Git had just left inside. Found by #258's class review with a
+/// real `SIGKILL` inside a `hash-object -w`: the kill left
+/// `objects/93/tmp_obj_HuHQtZ`, `git prune -n` named it a stale temporary
+/// file, `unreachable_objects` was empty, and the classifier answered `None`
+/// with no element observed — this scan's original defect surviving its own
+/// repair. [`fan_out_directories`] resolves the target with `fs::metadata`.
+///
+/// Unix only, because creating a directory symlink on Windows needs a
+/// privilege the CI runner does not hold. The resolution itself is
+/// `fs::metadata` on every platform.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_fan_out_directory_is_followed_as_git_follows_it() {
+    let fixture = Fixture::new("temp-object-symlink");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let elsewhere = fixture.root.join("fan-out-elsewhere");
+    fs::create_dir_all(&elsewhere).expect("the directory the fan-out points at");
+    let (fan_out, _) = unused_alphabetic_fan_out_pair(&objects);
+    std::os::unix::fs::symlink(&elsewhere, &fan_out).expect("the unused fan-out symlink");
+
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a symlinked fan-out holding nothing holds no temporary object file"
+    );
+
+    fs::write(elsewhere.join("tmp_obj_HuHQtZ"), b"half an object\n").expect("plant");
+    assert!(
+        temporary_object_files(&fixture.base).expect("scan"),
+        "Git writes tmp_obj_* through the fan-out link and prunes it through the link, \
+         so the scan reads through the link"
+    );
+
+    fs::remove_file(elsewhere.join("tmp_obj_HuHQtZ")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "and removing it leaves the store with none"
+    );
+
+    // A dangling link is a name that is gone, which holds nothing and is not
+    // an inspection failure.
+    fs::remove_dir_all(&elsewhere).expect("drop the target");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("a dangling fan-out link is not an error"),
+        "a fan-out link with no target holds no temporary object file"
+    );
+}
+
+/// An inspection failure at a later canonical name cannot discard an answer an
+/// earlier fan-out already gave; once nothing earlier answers, the failure is
+/// the caller's to see rather than a silent `false`.
+///
+/// Round 4's `fan_out_directories` collected all 256 probes before the caller
+/// read any, so a symlink loop at a later name turned a store whose
+/// `objects/00` held residue from `Ok(true)` into `Err(FilesystemLoop)`
+/// (`PR258-EAGER-FANOUT-PROBE-DISCARDS-A-KNOWN-TRUE`); the probe is streamed
+/// into the read now. The loop is also the witness for the `fs::metadata`
+/// error arm: replaced by a skip, the scan reads `Ok(false)` for a store it
+/// could not inspect (`PR258-ERROR-ARMS-SILENCEABLE`).
+///
+/// Unix only, because the loop is a symlink.
+#[cfg(unix)]
+#[test]
+fn a_fan_out_link_that_loops_is_an_inspection_error_once_no_earlier_fan_out_answers() {
+    let fixture = Fixture::new("temp-object-symlink-loop");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let first = objects.join("00");
+    fs::create_dir_all(&first).expect("the first fan-out the scan probes");
+    fs::write(first.join("tmp_obj_early"), b"half an object\n").expect("plant");
+    // Every alphabetic pair sorts after `00`, so the loop is probed later.
+    let (looped, _) = unused_alphabetic_fan_out_pair(&objects);
+    std::os::unix::fs::symlink(&looped, &looped).expect("a fan-out link that resolves to itself");
+    // `ELOOP`, whose `ErrorKind` (`FilesystemLoop`) is not yet stable to name
+    // and whose number differs between Linux and Darwin; the scan's error is
+    // compared with the one the filesystem gives here.
+    let loop_errno = match fs::metadata(&looped) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            error.raw_os_error().expect("an error the OS reported")
+        }
+        other => panic!("premise: resolving the link is a loop, not an absence: {other:?}"),
+    };
+
+    assert!(
+        temporary_object_files(&fixture.base).expect("the answer `00` gave stands"),
+        "`00` answers before the loop is probed, and its answer is not discarded"
+    );
+
+    fs::remove_file(first.join("tmp_obj_early")).expect("unplant");
+    let error = temporary_object_files(&fixture.base)
+        .expect_err("a fan-out that cannot be resolved is not a fan-out that holds nothing");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &looped && source.raw_os_error() == Some(loop_errno)
+        ),
+        "the error names the looping fan-out, with the OS's own errno: {error}"
+    );
+}
+
+/// A fan-out this process cannot read is an inspection failure the caller
+/// sees, not an absence: `PermissionDenied` is not `NotFound` (§7).
+///
+/// This is the one production difference the change discloses — an
+/// unreadable two-digit directory makes `verify_object` return `Io` where the
+/// old scan reached `Refusal::ObjectMissing` — and the `read_dir` arm that
+/// carries it was replaceable by `Ok(false)` with every test green
+/// (`PR258-ERROR-ARMS-SILENCEABLE`). Evaluated on the Unix legs, where a mode
+/// bit binds a non-root user.
+#[cfg(unix)]
+#[test]
+fn a_fan_out_this_process_cannot_read_is_an_inspection_error_not_an_absence() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("temp-object-unreadable-fan-out");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let (fan_out, _) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&fan_out).expect("the fan-out");
+    fs::write(fan_out.join("tmp_obj_hidden"), b"half an object\n").expect("plant");
+    let _restore = RestoreMode {
+        path: fan_out.clone(),
+    };
+    fs::set_permissions(&fan_out, fs::Permissions::from_mode(0o000)).expect("make it unreadable");
+    // The injection must bite: root, or a process holding CAP_DAC_READ_SEARCH,
+    // lists through a mode of 000, and this test would then measure nothing.
+    assert!(
+        fs::read_dir(&fan_out).is_err(),
+        "prerequisite not met: the mode bit did not bind (running as root or with \
+         CAP_DAC_READ_SEARCH); this test needs an unprivileged user"
+    );
+
+    let error = temporary_object_files(&fixture.base)
+        .expect_err("a fan-out that cannot be read is not a fan-out that holds nothing");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &fan_out && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the error names the fan-out it could not read: {error}"
+    );
+}
+
+/// A listing that fails part-way through is an inspection failure, not the
+/// end of the listing.
+///
+/// `fs::read_dir` yields its entries one at a time and can fail between two
+/// of them; `holds_name_prefixed` reads that failure as an answer nobody has
+/// rather than as "no more names" (§7). No filesystem the suite runs on fails
+/// a `readdir` to order, so the listing is constructed
+/// (`PR258-ERROR-ARMS-SILENCEABLE`).
+#[test]
+fn a_listing_that_fails_part_way_through_is_an_inspection_error_not_the_end_of_it() {
+    use std::ffi::OsString;
+    let name = |name: &str| -> std::io::Result<OsString> { Ok(OsString::from(name)) };
+    let failure = || -> std::io::Result<OsString> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the listing failed after its first entry",
+        ))
+    };
+
+    assert!(
+        matches!(
+            holds_name_prefixed([name("ef0123"), name("tmp_obj_x")].into_iter(), "tmp_"),
+            Ok(true)
+        ),
+        "a name with the prefix is found"
+    );
+    assert!(
+        matches!(
+            holds_name_prefixed([name("ef0123")].into_iter(), "tmp_"),
+            Ok(false)
+        ),
+        "a listing without the prefix holds none"
+    );
+    let error = holds_name_prefixed(
+        [name("ef0123"), failure(), name("tmp_obj_x")].into_iter(),
+        "tmp_",
+    )
+    .expect_err("a failure before the name is not the end of the listing");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        matches!(
+            holds_name_prefixed([name("tmp_obj_x"), failure()].into_iter(), "tmp_"),
+            Ok(true)
+        ),
+        "a name found before the failure is an answer, and the listing stops there"
+    );
+}
+
+// =======================================================================
+// A Git lock file a killed engine ref write left (PR8-CRASH-002)
+// =======================================================================
+
+/// A ref under this run's namespace, `refs/upstroke/runs/<run-id>/<name>`.
+fn run_ref(name: &str) -> String {
+    format!("{RUN_REF_ROOT}/{}/{name}", super::fixture::RUN_ID)
+}
+
+/// Where Git's files backend keeps the lock of `refname`, as
+/// `WorkspaceManager::ref_lock_path` spells it.
+fn lock_of(fixture: &Fixture, refname: &str) -> PathBuf {
+    fixture
+        .manager
+        .common_git_dir
+        .join(format!("{refname}.lock"))
+}
+
+/// The three primitives each reclaim the lock a killed write of their own
+/// left: empty, as a kill between Git's `open` and its content write leaves
+/// it, for a create; naming the value being written, as a kill between that
+/// write and the publishing rename leaves it, for a swap; and empty for a
+/// delete, whose lock Git never writes into.
+#[test]
+fn a_stale_lock_of_the_engines_own_write_is_reclaimed_by_the_write_that_retries() {
+    let fixture = Fixture::created("ref-lock-reclaim");
+    let name = run_ref("candidates/kalpha/1");
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("the create reclaims the empty lock its killed predecessor left");
+    assert!(!lock.exists(), "the reclaimed lock is gone");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone())
+    );
+
+    write_file(&lock, format!("{}\n", fixture.seed).as_bytes());
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("the swap reclaims the lock naming the value it writes");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.seed,
+        )
+        .expect("the delete reclaims the empty lock");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        None
+    );
+}
+
+/// A lock naming anything but the value this write writes belongs to another
+/// write: it is left where it is and the write refuses, saying so. For a
+/// delete that is any content at all, since a deletion's lock is never
+/// written into -- the ref's own current value included.
+#[test]
+fn a_lock_naming_another_value_is_left_and_the_write_refuses() {
+    let fixture = Fixture::created("ref-lock-foreign");
+    let name = run_ref("candidates/kalpha/1");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("create");
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, format!("{}\n", fixture.side).as_bytes());
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a lock naming a third value is not this write's");
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists(), "left in place");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone()),
+        "the ref is untouched"
+    );
+
+    write_file(&lock, format!("{}\n", fixture.head).as_bytes());
+    let error = fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.head,
+        )
+        .expect_err(
+            "a deletion writes nothing into its lock, so a lock with content is not a deletion's",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone())
+    );
+
+    // A lock longer than any object id and its newline is read only as far as
+    // the bound and is then, whatever follows, not this write's.
+    write_file(&lock, &vec![b'a'; 4096]);
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a long lock is not this write's");
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists());
+}
+
+/// A lock on a ref outside the run's namespace, offered to a namespace site,
+/// is nothing this manager reasons about: it is left exactly as before, and
+/// Git refuses the write on it as Git always did.
+#[test]
+fn a_lock_outside_the_run_namespace_is_left_for_git_to_refuse() {
+    let fixture = Fixture::created("ref-lock-elsewhere");
+    for name in [
+        "refs/upstroke/runs/01KZSOMEOTHERRUN0000000000/candidates/kalpha/1",
+        "refs/heads/elsewhere",
+    ] {
+        let lock = lock_of(&fixture, name);
+        write_file(&lock, b"");
+        let error = fixture
+            .manager
+            .create_ref_zero_old(&mut NoHooks, RefSite::CreateCandidates, name, &fixture.head)
+            .expect_err("Git refuses on the lock, as before");
+        assert!(
+            matches!(&error, UpstrokeError::Git { message } if message.contains(".lock")),
+            "{name}: Git's own refusal, naming the lock: {error}"
+        );
+        assert!(lock.exists(), "{name}: the lock was not touched");
+        assert_eq!(
+            fixture.manager.direct_ref_target(name).expect("read"),
+            None,
+            "{name}: nothing was created"
+        );
+    }
+}
+
+/// The two integration sites write the ref `run_started` recorded, wherever
+/// it lives -- the scaffold's is `refs/heads/upstroke/run-<id>` -- so a stale
+/// lock on it is reclaimed by its name being the run's integration ref rather
+/// than by the namespace.
+#[test]
+fn the_integration_sites_reclaim_a_stale_lock_on_the_recorded_integration_ref() {
+    let fixture = Fixture::created("ref-lock-integration");
+    let name = format!("refs/heads/upstroke/run-{}", super::fixture::RUN_ID);
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateIntegration,
+            &name,
+            &fixture.head,
+        )
+        .expect("the integration ref's create reclaims its stale lock");
+    assert!(!lock.exists());
+
+    write_file(&lock, fixture.seed.as_bytes());
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("the integration ref's swap reclaims a lock naming the value it writes");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+
+    // The same name offered to a namespace site is outside that site's
+    // namespace, and is left for Git.
+    write_file(&lock, b"");
+    let error = fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.seed,
+        )
+        .expect_err("a namespace site does not reclaim outside the namespace");
+    assert!(
+        matches!(&error, UpstrokeError::Git { .. }),
+        "Git's own refusal: {error}"
+    );
+    assert!(lock.exists());
+}
+
+/// With the ref in `packed-refs`, a `git pack-refs --prune` may be holding
+/// the lock at this instant and nothing the repository records says
+/// otherwise, so the lock is left and the write refuses -- and once an
+/// operator has removed it, the swap writes the loose ref over the packed
+/// copy as any swap of a packed ref does.
+#[test]
+fn a_stale_lock_on_a_packed_ref_is_left_and_the_write_refuses() {
+    let fixture = Fixture::created("ref-lock-packed");
+    let name = run_ref("candidates/kalpha/1");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("create");
+    git(&fixture.base, &["pack-refs", "--all"]);
+    assert!(
+        !fixture.manager.common_git_dir.join(&name).exists(),
+        "pack-refs packed the ref and pruned its loose file"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&name)
+            .expect("read packed-refs"),
+        Some(fixture.head.clone()),
+        "and the packed file names it"
+    );
+
+    let lock = lock_of(&fixture, &name);
+    write_file(&lock, b"");
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a lock on a packed ref may be a prune's");
+    assert!(
+        error.to_string().contains("the ref is in packed-refs"),
+        "{error}"
+    );
+    assert!(lock.exists(), "left in place");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone()),
+        "the ref is untouched"
+    );
+
+    super::fixture::remove_file(&lock);
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("with the lock gone the swap writes the loose ref");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+}
+
+/// `packed-refs` is read as Git writes it: the `# pack-refs with:` header and
+/// the `^<peeled>` lines are skipped, every other line is `<id> <refname>`,
+/// an absent file and an absent name both read as nothing.
+#[test]
+fn packed_refs_is_read_as_git_writes_it() {
+    let fixture = Fixture::created("packed-refs-read");
+    let packed = fixture.manager.common_git_dir.join("packed-refs");
+    let name = run_ref("candidates/kalpha/1");
+    assert_eq!(
+        fixture.manager.packed_ref_value(&name).expect("no file"),
+        None
+    );
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} refs/heads/main\n{} refs/tags/v1\n^{}\n{} {name}\n",
+            fixture.head, fixture.side, fixture.seed, fixture.seed
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        fixture.manager.packed_ref_value(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value("refs/heads/main")
+            .expect("read"),
+        Some(fixture.head.clone())
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&run_ref("candidates/kalpha/2"))
+            .expect("read"),
+        None,
+        "a name the file does not list"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&fixture.seed)
+            .expect("read"),
+        None,
+        "a peeled line is not a ref"
+    );
+}
+
+/// The check a swap runs after it reclaimed a lock: `packed-refs` now holding
+/// the ref at anything but the value just written means a `pack-refs` ran
+/// during the reclaim, and its prune may remove the loose ref, so the swap is
+/// refused rather than recorded. The same file holding the new value, or
+/// nothing, is no such sign.
+#[test]
+fn a_swap_that_reclaimed_a_lock_refuses_when_packed_refs_then_holds_the_ref_elsewhere() {
+    let fixture = Fixture::created("packed-refs-post-check");
+    let packed = fixture.manager.common_git_dir.join("packed-refs");
+    let name = run_ref("candidates/kalpha/1");
+
+    fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect("no packed file, nothing to refuse");
+
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} {name}\n",
+            fixture.seed
+        )
+        .as_bytes(),
+    );
+    fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect("packed at the value just written: a pack-refs that ran after the swap");
+
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} {name}\n",
+            fixture.head
+        )
+        .as_bytes(),
+    );
+    let error = fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect_err("packed at the old value: a pack-refs that ran during the reclaim");
+    let text = error.to_string();
+    assert!(text.contains("packed-refs now holds it"), "{text}");
+    assert!(
+        text.contains(&fixture.head),
+        "names the packed value: {text}"
+    );
+    assert!(text.contains(&fixture.seed), "and the one written: {text}");
+}
+
+/// Every `git update-ref` this module runs hands its child the run's cleanup
+/// lease, and it is the one place the module spells that command: the
+/// liveness fact `reclaim_own_ref_lock` rests on is made by the same
+/// function that makes the write.
+#[test]
+fn the_one_update_ref_spawn_gives_its_child_the_cleanup_lease() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace_manager.rs"))
+            .expect("this module's source")
+            // Normalised, so a checkout with Windows line endings reads the same
+            // source as one without: the body search below ends on a newline.
+            .replace("\r\n", "\n");
+    let code = crate::effects::production_code(&source);
+    assert_eq!(
+        code.matches("hold_cleanup_lease_for_child(").count(),
+        1,
+        "the lease is handed to exactly one child"
+    );
+    let start = source
+        .find("    fn update_ref(&self, args: &[&str])")
+        .expect("the update-ref runner");
+    let body = &source[start..];
+    let end = body.find("\n    }\n").expect("the end of its body");
+    let body = &body[..end];
+    assert!(
+        body.contains("hold_cleanup_lease_for_child("),
+        "and that child is the update-ref"
+    );
+    assert!(
+        body.contains("OsString::from(\"update-ref\")"),
+        "which this function spells"
+    );
+    assert_eq!(
+        source.matches("OsString::from(\"update-ref\")").count(),
+        1,
+        "and nothing else in the module does"
     );
 }

@@ -8,9 +8,56 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+## `pub fn resume(opts: &ResumeOptions) -> Result<RunReport, UpstrokeError> {`
+
+The v0.1 conductor's public resume entry points -- `resume`, `resume_with` and
+`resume_harness` -- and the two seams below them, defined here and re-exported
+by [`the facade`](mod.md) under the paths they always had. They moved here from
+`src/engine/mod.rs` on 2026-09-20 with the run entry points and for the same
+reason, which [`coordinator`](coordinator.md) states: `resume_contained` calls
+`resume_harness_inner_on`, denied by path, and the module that holds that call
+is this one, whose allow is recorded and whose functions are classified, rather
+than the facade, whose allow covered whatever else was written in it
+(`PR306-FACADE-INLINE-ESCAPE`). All five are `effectful` rows of
+`effects/wrappers.toml` and denied by path in `clippy.toml`.
+
+## `pub fn resume_harness(`
+
+§15: replay, verify the run branch still matches the record, re-probe, and
+continue — parked questions intact.
+
+Every refusal below exists because continuing would produce a *wrong*
+result rather than merely an awkward one, and each says which of the four
+things moved — the run, the plan, the config, or the branch — because that
+is what decides what the operator does next.
+
+Note what is *not* a refusal: gates that resolve differently today. Those
+are taken from the record and run, so there is nothing to refuse — the
+difference is a warning about an edit that does not apply here. A refusal is
+for the cases where continuing would be wrong, and continuing under the
+gates this run has been using all along is exactly right.
+
+## `pub(super) fn resume_harness_on(`
+
+The same resume, on an explicit [`Runner`]. See
+[`run_harness_on`](coordinator.md), including why this is `pub(super)` and no
+wider.
+
+### Errors
+
+Whatever the resume refuses or fails on.
+
+## `pub(super) fn resume_contained(`
+
+The same resume, over the containment step it must perform first. See
+[`run_contained`](coordinator.md): a resume drives a run, so it is a write
+command, and the three public resume entry points reach the coordinator only
+through here.
+
 ## `pub(super) fn resume_harness_inner_on(`
 
-The same resume, on an explicit boundary. See [`super::run_harness_on`], and
+The same resume, on an explicit boundary. See
+[`super::coordinator::run_harness_on`], and
 [`super::coordinator::run_harness_inner_on`] for why `_contained` is a
 parameter: a resume is a write command too, and the ambient job it needs is
 the one no facade used to establish.

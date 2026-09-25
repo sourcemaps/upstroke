@@ -1,18 +1,21 @@
 //! Extended notes: `docs/internals/engine/topology/dispatch/tests.md`
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::engine::topology::scaffold::{
-    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
+    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_and_adopt_in_a_scratch_tree,
+    kill_child_environment, kill_dir,
 };
 use crate::topology::effects::{
-    EffectSiteId, HookPhase, Injection, ObjectSite, RefSite, ResidueElement, WorktreeSite,
+    EffectSiteId, HookPhase, Injection, ObjectResidue, ObjectSite, RefSite, ResidueElement,
+    WorktreeSite,
 };
 use crate::topology::events::{CandidateRef, GitRef};
 use crate::topology::fold::{GenerationClass, TaskState};
 use crate::workspace_manager::WorkspaceManager;
-use crate::workspace_manager::fixture::{git, remove_file, write_file};
+use crate::workspace_manager::fixture::{fan_out_directory, git, remove_file, write_file};
 
 const APPEND: EffectSiteId = EffectSiteId::Event(crate::topology::effects::EventSite::Append);
 const INTENT: EffectSiteId = EffectSiteId::Worktree(WorktreeSite::WriteIntent);
@@ -333,20 +336,19 @@ fn dispatch_kill_child() {
     run.hand_off(&dir);
     match which.as_str() {
         "before_intent" => run.arm(INTENT, HookPhase::Before, Injection::Kill),
+        "after_intent" => run.arm(INTENT, HookPhase::After, Injection::Kill),
         "after_add" => run.arm(ADD, HookPhase::After, Injection::Kill),
         other => panic!("unknown site `{other}`"),
     }
     let _ = run.try_dispatch(ALPHA, 0);
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the dispatch returned past the kill armed at its site");
 }
 
 #[test]
 fn kill_after_dispatch_recreates_worktree_without_spend() {
-    for site in ["before_intent", "after_add"] {
-        let dir = kill_dir("killdispatch");
-        let mut run = kill_child_and_adopt(
+    for site in ["before_intent", "after_intent", "after_add"] {
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(
             "engine::topology::dispatch::tests::dispatch_kill_child",
-            &dir,
             site,
         );
 
@@ -375,6 +377,7 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             kind: DispatchKind::Ordinary {
                 paths: run.predicted(ALPHA),
             },
+            materialized: None,
         };
 
         let existed = dispatched.worktree.is_dir();
@@ -383,13 +386,23 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             site == "after_add",
             "`{site}`: the child left the wrong prefix on disk"
         );
+        assert_eq!(
+            run.fixture
+                .manager
+                .intents()
+                .expect("the intents list")
+                .contains(&dispatched.slot),
+            site != "before_intent",
+            "`{site}`: the durable intent is there exactly when the child died after writing it"
+        );
 
         let reuse = resume_open_no_attempt(
             &run.fixture.manager,
             &mut run.hooks,
             &dispatched.open_generation(),
         )
-        .expect("recover");
+        .expect("recover")
+        .reuse;
         assert_eq!(
             reuse.reused(),
             site == "after_add",
@@ -409,6 +422,7 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             vec!["run_started", "task_dispatched"],
             "`{site}`: recovery of an OpenNoAttempt generation appends nothing and spends nothing"
         );
+        run.replay_twice_equal();
     }
 }
 
@@ -508,6 +522,7 @@ fn repair_materialization_reproduced_after_kill() {
                 root: ALPHA,
                 source: source.clone(),
             },
+            materialized: None,
         };
 
         resume_open_no_attempt(
@@ -529,6 +544,7 @@ fn repair_materialization_reproduced_after_kill() {
                 root: ALPHA,
                 source,
             },
+            materialized: None,
         };
         run.fixture
             .manager
@@ -551,10 +567,18 @@ fn repair_materialization_reproduced_after_kill() {
             "`{site}`: the reproduced materialization must be the tree an uninterrupted one \
              produces"
         );
+        let expected = expected_checkout(&run, &run.base().0, &run.fixture.side, &["c.txt"]);
+        assert_checkout_is(&control.worktree, &expected, &format!("`{site}`: control"));
+        assert_checkout_is(
+            &dispatched.worktree,
+            &expected,
+            &format!("`{site}`: reproduced"),
+        );
         assert!(
             run.observed(MATERIALIZE, HookPhase::After),
             "`{site}`: the recovery re-ran the recorded materialization"
         );
+        run.replay_twice_equal();
     }
 }
 
@@ -769,4 +793,1086 @@ fn an_add_whose_intent_is_gone_is_refused_rather_than_leaking_a_worktree() {
         .expect_err("an add without an intent is refused");
     assert!(error.to_string().contains("durable intent"), "{error}");
     assert!(!dispatched.worktree.exists());
+}
+
+fn dispatch_repair(
+    run: &mut Run,
+    key: TaskKey,
+    generation: u32,
+    base: &str,
+    source: &CandidateRef,
+) -> Dispatched {
+    let root = run
+        .emitter
+        .fold()
+        .registry()
+        .and_then(|registry| registry.get(key))
+        .and_then(|entry| entry.lineage)
+        .map_or(ALPHA, |lineage| lineage.root);
+    let request = DispatchRequest {
+        key,
+        generation: crate::topology::events::GenerationId(generation),
+        base: crate::topology::events::CommitSha(base.to_owned()),
+        kind: DispatchKind::Repair {
+            root,
+            source: source.clone(),
+        },
+    };
+    dispatch(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &mut run.emitter,
+        &request,
+    )
+    .expect("the repair dispatches")
+}
+
+fn unmerged_entries(worktree: &Path) -> usize {
+    git(worktree, &["ls-files", "--unmerged"]).lines().count()
+}
+
+fn index_is_clean(worktree: &Path) -> bool {
+    crate::workspace_manager::fixture::git_out(worktree, &["diff", "--cached", "--quiet"])
+        .status
+        .success()
+}
+
+/// The checkout the worker is handed, read from disk: every path the index
+/// names, with the bytes its file holds. Never `write-tree`, which reads the
+/// index and not the files — PR #249's refusals review kept the index right
+/// and overwrote the files (mutation M6), and every SHA oracle in this module
+/// passed.
+fn checkout_bytes(worktree: &Path) -> BTreeMap<String, Vec<u8>> {
+    git(worktree, &["ls-files"])
+        .lines()
+        .map(|name| {
+            let bytes = std::fs::read(worktree.join(name))
+                .unwrap_or_else(|error| panic!("{name} is in the index and not on disk: {error}"));
+            (name.to_owned(), bytes)
+        })
+        .collect()
+}
+
+/// What one pick of `source` onto `base` must leave on disk, derived from
+/// the two commits and nothing the materialization wrote: `base`'s files,
+/// with the paths `source` adds or changes read from `source`.
+fn expected_checkout(
+    run: &Run,
+    base: &str,
+    source: &str,
+    changed_by_source: &[&str],
+) -> BTreeMap<String, Vec<u8>> {
+    let repo = &run.fixture.base;
+    let show = |commit: &str, name: &str| {
+        crate::workspace_manager::fixture::git_out(repo, &["show", &format!("{commit}:{name}")])
+            .stdout
+    };
+    let mut expected: BTreeMap<String, Vec<u8>> =
+        git(repo, &["ls-tree", "-r", "--name-only", base])
+            .lines()
+            .map(|name| (name.to_owned(), show(base, name)))
+            .collect();
+    for name in changed_by_source {
+        expected.insert((*name).to_owned(), show(source, name));
+    }
+    expected
+}
+
+/// The worktree's files are exactly `expected`, and the index agrees with
+/// them: the two reads that together pin what the worker sees.
+fn assert_checkout_is(worktree: &Path, expected: &BTreeMap<String, Vec<u8>>, label: &str) {
+    assert!(
+        crate::workspace_manager::fixture::git_out(worktree, &["diff-files", "--quiet"])
+            .status
+            .success(),
+        "{label}: the working tree differs from the index"
+    );
+    assert_eq!(
+        &checkout_bytes(worktree),
+        expected,
+        "{label}: the bytes on disk are not what one pick of the source onto the base leaves"
+    );
+}
+
+#[test]
+fn a_repair_dispatch_records_what_its_materialization_observed() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("materialization-kinds");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let side = run.fixture.side.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "not the side's content\n", "c-other");
+
+    let clean = dispatch_repair(&mut run, repair, 0, &head, &source);
+    assert_eq!(
+        clean.materialized,
+        Some(Materialization::Clean),
+        "the candidate's change applies onto a head that lacks it"
+    );
+    assert_eq!(unmerged_entries(&clean.worktree), 0);
+    assert!(
+        !index_is_clean(&clean.worktree),
+        "and the repair index carries the applied change"
+    );
+    assert_checkout_is(
+        &clean.worktree,
+        &expected_checkout(&run, &head, &side, &["c.txt"]),
+        "Clean",
+    );
+    close_at_run_end(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &mut run.emitter,
+        &clean,
+        OUTCOME,
+    )
+    .expect("close the clean generation");
+
+    let empty = dispatch_repair(&mut run, repair, 1, &side, &source);
+    assert_eq!(
+        empty.materialized,
+        Some(Materialization::Empty),
+        "the candidate's change is already present on its own commit"
+    );
+    assert_eq!(unmerged_entries(&empty.worktree), 0);
+    assert!(
+        index_is_clean(&empty.worktree),
+        "an already-present change stages nothing: `repairs.empty_source` proceeds as an \
+         ordinary attempt whose empty diff then fails under the existing rule"
+    );
+    close_at_run_end(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &mut run.emitter,
+        &empty,
+        OUTCOME,
+    )
+    .expect("close the empty generation");
+
+    let conflict = dispatch_repair(&mut run, repair, 2, &conflicting, &source);
+    assert_eq!(
+        conflict.materialized,
+        Some(Materialization::Conflict),
+        "a head that already carries another `c.txt` conflicts with the candidate's"
+    );
+    assert!(
+        unmerged_entries(&conflict.worktree) >= 2,
+        "the conflict is left in the index for the worker to resolve"
+    );
+    assert!(
+        std::fs::read_to_string(conflict.worktree.join("c.txt"))
+            .expect("the conflicted file")
+            .contains("<<<<<<< "),
+        "and in the working tree, with its markers"
+    );
+
+    let started: Vec<Option<Materialization>> = run
+        .emitter
+        .durable_events()
+        .iter()
+        .filter_map(|event| match &event.body {
+            crate::topology::events::TopologyEventBody::TaskDispatched { data }
+                if data.key == repair =>
+            {
+                Some(
+                    data.source_candidate
+                        .as_ref()
+                        .map(|_| Materialization::Retained),
+                )
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started.len(),
+        3,
+        "three dispatches, each recording its source candidate"
+    );
+    assert_eq!(
+        run.emitter
+            .durable_events()
+            .iter()
+            .filter(|event| matches!(
+                &event.body,
+                crate::topology::events::TopologyEventBody::GenerationClosed { data }
+                    if data.lease == crate::topology::events::LeaseDisposition::LineageHeld
+            ))
+            .count(),
+        2,
+        "each closed repair generation recorded `LineageHeld`"
+    );
+    run.replay_twice_equal();
+}
+
+#[test]
+fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
+    let elements = MATERIALIZE.residue_elements();
+    assert_eq!(
+        elements.len(),
+        4,
+        "Object.RepairMaterialize registers four elements and this test constructs each: \
+         {elements:?}"
+    );
+    for element in elements {
+        synthetic_materialization_residue_element(*element);
+    }
+}
+
+/// One registered element of `Object.RepairMaterialize`'s residue class,
+/// constructed **alone** in a repository of its own, classified, and recovered
+/// by the tabled action.
+///
+/// **A repository per element**, which is the shape
+/// `synthetic_git_add_residue_unreferenced_objects_and_index_lock_then_forced_scrub_converges`
+/// arrived at for `Object.CandidateStage`, for the same reason and with the
+/// same measurement behind it. Two of these four live in the **shared** object
+/// store and are permanent until Git prunes them — that is R27, and it is
+/// asserted below — so constructing them in sequence in one repository leaves
+/// each later element's slot carrying the earlier one's. This site records no
+/// published object, so [`ResidueElement::UnreferencedObject`] is observed
+/// whenever the store holds *any* unreachable object at all; measured on the
+/// shared-store form of this test, the orphan planted for the first element
+/// was still there supplying the `Internal` that the second element's
+/// assertion read.
+///
+/// So the reading is made **twice**: once before the element is constructed,
+/// where nothing the site registers may be observed and the class must be
+/// `None`, and once after, where this element and nothing else must be
+/// observed. The pair is what makes the `Internal` between them this
+/// element's own.
+fn synthetic_materialization_residue_element(element: ResidueElement) {
+    use crate::topology::effects::ObjectResidue;
+    use crate::workspace_manager::{
+        ResidueTarget, classify_object_residue, element_breaks_quiescence, object_directory,
+        observed_residue_elements, temporary_object_files, unreachable_objects,
+    };
+
+    let mut run = Run::started("synthetic-materialization");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let dispatched = dispatch_repair(&mut run, repair, 0, &head, &source);
+    let open = dispatched.open_generation();
+    let worktree = dispatched.worktree.clone();
+
+    let control_slot = task_slot(BETA, crate::topology::events::GenerationId(0));
+    run.fixture
+        .manager
+        .write_intent(run.hooks.effects(), &control_slot)
+        .expect("control intent");
+    let control = run
+        .fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &control_slot, &head)
+        .expect("control worktree");
+    materialize_repair(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &OpenGeneration {
+            key: BETA,
+            generation: crate::topology::events::GenerationId(0),
+            base: dispatched.base.clone(),
+            slot: control_slot,
+            source: Some(source.clone()),
+        },
+    )
+    .expect("control materialize");
+    let expected_tree = git(&control, &["write-tree"]);
+    let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
+    assert_checkout_is(&control, &expected_files, "control");
+
+    // A fresh worktree at the base to plant into: the forced removal and the
+    // add, which is what the tabled recovery does after a failed verification
+    // (the intent the dispatch wrote is still there).
+    run.fixture
+        .manager
+        .remove_worktree(run.hooks.effects(), &open.slot)
+        .expect("forced removal");
+    run.fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+        .expect("a fresh worktree at the base");
+
+    let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
+    assert_eq!(
+        observed_residue_elements(MATERIALIZE, &target).expect("observed"),
+        Vec::new(),
+        "{element:?}: the worktree is quiescent and the store holds nothing this site \
+         registers before the element is constructed, so what the assertions below read is \
+         this element alone"
+    );
+    assert_eq!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified"),
+        ObjectResidue::None,
+        "{element:?}: and the class before the element is constructed is `None`"
+    );
+
+    let dir = git_dir(&worktree);
+    let mut planted_object = None;
+    let mut planted_temporary = None;
+    match element {
+        ResidueElement::UnreferencedObject => {
+            let orphan = run.fixture.root.join(format!("orphan-{element:?}"));
+            write_file(
+                &orphan,
+                b"an object a killed pick wrote and never published\n",
+            );
+            let id = git(
+                &worktree,
+                &["hash-object", "-w", orphan.to_str().expect("utf-8")],
+            );
+            assert!(
+                unreachable_objects(&run.fixture.base)
+                    .expect("fsck")
+                    .contains(&id),
+                "the planted object must really be unreachable"
+            );
+            planted_object = Some(id);
+        }
+        ResidueElement::TemporaryObjectFile => {
+            // **Where the materialization's own write leaves it.** A loose
+            // object's temporary file is created in the fan-out directory the
+            // object's final name will live in: measured with
+            // `strace -f -e trace=openat,link`, `hash-object -w` opens
+            // `objects/01/tmp_obj_z86GbB` and links it to
+            // `objects/01/74d67c…`, and `write-tree` opens
+            // `objects/bf/tmp_obj_GgXRvX`; a real `SIGKILL` requested at half
+            // of a separately measured 3.878 s loose-object write left
+            // `objects/b7/tmp_obj_ybqfZf`. Git does write at the object root
+            // as well — a streamed object above `core.bigFileThreshold`, its
+            // fan-out unknown until the stream ends — which is why the scan
+            // keeps its root arm; `temporary_object_files` carries that trace.
+            //
+            // This test used to construct its stand-in at the object root
+            // instead — the one place the scan looked, and not where a
+            // cherry-pick's writes go — so it exercised the arm the scan
+            // already had rather than the element, and stayed green while
+            // `temporary_object_files` could not see the file the killed
+            // materialization leaves (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). It
+            // is planted in a fan-out directory the store already holds,
+            // beside real objects, as the trace shows.
+            let objects = object_directory(&worktree).expect("the object directory");
+            let planted = fan_out_directory(&objects).join("tmp_obj_repair");
+            write_file(&planted, b"half an object\n");
+            assert!(
+                temporary_object_files(&worktree).expect("temp files"),
+                "Git's temporary object file, where Git leaves it: {}",
+                planted.display()
+            );
+            planted_temporary = Some(planted);
+        }
+        ResidueElement::IndexLock => write_file(&dir.join("index.lock"), b""),
+        ResidueElement::CherryPickHead => {
+            write_file(
+                &dir.join("CHERRY_PICK_HEAD"),
+                format!("{}\n", source.commit_sha).as_bytes(),
+            );
+        }
+        other => panic!("`{other:?}` is not registered for Object.RepairMaterialize"),
+    }
+
+    assert_eq!(
+        observed_residue_elements(MATERIALIZE, &target).expect("observed"),
+        vec![element],
+        "{element:?}: constructing it makes it, and nothing else the site registers, observed"
+    );
+    assert_eq!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified"),
+        ObjectResidue::Internal,
+        "{element:?}: objects written with the reference unpublished is the Internal class"
+    );
+
+    let mark = run.mark();
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("the tabled recovery converges");
+    assert_eq!(
+        matches!(resumed.reuse, Reuse::Recreated { .. }),
+        element_breaks_quiescence(element),
+        "{element:?}: administrative residue is recreated with force, and residue that lives \
+         only in the shared object store is not what `Worktree.Verify` refuses on"
+    );
+    assert_eq!(
+        resumed.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "{element:?}: the materialization is reproduced deterministically"
+    );
+    assert_eq!(
+        run.count_after(mark, MATERIALIZE, HookPhase::After),
+        1,
+        "{element:?}: exactly one cherry-pick reproduces it"
+    );
+    assert_eq!(
+        git(&worktree, &["write-tree"]),
+        expected_tree,
+        "{element:?}: and it is the tree an uninterrupted materialization produces"
+    );
+    assert_checkout_is(&worktree, &expected_files, &format!("{element:?}"));
+    assert!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified") == ObjectResidue::After,
+        "{element:?}: after the recovery the index references the merge objects"
+    );
+
+    // R27: what the interrupted materialization left in the shared object
+    // store is Git's, and neither recovery — reuse or forced recreation —
+    // deletes it. Git prunes both of these itself; the engine may not.
+    if let Some(id) = &planted_object {
+        assert!(
+            crate::workspace_manager::fixture::git_out(&run.fixture.base, &["cat-file", "-e", id])
+                .status
+                .success(),
+            "R27: an object an interrupted materialization wrote is Git's, never deleted"
+        );
+    }
+    if let Some(planted) = &planted_temporary {
+        assert!(
+            planted.exists(),
+            "R27: Git prunes its own temporary object files; the recovery does not"
+        );
+    }
+}
+
+/// R27 across a **forced recreation**: what an interrupted materialization
+/// left in the shared object store is Git's, and removing and re-adding the
+/// worktree does not delete it.
+///
+/// **Why this is its own test.** [`synthetic_materialization_residue_element`]
+/// constructs each element alone, which is what `command_internal_sub_effects`
+/// requires — and that isolation puts the two object-store elements in exactly
+/// the runs whose recovery *reuses* the worktree, so none of them exercises
+/// preservation across a recreation. The shared-store form of that test used
+/// to cover this by accident: the orphan it planted for `UnreferencedObject`
+/// survived into the `IndexLock` and `CherryPickHead` iterations, which do
+/// recreate, and its closing assertion read it there. Isolating the elements
+/// removed that cover along with the contamination.
+///
+/// Found by #258's regression review, which injected `git prune --expire=now`
+/// into the forced-recreation branch and watched the shared-store test die at
+/// its R27 assertion while the isolated one accepted the mutation.
+///
+/// So this constructs the object-store residue **and** the administrative
+/// residue that makes `Worktree.Verify` fail, asserts the recovery really did
+/// recreate, and asserts both object-store elements are still there
+/// afterwards. It asserts nothing about which element classified the worktree
+/// — that is the isolated test's job, and mixing the two is what made the
+/// per-element evidence vacuous in the first place.
+#[test]
+fn a_forced_recreation_preserves_the_object_store_residue_it_recovers_over() {
+    use crate::workspace_manager::{object_directory, temporary_object_files, unreachable_objects};
+
+    let mut run = Run::started("recreation-preserves-r27");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let dispatched = dispatch_repair(&mut run, repair, 0, &head, &source);
+    let open = dispatched.open_generation();
+    let worktree = dispatched.worktree.clone();
+
+    run.fixture
+        .manager
+        .remove_worktree(run.hooks.effects(), &open.slot)
+        .expect("forced removal");
+    run.fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+        .expect("a fresh worktree at the base");
+
+    // R27's two, both in the shared object store.
+    let orphan = run.fixture.root.join("orphan-across-recreation");
+    write_file(
+        &orphan,
+        b"an object a killed pick wrote and never published\n",
+    );
+    let planted_object = git(
+        &worktree,
+        &["hash-object", "-w", orphan.to_str().expect("utf-8")],
+    );
+    assert!(
+        unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&planted_object),
+        "the planted object must really be unreachable"
+    );
+    let objects = object_directory(&worktree).expect("the object directory");
+    let planted_temporary = fan_out_directory(&objects).join("tmp_obj_repair");
+    write_file(&planted_temporary, b"half an object\n");
+    assert!(
+        temporary_object_files(&worktree).expect("temp files"),
+        "Git's temporary object file, where Git leaves it"
+    );
+
+    // And the administrative residue that makes `Worktree.Verify` fail, so the
+    // tabled recovery is a forced removal and re-add rather than a reuse.
+    write_file(&git_dir(&worktree).join("index.lock"), b"");
+
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("the tabled recovery converges");
+    assert!(
+        matches!(resumed.reuse, Reuse::Recreated { .. }),
+        "the administrative residue must have forced a recreation, or this test proves nothing \
+         about one: {:?}",
+        resumed.reuse
+    );
+    assert_eq!(
+        resumed.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "the materialization is reproduced deterministically"
+    );
+
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &run.fixture.base,
+            &["cat-file", "-e", &planted_object]
+        )
+        .status
+        .success(),
+        "R27: an object an interrupted materialization wrote is Git's; a forced recreation of \
+         the worktree does not delete it"
+    );
+    assert!(
+        planted_temporary.exists(),
+        "R27: Git prunes its own temporary object files; a forced recreation does not"
+    );
+}
+
+/// N real `cherry-pick --no-commit` children killed at spread points, every
+/// residue classified and every worktree recovered to what one pick leaves.
+///
+/// **A completed pick is a control, not a sample.** A child the kill missed
+/// — it had already exited — proves that recovery from the after phase
+/// converges, and is verified as such, but it is evidence of no interruption.
+/// PR #249's refusals review killed one child at spawn and let seven picks
+/// finish (mutation M3): the floor of "eight classified samples and at least
+/// one kill" accepted `killed=1/8, observed=[None, After ×7]` as the
+/// advertised sampled-interruption evidence. So the populations are kept
+/// apart: `SAMPLING_N` is the number of children that actually died by the
+/// kill, collected over as many spawns as that takes (bounded), and at
+/// least one of them must have died before the pick published its index —
+/// a kill that landed after the publish is an interruption of nothing the
+/// site registers. And at least one kill must have landed **while the pick
+/// was writing** ([`KilledSample::while_writing`]): PR #249's adequacy
+/// review killed every child at spawn and the floor above accepted eight
+/// `None`s. The loop keeps sampling, within `MAX_SPAWNS`, until it has seen
+/// one. That needs a kill that reaches git: on Windows `git` on the `PATH`
+/// is Git for Windows' `cmd\git.exe`, a launcher that starts the real git as
+/// its own child and waits, and the winguest lane at `56ea88c9` recorded 30
+/// kills of it in 32 spawns — ten `None`, twenty `After` with `MERGE_MSG` in
+/// place, none between — so `KillableGitChild::spawn` runs the real binary
+/// (`fixture::sampled_git`; `PR249-KILL-SAMPLER-WINDOWS-WRAPPER`).
+///
+/// The budget is `fixture::KillBudget`: the median of three probe picks
+/// after a discarded warm-up, re-aimed inside every pick that completed
+/// before its kill. The notes carry the two macOS reds that sized it.
+#[test]
+fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {
+    use crate::workspace_manager::fixture::{KillBudget, KillableGitChild, died_by_kill, time_git};
+    use crate::workspace_manager::{ResidueTarget, classify_object_residue};
+
+    /// Children that must die by the kill.
+    const SAMPLING_N: u32 = 8;
+    /// Spawns allowed to collect them: a pick faster than every kill point
+    /// fails here, loudly, rather than counting its completions.
+    const MAX_SPAWNS: u32 = 8 * SAMPLING_N;
+    /// A warm-up the budget discards, then the three it takes the median of.
+    const PROBE_PICKS: usize = 4;
+
+    let mut run = Run::started("sampled-materialization");
+    let source = protected_candidate(&mut run);
+    let head = run.fixture.head.clone();
+    let argv = vec![
+        "cherry-pick".to_owned(),
+        "--no-commit".to_owned(),
+        source.commit_sha.0.clone(),
+    ];
+
+    let probe_slot = task_slot(TaskKey(80), crate::topology::events::GenerationId(0));
+    run.fixture
+        .manager
+        .write_intent(run.hooks.effects(), &probe_slot)
+        .expect("probe intent");
+    let probe = run
+        .fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &probe_slot, &head)
+        .expect("probe worktree");
+    let mut picks = Vec::with_capacity(PROBE_PICKS);
+    for pick in 0..PROBE_PICKS {
+        if pick > 0 {
+            git(&probe, &["read-tree", "--reset", "-u", "HEAD"]);
+        }
+        picks.push(time_git(&probe, &argv));
+    }
+    let mut budget = KillBudget::probed(&picks);
+    let expected_tree = git(&probe, &["write-tree"]);
+    let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
+    assert_checkout_is(&probe, &expected_files, "probe");
+
+    let mut kills = Vec::new();
+    let mut completed_classes = Vec::new();
+    let mut refusals = Vec::new();
+    let mut timeline = Vec::new();
+    let mut spawns = 0_u32;
+    while (kills.len() < SAMPLING_N as usize || !kills.iter().any(KilledSample::while_writing))
+        && spawns < MAX_SPAWNS
+    {
+        let sample = spawns;
+        spawns += 1;
+        let key = TaskKey(90 + sample);
+        let slot = task_slot(key, crate::topology::events::GenerationId(0));
+        run.fixture
+            .manager
+            .write_intent(run.hooks.effects(), &slot)
+            .expect("sample intent");
+        let worktree = run
+            .fixture
+            .manager
+            .add_worktree(run.hooks.effects(), &slot, &head)
+            .expect("sample worktree");
+
+        let aim = budget.aim(sample % SAMPLING_N, SAMPLING_N);
+        let mut child = KillableGitChild::spawn(&worktree, &argv);
+        let ran = child.run_until(aim);
+        let running_at_kill = ran.is_none();
+        let status = child.wait();
+        let killed = died_by_kill(&status);
+        assert!(
+            killed || status.success(),
+            "sample {sample}: the child ended {status:?}, which is neither the kill's signature \
+             nor a completed pick"
+        );
+        if !killed {
+            assert!(
+                !running_at_kill || status.success(),
+                "sample {sample}: the child was running when the kill fired and yet exited \
+                 {status:?}"
+            );
+            // A completed pick measured the pick, and what is fed back is the
+            // clock at which the parent established its exit: `ran`, the poll
+            // that found it gone, or, when the kill attempt did not stop it —
+            // it exited between the poll that found it running and the system
+            // call, or the attempt failed and sent nothing — the clock once
+            // `wait` had returned its status. The kill's own clock is neither
+            // (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding 1 of
+            // each).
+            if let Some(clock) = ran.or(child.reaped()) {
+                budget.completed(clock);
+            }
+        }
+        let fired = child
+            .fired()
+            .map_or_else(|| "never".to_owned(), |fired| format!("{fired:?}"));
+        let reaped = child
+            .reaped()
+            .map_or_else(|| "never".to_owned(), |reaped| format!("{reaped:?}"));
+
+        let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
+        let class = match classify_object_residue(MATERIALIZE, &target) {
+            Ok(class) => Some(class),
+            Err(error) => {
+                refusals.push(format!("sample {sample}: {error}"));
+                None
+            }
+        };
+        // Read before recovery clears it: a completed `--no-commit` pick
+        // always leaves `MERGE_MSG` (R5), so its absence beside a published
+        // index is a kill between the publish and the pick's last write.
+        let merge_msg_written = git_dir(&worktree).join("MERGE_MSG").is_file();
+
+        let open = OpenGeneration {
+            key,
+            generation: crate::topology::events::GenerationId(0),
+            base: crate::topology::events::CommitSha(head.clone()),
+            slot: slot.clone(),
+            source: Some(source.clone()),
+        };
+        let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+            .unwrap_or_else(|error| {
+                panic!("sample {sample}: the recovery did not converge: {error}")
+            });
+        assert_eq!(
+            resumed.materialized,
+            Some(crate::topology::events::Materialization::Clean),
+            "sample {sample}: the materialization is reproduced after whatever the kill left"
+        );
+        assert_eq!(
+            git(&worktree, &["write-tree"]),
+            expected_tree,
+            "sample {sample}: deterministically"
+        );
+        assert_checkout_is(&worktree, &expected_files, &format!("sample {sample}"));
+        assert_eq!(
+            classify_object_residue(MATERIALIZE, &target).expect("classified after recovery"),
+            ObjectResidue::After,
+            "sample {sample}: the recovered worktree's index references the merge objects"
+        );
+        run.fixture
+            .manager
+            .remove_worktree(run.hooks.effects(), &slot)
+            .expect("scrub the sample");
+        run.fixture
+            .manager
+            .remove_intent(run.hooks.effects(), &slot)
+            .expect("scrub the sample intent");
+
+        timeline.push(format!(
+            "sample {sample}: aimed at {aim:?}, {}{}",
+            match (ran, child.kill_error()) {
+                (Some(ran), _) => format!("completed in {ran:?}"),
+                (None, _) if killed => format!("killed, the kill returned at {fired}"),
+                (None, None) => {
+                    format!("outran the kill, which returned at {fired}; exited by {reaped}")
+                }
+                (None, Some(error)) => format!(
+                    "outlived the kill, which failed at {fired} ({error}); exited by {reaped}"
+                ),
+            },
+            class.map_or_else(|| ", refused".to_owned(), |class| format!(", {class:?}"))
+        ));
+        if let Some(class) = class {
+            if killed {
+                kills.push(KilledSample {
+                    class,
+                    merge_msg_written,
+                });
+            } else {
+                completed_classes.push(class);
+            }
+        }
+    }
+    let schedule = format!(
+        "the probe measured {:?} and the ladder followed {} completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
+    );
+
+    assert!(
+        refusals.is_empty(),
+        "the classifier refused {} of {spawns} samples: {refusals:?}",
+        refusals.len()
+    );
+    let killed_classes: Vec<ObjectResidue> = kills.iter().map(|sample| sample.class).collect();
+    assert!(
+        kills.len() >= SAMPLING_N as usize,
+        "{} children died by the kill in {spawns} spawns; {} picks completed before their kill \
+         and are controls, not samples of an interruption: killed={kills:?}, \
+         completed={completed_classes:?}; {schedule}",
+        kills.len(),
+        completed_classes.len()
+    );
+    assert!(
+        completed_classes
+            .iter()
+            .all(|class| *class == ObjectResidue::After),
+        "a pick that completed left its after phase and nothing else: {completed_classes:?}"
+    );
+    assert!(
+        killed_classes
+            .iter()
+            .any(|class| *class != ObjectResidue::After),
+        "every one of the {} kills landed after the index was published, so the sample \
+         interrupted no materialization the site registers: {killed_classes:?}; {schedule}",
+        kills.len()
+    );
+    assert!(
+        kills.iter().any(KilledSample::while_writing),
+        "none of the {} kills in {spawns} spawns landed while the pick was writing — each \
+         found a child that had not begun (`None`, nothing written) or one that had finished \
+         (`After` with `MERGE_MSG` in place) — so the sample interrupted no materialization \
+         under way: {kills:?}; {schedule}",
+        kills.len()
+    );
+}
+
+/// One child the sampler killed: what it left, and whether it had finished.
+#[derive(Debug, Clone, Copy)]
+struct KilledSample {
+    class: ObjectResidue,
+    /// Whether `MERGE_MSG` was in place when the kill was observed — the last
+    /// thing a completed `--no-commit` pick writes.
+    merge_msg_written: bool,
+}
+
+impl KilledSample {
+    /// Whether the kill landed while the pick was writing: after its first
+    /// write (`index.lock`, so `Internal`) and before its last (`MERGE_MSG`).
+    ///
+    /// PR #249's adequacy review removed the sampler's delay so that every
+    /// child was killed the instant it was spawned, and the floor "at least
+    /// one kill before the index was published" accepted eight `None`s — kills
+    /// that interrupted processes which had not started. A kill before the
+    /// first write interrupted nothing; a kill after `MERGE_MSG` interrupted a
+    /// pick that had finished; only one between them is the interruption of a
+    /// materialization already under way that the sample is advertised as
+    /// evidence of, and the loop keeps sampling, within `MAX_SPAWNS`, until it
+    /// has seen one.
+    fn while_writing(&self) -> bool {
+        match self.class {
+            ObjectResidue::Internal => true,
+            ObjectResidue::After => !self.merge_msg_written,
+            ObjectResidue::None => false,
+        }
+    }
+}
+
+/// PR #249's crash review, finding 1: a coordinator dies after the pick
+/// completed and its state files were cleared, before `attempt_started`.
+/// Recovery (g) reuses the worktree (HEAD at the base, quiescent) and the
+/// continuation materializes again. The second pick must land on the base's
+/// tree, not on the index the first pick already changed: a cherry-pick is a
+/// three-way merge, and onto an index that already holds its result it can
+/// apply its hunks a second time. Each token below is one line of the file;
+/// the reviewer's witness duplicated the `c` on every resume.
+#[test]
+fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("continuation-preserves-tree");
+    let seed = run.fixture.seed.clone();
+    let parent = run.commit_with(&seed, "a.txt", "a\na\nd\nd\nc\nb\nc\na\n", "witness-parent");
+    let source_commit = run.commit_with(
+        &parent,
+        "a.txt",
+        "a\na\nd\nd\nc\nc\nb\nx\nc\na\n",
+        "witness-source",
+    );
+    let base = run.commit_with(&parent, "a.txt", "a\na\ny\nc\nb\nc\na\n", "witness-base");
+    let source = run.protect_candidate(&source_commit);
+    let repair = run.spawn_repair(ALPHA);
+    let dispatched = dispatch_repair(&mut run, repair, 0, &base, &source);
+    assert_eq!(dispatched.materialized, Some(Materialization::Clean));
+    // The merge of the source's change onto the base, worked out by hand:
+    // the hunk `c b` -> `c c b x` applied at the base's `y c b c a`.
+    const ONE_PICK: &str = "a\na\ny\nc\nc\nb\nx\nc\na\n";
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":a.txt"]),
+        ONE_PICK.trim_end(),
+        "one pick produces the merged file in the index"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dispatched.worktree.join("a.txt")).expect("a.txt"),
+        ONE_PICK,
+        "and in the working tree the worker reads"
+    );
+
+    let open = dispatched.open_generation();
+    for resume in 1..=2 {
+        let recovered = verify_or_recreate(
+            &run.fixture.manager,
+            &mut run.hooks,
+            &open,
+            &open.quiescence(),
+        )
+        .expect("(g) verifies the completed pick's worktree at its base");
+        assert_eq!(
+            recovered,
+            Reuse::Verified,
+            "resume {resume}: a completed pick is quiescent at its base and is reused"
+        );
+        let continued = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+            .expect("the continuation materializes again");
+        assert_eq!(continued.reuse, Reuse::Verified, "resume {resume}");
+        assert_eq!(
+            continued.materialized,
+            Some(Materialization::Clean),
+            "resume {resume}"
+        );
+        assert_eq!(
+            git(&dispatched.worktree, &["show", ":a.txt"]),
+            ONE_PICK.trim_end(),
+            "resume {resume}: a crash after the pick, before attempt_started, must not change \
+             the repair's input — the index"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dispatched.worktree.join("a.txt")).expect("a.txt"),
+            ONE_PICK,
+            "resume {resume}: nor the working tree"
+        );
+        assert!(
+            crate::workspace_manager::fixture::git_out(
+                &dispatched.worktree,
+                &["diff-files", "--quiet"]
+            )
+            .status
+            .success(),
+            "resume {resume}: the working tree matches the index"
+        );
+    }
+    run.replay_twice_equal();
+}
+
+#[test]
+fn repair_materialization_objects_released_to_git_on_scrub() {
+    use crate::workspace_manager::unreachable_objects;
+
+    let mut run = Run::started("materialization-objects");
+    let seed = run.fixture.seed.clone();
+    let candidate_commit = run.commit_with(
+        &seed,
+        "a.txt",
+        "one\ntwo, from the candidate\n",
+        "candidate-appends",
+    );
+    let repair_base = run.commit_with(&seed, "a.txt", "zero, merged first\none\n", "base-prepends");
+    let source = run.protect_candidate(&candidate_commit);
+    let repair = run.spawn_repair(ALPHA);
+
+    let dispatched = dispatch_repair(&mut run, repair, 0, &repair_base, &source);
+    assert_eq!(
+        dispatched.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "two edits to different lines merge cleanly"
+    );
+    let merged_blob = git(&dispatched.worktree, &["rev-parse", ":a.txt"]);
+    assert_eq!(
+        git(&dispatched.worktree, &["cat-file", "-p", &merged_blob]),
+        "zero, merged first\none\ntwo, from the candidate",
+        "the merge produced a blob neither side had"
+    );
+    let candidate_blob = git(
+        &run.fixture.base,
+        &["rev-parse", &format!("{candidate_commit}:a.txt")],
+    );
+    let base_blob = git(
+        &run.fixture.base,
+        &["rev-parse", &format!("{repair_base}:a.txt")],
+    );
+    assert!(
+        merged_blob != candidate_blob && merged_blob != base_blob,
+        "and it is a new object: {merged_blob} vs {candidate_blob} and {base_blob}"
+    );
+    assert!(
+        !unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&merged_blob),
+        "R9: while the repair worktree exists its index references the merge object"
+    );
+
+    scrub(&run.fixture.manager, &mut run.hooks, &dispatched.slot).expect("scrub");
+    assert!(
+        unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&merged_blob),
+        "R27: once the worktree is gone nothing references the merge object"
+    );
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &run.fixture.base,
+            &["cat-file", "-e", &merged_blob]
+        )
+        .status
+        .success(),
+        "and it is Git's: released, never deleted by the run"
+    );
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &run.fixture.base,
+            &["cat-file", "-e", &candidate_commit]
+        )
+        .status
+        .success(),
+        "R11: the source candidate stays reachable through its ref"
+    );
+}
+
+/// The two kill points of `cherry-pick --no-commit` that lie *after* its index
+/// write, pinned deterministically (the sampler above reaches them only when
+/// its timing does). Measured on git 2.43: the index lock is released by
+/// `write_locked_index` before `write_message` creates `MERGE_MSG.lock` and
+/// renames it to `MERGE_MSG`, so a kill in between leaves a merged index with
+/// no state file at all (K2), and a kill inside `write_message` leaves the
+/// merged index plus the held `MERGE_MSG.lock` (K3). K3 is what the sampler
+/// first found: `Worktree.Verify` read only the committed `MERGE_MSG`, passed
+/// the worktree, and the re-run pick died on `could not lock 'MERGE_MSG'`.
+#[test]
+fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_states() {
+    use crate::topology::effects::ResidueElement;
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("materialization-late-kills");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let dispatched = dispatch_repair(&mut run, repair, 0, &head, &source);
+    assert_eq!(dispatched.materialized, Some(Materialization::Clean));
+    let open = dispatched.open_generation();
+    let worktree = dispatched.worktree.clone();
+    let dir = git_dir(&worktree);
+    let expected_tree = git(&worktree, &["write-tree"]);
+    let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
+    assert_checkout_is(&worktree, &expected_files, "the first pick");
+    assert!(
+        !dir.join("MERGE_MSG").exists() && !dir.join("AUTO_MERGE").exists(),
+        "the funnel cleared the pick's state files once the pick had ended"
+    );
+
+    // K3: the message's lock held, the message itself not yet in place.
+    write_file(&dir.join("MERGE_MSG.lock"), b"side\n");
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("a held MERGE_MSG.lock is recovered from");
+    assert_eq!(
+        resumed.reuse,
+        Reuse::Recreated {
+            failure: crate::workspace_manager::VerifyFailure::Residue(ResidueElement::MergeMsg)
+        },
+        "the held lock is read as the message's residue and the worktree is recreated"
+    );
+    assert_eq!(resumed.materialized, Some(Materialization::Clean));
+    assert_eq!(git(&worktree, &["write-tree"]), expected_tree);
+    assert_checkout_is(&worktree, &expected_files, "K3");
+    assert!(
+        !git_dir(&worktree).join("MERGE_MSG.lock").exists(),
+        "a recreated worktree has a fresh git dir"
+    );
+
+    // K2: the index written and released, no state file — which, since the
+    // funnel clears the state files itself, is also the completed after phase.
+    // The packet's quiescence rule (HEAD at base, index unlocked, no
+    // cherry-pick state) is satisfied, so the worktree is reused as it stands;
+    // the funnel restores the base's tree before it picks again, so the
+    // re-run is one pick onto the base, reporting the same observation and
+    // producing the same tree (a pick onto the merged index is not a no-op:
+    // `a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`).
+    let dir = git_dir(&worktree);
+    remove_file(&dir.join("MERGE_MSG"));
+    remove_file(&dir.join("AUTO_MERGE"));
+    assert!(
+        !index_is_clean(&worktree),
+        "the merged index is the state under test"
+    );
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("a merged index with no state file is recovered from");
+    assert_eq!(resumed.reuse, Reuse::Verified);
+    assert_eq!(resumed.materialized, Some(Materialization::Clean));
+    assert_eq!(git(&worktree, &["write-tree"]), expected_tree);
+    assert_checkout_is(&worktree, &expected_files, "K2");
+
+    // K2 for a conflicting source: the unmerged entries are the state.
+    let conflicting = run.commit_with(&head, "c.txt", "not the side's content\n", "c-other");
+    // Rooted at BETA: the scaffold's repair display ids are per root.
+    let conflict_key = run.spawn_repair(BETA);
+    let conflicted = dispatch_repair(&mut run, conflict_key, 0, &conflicting, &source);
+    assert_eq!(conflicted.materialized, Some(Materialization::Conflict));
+    let conflicted_open = conflicted.open_generation();
+    let dir = git_dir(&conflicted.worktree);
+    let unmerged_before = unmerged_entries(&conflicted.worktree);
+    assert!(unmerged_before > 0, "the conflict left unmerged entries");
+    assert!(
+        !dir.join("MERGE_MSG").exists(),
+        "a conflicting pick's state files are cleared too"
+    );
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &conflicted_open)
+        .expect("an unmerged index with no state file is recovered from");
+    assert_eq!(resumed.reuse, Reuse::Verified);
+    assert_eq!(
+        resumed.materialized,
+        Some(Materialization::Conflict),
+        "the restore clears the unmerged index and the re-run pick conflicts again"
+    );
+    assert_eq!(
+        unmerged_entries(&conflicted.worktree),
+        unmerged_before,
+        "and the unmerged entries the worker is to resolve are exactly the ones it left"
+    );
+    run.replay_twice_equal();
 }

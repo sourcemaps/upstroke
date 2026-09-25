@@ -55,6 +55,26 @@ standards remain authoritative. `*_verification_dispositions`,
 `finding_dispositions[].rationale` and the `v4_`..`v15_` keys belong to the
 packet's disposition history and are not reproduced here.
 
+## `#![cfg_attr(`
+
+The three governed lints are `forbid` in this file's production build since
+#318's third round, and conditional because of what sits below it. This file
+stated no level for any of them and inherited none, so each took its level
+from `-D warnings` alone, which an inner `allow` the placement scan does not
+read lowers (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL`).
+Its only allowances below are `src/effects/tests.rs` and the eight files
+under it, every one a whole-file test module, so an unconditional `forbid` is
+`E0453` at the lib test target and the production build -- the lib target
+CI's three clippy legs check and the binary links -- can forbid: the shape
+#318 gave `src/agent/bin.rs`. `file_level_lint_state` reads it as the
+production build's statement; a generated `allow` in this file's production
+region is `E0453` at the lint gate
+(`~/orch-pr10/repair-318-r3-evidence/controls/C2-inheritance-reach-*`), and
+the lib test target alone compiles it, as for every conditional fence.
+`effects::tests::every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid` names this file the day the fence is removed
+(`controls/C1-unfence-effects-root-*`). The allowlist row for this file says
+the same: no allowance, and since #318 a production fence.
+
 ## `use std::collections::BTreeSet;`
 
 Allowlist placement: the **funnel section** of `effects/allowlist.toml`, and
@@ -109,6 +129,20 @@ carry one, so the histogram is emitted to this path on every run of
 and_recovered`, which then reads it back. Not checked in: its contents are a
 property of the machine that produced them, and a stale copy of somebody
 else's numbers would be worse than no copy.
+
+## `pub const SEQUENTIAL_RESIDUE_HISTOGRAM_JSON: &str = "residue-histogram-sequential.json";`
+
+The same half for the five residue-classified sites PR5's four-command sampler does not
+run, written on every run by
+`engine::topology::coverage::tests::sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered`.
+A file name rather than a path: that module's tests resolve it (`sequential_histogram_path`)
+against the observation export's directory when `UPSTROKE_HOOK_OBSERVATIONS` names one, and
+otherwise against the profile directory the test binary runs from — never against the source
+tree. Until PR10's round 7 it was `effects/residue-histogram-sequential.json` under the
+manifest directory, gitignored like PR5's, and every build of one checkout shared it: a suite
+in one build slot truncated it while the merge check in another read it (the round-7
+regression lens, P3). The merge check and the regenerator read it where the sampler wrote it;
+the ordinary tests read the declarations.
 
 ## `pub const FUNNEL_MODULES_JSON: &str = "effects/funnel-modules.json";`
 
@@ -214,6 +248,61 @@ build owns rather than a claim a reviewer has to re-check.
 ## `pub struct GovernedAllow` › `pub reasoned: bool,`
 
 Whether it carries a `reason = "…"`.
+
+## `pub const RUSTC_WHITESPACE: [char; 11] = [`
+
+The eleven code points rustc's lexer reads as whitespace between tokens:
+U+0009 TAB, U+000A LF, U+000B VT, U+000C FF, U+000D CR, U+0020 SPACE,
+U+0085 NEL, U+200E LRM, U+200F RLM, U+2028 LS and U+2029 PS. **This is the one
+definition of a token separator here**, and it is rustc's rather than a
+library's: `u8::is_ascii_whitespace` leaves out U+000B and cannot see the five
+that are not ASCII, and `char::is_whitespace` leaves out U+200E and U+200F and
+adds code points rustc refuses between tokens, U+00A0 among them.
+`every_separator_rustc_reads_is_one_every_reader_here_reads` pins the eleven by
+value; that rustc builds each of them with nothing reported, and refuses
+U+00A0 and U+200B (whitespace to the eye and to no predicate) as unknown
+tokens, was compiled once for round 4 of #309 and is in that round's evidence,
+not in the suite.
+
+The fourth review of #309 measured the difference at `84123789`. Three
+readers took three sets -- the module walk `u8::is_ascii_whitespace`, the name
+reader `char::is_whitespace`, the facade whitelist `str::split_whitespace` --
+and two ordinary declarations, written with `#[rustfmt::skip]` and no macro,
+passed every gate while a topology caller wrote through them: `mod`, U+200E, a
+child of `src/engine/attempt.rs` that no walk judged, and `fn`, U+200E, a name
+in `src/engine/coordinator.rs` that was no classification obligation and no
+count. In the facade the whitelist admitted `mod`, U+000B, a name, and the walk
+did not read it; only the facade's own deny kept an effect from following.
+rustc reports none of this: its text-direction lints cover literals and
+comments, not the space between tokens.
+
+**It is applied once, where every reader gets its text.** The module walk, the
+name reader, the whitelist and the other readers in this module and its tests
+each decide where a token ends, with a byte test, a `trim` or a
+`split_whitespace`, and they read [`blank_comments_and_strings`] or
+[`production_code`], which is made from it. So that function writes each of
+the six separators those predicates do not all read -- U+000B, U+0085, U+200E,
+U+200F, U+2028, U+2029 -- as spaces of the same byte length, and on its output
+the three library predicates and rustc's agree. A reader added later inherits
+that; a predicate repaired reader by reader is what rounds 1 to 3 did, each
+leaving the next reader's blind spot. [`declared_fns`], which matches text
+rather than testing bytes, names this definition itself; the `trait`, `impl`
+and `for` readers of [`externally_reachable_fns`] read a keyword as a whole
+word and ask nothing of what follows it ([`keyword_sites`]). The byte readers
+([`census_domain`]'s `whitespace` among them) keep `u8::is_ascii_whitespace`,
+which on that text is the whole set.
+
+**What it does not reach.** A reader that reads the raw source instead of the
+tokenizer's text is outside it; the module walk read an attribute's name that
+way and now reads it from the tokenizer's text (see `scan_modules`).
+[`blank_comments`] keeps literals and is not rewritten: its callers look for a
+string's contents, not for where a token ends. And a separator is one thing a
+recogniser can misread, not the only one: see `PR7-WRAPPERS-EMPTY-DOMAIN`.
+
+## `pub fn is_rustc_whitespace(character: char) -> bool {`
+
+Whether rustc reads `character` as whitespace between tokens:
+[`RUSTC_WHITESPACE`] as a predicate.
 
 ## `pub fn blank_comments(source: &str) -> String {`
 
@@ -326,7 +415,7 @@ rustfmt (macro bodies in braces are), and a `#[cfg(test)]` module not named
 `src/runner/container/view.rs`'s `#[cfg(test)] pub(crate) mod fixtures` and a
 forged `RunnerRequest {` builder above the file's real test module,
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` both exit
-0 and `runner::tests::every_production_runner_request_is_built_by_its_roles_\
+0 and `runner::contract::tests::every_production_runner_request_is_built_by_its_roles_\
 builder` passes — while the identical forged builder **without** the probe
 fails it by name.
 
@@ -340,9 +429,30 @@ scalar is not a quote — rather than by a list.
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `at += 2;`
 
-An escape. The longest Rust spells is `\u{10FFFF}`, which closes at
-`from + 11`, so the window is bounded and a runaway scan over the rest
-of the file cannot happen.
+An escape, read the way rustc's lexer reads one: past the escaped character,
+then to the next quote that is not itself escaped. A line break before that
+quote means this was no char literal, so a scan cannot run past its own line.
+
+**It used to be a window, and the window was wrong.** This note said the
+longest escape Rust spells is `\u{10FFFF}`, closing at `from + 11`, and the
+reader stopped looking at `from + 13`. A Unicode escape is one to six hex
+digits and **any number of underscores**, so `'\u{7b____________________}'` is
+legal and longer than any window. The regression lens of #309's fourth review
+executed what follows from that at `84123789`: the reader gave up on the
+literal, took the `','` after it for a char literal, and the `}` of a
+following `'}'` survived as code. Written twice in each of two `impl` blocks
+inside `stringify! { .. }` -- once with `'}'` and once with `'{'`, which keeps
+the braces balanced for the module walk -- it closed both impls early, so two
+effectful `rf4_write`s read as file-scope twins and the sharing rule admitted
+two paths under one denial; fmt, clippy and 188 tests passed while a topology
+caller wrote through the undenied one. The same text with the underscores
+removed was refused. **A structural reading is only as good as the
+tokenization under it**: every brace position [`reachable_fn_owners`] compares
+comes from this function. Pinned by
+`a_multi_byte_char_literal_does_not_desync_the_blanker` (each legal escape
+form beside a brace) and by
+`a_fn_behind_any_separator_is_unclassified_and_a_legal_escape_hides_no_brace`
+(the review's witness and its control, both refused).
 
 ## `fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {` › `let width = match *bytes.get(at)? {`
 
@@ -361,8 +471,19 @@ literal ends at end of input — a file that does not compile.
 ## `pub fn blank_comments_and_strings(source: &str) -> String {`
 
 `source` with every comment and string literal replaced by spaces of the same
-length, newlines preserved. The output is exactly as long as the input, so an
-offset, a line and a column measured in it are `source`'s own.
+length, newlines preserved, **and every token separator rustc reads that is
+not ASCII whitespace written as spaces of its own byte length**
+([`RUSTC_WHITESPACE`]: U+000B, U+0085, U+200E, U+200F, U+2028, U+2029). The
+output is exactly as long as the input, so an offset, a line and a column
+measured in it are `source`'s own.
+
+This is the tokenizer every structural reader here starts from, which is why
+the separators are settled here and not in each reader: after it, a byte test
+for ASCII whitespace, `char::is_whitespace` and `split_whitespace` all read
+exactly what rustc reads between tokens. A source that writes none of the six
+comes back byte for byte as `code_bytes_only` made it. LF stays LF, and the
+other four ASCII separators stay what they are, so a CRLF checkout reads as it
+did.
 
 ```text
 in: /*why*/let x = "docker";
@@ -382,15 +503,20 @@ can no longer contain. [`blank_comments`] is the half that keeps it, and
 `the_notes_give_each_blanker_its_own_contract` runs both worked examples
 above against the functions themselves.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
+## `fn code_bytes_only(source: &str) -> String {`
+
+The blanking itself, unchanged since before the separators were settled above
+it: comments and literals to spaces, code bytes kept, newlines kept.
+
+## `fn code_bytes_only(source: &str) -> String` › `for (index, byte) in bytes.iter().enumerate() {`
 
 Newlines survive so line numbers do.
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `let mut j = i;`
+## `fn code_bytes_only(source: &str) -> String` › `let mut j = i;`
 
 `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`
 
-## `pub fn blank_comments_and_strings(source: &str) -> String` › `match char_literal_end(bytes, i) {`
+## `fn code_bytes_only(source: &str) -> String` › `match char_literal_end(bytes, i) {`
 
 [`char_literal_end`] decides, so this and its sibling in
 [`blank_comments`] cannot drift apart.
@@ -405,10 +531,16 @@ inside a comment or a string.
 The production **code** of `source`: comments and string literals blanked,
 and every `#[cfg(test)]`-configured item removed.
 
-[`production_region`] answers a different question and keeps its answer: it
-*truncates* at the first `#[cfg(test)]`, which is what a **domain** question
-wants (everything above the cut is certainly production) and what a
-**prohibition** question must not have. Three failures a prohibition census
+[`production_region`] keeps its truncating answer for the censuses that pin
+its cut point by name (`every_production_region_that_stops_early_stops_at_a_module`),
+and it is no longer what the classification domain reads.
+`PR7-WRAPPERS-EMPTY-DOMAIN` measured why: the truncating region was said to be
+what a **domain** question wants, because everything above the cut is
+certainly production -- but everything below it is certainly outside the
+domain, and in six classified modules the cut was a `#[cfg(test)] use` among
+the imports, so the domain was empty and an all-empty record passed. This
+function's answer is production in both directions, and
+[`externally_reachable_fns`] reads it. Three failures a prohibition census
 pays for with a truncating region, all three measured on this tree:
 
 * A file that declares its tests as `#[cfg(test)] mod tests;` — the
@@ -511,6 +643,23 @@ The legacy section of `effects/allowlist.toml` as PR5 freezes it.
 Held here rather than only in the TOML because the TOML is the thing under
 test: a frozen list that lived in the file it freezes would agree with any
 edit to that file.
+
+One entry was added after PR5, by the owner's decision on #306
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and removed again on 2026-09-20:
+`src/engine/mod.rs`, the v0.1 conductor's facade, whose only denied calls were
+the two conductor entry points denied by path in that change. The list and the
+TOML grew in the same commit, which is the only way
+`the_legacy_section_is_frozen_and_may_only_shrink` admits an entry, and the row
+said how every module below the facade was kept from inheriting the allow. It
+could not say the same of what the facade itself held: the fourth review of
+#306 (`PR306-FACADE-INLINE-ESCAPE`) reached `std::fs::write` from
+`engine::topology` through an inline module written in the facade and through
+a function placed in it, both under that allow, neither classified. The row's
+own `shrinks_when` was the remedy -- the entry points moved into
+`src/engine/coordinator.rs` and `src/engine/resume.rs`, the facade re-exports
+them and calls nothing denied -- so the row and this entry went together, and
+the list is again what PR5 froze. Putting the facade back needs an edit here,
+which is the point of holding the list in the code.
 
 ## `pub const TOPOLOGY_MODULES: &[&str] = &[`
 
@@ -696,15 +845,31 @@ memo, `windows_job` and `termination` stayed in `src/agent/proc.rs`.
 
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String> {`
 
-Every `fn` of `source`'s production region that is reachable from outside its
-module.
+Every `fn` of `source`'s production code that is reachable from outside its
+module. The region is [`production_code`]: comments and string literals
+blanked, every `#[cfg(test)]` item removed in place.
+
+**The region was the truncating one until `PR7-WRAPPERS-EMPTY-DOMAIN`.**
+[`production_region`] cuts a file at its first `#[cfg(test)]`, and in six
+classified modules -- `src/engine/{attempt,coordinator,resume}.rs` and
+`src/agent/{claude,codex,copilot}.rs` -- that is a `use` among the imports, so
+the derived domain was empty, `effects/wrappers.toml` recorded all four
+buckets as `[]`, and `reachable_fns_are_classified` compared an empty set
+with an empty set: forty-seven names classified by a census that read none
+of them, and a `pub(super) fn` below the cut, called from a live topology
+module, passed clippy and the suite. `src/agent/proc.rs` was cut inside
+`windows_job` and lost fifteen names the same way. Pinned by
+`a_configured_item_above_a_production_fn_does_not_hide_it_from_the_domain`
+(the shape) and `every_classified_module_that_declares_a_visible_fn_has_a_domain`
+(the six modules by name, and every classified module that declares a
+visible fn).
 
 Three shapes, because "pubfn" in the packet's sentence has three of them in
 this tree and a classification that saw one would be complete against a
 domain nobody drew:
 
-* `pub fn` / `pub(crate) fn` / `pub(super) fn` items, free or in an inherent
-  `impl`;
+* `pub fn` / `pub(crate) fn` / `pub(super) fn` / `pub(in a::b) fn` items, free
+  or in an inherent `impl`;
 * every `fn` inside an `impl <Trait> for <Type>` block, which is reachable
   through the trait whatever its own visibility says;
 * associated `fn`s of a public trait's default bodies, which are the same
@@ -730,15 +895,40 @@ A trait method **declaration** (no body) is deliberately still excluded: it
 performs nothing, and every implementation of it is reached by the
 `impl … for …` shape above.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut t = 0;`
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (start, after) in keyword_sites(&region, "trait") {`
 
 `pub trait X: Y { … }` — the bodies inside are reachable through the
 trait, exactly as a trait impl's are.
 
-## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let mut i = 0;`
+**`trait` as a whole word, whatever follows it.** This was the text `trait` and
+one U+0020, and the `impl` reader below wanted one U+0020 or `<` after `impl`
+and one U+0020 on each side of `for`. A tab or a line break is enough to miss
+all three, no Unicode needed: `pub trait`, a tab, a name left every default
+body of that trait outside the domain, and `impl`, a tab, a trait, `for` left
+every fn of that impl outside it. Found while settling the separators in round
+4 of #309, by reading; the tree writes none of them and the domain did not
+move (759 names in the 54 classified modules).
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` holds all eleven
+separators after `fn`, `trait` and `impl` and around `for`.
+
+## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `for (_, after) in keyword_sites(&region, "impl") {`
 
 `impl <something> for <something> {` — the `for` is what makes it a trait
 impl; an inherent `impl Type {` has none before the brace.
+
+**Both keywords are whole words and nothing more is asked of their
+neighbours**, because rustc asks nothing more: `impl::path::Trait for Thing`,
+`impl<T> Glued<T>for Thing<T>` and `impl Trait for&'static str` are trait
+impls, and a reader that wants a separator after `impl`, or on each side of
+`for`, leaves their methods outside the domain (found by attacking round 4's
+own first draft, which had widened "one U+0020" to "a separator" and no
+further; executed as parser omissions only). The price is an over-reading,
+and it is pinned: an inherent impl whose header holds a higher-ranked bound,
+`impl<F: for<'a> Fn(&'a u8)> Holder<F>`, reads as a trait impl, so its
+private fns are in the domain. That costs a row and fails closed. The next
+token cannot tell the two apart -- `impl Tr for <X as Y>::Out` is a trait impl
+whose `for` is followed by `<` too -- and the tree holds no such header: no
+name moved.
 
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String>` › `let is_default_body = public_trait_spans`
 
@@ -758,9 +948,206 @@ the second copy still caught it. Two hand-maintained lists of three strings
 disagree eventually, and the one that disagreed silently would be this one.
 Measured, mutation `the-parser-misses-pub-crate`.
 
+**Any restriction, not a list of two.** The arm read `pub`, `pub(crate)` and
+`pub(super)`, and `pub(in crate::engine) fn` is as visible to a module under
+`engine::topology` as `pub(super) fn` written in a child of `engine` is, so a
+function spelled that way in an allowed, classified file would have stood
+outside the domain: unclassified, undenied, and reachable. Found by reading
+this function while closing `PR306-FACADE-INLINE-ESCAPE` on 2026-09-20, not by
+a witness, and widened then: a `pub` followed by a parenthesised restriction of
+any content counts, which admits `pub(self)` too and fails closed by doing so
+-- a name the domain holds needlessly costs a row, and a name it misses costs
+the guarantee. The widening added no name to any classified module at that
+head; `the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both the
+path form and a spaced one.
+
+**`extern` is a modifier too.** The review of `409a6138` handed the widened
+recogniser `pub(in crate::engine) extern "Rust" fn probe() {}` and got no
+name: the ABI string is blanked with every other literal, which leaves
+`extern` as the word before `fn`, and the list of modifiers stripped from the
+end of the prefix did not hold it. It is stripped first now, being the last
+modifier Rust's grammar admits before `fn`, and the shape test pins the path
+form and `pub unsafe extern "C" fn`. This is a recogniser of the shapes the
+tree and its reviews have produced, not of Rust's item grammar, and nothing
+here should be read as saying otherwise.
+
+## `pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {`
+
+For each name [`externally_reachable_fns`] derives, how many `fn` declarations
+of the file's production code bear it -- every one, whatever its own
+visibility, wherever in the file it is written.
+
+The record classifies by bare name, so a name is the whole of a callable's
+identity there, and a denial names one path. One name borne by two callables
+is one row answering for both. That is ordinary -- two `Display` impls, a
+`#[cfg(unix)]` and a `#[cfg(windows)]` twin, a trait's declaration and its
+impl -- and it is also how a function the source writes is added to a
+classified module without the record changing: give it a name that is already
+classified
+(`PR309-INLINE-WRAPPER-NAME-COLLISION`). The census pins every count above one
+in the record's `shared` table, so the second bearer of a name is a
+disagreement like a new name is.
+
+## `pub enum OwnerHeader {`
+
+What the header of one pair of braces was read as, for
+[`reachable_fn_owners`]: an inline `mod`, a `trait` declaration, a trait's
+impl with the trait's name as the header writes it, an inherent impl, or
+`Unread` -- everything else, which is most braces: a function body, a `const`
+block, a `match`, a macro's definition or invocation, an `extern` block, and
+any header the reading below cannot place. An inherent impl carries no type
+name on purpose. Nothing downstream may compare two impls by what their
+headers spell, and the way to be sure nothing does is for the spelling not to
+be there.
+
+## `pub struct OwnerScope {`
+
+One pair of braces open at a declaration: the byte its `{` sits at in the
+file's production code, and what its header was read as. **The offset is the
+scope's identity.** Two scopes are the same scope when they open at the same
+byte and at no other time, whatever their headers say, because a header is
+text and text is what an alias, a `use` inside a block or a generic argument
+changes without changing the path -- or changes the path without changing the
+text.
+
+## `pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {`
+
+For each name [`externally_reachable_fns`] derives, where each of its bearers
+is declared: the chain of braces open at the `fn`, outermost first, the file's
+top level being the empty chain. It exists for one question -- whether the
+bearers of an effectful name are one path or several
+(`PR309-SHARED-EFFECTFUL-PIN-CANNOT-RECORD-ITS-DENIAL`) -- and answers no
+other. Each bearer owns its chain, so the open stack is cloned once per
+reachable declaration; a chain is a handful of small values.
+
+**What it returned before, and why it does not now.** Until the review of
+`993f080d` a chain was a string of labels (`block > impl Rf3Target`) and the
+caller compared strings. Both lenses of that review passed two receivers as
+one with ordinary source-written Rust and no expansion. `impl RfFirst<{ 1 + 1 }>`
+and `impl RfSecond<{ 1 + 1 }>`: the braces of the const argument are braces,
+closing them restarted the header, what was left of each `impl` header was
+`>`, and both owners read `block`. Two `const _: () = { .. }` blocks each
+importing a different receiver as `Rf3Target`: both owners read
+`block > impl Rf3Target`. In each case the record classified and denied the
+first path, a production body under `engine::topology` called the second, and
+clippy exited 0 with 186 tests passing. Writing `2` for `{ 1 + 1 }`, or
+renaming one alias, made the same check fail -- so the verdict followed the
+spelling and not the path. Every `{` still opens a scope here, a const
+argument's included; what changed is that a scope is known by where it opens,
+and a header that does not read as an item is `Unread` rather than something
+two blocks can have in common.
+
+**Parentheses and square brackets open scopes too, always `Unread`.** No item
+is declared inside either in ordinary Rust, and the one thing that does put a
+`fn` there is a macro invocation, `place!( pub fn held() {} );`, which can set
+its tokens down anywhere. Found by attacking the first draft of this repair,
+which tracked braces alone: twins inside one invocation's parentheses were
+two bearers at the file's top level, one scope, admitted. A closer leaves only
+the scope its own opener made, so a stray one cannot close an `impl`; and a
+`;` ends a header only when the innermost thing open is a brace, which is what
+lets `impl View for [u8; 4]` be read as the impl it is.
+
+It is a lexical reading like every other in this file. It sees the
+declarations the source writes, it does not evaluate `cfg`, and it resolves no
+name.
+
+## `fn owner_header(header: &str) -> OwnerHeader {`
+
+The text between the last `;`, `{` or `}` and an opening brace, read as an
+item header or not at all. Leading attributes are stepped over by matching
+their brackets, a visibility is dropped, generic argument lists are dropped
+(an `->` inside one does not close it), and then **the first word has to be
+the keyword**, after at most one `unsafe`: `mod name`, `trait Name`, or
+`impl`. An `impl` header is a trait's impl when the word
+`for` is its second word after `impl` and the first is a plain identifier --
+`impl View for A`, not `impl fmt::Display for A`, whose trait this reading
+would have to resolve -- and an inherent impl when it holds no `for` at all.
+Anything else is `Unread`.
+
+The keyword has to lead because the earlier reading took the last of `trait`,
+`impl` or `mod` found *anywhere* in the header, and answered `impl Sized)` for
+`fn host(value: impl Sized) {` (measured at `993f080d`). That direction -- a
+scope read as an item it is not -- is the one that could admit something, so
+it is the strict one. The other direction is deliberately loose: a header this
+cannot place is refused by the caller, so a brace inside the header
+(`impl Wide<{ 1 + 1 }>`), a trait named by a path, an `impl const`, a
+non-ASCII name and a negative impl all come back `Unread`, and the cost is
+that the author of such a header gives the other callable its own name.
+
+## `fn without_visibility(item: &str) -> &str {`
+
+An item header with its `pub`, `pub(crate)` or `pub(in path)` removed. `pub`
+has to end at whitespace or a parenthesis, so an item whose first word merely
+begins with those letters keeps it and is read as what it is.
+
+## `fn is_identifier(word: &str) -> bool {`
+
+An ASCII identifier: the name a `mod`, a `trait` or the trait of an impl has
+to be for the header to be placed. A raw or non-ASCII identifier is not one,
+which leaves its header `Unread`.
+
+## `fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {`
+
+Where `keyword` is written in `text` as a whole word -- no identifier byte
+before it, no identifier character after it -- as `(start, end)`. That is all
+rustc asks of a keyword, so it is all the `trait`, `impl` and `for` readers
+ask; [`declared_fns`] goes on to want a separator after `fn`, because a name
+has to follow and `fn(` is a type. One reading of "a keyword is written here"
+for the four, where there were three and each wanted its own neighbour. A
+non-ASCII character before the keyword is taken for a boundary, which
+over-reads.
+
+## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
+
+Every `fn name` a region declares, with its offset: the one reading the
+domain, its multiplicity and its owners are all made from, so they cannot
+disagree about what a declaration is.
+
+**A name is read by what ends it, not by what it is made of.** After `fn` and
+any run of separators, the name is the text up to the first `(`, `<` or
+separator, less a leading `r#` -- a separator being one of
+[`RUSTC_WHITESPACE`], which this reader names itself, so it reads `fn`, U+200E,
+a name on text no tokenizer has rewritten as well (round 3 had widened it to
+`char::is_whitespace`, which reads neither U+200E nor U+200F, and the review
+of `84123789` executed that: see [`RUSTC_WHITESPACE`]). It used to be `fn`,
+exactly one space, and a
+run of ASCII letters, digits and underscores, and round 3 of #309 measured
+what that left out at `993f080d`, each with the control `pub fn plain() {}`
+read beside it: `pub fn /* between */ commented() {}` was unread, because the
+blanker turns the comment into spaces and the first piece after `fn ` is then
+empty; so was a name after a line break; so was a non-ASCII name; and
+`pub fn r#raw() {}` was read as `r`. Each is a function the source writes and
+the record never asked about, or asked about under another name, and the
+count this file's sharing rule rests on was short by it. Executed as parser
+omissions; the bypass each would allow is reasoned. The tree writes none of
+them, and the fix moves nothing at that head: 759 names in the 54 classified
+modules, 2267 across all 186 source files, byte-identical, and the 69 pins
+still exact.
+
+One thing that follows `fn` is deliberately not a name: a macro metavariable.
+`pub fn $name() {}` names nothing the text holds, reading it as `$name` would
+make expansion look covered when it is not
+(`PR7-WRAPPERS-EMPTY-DOMAIN`), and `$` cannot begin an identifier, so the
+exclusion costs no real name. `the_reachable_fn_parser_finds_each_shape_this_tree_uses`
+pins all five.
+
 ## `fn find_header_brace(region: &str, from: usize) -> Option<usize> {`
 
 The `{` that opens an `impl` block's body, skipping generics and where-clauses.
+
+**A `;` or a `{` inside square brackets is not the header's end.** It used to
+be: the scan counted angle brackets and parentheses and stopped at the first
+`;` outside them, so `impl Trait for [u8; 4] { fn f(&self) {} }` gave no span,
+`f` declares no visibility, and the method was outside the classification
+domain; a public trait's default body returning `[u8; 4]` went the same way.
+Found in round 3 of #309 while pinning what [`reachable_fn_owners`] reads, by
+a shape test that came back empty: executed as a parser omission, the bypass
+it would allow reasoned. Brackets are counted now. It adds no name at that
+head -- 759 names in the 54 classified modules and 2267 across all 186 source
+files, byte-identical with the hunk reverted -- and
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses` pins both shapes.
+Like `declares_visibility` above, this is a recogniser of the shapes the tree
+and its reviews have produced, not of Rust's item grammar.
 
 ## `pub struct DenialFixture {`
 
@@ -1296,6 +1683,55 @@ The effective predicate, rendered.
 
 Whether that predicate is false wherever `test` is false.
 
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedInlineModule {`
+
+One inline `mod name { … }`, at whatever depth it is written.
+
+[`ScannedDeclaration`] is a module that has a file. This is the other kind, and
+until 2026-09-20 the scan recorded nothing for it: the inline branch opened a
+scope, so that a declaration *inside* it carried the right `inline_path`, and
+moved on. No census could judge a module the scan never reported, and the
+fourth review of #306 (`PR306-FACADE-INLINE-ESCAPE`) used exactly that -- an
+attribute-free inline module in `src/engine/mod.rs`, under that file's allow,
+walked by no guard. An inline module has no file and no allowlist row; it
+inherits the level of the file it is written in and can write attributes of
+its own, outside its braces or inside them, so a census that wants to answer
+for it needs both.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) inline_path: Vec<String>,`
+
+The inline modules enclosing this one, outermost first; empty at the top level
+of the file. Its length is the depth.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) guard: String,`
+
+The effective `cfg` predicate, as [`ScannedDeclaration::guard`] renders it:
+what the module inherits from the inline modules around it and what is written
+on it.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) outer_attributes: String,`
+
+The run of outer attributes written directly above the item, verbatim from the
+raw source, comments between them included; empty when the item has none. The
+run starts at the first `#[` since the last token that was not an attribute,
+so an attribute on a neighbouring item is never handed to this one --
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`
+pins that against an attributed item and an attributed declaration directly
+above an attribute-free inline module.
+
+## `pub(crate) struct ScannedInlineModule` › `pub(crate) body: String,`
+
+The text between the braces, verbatim. Inner attributes are the head of it,
+which [`super::lint_levels::leading_inner_attributes`] reads. A body that never
+closes runs to the end of the file rather than refusing, so that
+[`scan_module_declarations`] refuses exactly what it refused before this
+record existed.
+
+## `pub(crate) mod census_domain` › `pub(crate) struct ScannedModules {`
+
+Both halves of one scan: the declarations that name a file, and the inline
+modules that do not.
+
 ## `pub(crate) mod census_domain` › `pub(crate) enum ScanRefusal {`
 
 Why a file's structure could not be read, and where.
@@ -1320,7 +1756,10 @@ A `}` with no `{`.
 
 ## `pub(crate) enum ScanRefusal` › `UnreadablePredicate {`
 
-A `cfg` predicate the entailment grammar cannot read.
+A `cfg` predicate the entailment grammar cannot read, written directly or
+applied through a `cfg_attr` (the `cfg_attr`'s own predicate included), or a
+`cfg`/`cfg_attr` attribute whose comments and literals do not read the way
+the blanked text does ([`with_literal_identity`] answers `None`).
 
 ## `pub(crate) enum ScanRefusal` › `UnsupportedPathAttribute {`
 
@@ -1328,7 +1767,8 @@ A `cfg` predicate the entailment grammar cannot read.
 
 ## `pub(crate) enum ScanRefusal` › `UnsupportedInnerCfg {`
 
-An inner `#![cfg(…)]`, which gates the module it is written in.
+An inner `#![cfg(…)]`, or an inner `#![cfg_attr(…)]` that can apply one,
+which gates the module it is written in.
 
 ## `pub(crate) enum ScanRefusal` › `DuplicateDeclaration {`
 
@@ -1343,6 +1783,17 @@ A macro body holding a module-shaped token sequence.
 Every `mod` declaration in `source`, with the inline modules enclosing it
 and the effective `cfg` predicate it inherits.
 
+The out-of-line half of [`scan_modules`], and nothing else. The branch that
+emits a declaration is the one it always was; what holds that is the scan
+tests written before inline modules were reported, which pass unedited -- not
+the comparison of this entry point with [`scan_modules`] in
+`the_module_scan_reports_inline_modules_at_every_depth_with_what_they_write`,
+which compares a function with its own delegate and pins only the adapter.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {`
+
+The scan itself: one pass, both kinds of module.
+
 Pure over `&str`, which is what makes the refusals above drivable: the
 tree satisfies every one of them, so the only way to see one is to hand
 this a source that does not.
@@ -1350,9 +1801,14 @@ this a source that does not.
 Comments and string literals are blanked first —
 [`super::blank_comments_and_strings`], which also handles raw strings,
 byte strings and char literals — so a `mod` written in prose is spaces.
-The predicate text is read from the **raw** span at the same offsets,
-because blanking erases what is inside a string and `feature = "x"` would
-otherwise arrive as `feature = "   "`.
+A `cfg` or `cfg_attr` attribute's text is then read through
+[`with_literal_identity`] at the same offsets: comments blanked, and every
+string literal kept as a token that names it exactly. Blanking alone erased
+the value, so `feature = "x"` would arrive as `feature = "   "`; reading the
+raw span instead, as this did until #318's fourth round, handed the grammar
+string contents it split as structure -- `all(feature = "a\"", test,
+feature = "b\"")` has `test` at top level, and the quote-toggling splitter
+saw one atom and called a test-only declaration production.
 
 ## `pub(crate) mod census_domain` › `struct Scope {`
 
@@ -1366,11 +1822,38 @@ The brace depth *outside* the module's body.
 
 -- an attribute, which belongs to whatever item comes next -----
 
+## `pub(crate) mod census_domain` › `"cfg" | "cfg_attr" => {`
+
+A `cfg` gates the item that follows, and so does a `cfg` that a `cfg_attr`
+applies: `#[cfg_attr(P, cfg(Q))] mod x;` is compiled where `P` fails or `Q`
+holds, so it is pushed as `any(not(P), Q)`, and a nested `cfg_attr` conjoins
+its predicates into `P`. This scan read only the literal `cfg` until #318's
+fourth round, so `#[cfg_attr(not(test), cfg(test))] mod x;` -- a file no
+production build compiles -- was a production declaration, and
+[`declared_whole_file_test_modules`] left it out of the population every
+production census skips. The expansion is [`super::lint_levels::applied_attributes`],
+the one reading of `cfg_attr` the crate has; a predicate on the way to a
+generated `cfg` that the grammar cannot read is refused rather than dropped,
+and an inner `cfg_attr` that can apply a `cfg` is refused like an inner `cfg`.
+A `cfg_attr` that applies no `cfg` gates nothing and is passed over, as it
+always was.
+
 ## `pub(crate) mod census_domain` › `"path" => pending_path = true,`
 
 `path` names the file directly; `cfg_attr` can apply one
 conditionally. Both are refused where they could reach a
 module, which is decided when the item is read.
+
+The attribute's **name** is read from the tokenizer's text and its `cfg`
+predicate from [`with_literal_identity`]'s reading of the source, which keeps
+the string values the tokenizer blanks. The name used to come from the source too, through `trim_start`, which
+does not read U+200E or U+200F: `#[`, U+200E, `path = ".."]` was then an
+attribute with no name, the refusal never fired, and the walk went on to the
+file the declaration's own name resolves to while rustc compiled the one the
+attribute names. Found by reading in round 4 of #309 while settling the
+separators ([`RUSTC_WHITESPACE`]), not by a compiled witness;
+`every_separator_rustc_reads_is_one_every_reader_here_reads` holds the refusal
+for all eleven.
 
 ## `pub(crate) mod census_domain` › `if let Some(invocation) = macro_at(bytes, i) {`
 
@@ -1542,7 +2025,12 @@ Whether `text` is a Rust keyword written plainly.
 
 ## `pub(crate) mod census_domain` › `fn whitespace(bytes: &[u8], from: usize) -> usize {`
 
-The first non-whitespace index at or after `from`.
+The first non-whitespace index at or after `from`. ASCII whitespace is the
+whole of it **because `bytes` is the tokenizer's text**, where every other
+separator rustc reads is already spaces ([`RUSTC_WHITESPACE`]). At `84123789`
+the tokenizer's text still held them as written, this stopped at U+000B and
+at the five that are not ASCII, and that is how `mod`, U+200E, a name went
+unread.
 
 ## `pub(crate) mod census_domain` › `struct ModuleShape {`
 
@@ -1636,9 +2124,17 @@ nothing about platforms or features and must not pretend to. `all(test,
 unix)` entails; `any(test, unix)` does not, because a Unix build without
 `test` compiles it; `not(test)` does not.
 
-## `pub(crate) mod census_domain` › `fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
+## `pub(crate) mod census_domain` › `pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
 
 `predicate` with `test = false` and every other atom unknown.
+
+`pub(crate)` since #318: [`super::lint_levels`] decides a `cfg_attr`'s
+predicate through it, as the module scan decides a declaration's gate, so
+those readers cannot disagree about what `all(test, unix)` means. The
+production-fence rule in `tests.rs` asked it first until #318's fifth round;
+it now decides an allowance against CI's production valuations, which know
+`unix` and `target_os` where this leaves them unknown, and agrees with this on
+every predicate this decides (`test` false in every production build).
 
 ## `fn decide_without_test(predicate: &Predicate) -> Option<bool> {` › `Predicate::All(parts) => {`
 
@@ -1657,6 +2153,20 @@ The grammar is `all(…)`, `any(…)`, `not(P)`, and an atom — a bare name
 or `name = "value"`. Anything else is refused: an unknown combinator, an
 unbalanced paren, `not` with other than one argument, an empty atom.
 
+Its splitter tracks a string only by toggling at `"`, so it is handed
+[`with_literal_identity`]'s text, never raw source: there a literal is a
+token with no quote, escape or separator inside it, and the token is the
+literal's decoded value. An atom's text is its identity (`Predicate::Other`),
+so `target_os = "linux"` and `target_os = "windows"` are two atoms -- what
+#318's third reviews executed the absence of -- and `target_os = "linux"`,
+`target_os = r"linux"` and `target_os = "lin\x75x"` are one, because rustc
+gives the three one value -- what #318's fourth reviews executed the absence
+of (`R4-MAIN-01`, `R4-REG-01`). Two different predicates over related atoms
+-- `unix` and `target_family = "unix"` -- are still two atoms here; the
+production-fence rule decides them against CI's valuations, where they are
+related, and the lint reader treats them as independent, which only adds an
+outcome.
+
 ## `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {` › `if name.is_empty() {`
 
 An atom: `test`, `unix`, or `key = "value"`.
@@ -1664,6 +2174,138 @@ An atom: `test`, `unix`, or `key = "value"`.
 ## `pub(crate) mod census_domain` › `fn split_arguments(text: &str) -> Result<Vec<&str>, String> {`
 
 The comma-separated arguments of a parenthesised group starting at `(`.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {`
+
+An attribute's text -- `raw` between its brackets, with `blanked` the same
+span of [`super::blank_comments_and_strings`] -- with every comment blanked
+and every string or char literal replaced by a token that **names its value
+exactly and carries nothing a splitter reads as structure**; `None` when the
+two spans disagree about where the code is, or when the text holds a doc
+comment.
+
+**Why it exists: the value is the predicate's identity.** Every reader of a
+`cfg` or `cfg_attr` here used to parse the blanked text, where
+`target_os = "linux"` and `target_os = "windows"` are both `target_os =`
+followed by spaces: the grammar refused both, and the lint reader then made
+the refused text one condition, so the two were assumed to hold together.
+`#![deny(L)] #![cfg_attr(target_os = "linux", allow(L))]
+#![cfg_attr(target_os = "windows", deny(L))]` read as a definite `deny`
+while clippy-driver on Linux applied the `allow` -- 12 of 57 compiler cases
+across the three governed lints in #318's third MAIN review, and the same
+aliasing in the third regression review (`R3-MAIN-02`, `R3-REG-02`). The
+production-fence rule in `tests.rs` dropped the whole unreadable predicate
+instead, so `cfg(all(test, target_os = "linux"))` lost its `test` and an
+allowance no production build compiles excused a `deny` (`R3-MAIN-01`).
+Parsing the raw text is not the repair either: the grammar's splitter
+toggles at every `"`, so an escaped quote inside a value moves top-level
+commas into and out of the atom.
+
+**One value is one token, whatever its spelling.** Every string literal is
+read for the value rustc gives it in a `cfg` predicate
+([`string_literal_value`]) and written back as a token for that value
+([`literal_token`]): the value itself when it is ASCII letters, digits, `_`,
+`-` and `.`, so a predicate still renders as the source usually spells it,
+and otherwise `"%"` and the hex of the value's UTF-8 bytes. `"linux"`,
+`r"linux"`, `r###"linux"###`, `"lin\x75x"`, `"lin\u{7_5}x"` and a `"lin\`
+continued on the next line as `ux"` are one token; `r"lin\x75x"`, whose
+backslash a raw string keeps, is another, and so is every other value. Until
+#318's fifth round the token was the spelling -- a plain literal kept, any
+other one its source text in hex -- so `all(target_os = "linux",
+not(target_os = r"linux"))`, which no configuration satisfies, was two
+independent atoms the production-fence rule satisfied with the first true
+and the second false: it excused a `deny` for an allowance nothing applies,
+and a macro-written `allow` behind that `deny` wrote 47 bytes through an
+ordinary library with all ten local gates green (`R4-MAIN-01`,
+`~/orch-pr10/reviews/pr-318r4/main-evidence/X4-raw*`; `R4-REG-01`, 63 bytes,
+`regression-evidence/r4-equivalent-literals*`). The same split refused the
+legitimate `all(target_os = "linux", target_os = r"linux")`, which Linux
+applies.
+
+**What it cannot decode, it does not name.** A literal it cannot read with
+certainty -- a byte or C string, a suffix, an escape rustc refuses, a raw
+string past 255 `#`s -- becomes `"?"` and the hex of its source text: no two
+different literals share that token, and [`literal_token_value`] reads no
+value from it, so the production-fence rule counts the atom it sits in as
+unknown and never as evidence, and the lint reader counts it as a condition
+of its own. rustc refuses every such literal in a `cfg` predicate.
+
+**The structure is always `blanked`'s.** The walk mirrors
+`code_bytes_only`'s rules -- comments first, then [`super::literal_end`]
+where `code_bytes_only` would read a string, then [`super::char_literal_end`]
+-- and every byte it keeps as code must be the byte `blanked` holds there,
+every comment or literal must be spaces there; a rustc whitespace character
+`blanked` turned to spaces is a space. Any disagreement is `None`, which
+every caller treats as an attribute it cannot read, never as one it can. A
+doc comment is the one comment that is not whitespace: rustc lexes `///`,
+`//!`, `/**` and `/*!` as attribute tokens ([`is_doc_comment`]), and inside
+an attribute's brackets one is an error, so the text has no reading.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {`
+
+Whether the comment opening at `at` is a doc comment, as rustc's lexer
+classes it: `//!` and `/*!` inner; `///` and `/**` outer; `////`, `/***` and
+`/**/` plain. rustc lexes a doc comment as an attribute, not as whitespace,
+so [`with_literal_identity`] refuses one inside an attribute's text and
+[`super::lint_levels`]'s prologue walk refuses one between an attribute's
+`#`, `!` and `[`; between inner attributes an inner one is an inner attribute
+that states no level, and an outer one ends the prologue.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {`
+
+The end of the nested block comment opening at `from`, as
+`code_bytes_only` counts it. `pub(crate)` for [`super::lint_levels`]'s
+prologue walk, which skips a comment between inner attributes, and between
+one's `#`, `!` and `[`, by the same count.
+
+## `pub(crate) mod census_domain` › `fn literal_token(literal: &str) -> String {`
+
+The token a string literal is read as: its value when
+[`string_literal_value`] decodes it -- the value itself when every byte is
+one [`is_kept_value_byte`] keeps, otherwise `"%"` and the hex of the value's
+bytes -- and `"?"` and the hex of the literal's source text when it does not.
+The three forms share no token: a kept value holds neither `%` nor `?`.
+
+## `pub(crate) mod census_domain` › `fn is_kept_value_byte(byte: u8) -> bool {`
+
+The bytes a value may hold and still be written as itself: ASCII letters,
+digits, `_`, `-` and `.`, which is every value a `cfg` in this tree names.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn literal_token_value(token: &str) -> Option<String> {`
+
+The value a token [`literal_token`] wrote stands for: a kept value as it
+stands, a `%` token's hex decoded; `None` for a `?` token -- a literal that
+could not be decoded -- and for any text that is not a token at all. The
+production-fence rule reads an atom's value through this and nothing else,
+so a value it cannot name is an atom it cannot decide.
+
+## `pub(crate) mod census_domain` › `const MOST_RAW_STRING_HASHES: usize = 255;`
+
+rustc's limit on a raw string's `#`s; past it rustc refuses the literal and
+this reads no value from it.
+
+## `pub(crate) mod census_domain` › `fn string_literal_value(literal: &str) -> Option<String> {`
+
+A string literal's value as rustc reads it in a `cfg` predicate, or `None`.
+Plain `"…"`: `\n`, `\r`, `\t`, `\\`, `\0`, `\'` and `\"`; `\x` and two hex
+digits up to `7F`; `\u{…}` with one to six hex digits, underscores after the
+first, naming a character; and a backslash ending a line, which drops the
+line break and the spaces, tabs and line breaks after it. Raw `r"…"`, with
+up to 255 `#`s: the text between, as written. A CRLF is read as LF, as rustc
+reads the file, and a bare CR is refused. Anything else -- a byte string, a
+C string, an escape a string may not carry -- is `None`.
+
+Measured, not assumed: clippy-driver applies a `cfg_attr` on Linux under
+each of the escaped, underscored, line-continued and raw spellings of
+`linux`, and refuses a byte string, a C string and a suffix there
+(`~/orch-pr10/repair-318-r5-evidence/measure/clippy-semantics/`);
+`effects::tests::the_production_fence_rule_reads_the_effective_activation_of_every_allowance`
+compiles every spelling it names under the fence the rule asks for.
+
+## `pub(crate) mod census_domain` › `fn unescape(characters: &mut std::str::Chars<'_>, value: &mut String) -> Option<()> {`
+
+One escape after a backslash, pushed onto `value`; `None` for one a string
+literal may not carry.
 
 ## `pub(crate) mod lint_levels {`
 
@@ -1681,8 +2323,9 @@ file is not one of them and must not become one.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) struct Resolution {`
 
-How a file's prologue resolves for one lint: the level **in force**, and
-whether rustc refuses the prologue outright.
+How a file's prologue resolves for one lint in the production build: the
+level **in force**, whether rustc refuses the prologue outright, and
+whether every production valuation agrees on the answer at all.
 
 ## `pub(crate) struct Resolution` › `pub(crate) level: Option<&'static str>,`
 
@@ -1695,6 +2338,49 @@ A later attribute tried to weaken a `forbid`. rustc answers `E0453`
 and the crate does not compile, so this is not a level at all — it is
 the file failing to build, and a reader that folded it into a level
 would report a governance state for a file that has none.
+
+## `pub(crate) struct Resolution` › `pub(crate) undecided: bool,`
+
+The prologue names the lint under a predicate the production build does
+not decide -- a platform's, a feature's -- and the valuations disagree; or it
+states or may change the lint in a way the reader does not answer for: under
+a predicate or in an attribute it cannot read (one rustc refuses -- a list
+entry that is not a lint path, an unknown lint tool, a custom inner
+attribute, a doc comment inside or between an attribute's tokens, an
+attribute [`super::census_domain::with_literal_identity`] cannot read),
+through an `allow` or `expect` the placement census does not read, or with a
+`warnings` level where the lint's own is `warn` or unstated. No single level
+is claimed: `level` is `None` and `refused_downgrade` is false. Undecided is
+not "unstated", and the difference is the failure direction: a census that
+treats it as unstated fails loud (the roll-call pin counts the pair), and a
+census that asks for a `deny` or a `forbid` is told neither. #318's second
+regression review executed the alternative on the reader as it was: it
+skipped a nested `cfg_attr` it did not read and kept the level before it, so
+`#![cfg_attr(not(test), deny(L), cfg_attr(not(test), allow(L)))]` was called
+a `deny` while clippy-driver applied the `allow` (`R2-REG-02`,
+`~/orch-pr10/reviews/pr-318r2/regression-evidence/probes/nested-parity.*`),
+and #318's fourth reviews executed it again on attribute syntax: after a
+`deny`, an `allow` written `r#allow`, through `r#cfg_attr`, with `#`, `!` and
+`[` spaced or commented apart, naming `clippy::r#<lint>`, or naming
+`clippy::all` or `clippy::style` was skipped and the `deny` answered
+definite -- 27 of 48 clippy-driver cases in MAIN's sweep, 18 of 30 in
+REGRESSION's (`R4-MAIN-02`, `R4-REG-02`).
+
+**What each census does with it.** [`file_level_lint_state`] answers `None`
+for it, and no census reads `None` as a fence. The roll-call guard
+(`tests::unclassified_production_files_leaving_a_governed_lint_unfenced`)
+names the file unless an ancestor states a `forbid`, which no lowering in the
+file survives, and names a silent child of an undecided ancestor, which
+states nothing the child can inherit. The classified-module pin counts the
+pair as unstated, so the count moves and the pin fails. The placement
+census's per-site-expectation rule (`tests::file_level_denies`) does not take
+it for the `deny` an expectation needs. The container funnel census
+(`runner::container::tests`, `closes_the_hole`) names it as stating no level.
+The fence sweep reads the written `deny(` lists itself and still names one
+nothing below allows. And the production-fence rule asks only about a `deny`,
+which an undecided prologue is not: the roll-call or the pin reaches it
+first. `tests::an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one`
+holds the fixture-fed half of that.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {`
 
@@ -1710,10 +2396,14 @@ A scan that accepts the second in place of the first reports a module as
 having stated its own level when it has not, which is `PR6-LANEF-004`
 answered by the wrong evidence.
 
-So the walk is: from the first byte, over whitespace and **inner**
-attributes only, stopping at the first token that is neither. That is
-exactly the region an `#![…]` may govern the file module from, and it is the
-same rule [`super::is_module_level`] applies to the inner half of its answer.
+So the walk is: from the first token -- past a byte-order mark and a
+shebang line, which rustc strips before it lexes -- over whitespace, comments
+and **inner** attributes only, stopping at the first token that is none of
+them. That is exactly the region an `#![…]` may govern the file module from,
+and it is the rule [`super::is_module_level`] applies to the inner half of
+its answer. An attribute is its tokens, as rustc lexes them: `#`, `!` and `[`
+with whitespace and plain comments between them are one inner attribute, and
+a raw identifier is the name it spells.
 
 ### Ordered, because rustc is ordered
 
@@ -1736,36 +2426,395 @@ compiled by `clippy-driver` and this reader's answer is checked against
 the diagnostics that come back, so no sentence here is the authority for
 what the compiler does.
 
-### What it deliberately does not do
+### Decided by every production valuation, or by none
 
-**Lint groups are not expanded.** `#![deny(clippy::all)]` denies this
-lint to rustc and reads as `None` here. The direction is the safe one — a
-census is told a module states nothing when it states something, which is
-loud — and the tree is measured rather than trusted:
-[`tests::the_three_blunt_governed_lints_are_used_by_nobody`] asserts that
-`clippy::all`, `clippy::style` and `warnings` are used by no file at all.
+The production build is not one valuation: three clippy legs compile the
+lib target on three platforms, and a `cfg_attr` in the prologue may hold
+on one and not another. The reader enumerates ([`file_level_lint_worlds`])
+the answer under every assignment of the predicates it cannot decide and
+returns a level only when all of them agree; otherwise it is
+[`Resolution::undecided`] and claims nothing. What it *can* decide is what
+[`super::census_domain::decide_without_test`] decides -- `test` false,
+`not(test)` true, `all`/`any`/`not` evaluated, `all()` true and `any()`
+false as `cfg` has them -- so `#![cfg_attr(not(test), forbid(L))]` is a
+plain `forbid` here, `#![cfg_attr(test, ..)]` is nothing, and a nested
+`cfg_attr` is expanded like the outer one. The same function decides the
+module scan's whole-file test modules; the production-fence rule decides an
+allowance against CI's valuations instead, where the reader must stay
+undecided, because one file's prologue is read for every platform at once.
+
+### A lint is named the way Clippy's lint store names it
+
+A list entry is a lint path -- a raw identifier read as the name it spells,
+spacing and comments between segments dropped -- and it names the governed
+lint when it is `clippy::<lint>` or the prefixless `<lint>`, which rustc
+applies to the Clippy lint with a deprecation warning; `clippy::disallowed_method`
+or `clippy::disallowed_type`, Clippy's renames onto two of the three; or a
+group that holds it -- `clippy::all` and `clippy::style`, the only two of
+Clippy's ten groups that do, the prefixless `all` and `style`, and the
+aliases `clippy_all` and `clippy_style` ([`what_a_lint_path_names`]). Any
+other name under `clippy::`, `rustdoc::` or `rustc::`, and any other name of
+one segment, is another lint or no lint, and changes nothing here; a name is
+compared with its case, as rustc compares it. Each of those facts was read
+from the driver -- `-W help` for the groups, its rename table, a
+clippy-driver compile for every name
+(`~/orch-pr10/repair-318-r5-evidence/measure/clippy-semantics/`) -- and each
+is a compiled row of
+`effects::tests::the_file_level_lint_reader_answers_what_rustc_does`. Until
+#318's fifth round an entry was compared by its last `::` segment alone:
+`allow(clippy::all)`, `allow(clippy::style)` and
+`allow(clippy::r#disallowed_methods)` changed nothing here while Clippy
+applied them (`R4-MAIN-02`, `R4-REG-02`), and the census
+[`tests::the_three_blunt_governed_lints_are_used_by_nobody`], which refuses a
+group allowance anywhere in the tree, was the only thing holding the answer
+honest.
+
+**A `forbid` a group states is not a fence.** rustc refuses a later `allow`,
+`warn` or `expect` of a `forbid` (`E0453`) -- unless the `forbid` came from a
+lint group, when it applies the lower level and warns
+`forbidden_lint_groups`, which `-D warnings` does not promote (measured:
+`forbid(clippy::all)` then `allow(<lint>)` builds under `-D warnings` with
+that one warning). A later group `forbid` turns an earlier direct one into
+that kind, and a later direct `forbid` turns it back. A `forbid` whose last
+source is a group is reported as `deny`: an error level an inner attribute
+lowers, which is the question every census here asks.
+
+### What it will not answer for
+
+**An allowance only this reader reads.** An `allow` or `expect` of the lint
+spelled so that the placement census (`super::governed_allows`) does not
+read it -- `#`, `!` and `[` spaced or commented apart, a raw lint name, a
+prefixless group alias, a rename -- is a lowering no row of
+`effects/allowlist.toml` accounts for, and the censuses here take a stated
+`allow` for one the placement census recorded. So when such a statement sets
+the level the reader answers undecided rather than `allow`
+([`recorded_by_the_placement_census`]); the same spelling the production-fence
+rule refuses to count as an excuse.
+
+**`warnings` over a `warn`.** A `warnings` level replaces a lint's `warn`,
+the default included, and leaves a stated `allow`, `expect`, `deny` or
+`forbid` alone: `#![deny(L)] #![allow(warnings)]` is a `deny`, and
+`#![warn(L)] #![allow(warnings)]` compiles silent. Where the lint's level in
+the file is `warn` or unstated, the answer turns on what the file inherits,
+which one file does not say, so a `warnings` statement leaves it undecided.
+
+**What rustc refuses.** A list entry that is not a lint path, `reason` before
+a lint, a tool other than `clippy`, `rustdoc` or `rustc`, a path of three
+segments, a custom inner attribute (a path, which stable rustc refuses at
+inner position), a level attribute with no parenthesised list, a doc comment
+inside or between an attribute's tokens, and a `#!` that opens no attribute
+are read as nothing the file can be answered for.
 
 Comments and string literals are blanked first, so a level quoted in a doc
 comment or inside a `&str` is invisible — `PR4-CENSUS-COMMENT-ORACLE`, and
-this crate's effect fixtures are written as exactly those two shapes.
+this crate's effect fixtures are written as exactly those two shapes. Inside
+an attribute the prologue walk found, a literal is read back as the token
+[`super::census_domain::with_literal_identity`] gives it: a predicate's value
+keeps its identity, and a `reason = "…"` that spells a lint name is still no
+entry of the level's list.
 
 `clippy::disallowed_methods` and `disallowed_methods` are the same lint;
-[`super::normalize_lint`] is the bridge, as it is everywhere else here.
+[`what_a_lint_path_names`] is the bridge for this reader, and
+[`super::normalize_lint`] for the placement census and every text scan.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `if bytes[at] != b'#' || bytes.get(at + 1) != Some(&b'!') {`
+## `pub(crate) mod lint_levels` › `pub(crate) type World = (Option<&'static str>, bool);`
 
-The prologue ends at the first token that is not an inner attribute.
+One production valuation's answer: the level in force, and whether the
+prologue is `E0453` under it.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `let Some(list) = rest`
+## `pub(crate) mod lint_levels` › `struct Statement {`
 
-`allowance(…)` strips to `ance(…)`, which opens nothing: the
-parenthesis is what makes the prefix an exact attribute name.
+One statement the prologue makes about the lint, in source order: what it
+does ([`Effect`]), and the undecided predicates that all have to hold for it
+to apply. A statement under `cfg_attr(not(test), ..)` carries no condition;
+one under `cfg_attr(unix, ..)` carries `unix`; one nested in both carries
+`unix`.
 
-## `pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {` › `if resolution.level == Some("forbid") {`
+## `pub(crate) mod lint_levels` › `enum Effect {`
 
-Ordered, and `forbid` is sticky. A weaker level after a
-`forbid` is `E0453`, which is the file not compiling rather
-than a level; anything else replaces what came before it.
+A level for the lint -- with whether a lint group stated it, which decides
+whether a `forbid` holds, and whether the placement census reads the
+attribute it sits in -- or a level for `warnings`, which replaces a `warn`.
+
+## `pub(crate) mod lint_levels` › `struct Unreadable;`
+
+A level attribute rustc refuses, or names the lint through a tool it does not
+know: the prologue has no answer for the lint.
+
+## `pub(crate) mod lint_levels` › `enum Named {`
+
+What one lint path names, for one governed lint: the lint itself, a group
+that holds it, `warnings`, another lint or none, or a path rustc refuses.
+
+## `pub(crate) mod lint_levels` › `const GROUPS_NAMING_THE_GOVERNED_LINTS: [&str; 2] = ["all", "style"];`
+
+The Clippy groups that hold the three governed lints. `clippy-driver -W help`
+lists ten groups; `disallowed_methods`, `disallowed_types` and
+`disallowed_macros` are in `all` and `style` and in no other, `restriction`
+included.
+
+## `pub(crate) mod lint_levels` › `const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];`
+
+Clippy's old names for those two groups, which rustc still applies as the
+group, with a deprecation warning.
+
+## `pub(crate) mod lint_levels` › `const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [`
+
+The renames in Clippy's table whose new name is a governed lint: rustc
+applies `clippy::disallowed_method` to `clippy::disallowed_methods` and
+`clippy::disallowed_type` to `clippy::disallowed_types`, with a warning.
+`disallowed_macros` has none, and the prefixless old names apply to nothing.
+
+## `pub(crate) mod lint_levels` › `const LINT_TOOLS_NAMING_NO_GOVERNED_LINT: [&str; 2] = ["rustdoc", "rustc"];`
+
+The two lint tools besides `clippy` that rustc knows. Their names are no
+governed lint; any other tool is `E0710`.
+
+## `pub(crate) mod lint_levels` › `const MOST_UNDECIDED_PREDICATES: usize = 12;`
+
+The valuations are enumerated, two to the power of the distinct undecided
+predicates in the prologue; past this many the reader answers undecided
+rather than enumerate. No prologue in the tree carries even one.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {`
+
+Every answer some production valuation gives for `lint` over `source`'s
+prologue: the statements are replayed in order under each assignment of
+the undecided predicates by [`replay`], and the distinct outcomes are the
+set. One element is a decided prologue; more than one is what
+[`Resolution::undecided`] reports; none is a prologue past
+`MOST_UNDECIDED_PREDICATES`, one that states the lint under a predicate or in
+an attribute the reader cannot read, or one some valuation of which `replay`
+does not answer for.
+
+Predicates are variables by their rendered text, and the text keeps each
+string's value ([`super::census_domain::with_literal_identity`]): `unix`
+written twice is one variable, `target_os = "linux"` and
+`target_os = r"linux"` are one, `target_os = "linux"` and
+`target_os = "windows"` are two, and two different predicates are
+independent -- an over-approximation of the real valuations that can only
+add outcomes, never remove one, so it can only make the reader refuse,
+never decide wrongly. That argument held only while no two different
+predicates shared a text, and until #318's fourth round they did: the
+values were blanked, both OS predicates became one unreadable condition,
+and the reader replayed an `allow` and a `deny` under one variable and
+answered a definite `deny` that Linux compiles as `allow` (`R3-MAIN-02`,
+`R3-REG-02`). A predicate whose identity cannot be read is not guessed at:
+the file has no answer for the lint.
+
+## `pub(crate) mod lint_levels` › `fn replay<'a>(statements: impl Iterator<Item = &'a Statement>) -> Option<World> {`
+
+One valuation's answer: the statements that apply in it, in order. After a
+direct `forbid`, `deny` is ignored, `forbid` stays, and anything weaker is
+`E0453` -- the file not compiling rather than a level. After a `forbid` a
+group stated, a weaker level applies, as `forbidden_lint_groups` lets it, and
+the answer reports that `forbid` as the lowerable `deny` it is. Anything else
+replaces what came before it. `None` when the level it ends on was set by an
+`allow` or `expect` the placement census does not read, or when `warnings`
+is stated and the lint's own level is `warn` or unstated.
+
+## `pub(crate) mod lint_levels` › `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {`
+
+The walk: from [`prologue_start`], over whitespace, comments, inner doc
+comments and inner attributes only, each attribute's `#`, `!` and `[` found
+past whitespace and plain comments, its text read through
+[`super::census_domain::with_literal_identity`], expanded by
+[`applied_attributes`] into the attributes it applies, and each statement
+about the lint kept with the undecided predicates it is applied under.
+`None` when the lint is stated under a predicate the grammar cannot read, in
+an attribute whose text cannot be read, by a level attribute rustc refuses
+([`stated_effects`]), by a `#!` that opens no attribute, or when an inner
+attribute follows where the walk stopped ([`an_inner_attribute_follows`]):
+the file then has no answer for the lint, rather than an answer that assumed
+what the unreadable text said.
+
+## `pub(crate) mod lint_levels` › `fn prologue_start(source: &str) -> usize {`
+
+Where rustc starts lexing a file: past a byte-order mark, and past the first
+line when it opens `#!` and the next token past whitespace and plain comments
+is not `[` -- a shebang, which rustc strips, `#!/** doc */[..]` included
+(measured: that first line applies nothing). Until #318's fifth round the
+walk began at the first byte, so a mark or a shebang ended the prologue
+before it began and every level below it was read as unstated.
+
+## `pub(crate) mod lint_levels` › `fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {`
+
+The next token at or after `from`: past rustc's whitespace and plain
+comments, and past doc comments too when asked.
+
+## `pub(crate) mod lint_levels` › `fn past_inner_doc_comments(source: &str, from: usize) -> usize {`
+
+The next token that is not an inner doc comment: `//!` and `/*!` are inner
+`doc` attributes, which state no level. An outer doc comment is not skipped;
+it ends the prologue.
+
+## `pub(crate) mod lint_levels` › `fn an_inner_attribute_follows(source: &str, from: usize) -> bool {`
+
+Whether an inner attribute starts at `from`, past every comment: one the walk
+stopped short of -- after an outer doc comment, or with a doc comment between
+its `#` and `!` -- which rustc refuses, so the walk has no answer rather than
+the answer before it.
+
+## `pub(crate) mod lint_levels` › `fn recorded_by_the_placement_census(attribute: &str, lint: &str) -> bool {`
+
+Whether `super::governed_allows`, the placement census, reads an allowance of
+the lint or of a group holding it in `attribute` -- the attribute's whole
+source span, `#` to `]`. The allowlist census requires a row for what it
+reads and the blunt-lint census refuses a group anywhere; an allowance it does
+not read, no census records. The production-fence rule in `tests.rs` asks
+the same question of an allowance before counting it as an excuse, so the two
+answers cannot part.
+
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {` › `if bytes.get(open) != Some(&b'[') {`
+
+A `#` and a `!` that open no `[` -- `#!/bin/sh` below the first line, or a
+doc comment between the `!` and the `[` -- is a file rustc refuses.
+
+## `fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {` › `for applied in applied_attributes(attribute.trim()) {`
+
+An inner attribute states what it applies in the production build, and an
+attribute that states nothing about the lint is passed over whatever its
+predicates are. For
+every attribute but `cfg_attr` that is the attribute itself; for a
+`cfg_attr` it is what its predicates apply, nested `cfg_attr`s included.
+Each predicate on the way is decided by
+[`super::census_domain::decide_without_test`]: true, and it adds no
+condition; false, and the statement is not in the production build;
+undecided -- a platform, a feature, any atom but `test` -- and it becomes a
+condition that [`file_level_lint_worlds`] enumerates both ways. A predicate
+rustc would refuse (`cfg_attr(, ..)`, `not(a, b)`, `not(te st)`) is no
+condition at all: rustc does not compile such a file, and the reader claims
+no level for it rather than repair the spelling.
+
+## `pub(crate) mod lint_levels` › `fn stated_effects(attribute: &str, lint: &str, recorded: bool) -> Result<Vec<Effect>, Unreadable> {`
+
+What an applied attribute states about the lint, in list order: nothing, for
+an attribute that is not one of the five level attributes; for one that is,
+an [`Effect`] per entry naming the lint, a group holding it, or `warnings`
+([`what_a_lint_path_names`]). [`Unreadable`] for a custom inner attribute (a
+path), a level attribute with no parenthesised list, an entry that is not a
+lint path or a `reason`, an entry after the `reason`, and a lint tool rustc
+does not know -- each a prologue rustc refuses.
+
+**The valuation this reader answers for is the production build's**: the
+lib target every clippy leg checks and the binary links, compiled without
+`cfg(test)`. Why the reader learned to expand `cfg_attr`:
+`src/agent/bin.rs`'s inline `#[cfg(test)] mod tests` allows
+`disallowed_methods`, so an unconditional `forbid` is `E0453` at the lib
+test target (measured by both of #318's first reviews) and the file carried
+`deny` -- a level a macro-generated `allow` in its production region
+lowered, executed by #318's MAIN review
+(`PR318-DENY-THE-PRODUCTION-BUILD-COULD-FORBID`). The repair is a `forbid`
+that exists in every build the test module does not, and a reader that did
+not read it would have counted the pair unstated. The same shape was then
+found and executed in `src/runner/container/census.rs`, `exec.rs` and
+`resolve.rs` and under `src/engine/mod.rs`, and fenced the same way
+(`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`).
+Why it learned nesting: the first form returned the outer `cfg_attr`'s
+attributes unexpanded and the level loop skipped the nested one, so a later
+`allow` nested under the same predicate was dropped and the earlier `deny`
+kept -- a false fence, executed by #318's second regression review
+(`R2-REG-02`). Why it keeps literal identity: see
+[`super::census_domain::with_literal_identity`] (`R3-MAIN-02`, `R3-REG-02`).
+Why it reads names and tokens as rustc does: see
+[`file_level_lint_resolution`] (`R4-MAIN-02`, `R4-REG-02`).
+
+Measured, not reasoned: every row of
+`effects::tests::the_file_level_lint_reader_answers_what_rustc_does` is
+compiled by `clippy-driver` without `--test`, which is exactly this
+valuation, for each of the three governed lints; the nested, composite,
+empty-combinator, `cfg_attr(test, ..)`, raw, spaced, group, group-`forbid`,
+mark and shebang rows are among the decided ones, a second table of
+platform, feature and malformed prologues checks that the reader refuses to
+decide what the compiler decides differently per valuation, and that what it
+cannot read does not compile, a third of string-valued predicates -- the
+reviews' collisions among them -- checks that distinct values stay distinct,
+and a fourth holds the prologues it will not answer for, each with what
+clippy-driver did with it.
+
+## `pub(crate) mod lint_levels` › `fn is_a_reason(entry: &str) -> bool {`
+
+Whether a list entry is the `reason = "…"` rustc accepts last in a level
+attribute, `r#reason` included. A reason that spells a lint name is no entry
+of the list.
+
+## `pub(crate) mod lint_levels` › `fn lint_path(entry: &str) -> Option<Vec<&str>> {`
+
+A list entry's segments, each an identifier read as the name it spells, with
+whitespace allowed around `::`; `None` for anything else -- a literal, a
+nested list, a leading `::`.
+
+## `pub(crate) mod lint_levels` › `fn what_a_lint_path_names(path: &[&str], lint: &str) -> Named {`
+
+What a lint path names for one governed lint, as Clippy's lint store answers
+it: see [`file_level_lint_resolution`] for the rule and its measurement. The
+bridge between `clippy::disallowed_methods` and the prefixless
+`disallowed_methods`, and the one place a group, a rename or `warnings` is
+recognised.
+
+## `pub(crate) mod lint_levels` › `pub(crate) struct Applied<'a> {`
+
+One attribute an attribute applies, and the `cfg_attr` predicates it is
+applied under, outermost first, each parsed or the reason it cannot be.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn applied_attributes(attribute: &str) -> Vec<Applied<'_>> {`
+
+**The crate's one reading of `cfg_attr`.** Every attribute `attribute`
+applies, with the predicates it is applied under: for anything but a
+`cfg_attr`, the attribute itself under none; for a `cfg_attr`, what each of
+its attributes applies, under its predicate and theirs. Nothing is decided
+here -- [`lint_statements_in_the_prologue`] decides for the production
+build, [`super::census_domain::scan_modules`] turns an applied `cfg` into a
+declaration's gate, and the production-fence rule in `tests.rs` turns the
+predicates, an item's gates and its enclosing items' gates into an
+allowance's effective activation. Before #318's fourth round each of those
+read `cfg_attr` its own way, and the fence rule read only the outermost
+predicate: `#[cfg_attr(unix, cfg_attr(test, allow(L)))]` was an allowance
+under `unix` (`R3-MAIN-01`, `R3-REG-01`). Handed
+[`super::census_domain::with_literal_identity`]'s text, so a predicate
+keeps its values.
+
+## `pub(crate) mod lint_levels` › `fn applied_under<'a>(`
+
+The recursion: a `cfg_attr` with no parenthesised body applies nothing,
+and its first argument is the predicate whatever it holds.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn attribute_name(attribute: &str) -> &str {`
+
+The path an attribute starts with, up to the first character that is not
+an identifier's: `cfg`, `cfg_attr`, `allow`; a raw `r#cfg_attr` is
+`cfg_attr`, which is what rustc resolves it as (measured). Until #318's fifth
+round `r#allow` read as `r`, so the reader skipped it, and `r#cfg` and
+`r#cfg_attr` gated nothing the production-fence rule could see (`R4-MAIN-02`,
+`R4-REG-02`, and REGRESSION's `raw_cfg_gate` shapes).
+
+## `pub(crate) mod lint_levels` › `fn attribute_name_token(attribute: &str) -> (usize, &str) {`
+
+The name and where its token ends, `r#` included, so what follows the name
+is found past the prefix.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn attribute_arguments(attribute: &str) -> Option<&str> {`
+
+What an attribute holds between the parentheses after its name.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn top_level_arguments(body: &str) -> Vec<&str> {`
+
+`cfg_attr`'s arguments, split at the commas that are not inside
+parentheses, brackets, braces or a string: the predicate first, then
+each attribute it applies. `pub(crate)` for the production-fence rule in
+`tests.rs`, which splits an allowance's list of lints with it.
+
+## `pub(crate) mod lint_levels` › `pub(crate) fn leading_inner_attributes(source: &str) -> &str {`
+
+The inner attributes a file, or an inline module's body, opens with: the raw
+text from its first byte to the end of the last `#![…]` before anything that
+is not one. Comments and blank lines between them are kept, because the text
+is handed on verbatim -- to `governed_allows`, to learn what an inline module
+writes inside its braces, and to a compiled fixture, as the header of a crate
+root that has to carry exactly what `src/engine/mod.rs` carries
+(`the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`).
+It stops where [`file_level_lint_resolution`] stops, for the same reason: an
+inner attribute after the first item is not one rustc accepts.
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {`
 
@@ -1773,10 +2822,6 @@ The level in force for `lint` at `source`'s file-module scope, or none.
 
 [`file_level_lint_resolution`] without the `E0453` bit, for the censuses
 that ask only which level governs a module.
-
-## `pub(crate) mod lint_levels` › `fn names_lint(entry: &str, lint: &str) -> bool {`
-
-Whether an attribute entry names `lint`, qualified either way.
 
 ## `pub(crate) mod tests;`
 

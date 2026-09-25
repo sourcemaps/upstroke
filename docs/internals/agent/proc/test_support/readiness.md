@@ -285,6 +285,32 @@ then exited between the stat above and this call, and
 a signal that is on disk is a signal however dead its
 producer now is.
 
+## `pub(crate) fn await_signal_by(`
+
+[`await_signal`] with `now` in place of `Instant::now`: the clock the
+wait reads, once for its deadline and then once per poll, before it
+sleeps. The seam through which the wait's bound is tested without the
+wall clock: a test that drives the clock reads which reading ended the
+wait, and a stall of the waiting thread between two readings changes no
+reading, where it changes every wall-clock duration
+(`agent::proc::tests::the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer`,
+after `PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). `await_signal` is this
+with the wall clock.
+
+The rest between two polls is one attempt: `rest_within` in
+`workspace_manager::fixture`, one `nanosleep` on Unix capped at what the
+reading just taken leaves of the deadline, and never made again. The
+reading that decided the deadline is the one the rest is capped by, so
+the count of readings above is unchanged. `thread::sleep` made a refused
+or interrupted sleep again inside itself for what it had left, so a wait
+whose every rest a policy refused never came back to its deadline: the
+same hidden retry as the lease waits' (`PR320-R6-REG-001`), in the wait
+this pull request added
+(`rundir::tests::a_readiness_wait_whose_every_rest_is_refused_times_out_at_its_bound`).
+`published` is still read with `read_published`, whose open and read
+retry an interruption inside std; it is reached once, after the signal
+exists, and is outside the wait's rest.
+
 ## `fn published(signal: &Path) -> Waited {`
 
 [`read_published`] as a [`Waited`].

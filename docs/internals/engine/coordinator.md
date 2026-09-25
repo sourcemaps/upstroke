@@ -13,6 +13,104 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
+
+The v0.1 conductor's public entry points -- `run`, `run_with` and
+`run_harness` -- and the two seams below them, defined here and re-exported by
+[`the facade`](mod.md) as `engine::run`, `engine::run_with` and
+`engine::run_harness`, the paths they always had.
+
+**They moved here from `src/engine/mod.rs` on 2026-09-20, unchanged but for
+one path.** `run_contained` calls `run_harness_inner_on`, which is denied by
+path, so whichever module holds that call needs an allow of
+`clippy::disallowed_methods`. The facade held it, and its allow covered
+everything else anyone wrote in the facade -- an inline module, a private
+function -- all of it visible to `engine::topology` and none of it classified:
+the two routes of `PR306-FACADE-INLINE-ESCAPE`. This module already carries a
+recorded allow and is a classified module, so the five are rows of
+`effects/wrappers.toml` (`effectful`: each reaches the coordinator without
+leaving this file) and denied by path in `clippy.toml` like the conductors
+below. The bodies are what they were; the call in `run_contained` lost its
+`coordinator::` prefix and the two seams became `pub(super)`.
+
+## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())`
+
+The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
+
+`HostRunner::for_legacy_workspace` differs from `HostRunner::new` in one
+field: its children read the object graph `refs/replace/*` describes, which is
+the graph `src/workspace.rs` writes the workspace and its gate snapshots from.
+This function drives the *schema-1..3* coordinator and nothing else, so it is
+the one place that choice belongs. See
+[`ObjectGraph`](../runner/host/environment.md) for why a consumer has to read
+its own producer's graph, and `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for
+the deferred finding about that graph being the replaced one.
+
+## `pub(super) fn run_harness_on(`
+
+The same run, on an explicit [`Runner`].
+
+The boundary is a parameter rather than a `Harness` field because it is not
+an injectable stand-in for a collaborator: it is where every process of
+this run executes, and DESIGN.md:612 makes it a configured choice —
+"`[runner]` config selects `host` or `container`". PR6 passes the container
+runner here; PR4 passes [`HostRunner`] and nothing else.
+
+**`pub(super)`, no wider, and it has to be.**
+`decisions.phase_zero_modules.visibility` is "pub(super) only where a sibling
+or tests reference an item; **no new pub or pub(crate)**; public paths
+unchanged", and the module's own entry enumerates the facade without it. The
+reason is not bookkeeping: this function drives the *schema-1..3* coordinator,
+and `invariants[22]` is "schema-1..3 runs are host-only and no run changes its
+boundary or image between epochs". A `pub` re-exported by the facade lets a
+downstream crate execute a legacy run off-host, with no `RunnerPolicy` to
+record it and no refusal — and lets the same run come back on `HostRunner` at
+the next resume. It was a private item of `src/engine/mod.rs` until
+2026-09-20; it is `pub(super)` here because `engine::tests` drives it with a
+recording runner, and `pub(super)` from this module is `engine` and its
+descendants — exactly the modules the private facade item was visible to.
+`engine` is where it stops: this module is private, the facade re-exports the
+three `pub fn`s above and not this, and
+`the_engine_facade_exposes_exactly_the_items_the_packet_enumerates` refuses a
+`pub` or `pub(crate)` spelling of it and a re-export of it alike. Not being
+exported is what makes the off-host run unreachable rather than merely
+undocumented. It is denied by path with the rest of this file's conductors, so
+a topology module cannot call it either.
+
+### Errors
+
+Whatever the run refuses or fails on.
+
+## `run_contained(opts, harness, runner, || {`
+
+`NoHooks` is what production passes the process funnel, and the
+containment step is threaded the same way: the observer exists so the
+step has a drivable failure path (`runner::host::contain_write_command`),
+and production arms nothing.
+
+## `pub(super) fn run_contained(`
+
+The same run, over the containment step it must perform **first**.
+
+Every public entry point above reaches the coordinator through here, so
+this one call is what makes `run`, `run_with` and `run_harness` write
+commands in INV-18's sense: "on Windows every host child is a member of the
+coordinator's ambient kill-on-close Job Object from creation", and
+`expected_failures_refusals[1]`, "ambient job cannot be created or joined
+(Windows) → write command refuses at startup with a diagnostic". A
+downstream crate calling `engine::run_with` is a coordinator exactly as the
+CLI is; before this it established nothing, so a kill between
+`CreateProcessW` and private-job assignment left the suspended stub alive
+and a real ambient failure could not produce the required refusal.
+
+`contain` is a parameter for the same reason `src/main.rs`'s `dispatch`
+takes its join: no machine here can make the real one fail, and the
+*ordering* between containment and the first thing the coordinator does is
+then a testable fact rather than a written-down one
+(`a_facade_run_refuses_before_any_effect_when_containment_fails`). It is
+not a hole in the guarantee: `Contained` has a private field, so the only
+closure that can return one is one that establishes containment.
+
 ## `pub(super) fn run_harness_inner(`
 
 Also hands back the state the run ended with — its own fold of its own log.
@@ -22,7 +120,7 @@ same file side by side. Nothing in the engine reads state back.
 
 ## `pub(super) fn run_harness_inner_on(`
 
-The same run, on an explicit boundary. See [`super::run_harness_on`].
+The same run, on an explicit boundary. See [`run_harness_on`].
 
 `_contained` is INV-18's host portion as a capability: "on Windows every
 host child is a member of the coordinator's ambient kill-on-close Job
@@ -199,6 +297,17 @@ inspection.
 ## `impl Run<'_>` › `pub(super) fn drain_and_report(&mut self) -> Result<RunReport, UpstrokeError> {`
 
 Drain, settle, and report.
+
+The report goes through `rundir::write_report` with both halves of the
+run's paths (PR10's round 10): the writer records the name of the staging
+directory it is about to make in the run's private half before making it,
+and removes on the next write only the directory that record names. What
+the writer hands back — staging-shaped entries under the run directory that
+no record of this run's names, passed over and left as found — is dropped
+on this path: the coordinator has no diagnostic channel that is not a
+governed effect (`eprintln!` is denied here), the entries are left as found
+either way, and the schema-4 finalization names them in its refusal
+(`finalize::refuse_continuation`).
 
 ## `pub(super) fn drain_and_report(&mut self) -> Result<RunReport, UpstrokeError> {` › `let partial = self.finish();`
 
@@ -624,9 +733,15 @@ already closed absorbs the second one instead of applying it.
 
 ## `impl Run<'_>` › `self.emit(EventBody::DesignDefect {`
 
-§5: a question that reached a human at runtime is, by definition, a
-design-phase defect — logged as one so the accumulated defects can
-become review material for the designer prompt.
+§5's attribution loop: every question that reached a human at runtime is
+logged, with the question and the answer, as the `design_defect` record —
+the tag is historical; the record carries the judgment. This is the schema-3
+writer, and it writes the record **unclassified**: `attribution: None,
+citation: None`, never through `DesignDefect::discovered` or `::convicted`,
+so the bytes are what this writer always wrote and a reader treats them as
+written before the taxonomy (`reviews/2026-09-14-o3-attribution-record.md`,
+R1). The ruling an answer file may carry is not read here: `read_answer`
+returns the answer alone.
 
 ## `impl Run<'_>` › `if answer == Answer::Declined {`
 
@@ -705,6 +820,27 @@ How many distinct rungs those attempts spent, at least one.
 ## `impl<'a> ParkSubject<'a>` › `pub(super) fn of(task: &'a Task, progress: &Progress) -> Self {`
 
 The subject of a schema-3 task and its progress.
+
+## `pub(super) fn question_options(kind: QuestionKind) -> Vec<String> {`
+
+The legacy engine's options for a parked task's question: the engine's
+instructions to the operator, with the decline actions taken from
+`interaction::DECLINE_OPTIONS` so that a numbered pick of one is read as the
+decline it is. "typed free text is sent back to the agent" is true here:
+`answer_question` turns a non-canned answer into human feedback for the next
+attempt.
+
+## `pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {`
+
+The schema-4 driver's options for the same kinds, worded for what that
+engine does with an answer. `question_answered(schema 4)` records an option
+index and, for a binding, an override; it has no field for typed text, so a
+typed answer un-parks the task and reaches no agent
+(`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
+`Clarify` list promising delivery the driver does not make; this list
+promises nothing it cannot keep, and its give-up option is the shared
+constant, so `answer_for_option` reads it as a decline. `ApproveSpend` is
+not a kind this driver raises and keeps the legacy pair for totality.
 
 ## `pub(super) fn question_context(`
 

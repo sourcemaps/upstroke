@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 
 use crate::error::UpstrokeError;
+use crate::events::RunOutcome;
 use crate::events::{AttemptRecord, BudgetKind};
 use crate::ir::QuestionId;
 use crate::topology::events::{
-    AttemptNumber, BudgetExceeded4, CandidateRef, DerivedOutcome, Epoch, GenerationId,
+    AttemptNumber, BudgetExceeded4, CandidateRef, DerivedOutcome, Epoch, GenerationId, SequenceId,
     TopologyEvent, TopologyEventBody,
 };
 use crate::topology::fold::{GenerationClass, TopologyFold};
@@ -46,14 +47,33 @@ impl Spend {
         *self.per_task.entry(key).or_insert(0.0) += cost;
     }
 
+    fn record_unattributed_reviews(&mut self, reviews: &[crate::events::ReviewRecord]) {
+        for review in reviews {
+            self.run += review.cost_usd.unwrap_or(0.0);
+        }
+    }
+
     #[must_use]
     pub fn replay(events: &[TopologyEvent]) -> Self {
         let mut spend = Self::new();
+        let mut verifying: Option<(SequenceId, TaskKey)> = None;
         for event in events {
             match &event.body {
                 TopologyEventBody::AttemptFinished { data } => spend.record(data.key, &data.record),
                 TopologyEventBody::CandidatePrepared { data } => {
                     spend.record(data.key, &data.attempt);
+                }
+                TopologyEventBody::MergeVerificationStarted { data } => {
+                    verifying = Some((data.sequence, data.candidate.key));
+                }
+                TopologyEventBody::MergeVerificationUnavailable { data } => {
+                    match verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                    {
+                        Some((_, key)) => spend.record_reviews(key, &data.reviews),
+                        None => spend.record_unattributed_reviews(&data.reviews),
+                    }
                 }
                 TopologyEventBody::MergePrepared { data } => {
                     if let Some(verification) = &data.verification {
@@ -154,12 +174,15 @@ pub enum Step {
     RepairDispatch {
         key: TaskKey,
         generation: GenerationId,
+        continuing: bool,
     },
     Backoff,
     HardBlock {
         questions: Vec<QuestionId>,
     },
     Closure(DerivedOutcome),
+    NotStarted,
+    Finished(RunOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,10 +201,16 @@ pub enum Admitted {
         generation: GenerationId,
         continuing: bool,
     },
+    RepairDispatch {
+        key: TaskKey,
+        generation: GenerationId,
+        continuing: bool,
+    },
     Backoff,
     HardBlock {
         questions: Vec<QuestionId>,
     },
+    Closure(DerivedOutcome),
 }
 
 #[must_use]
@@ -189,8 +218,11 @@ pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {
     if fold.is_poisoned() {
         return Step::Poisoned;
     }
+    if let Some(outcome) = fold.finished() {
+        return Step::Finished(outcome.clone());
+    }
     let Some(epoch) = fold.epoch() else {
-        return Step::Closure(fold.derived_outcome());
+        return Step::NotStarted;
     };
 
     if fold.run_is_ending() {
@@ -214,7 +246,11 @@ pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {
     }
     if let Some((key, generation, continuing)) = first_ready(fold) {
         if is_repair(fold, key) {
-            return Step::RepairDispatch { key, generation };
+            return ceiling_or(ceiling, spend, epoch, key, || Step::RepairDispatch {
+                key,
+                generation,
+                continuing,
+            });
         }
         return ceiling_or(ceiling, spend, epoch, key, || Step::Dispatch {
             key,
@@ -257,21 +293,26 @@ pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {
         Step::Integrate { candidate } => Ok(Admitted::Integrate { candidate }),
         Step::Backoff => Ok(Admitted::Backoff),
         Step::HardBlock { questions } => Ok(Admitted::HardBlock { questions }),
-        Step::RepairDispatch { key, generation } => Err(UpstrokeError::Refused {
-            message: format!(
-                "this build does not dispatch a repair: task {key} is a Repair-origin task ready \
-                 to open generation {}, and repair execution — `T-REPAIR-DISPATCH`, the \
-                 materialization of its source candidate and the `LineageHeld` settlements — \
-                 is PR9's, so `checkpoint_refusals` has PR8 refuse the dispatch before any \
-                 append. Nothing was appended and no worktree was created",
-                generation.0
-            ),
+        Step::RepairDispatch {
+            key,
+            generation,
+            continuing,
+        } => Ok(Admitted::RepairDispatch {
+            key,
+            generation,
+            continuing,
         }),
-        Step::Closure(outcome) => Err(UpstrokeError::Refused {
+        Step::Closure(outcome) => Ok(Admitted::Closure(outcome)),
+        Step::NotStarted => Err(UpstrokeError::Refused {
+            message: "the run has not started: nothing is admitted from a fold with no \
+                      `run_started`, and nothing was appended"
+                .to_owned(),
+        }),
+        Step::Finished(outcome) => Err(UpstrokeError::Refused {
             message: format!(
-                "this build does not end a run: closure derives {outcome:?}, and the terminal \
-                 finalization `run_end_policy` attaches to `run_finished` is not implemented \
-                 here, so it refuses before appending it"
+                "this run already finished as `{}`, and continuation of a finished run is \
+                 refused after finalization; nothing was appended",
+                super::report::outcome_label(&outcome)
             ),
         }),
         Step::Poisoned => Err(UpstrokeError::Refused {

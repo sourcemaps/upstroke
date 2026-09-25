@@ -134,9 +134,18 @@ pub enum DurableStep {
     Flushed,
     SyncedData,
     Truncated,
+    Staged,
+    DirectoryCreated,
+    GroupGiven,
     SyncedFile,
     Renamed,
     SyncedDirectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryObserved {
+    pub path: PathBuf,
+    pub present: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +153,9 @@ pub struct DurableRecord {
     pub step: DurableStep,
     pub path: PathBuf,
     pub len: u64,
+    pub mode: Option<u32>,
+    pub mode_after: Option<u32>,
+    pub entry: Option<EntryObserved>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,14 +178,58 @@ impl DurabilityLedger {
     }
 
     pub fn record(&self, step: DurableStep, path: &Path, len: u64) {
+        if !self.is_recording() {
+            return;
+        }
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len,
+            mode: permission_bits(path),
+            mode_after: None,
+            entry: None,
+        });
+    }
+
+    pub fn record_transition(
+        &self,
+        step: DurableStep,
+        path: &Path,
+        mode: Option<u32>,
+        mode_after: Option<u32>,
+    ) {
+        if !self.is_recording() {
+            return;
+        }
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len: 0,
+            mode,
+            mode_after,
+            entry: None,
+        });
+    }
+
+    pub fn record_entry(&self, step: DurableStep, path: &Path, entry: EntryObserved) {
+        if !self.is_recording() {
+            return;
+        }
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len: 0,
+            mode: permission_bits(path),
+            mode_after: None,
+            entry: Some(entry),
+        });
+    }
+
+    fn push(&self, record: DurableRecord) {
         if let Some(log) = &self.0 {
             log.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(DurableRecord {
-                    step,
-                    path: path.to_path_buf(),
-                    len,
-                });
+                .push(record);
         }
     }
 
@@ -209,6 +265,19 @@ impl DurabilityLedger {
                 .clear();
         }
     }
+}
+
+#[cfg(unix)]
+fn permission_bits(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn permission_bits(_path: &Path) -> Option<u32> {
+    None
 }
 
 pub fn read_file_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -273,8 +342,109 @@ pub(crate) fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
     file.sync_all()
 }
 
+pub(crate) fn fsync_file_at(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    if let Some(fault) = injected_barrier_fault(path, BarrierHalf::File) {
+        count_barrier(BarrierHalf::File);
+        return Err(fault);
+    }
+    fsync_file(file)
+}
+
+static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<(PathBuf, FaultScope)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultScope {
+    Exactly,
+    FilesWithin,
+}
+
+static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[must_use = "the fault is armed only while the guard is held"]
+pub(crate) struct BarrierFault {
+    path: PathBuf,
+    scope: FaultScope,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fail_barriers_at(path: &Path) -> BarrierFault {
+    arm_barrier_fault(path, FaultScope::Exactly)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fail_file_barriers_within(dir: &Path) -> BarrierFault {
+    arm_barrier_fault(dir, FaultScope::FilesWithin)
+}
+
+fn arm_barrier_fault(path: &Path, scope: FaultScope) -> BarrierFault {
+    ARMED_BARRIER_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((path.to_path_buf(), scope));
+    ARMED_BARRIER_FAULT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BarrierFault {
+        path: path.to_path_buf(),
+        scope,
+    }
+}
+
+impl Drop for BarrierFault {
+    fn drop(&mut self) {
+        let mut armed = ARMED_BARRIER_FAULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = armed
+            .iter()
+            .position(|(armed, scope)| *armed == self.path && *scope == self.scope)
+        {
+            armed.remove(index);
+            ARMED_BARRIER_FAULT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn injected_barrier_fault(path: &Path, half: BarrierHalf) -> Option<std::io::Error> {
+    if ARMED_BARRIER_FAULT_COUNT.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let armed = ARMED_BARRIER_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resolved = std::fs::canonicalize(path).ok();
+    armed
+        .iter()
+        .any(|(armed, scope)| match scope {
+            FaultScope::Exactly => {
+                armed == path
+                    || (resolved.is_some() && std::fs::canonicalize(armed).ok() == resolved)
+            }
+            FaultScope::FilesWithin => {
+                half == BarrierHalf::File
+                    && (path.starts_with(armed)
+                        || (resolved.is_some()
+                            && std::fs::canonicalize(armed).ok().is_some_and(|armed| {
+                                resolved
+                                    .as_ref()
+                                    .is_some_and(|resolved| resolved.starts_with(armed))
+                            })))
+            }
+        })
+        .then(|| {
+            std::io::Error::other(format!(
+                "injected barrier fault at {}: the durability barrier was refused",
+                path.display()
+            ))
+        })
+}
+
 pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     count_barrier(BarrierHalf::Directory);
+    if let Some(fault) = injected_barrier_fault(dir, BarrierHalf::Directory) {
+        return Err(fault);
+    }
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()

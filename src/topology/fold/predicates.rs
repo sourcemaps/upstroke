@@ -24,6 +24,11 @@ impl TopologyFold {
         self.run.as_ref()?.tasks.get(key.index())
     }
 
+    #[must_use]
+    pub fn task_count(&self) -> usize {
+        self.run.as_ref().map_or(0, |run| run.tasks.len())
+    }
+
     pub fn task_state(&self, key: TaskKey) -> Option<TaskState> {
         self.task(key).map(|task| task.state)
     }
@@ -143,6 +148,15 @@ impl TopologyFold {
             frozen,
             entry.ladder.effort.implementation_for(frozen.tier),
         ))
+    }
+
+    #[must_use]
+    pub fn rung_binding(&self, key: TaskKey, rung: u32) -> Option<RungBinding> {
+        let entry = self.registry()?.get(key)?;
+        match self.binding_override(key) {
+            Some(binding) => Some(RungBinding::from_override(binding, entry.ladder.floor?)),
+            None => self.frozen_rung_binding(key, rung),
+        }
     }
 
     #[must_use]

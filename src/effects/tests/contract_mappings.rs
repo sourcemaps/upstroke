@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/effects/tests/contract_mappings.md`
 
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
@@ -307,7 +307,7 @@ pub(super) mod mappings {
         ),
         (
             "ST-20: report.json and status name the run's kind, policy, image reference, id and digest",
-            "defer:PR10",
+            "finalized_report_names_runner_identity",
         ),
         ("the container transition is wired into a run", "defer:PR7"),
     ];

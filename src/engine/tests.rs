@@ -14,14 +14,15 @@ use super::attempt::{
     QUESTION_MARKER, artifact_path, evaluate_outcome, materialize_prompt, review_failure,
     worker_question,
 };
-use super::coordinator::{question_options, run_harness_inner};
+use super::coordinator::{question_options, run_contained, run_harness_inner, run_harness_on};
 use super::preflight::{gates_differ, validate_inputs};
 use super::report::{sum_opt, task_report, total_of};
-use super::resume::resume_harness_inner;
+use super::resume::{resume_contained, resume_harness_inner};
 use super::*;
 use crate::agent::{AgentAdapter, Caps, ProcessOutput, TaskRun};
 use crate::capacity;
 use crate::config;
+use crate::error::UpstrokeError;
 use crate::events::{self, EventBody, EventLog, GateSummary, Progress, RunState, TaskState};
 use crate::interaction::{self, AnswerSource, QuestionRecord, Sleeper};
 use crate::ir::{
@@ -3337,6 +3338,113 @@ fn answering_the_question_retries_the_task_with_the_operators_words() {
     );
 }
 
+fn design_defect_lines(paths: &RunPaths) -> Vec<serde_json::Value> {
+    let text = fs::read_to_string(paths.events()).expect("log");
+    text.lines()
+        .filter(|line| line.contains("\"event\":\"design_defect\""))
+        .map(|line| serde_json::from_str(line).expect("the record parses"))
+        .collect()
+}
+
+fn assert_unclassified_on_disk(line: &serde_json::Value) {
+    let data = line
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .expect("the record has a payload object");
+    let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["answer", "context", "question"],
+        "the schema-3 writer writes the record it always wrote, with no attribution and no \
+         citation key: {line}"
+    );
+    let event: events::Event = serde_json::from_value(line.clone()).expect("the line reads");
+    let EventBody::DesignDefect { data } = &event.body else {
+        panic!("not a design_defect line: {line}");
+    };
+    assert_eq!(
+        data.effective_attribution(),
+        events::EffectiveAttribution::Unclassified,
+        "written before the taxonomy, so unclassified, never a discovery: {line}"
+    );
+}
+
+#[test]
+fn the_legacy_ingest_writes_an_unclassified_design_defect() {
+    let repo = temp_engine_repo("legacydefectbytes");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(
+        vec![Effect::NoEdit, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    let answers = ScriptedAnswers::new(vec![Answer::Answered {
+        text: "the widget lives in src/widget.rs — write it there".to_owned(),
+    }]);
+    let report = run_harness(
+        &opts,
+        &Harness {
+            adapters: &source,
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let lines = design_defect_lines(&paths_of(&repo, &report.run_id));
+    assert_eq!(lines.len(), 1, "one answered question, one record");
+    assert_unclassified_on_disk(lines.first().expect("the one record"));
+}
+
+#[test]
+fn the_resume_repair_writes_an_unclassified_design_defect() {
+    let repo = temp_engine_repo("legacydefectresume");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
+    let answers = ScriptedAnswers::new(vec![Answer::Declined]);
+    let report = run_harness(
+        &opts,
+        &Harness {
+            adapters: &source,
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("build a complete decline sequence");
+    let paths = paths_of(&repo, &report.run_id);
+    truncate_log_after(&paths, "question_answered");
+    assert!(
+        design_defect_lines(&paths).is_empty(),
+        "the crash prefix ends before the record"
+    );
+
+    let resumed_source = fake(Effect::EditFile);
+    let resumed = resume_with(&resume_options(&repo, &report.run_id), &resumed_source)
+        .expect("resume repairs the incomplete settlement");
+    assert_eq!(resumed.outcome(), RunOutcome::Halted, "{resumed:?}");
+    assert!(
+        resumed_source.adapter.runs().is_empty(),
+        "the repair settles the decline before another paid attempt"
+    );
+
+    let lines = design_defect_lines(&paths);
+    assert_eq!(lines.len(), 1, "the missing record is appended once");
+    assert_unclassified_on_disk(lines.first().expect("the one record"));
+}
+
 #[test]
 fn declining_fails_the_task_and_halt_is_the_default() {
     let repo = temp_engine_repo("declined");
@@ -4945,6 +5053,116 @@ fn crash_child_dies_inside_an_attempt() {
     let _ = run_with(&opts, &source);
 
     std::process::exit(0);
+}
+
+const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
+     cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
+
+fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
+    let repo = temp_engine_repo(tag);
+    crate::workspace_manager::fixture::pin_replacement_refs_in(&repo);
+    seed(&repo, plan, Some(config));
+
+    git_in(&repo, &["checkout", "-q", "-b", "probe"]);
+    fs::write(repo.join("probe.txt"), "recorded\n").expect("the recorded probe");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_in(&repo, &["tag", "probe-recorded"]);
+
+    fs::write(repo.join("probe.txt"), "replacing\n").expect("the replacing probe");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "replacing"]);
+    let replacing = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_in(&repo, &["tag", "probe-replacing"]);
+    assert_ne!(recorded, replacing, "two distinct commits");
+
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(&repo, &["branch", "-q", "-D", "probe"]);
+    git_in(&repo, &["replace", &recorded, &replacing]);
+    assert_eq!(
+        git_in(&repo, &["replace", "-l"]).trim(),
+        recorded,
+        "the replacement is in place"
+    );
+    assert!(
+        git_in(&repo, &["status", "--porcelain"]).trim().is_empty(),
+        "the fixture left the worktree dirty"
+    );
+    repo
+}
+
+#[test]
+fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::v1_object_graph_helper",
+    );
+    assert!(
+        status.success(),
+        "the child drives `engine::run_harness` and `engine::resume_harness` over a \
+         repository whose probe commit carries a replacement, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_object_graph_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-object-graph");
+
+    let repo = replaced_probe_repo(
+        "v1graphrun",
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATE}"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
+    assert_eq!(report.gates, ["object-graph"], "{report:?}");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+
+    let repo = replaced_probe_repo(
+        "v1graphresume",
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        &format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n\
+             {V1_OBJECT_GRAPH_GATE}"
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let parked = run_with(
+        &opts,
+        &source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]),
+    )
+    .expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    let question = parked
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question[..8],
+        crate::answer::Reply::Text("the widget lives in src/widget.rs".to_owned()),
+    )
+    .expect("answer");
+
+    let resumed = resume_with(
+        &resume_options(&repo, &parked.run_id),
+        &fake(Effect::EditFile),
+    )
+    .expect("the resume");
+    assert_eq!(resumed.gates, ["object-graph"], "{resumed:?}");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
 }
 
 #[test]
@@ -6984,7 +7202,12 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
 
     let answers = rundir::public_dir(&repo, &run_id).join("answers");
     fs::create_dir_all(&answers).expect("answers dir");
-    interaction::write_answer(&answers, &question, &Answer::Unanswered).expect("write");
+    interaction::write_answer(
+        &answers,
+        &question,
+        &interaction::AnswerRecord::unattributed(Answer::Unanswered),
+    )
+    .expect("write");
 
     let source = fake(Effect::EditFile);
     let resumed = resume_with(&resume_options(&repo, &run_id), &source).expect("resume");
@@ -6992,6 +7215,43 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
         resumed.outcome(),
         RunOutcome::Parked,
         "still waiting on a real answer, and the run ended saying so: {resumed:?}"
+    );
+}
+
+#[test]
+fn a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring() {
+    let repo = temp_engine_repo("foreigncolumn");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[interaction]\nmode = \"never\"\n\n\
+                 [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Parked);
+    let run_id = report.run_id.clone();
+    let question = report.questions[0].question.id.clone();
+
+    let answers = rundir::public_dir(&repo, &run_id).join("answers");
+    fs::create_dir_all(&answers).expect("answers dir");
+    fs::write(
+        interaction::answer_path(&answers, &question),
+        r#"{"answer":"unanswered","citation":7}"#,
+    )
+    .expect("a file the base tolerated: a column the answer does not know, of a foreign type");
+
+    let source = fake(Effect::EditFile);
+    let resumed = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect("the legacy reader ignores the column, as the base did, and the resume runs");
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Parked,
+        "still waiting on a real answer, not erroring on the column: {resumed:?}"
     );
 }
 
@@ -8422,21 +8682,26 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         raw.len()
     );
 
-    let public_fns: BTreeSet<&str> = source
-        .lines()
-        .filter_map(|line| line.strip_prefix("pub fn "))
-        .filter_map(|rest| rest.split(['(', '<', ' ']).next())
-        .collect();
     assert_eq!(
-        public_fns,
-        BTreeSet::from([
+        top_level_public_fns(source),
+        BTreeSet::new(),
+        "the engine facade declares a public function of its own again; its six entry points \
+         are defined in the conductor modules they drive and re-exported here"
+    );
+    let entry_points: BTreeSet<String> = public_facade_entry_points().into_iter().collect();
+    assert_eq!(
+        entry_points,
+        [
             "run",
             "run_with",
             "run_harness",
             "resume",
             "resume_with",
             "resume_harness",
-        ]),
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<String>>(),
         "the engine facade's public functions moved away from the packet's list"
     );
 
@@ -8454,34 +8719,11 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         );
     }
 
-    let mut reexported: BTreeSet<&str> = BTreeSet::new();
-    let mut rest = source;
-    while let Some(start) = rest.find("pub use ") {
-        rest = &rest[start + "pub use ".len()..];
-        let end = rest.find(';').expect("a `pub use` ends in a semicolon");
-        let statement = &rest[..end];
-        rest = &rest[end..];
-        match (statement.find('{'), statement.find('}')) {
-            (Some(open), Some(close)) => {
-                for name in statement[open + 1..close].split(',') {
-                    let name = name.trim();
-                    if !name.is_empty() {
-                        reexported.insert(name);
-                    }
-                }
-            }
-            _ => {
-                reexported.insert(
-                    statement
-                        .rsplit("::")
-                        .next()
-                        .expect("a path")
-                        .trim()
-                        .trim_end_matches(';'),
-                );
-            }
-        }
-    }
+    let reexported: BTreeSet<&str> = facade_reexports(source)
+        .into_iter()
+        .filter(|(from, _)| !CONDUCTOR_MODULES.contains(from))
+        .flat_map(|(_, names)| names)
+        .collect();
     assert_eq!(
         reexported,
         BTreeSet::from([
@@ -8507,22 +8749,95 @@ fn the_engine_facade_exposes_exactly_the_items_the_packet_enumerates() {
         "the engine facade's re-exports moved away from the packet's list"
     );
     assert_eq!(reexported.len(), 18, "five groups, eighteen names");
-
-    for private in ["fn run_harness_on(", "fn resume_harness_on("] {
-        assert!(source.contains(private), "`{private}` is gone");
-    }
-    assert!(
-        !source.contains("pub fn run_harness_on") && !source.contains("pub fn resume_harness_on"),
-        "an explicit-Runner entry point is public again"
+    assert_eq!(
+        facade_reexports(source).len(),
+        7,
+        "the packet's five groups and one per conductor module"
     );
+
+    let conductors = [
+        (
+            "coordinator",
+            include_str!("coordinator.rs"),
+            "run_harness_on",
+        ),
+        ("resume", include_str!("resume.rs"), "resume_harness_on"),
+    ];
+    assert_eq!(
+        conductors.map(|(module, _, _)| module),
+        CONDUCTOR_MODULES,
+        "a conductor module is re-exported here and not read below"
+    );
+    for (module, text, seam) in conductors {
+        let production = crate::effects::production_code(text);
+        let declared = top_level_public_fns(&production);
+        let reexported_from_it: BTreeSet<&str> = facade_reexports(source)
+            .into_iter()
+            .filter(|(from, _)| *from == module)
+            .flat_map(|(_, names)| names)
+            .collect();
+        assert_eq!(
+            declared, reexported_from_it,
+            "`engine::{module}` declares a `pub fn` the facade does not re-export, or the facade \
+             re-exports a name that is not one"
+        );
+        assert!(
+            production.contains(&format!("pub(super) fn {seam}(")),
+            "`pub(super) fn {seam}(` is gone from `engine::{module}`"
+        );
+        for public in [format!("pub fn {seam}"), format!("pub(crate) fn {seam}")] {
+            assert!(
+                !production.contains(&public),
+                "an explicit-Runner entry point is public again: `{public}` in `engine::{module}`"
+            );
+        }
+    }
 }
 
-fn public_facade_entry_points() -> Vec<&'static str> {
-    let source = include_str!("mod.rs");
-    let mut names: Vec<&str> = source
+const CONDUCTOR_MODULES: [&str; 2] = ["coordinator", "resume"];
+
+fn top_level_public_fns(production: &str) -> std::collections::BTreeSet<&str> {
+    production
         .lines()
         .filter_map(|line| line.strip_prefix("pub fn "))
         .filter_map(|rest| rest.split(['(', '<', ' ']).next())
+        .collect()
+}
+
+fn facade_reexports(production: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut groups = Vec::new();
+    let mut rest = production;
+    while let Some(start) = rest.find("pub use ") {
+        rest = &rest[start + "pub use ".len()..];
+        let end = rest.find(';').expect("a `pub use` ends in a semicolon");
+        let statement = &rest[..end];
+        rest = &rest[end..];
+        match (statement.find('{'), statement.find('}')) {
+            (Some(open), Some(close)) => {
+                let from = statement[..open].trim().trim_end_matches("::");
+                let names = statement[open + 1..close]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                groups.push((from, names));
+            }
+            _ => {
+                let (from, name) = statement.trim().rsplit_once("::").expect("a path");
+                groups.push((from, vec![name.trim()]));
+            }
+        }
+    }
+    groups
+}
+
+fn public_facade_entry_points() -> Vec<String> {
+    let production = crate::effects::production_code(include_str!("mod.rs"));
+    let mut names: Vec<String> = facade_reexports(&production)
+        .into_iter()
+        .filter(|(from, _)| CONDUCTOR_MODULES.contains(from))
+        .flat_map(|(_, names)| names)
+        .map(str::to_owned)
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -8768,4 +9083,467 @@ fn a_facade_resume_refuses_before_any_effect_when_containment_fails() {
         !reached.contains("ambient Job Object"),
         "a successful establishment must not be reported as a refusal: {reached}"
     );
+}
+
+const PARKING_SETTLEMENT_KILL_CHILD: &str = "engine::tests::parking_settlement_kill_child";
+
+const QUESTION_PAYLOAD_KILL_CHILD: &str = "engine::tests::question_payload_kill_child";
+
+const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
+
+const ASKING_PLAN: &str =
+    "## Ask before building\n<!-- upstroke: id=t1 kind=implement depends= -->\n";
+
+const PARKING_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\
+     [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
+
+struct KillOnceTheParkingSettlementIsDurable {
+    repo: PathBuf,
+}
+
+impl crate::events::log::EventHooks for KillOnceTheParkingSettlementIsDurable {
+    fn phase(&mut self, site: EventSite, phase: crate::topology::effects::HookPhase) {
+        if site != EventSite::LegacyAppend || phase != crate::topology::effects::HookPhase::After {
+            return;
+        }
+        let Some(run_id) = rundir::latest_run(&self.repo) else {
+            return;
+        };
+        let log = fs::read_to_string(paths_of(&self.repo, &run_id).events()).unwrap_or_default();
+        if log.lines().last().is_some_and(|line| {
+            line.contains("\"attempt_finished\"") && line.contains("\"parking\":{")
+        }) {
+            std::process::abort();
+        }
+    }
+}
+
+fn kill_once_the_parking_settlement_is_durable() -> Box<dyn crate::events::log::EventHooks> {
+    Box::new(KillOnceTheParkingSettlementIsDurable {
+        repo: PathBuf::from(
+            std::env::var("UPSTROKE_CRASH_REPO").expect("the parent names the repository"),
+        ),
+    })
+}
+
+#[test]
+#[ignore = "spawned by the question payload witnesses"]
+fn parking_settlement_kill_child() {
+    let Ok(repo) = std::env::var("UPSTROKE_CRASH_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.log_hooks = Some(kill_once_the_parking_settlement_is_durable);
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let outcome = run_with(&opts, &source).map(|report| report.outcome());
+    panic!("the run went on past its durable parking settlement: {outcome:?}");
+}
+
+struct QuestionPayloadKilledAt {
+    inner: rundir::HarnessHooks,
+    at: crate::topology::effects::HookPhase,
+}
+
+impl rundir::RunDirHooks for QuestionPayloadKilledAt {
+    fn hook(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        let answered = self.inner.hook(site, phase);
+        if site
+            == crate::topology::effects::EffectSiteId::RunDir(
+                crate::topology::effects::RunDirSite::WriteQuestionPayload,
+            )
+            && phase == self.at
+        {
+            crate::observations::Exported::new(std::sync::Arc::clone(self.inner.harness()))
+                .carried(crate::topology::effects::Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
+fn payload_phase_named(name: &str) -> crate::topology::effects::HookPhase {
+    match name {
+        "Before" => crate::topology::effects::HookPhase::Before,
+        "After" => crate::topology::effects::HookPhase::After,
+        other => panic!("`{other}` is not a phase of `RunDir.WriteQuestionPayload`"),
+    }
+}
+
+#[test]
+#[ignore = "spawned by the question payload witnesses"]
+fn question_payload_kill_child() {
+    let Ok(repo) = std::env::var("UPSTROKE_CRASH_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let at = payload_phase_named(
+        &std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the phase"),
+    );
+    let run_id = rundir::latest_run(&repo).expect("the parent's run");
+    let replayed = replay_of(&repo, &run_id);
+    let [record] = replayed.state.questions.as_slice() else {
+        panic!(
+            "the parking settlement records one question: {:?}",
+            replayed.state.questions
+        );
+    };
+    let mut hooks = QuestionPayloadKilledAt {
+        inner: rundir::HarnessHooks::new(std::sync::Arc::new(Mutex::new(
+            crate::topology::effects::HookHarness::new(),
+        ))),
+        at,
+    };
+    let written = rundir::write_question_payload(
+        &paths_of(&repo, &run_id).questions(),
+        &crate::util::filename_component(record.question.id.as_str()),
+        record,
+        &mut hooks,
+    );
+    panic!(
+        "the kill at `RunDir.WriteQuestionPayload` ({at}) did not take this process: {written:?}"
+    );
+}
+
+fn a_run_killed_once_its_parking_settlement_is_durable(
+    tag: &str,
+) -> (
+    rundir::scratch_tree::ScratchTree,
+    PathBuf,
+    String,
+    QuestionRecord,
+) {
+    // The repository and its sibling private root (`private_root_for`) are made
+    // in one tree, handed back for the caller to hold: the guard reclaims both
+    // when the witness returns and when it unwinds (#292's review round 6).
+    let tree = rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch tree for the repository and its private root");
+    git_in(tree.path(), &["init", "-q", "-b", "main", "repo"]);
+    let repo = tree.path().join("repo");
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    seed(&repo, ASKING_PLAN, Some(PARKING_CONFIG));
+    let temporary = tree.path().as_os_str();
+    let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
+        PARKING_SETTLEMENT_KILL_CHILD,
+        &[
+            ("UPSTROKE_CRASH_REPO", repo.as_os_str()),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the parking run did not end within {KILL_CHILD_BOUND:?}, and was killed and \
+             reaped"
+        );
+    };
+    assert!(
+        crate::workspace_manager::fixture::died_by_abort(&killed),
+        "{tag}: the run must die once its parking settlement is durable: {killed:?}"
+    );
+    let run_id = rundir::latest_run(&repo).expect("the child started a run");
+    let paths = paths_of(&repo, &run_id);
+    let log = fs::read_to_string(paths.events()).expect("the log");
+    let last = log.lines().last().expect("events");
+    assert!(
+        last.contains("\"attempt_finished\"") && last.contains("\"parking\":{"),
+        "{tag}: the log ends at the parking settlement: {last}"
+    );
+    let replayed = replay_of(&repo, &run_id);
+    let [record] = replayed.state.questions.as_slice() else {
+        panic!(
+            "{tag}: the settlement parks one question: {:?}",
+            replayed.state.questions
+        );
+    };
+    assert!(record.is_open(), "{tag}: nothing answered it");
+    assert_eq!(
+        fs::read_dir(paths.questions()).map_or(0, Iterator::count),
+        0,
+        "{tag}: the process died before the question's payload was written"
+    );
+    assert!(
+        !rundir::is_running(&paths.public),
+        "{tag}: the OS released the run lock"
+    );
+    (tree, repo, run_id, record.clone())
+}
+
+fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {
+    paths_of(repo, run_id).questions().join(format!(
+        "{}.json",
+        crate::util::filename_component(record.question.id.as_str())
+    ))
+}
+
+fn resume_options_in(
+    tree: &rundir::scratch_tree::ScratchTree,
+    repo: &Path,
+    run_id: &str,
+) -> ResumeOptions {
+    let pools = tree.path().join("pools.toml");
+    fs::write(&pools, "# no pools\n").expect("the witness's own empty pools file");
+    let mut opts = ResumeOptions::new(run_id.to_owned(), repo.to_path_buf());
+    opts.pools_path = Some(pools);
+    opts.attempt_timeout = Duration::from_secs(60);
+    opts.defer_backoff = Duration::ZERO;
+    opts.wait_on_block = Some(Duration::ZERO);
+    opts.private_root = Some(private_root_for(repo));
+    opts
+}
+
+fn resume_parked(
+    tree: &rundir::scratch_tree::ScratchTree,
+    repo: &Path,
+    run_id: &str,
+    record: &QuestionRecord,
+    tag: &str,
+) {
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let (resumed, state) = resume_harness_inner(
+        &resume_options_in(tree, repo, run_id),
+        &Harness {
+            adapters: &source,
+            answers: None,
+            sleeper: None,
+        },
+    )
+    .expect("the resume converges");
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Parked,
+        "{tag}: the question is still open, so the run parks again: {resumed:?}"
+    );
+    let payload = question_payload(repo, run_id, record);
+    let written: QuestionRecord = serde_json::from_slice(
+        &fs::read(&payload).expect("the resume leaves the question's payload"),
+    )
+    .expect("the payload is a question record");
+    assert_eq!(
+        &written, record,
+        "{tag}: the payload holds the question the parking settlement records"
+    );
+    assert_eq!(
+        resumed.questions,
+        vec![record.clone()],
+        "{tag}: the report names the one open question"
+    );
+    assert_live_equals_replay(repo, &state, &resumed);
+    assert_live_equals_replay(repo, &state, &resumed);
+}
+
+fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+    phase: crate::topology::effects::HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{
+        EffectSiteId, EntryPhase, HookPhase, ResourceRow, ResumeAction, RunDirSite,
+    };
+
+    let site = EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the payload's coordinates are its two phases"),
+    });
+    // Bound first, so it is reclaimed last: `tree` owns the repository and its
+    // private root until this witness returns or unwinds.
+    let (tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let payload = question_payload(&repo, &run_id, &record);
+    let coordinate = format!("{phase:?}");
+    let temporary = tree.path().as_os_str();
+    let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
+        QUESTION_PAYLOAD_KILL_CHILD,
+        &[
+            ("UPSTROKE_CRASH_REPO", repo.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(&coordinate),
+            ),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the payload writer armed at the {phase} phase did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        crate::workspace_manager::fixture::died_by_abort(&killed),
+        "{tag}: the payload writer must die at the {phase} phase: {killed:?}"
+    );
+    assert_eq!(
+        payload.is_file(),
+        semantics.rows.contains(&ResourceRow::R21),
+        "{tag}: the payload is left exactly where the authority's rows say R21 holds it ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+    let left = fs::read(&payload).ok();
+    let log = fs::read(paths_of(&repo, &run_id).events()).expect("the log");
+
+    resume_parked(&tree, &repo, &run_id, &record, tag);
+    if let Some(left) = left {
+        assert_eq!(
+            fs::read(&payload).expect("the payload"),
+            left,
+            "{tag}: the resume's rewrite adopted the payload the killed write left, byte for byte"
+        );
+    }
+    assert!(
+        fs::read(paths_of(&repo, &run_id).events())
+            .expect("the log")
+            .starts_with(&log),
+        "{tag}: the resume appended after the durable prefix"
+    );
+}
+
+#[test]
+fn a_kill_before_a_parked_questions_payload_is_written_is_recovered_by_the_resume_writing_it() {
+    a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+        crate::topology::effects::HookPhase::Before,
+        "payload-kill-before",
+    );
+}
+
+#[test]
+fn a_kill_after_a_parked_questions_payload_is_written_is_recovered_by_the_resume_adopting_it() {
+    a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+        crate::topology::effects::HookPhase::After,
+        "payload-kill-after",
+    );
+}
+
+#[cfg(windows)]
+struct CreationsRecorded {
+    inner: crate::runner::HarnessHooks,
+    created: Vec<u32>,
+}
+
+#[cfg(windows)]
+impl crate::agent::proc::SpawnHooks for CreationsRecorded {
+    fn point(
+        &mut self,
+        point: crate::topology::effects::SubEffectPoint,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: crate::topology::effects::SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::ProcessSite,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        self.inner.phase(site, phase)
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.created.push(pid);
+        self.inner.child_created(pid);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges() {
+    use crate::topology::effects::{HookHarness, HookPhase, InjectionMode, SubEffectPoint};
+
+    let tag = "ambient-join-error-resume";
+    // `tree` owns the repository and its private root until this witness
+    // returns or unwinds.
+    let (tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let paths = paths_of(&repo, &run_id);
+    let payload = question_payload(&repo, &run_id, &record);
+    let log = fs::read(paths.events()).expect("the log");
+    let site = crate::runner::SPAWN_SITE;
+    let point = SubEffectPoint::AmbientJobJoined;
+    let mode = InjectionMode::ErrorReturn;
+    let harness = std::sync::Arc::new(Mutex::new(HookHarness::new()));
+    harness
+        .lock()
+        .expect("the harness")
+        .arm(site, point, mode)
+        .expect("the ambient join supports an error return");
+    let mut hooks = CreationsRecorded {
+        inner: crate::runner::HarnessHooks::new(std::sync::Arc::clone(&harness)),
+        created: Vec::new(),
+    };
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let runner = RecordingRunner::new();
+
+    let refused = resume_contained(
+        &resume_options_in(&tree, &repo, &run_id),
+        &Harness::new(&source),
+        &runner,
+        || crate::runner::host::contain_write_command(&mut hooks),
+    )
+    .expect_err("a resume whose ambient job join errs refuses");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("INV-18")
+            && refused.contains("(simulated failure). No process was spawned"),
+        "{tag}: the refusal is the containment step's, for the injected failure: {refused}"
+    );
+    assert!(
+        harness
+            .lock()
+            .expect("the harness")
+            .observed(site, HookPhase::Point { point, mode }),
+        "{tag}: the armed point fired"
+    );
+    assert!(
+        hooks.created.is_empty(),
+        "{tag}: the funnel created a process: {:?}",
+        hooks.created
+    );
+    assert!(
+        runner.seen().is_empty(),
+        "{tag}: the resume went on and ran a process: {:?}",
+        runner.seen()
+    );
+    assert_eq!(
+        fs::read(paths.events()).expect("the log"),
+        log,
+        "{tag}: the resume went on and appended: {refused}"
+    );
+    assert!(
+        !payload.exists(),
+        "{tag}: the resume went on and rewrote the question's payload: {refused}"
+    );
+    assert!(
+        !rundir::is_running(&paths.public),
+        "{tag}: nothing holds the run lock"
+    );
+    drop(hooks);
+
+    resume_parked(&tree, &repo, &run_id, &record, tag);
 }

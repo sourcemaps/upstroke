@@ -1,6 +1,15 @@
 //! Extended notes: `docs/internals/effects.md`
 
-use std::collections::BTreeSet;
+#![cfg_attr(
+    not(test),
+    forbid(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
+    )
+)]
+
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CLIPPY_TOML: &str = "clippy.toml";
 
@@ -13,6 +22,8 @@ pub const EFFECT_SITES_JSON: &str = "effect_sites.json";
 pub const RESIDUE_CLASSES_JSON: &str = "effects/residue-classes.json";
 
 pub const RESIDUE_HISTOGRAM_JSON: &str = "effects/residue-histogram.json";
+pub const RESIDUE_SYNTHETIC_JSON: &str = "effects/residue-synthetic.json";
+pub const SEQUENTIAL_RESIDUE_HISTOGRAM_JSON: &str = "residue-histogram-sequential.json";
 
 pub const FUNNEL_MODULES_JSON: &str = "effects/funnel-modules.json";
 
@@ -48,6 +59,16 @@ pub struct GovernedAllow {
     pub written: Vec<String>,
     pub keywords: Vec<&'static str>,
     pub reasoned: bool,
+}
+
+pub const RUSTC_WHITESPACE: [char; 11] = [
+    '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}', '\u{200E}',
+    '\u{200F}', '\u{2028}', '\u{2029}',
+];
+
+#[must_use]
+pub fn is_rustc_whitespace(character: char) -> bool {
+    RUSTC_WHITESPACE.contains(&character)
 }
 
 #[must_use]
@@ -121,11 +142,14 @@ fn char_literal_end(bytes: &[u8], from: usize) -> Option<usize> {
     let mut at = from + 1;
     if bytes.get(at) == Some(&b'\\') {
         at += 2;
-        let limit = (from + 13).min(bytes.len());
-        while at < limit && bytes[at] != b'\'' {
-            at += 1;
+        loop {
+            match *bytes.get(at)? {
+                b'\'' => return Some(at + 1),
+                b'\n' => return None,
+                b'\\' => at += 2,
+                _ => at += 1,
+            }
         }
-        return (bytes.get(at) == Some(&b'\'')).then_some(at + 1);
     }
     let width = match *bytes.get(at)? {
         0x00..=0x7F => 1,
@@ -172,8 +196,26 @@ fn literal_end(bytes: &[u8], from: usize) -> Option<usize> {
 }
 
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn blank_comments_and_strings(source: &str) -> String {
+    let code = code_bytes_only(source);
+    let unread =
+        |character: char| is_rustc_whitespace(character) && !character.is_ascii_whitespace();
+    if !code.contains(unread) {
+        return code;
+    }
+    let mut spaced = String::with_capacity(code.len());
+    for character in code.chars() {
+        if unread(character) {
+            spaced.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        } else {
+            spaced.push(character);
+        }
+    }
+    spaced
+}
+
+#[allow(clippy::too_many_lines)]
+fn code_bytes_only(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = vec![b' '; bytes.len()];
     for (index, byte) in bytes.iter().enumerate() {
@@ -689,23 +731,17 @@ pub const CLASSIFIED_MODULES: &[&str] = &[
 
 #[must_use]
 pub fn externally_reachable_fns(source: &str) -> Vec<String> {
-    let region = blank_comments_and_strings(&production_region(source));
+    let region = production_code(source);
     let bytes = region.as_bytes();
     let mut names = BTreeSet::new();
     let mut trait_impl_spans = Vec::new();
     let mut public_trait_spans = Vec::new();
 
-    let mut t = 0;
-    while let Some(hit) = region[t..].find("trait ") {
-        let start = t + hit;
-        t = start + "trait ".len();
-        if start > 0 && is_ident_byte(bytes[start - 1]) {
+    for (start, after) in keyword_sites(&region, "trait") {
+        if !declares_visibility(region.get(..start).unwrap_or_default()) {
             continue;
         }
-        if !declares_visibility(&region[..start]) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, t) else {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -713,19 +749,12 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    let mut i = 0;
-    while let Some(hit) = region[i..].find("impl") {
-        let start = i + hit;
-        i = start + 4;
-        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
-        if !before_ok || !region[i..].starts_with([' ', '<']) {
-            continue;
-        }
-        let Some(brace) = find_header_brace(&region, i) else {
+    for (_, after) in keyword_sites(&region, "impl") {
+        let Some(brace) = find_header_brace(&region, after) else {
             continue;
         };
-        let header = &region[i..brace];
-        if !header.contains(" for ") {
+        let header = region.get(after..brace).unwrap_or_default();
+        if keyword_sites(header, "for").next().is_none() {
             continue;
         }
         if let Some(end) = matching(bytes, brace, b'{', b'}') {
@@ -733,18 +762,8 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
         }
     }
 
-    for (index, _) in region.match_indices("fn ") {
-        if index > 0 && is_ident_byte(bytes[index - 1]) {
-            continue;
-        }
-        let Some(name) = region[index + 3..]
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .next()
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        let visible = declares_visibility(&region[..index]);
+    for (index, name) in declared_fns(&region) {
+        let visible = declares_visibility(region.get(..index).unwrap_or_default());
         let in_trait_impl = trait_impl_spans
             .iter()
             .any(|(open, close)| index > *open && index < *close);
@@ -759,32 +778,238 @@ pub fn externally_reachable_fns(source: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
+#[must_use]
+pub fn reachable_fn_multiplicity(source: &str) -> BTreeMap<String, usize> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = BTreeMap::new();
+    for (_, name) in declared_fns(&region) {
+        if reachable.contains(name) {
+            *bearers.entry(name.to_owned()).or_insert(0) += 1;
+        }
+    }
+    bearers
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerHeader {
+    Module(String),
+    Trait(String),
+    TraitImpl(String),
+    InherentImpl,
+    Unread,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub opened_at: usize,
+    pub header: OwnerHeader,
+}
+
+#[must_use]
+pub fn reachable_fn_owners(source: &str) -> BTreeMap<String, Vec<Vec<OwnerScope>>> {
+    let region = production_code(source);
+    let reachable: BTreeSet<String> = externally_reachable_fns(source).into_iter().collect();
+    let mut bearers = declared_fns(&region).into_iter().peekable();
+    let mut open: Vec<(u8, OwnerScope)> = Vec::new();
+    let mut header_from = 0;
+    let mut owners: BTreeMap<String, Vec<Vec<OwnerScope>>> = BTreeMap::new();
+    for (at, byte) in region.bytes().enumerate() {
+        while let Some((_, name)) = bearers.next_if(|(index, _)| *index <= at) {
+            if reachable.contains(name) {
+                owners
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push(open.iter().map(|(_, scope)| scope.clone()).collect());
+            }
+        }
+        let in_braces = open.last().is_none_or(|(opener, _)| *opener == b'{');
+        match byte {
+            b'{' => {
+                let header = owner_header(region.get(header_from..at).unwrap_or_default());
+                open.push((
+                    byte,
+                    OwnerScope {
+                        opened_at: at,
+                        header,
+                    },
+                ));
+                header_from = at + 1;
+            }
+            b'(' | b'[' => open.push((
+                byte,
+                OwnerScope {
+                    opened_at: at,
+                    header: OwnerHeader::Unread,
+                },
+            )),
+            b'}' | b')' | b']' => {
+                let opener = match byte {
+                    b'}' => b'{',
+                    b')' => b'(',
+                    _ => b'[',
+                };
+                if open.last().is_some_and(|(opened, _)| *opened == opener) {
+                    open.pop();
+                }
+                if byte == b'}' {
+                    header_from = at + 1;
+                }
+            }
+            b';' if in_braces => header_from = at + 1,
+            _ => {}
+        }
+    }
+    owners
+}
+
+fn owner_header(header: &str) -> OwnerHeader {
+    let mut item = header.trim_start();
+    while let Some(attribute) = item.strip_prefix('#') {
+        let attribute = attribute.strip_prefix('!').unwrap_or(attribute);
+        let close = attribute
+            .starts_with('[')
+            .then(|| matching(attribute.as_bytes(), 0, b'[', b']'))
+            .flatten();
+        let Some(close) = close else {
+            return OwnerHeader::Unread;
+        };
+        item = attribute.get(close + 1..).unwrap_or_default().trim_start();
+    }
+
+    let mut depth = 0usize;
+    let mut plain = String::with_capacity(item.len());
+    let mut previous = ' ';
+    for character in without_visibility(item).chars() {
+        match character {
+            '<' => {
+                if depth == 0 {
+                    plain.push(' ');
+                }
+                depth += 1;
+            }
+            '>' if depth > 0 && previous != '-' => depth -= 1,
+            _ if depth == 0 => plain.push(character),
+            _ => {}
+        }
+        previous = character;
+    }
+
+    let mut words = plain.split_whitespace().peekable();
+    words.next_if_eq(&"unsafe");
+    match words.next() {
+        Some("mod") => match words.next() {
+            Some(name) if is_identifier(name) => OwnerHeader::Module(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("trait") => match words.next().map(|name| name.trim_end_matches(':')) {
+            Some(name) if is_identifier(name) => OwnerHeader::Trait(name.to_owned()),
+            _ => OwnerHeader::Unread,
+        },
+        Some("impl") => {
+            let written: Vec<&str> = words.take_while(|word| *word != "where").collect();
+            match written.iter().position(|word| *word == "for") {
+                None => OwnerHeader::InherentImpl,
+                Some(1) => written
+                    .first()
+                    .filter(|name| is_identifier(name))
+                    .map_or(OwnerHeader::Unread, |name| {
+                        OwnerHeader::TraitImpl((*name).to_owned())
+                    }),
+                _ => OwnerHeader::Unread,
+            }
+        }
+        _ => OwnerHeader::Unread,
+    }
+}
+
+fn without_visibility(item: &str) -> &str {
+    let Some(after) = item.strip_prefix("pub") else {
+        return item;
+    };
+    if let Some(restriction) = after.trim_start().strip_prefix('(') {
+        return restriction.split_once(')').map_or(item, |(_, rest)| rest);
+    }
+    if after.starts_with(char::is_whitespace) {
+        after
+    } else {
+        item
+    }
+}
+
+fn is_identifier(word: &str) -> bool {
+    word.bytes().all(is_ident_byte)
+        && word
+            .bytes()
+            .next()
+            .is_some_and(|first| !first.is_ascii_digit())
+}
+
+fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let bytes = text.as_bytes();
+    text.match_indices(keyword)
+        .map(|(start, word)| (start, start + word.len()))
+        .filter(move |(start, end)| {
+            let glued_before = start
+                .checked_sub(1)
+                .and_then(|before| bytes.get(before))
+                .is_some_and(|byte| is_ident_byte(*byte));
+            let glued_after = text.get(*end..).is_some_and(|rest| {
+                rest.starts_with(|next: char| next.is_alphanumeric() || next == '_')
+            });
+            !glued_before && !glued_after
+        })
+}
+
+fn declared_fns(region: &str) -> Vec<(usize, &str)> {
+    keyword_sites(region, "fn")
+        .filter_map(|(index, after)| {
+            let written = region
+                .get(after..)?
+                .strip_prefix(is_rustc_whitespace)?
+                .trim_start_matches(is_rustc_whitespace)
+                .split(|c: char| is_rustc_whitespace(c) || matches!(c, '(' | '<'))
+                .next()?;
+            let name = written.strip_prefix("r#").unwrap_or(written);
+            (!name.is_empty() && !name.starts_with('$')).then_some((index, name))
+        })
+        .collect()
+}
+
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn declares_visibility(prefix: &str) -> bool {
     let mut rest = prefix.trim_end();
-    for modifier in ["unsafe", "const", "async"] {
+    for modifier in ["extern", "unsafe", "const", "async"] {
         for _ in 0..3 {
             rest = rest.strip_suffix(modifier).unwrap_or(rest).trim_end();
         }
     }
-    rest.ends_with("pub") || rest.ends_with("pub(crate)") || rest.ends_with("pub(super)")
+    if rest.ends_with("pub") {
+        return true;
+    }
+    rest.strip_suffix(')')
+        .and_then(|restriction| restriction.rsplit_once('('))
+        .is_some_and(|(before, _)| before.trim_end().ends_with("pub"))
 }
 
 fn find_header_brace(region: &str, from: usize) -> Option<usize> {
     let bytes = region.as_bytes();
     let mut angle = 0i32;
     let mut paren = 0i32;
+    let mut bracket = 0i32;
     for (index, byte) in bytes.iter().enumerate().skip(from) {
         match byte {
             b'<' => angle += 1,
             b'>' => angle -= 1,
             b'(' => paren += 1,
             b')' => paren -= 1,
-            b';' if angle <= 0 && paren <= 0 => return None,
-            b'{' if angle <= 0 && paren <= 0 => return Some(index),
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b';' if angle <= 0 && paren <= 0 && bracket <= 0 => return None,
+            b'{' if angle <= 0 && paren <= 0 && bracket <= 0 => return Some(index),
             _ => {}
         }
     }
@@ -862,6 +1087,8 @@ pub const DENIAL_CONTROL: &str = "pub fn go(p: &std::path::Path) -> bool {\n\
 #[cfg(test)]
 pub(crate) mod census_domain {
     use std::path::PathBuf;
+
+    use super::lint_levels::{applied_attributes, attribute_arguments, attribute_name};
 
     pub(crate) fn production_calls(code: &str, name: &str, form: Call) -> usize {
         let needle = format!("{name}(");
@@ -1304,6 +1531,23 @@ pub(crate) mod census_domain {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ScannedInlineModule {
+        pub(crate) name: String,
+        pub(crate) inline_path: Vec<String>,
+        pub(crate) guard: String,
+        pub(crate) test_only: bool,
+        pub(crate) line: usize,
+        pub(crate) outer_attributes: String,
+        pub(crate) body: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub(crate) struct ScannedModules {
+        pub(crate) declared: Vec<ScannedDeclaration>,
+        pub(crate) inline: Vec<ScannedInlineModule>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum ScanRefusal {
         UnclosedAttribute {
             line: usize,
@@ -1385,6 +1629,10 @@ pub(crate) mod census_domain {
     pub(crate) fn scan_module_declarations(
         source: &str,
     ) -> Result<Vec<ScannedDeclaration>, ScanRefusal> {
+        scan_modules(source).map(|scanned| scanned.declared)
+    }
+
+    pub(crate) fn scan_modules(source: &str) -> Result<ScannedModules, ScanRefusal> {
         struct Scope {
             open_depth: usize,
             name: String,
@@ -1398,10 +1646,12 @@ pub(crate) mod census_domain {
         let line_of = |at: usize| blanked[..at].matches('\n').count() + 1;
 
         let mut found = Vec::new();
+        let mut inline = Vec::new();
         let mut scopes: Vec<Scope> = Vec::new();
         let mut top_level: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut pending: Vec<Predicate> = Vec::new();
         let mut pending_path = false;
+        let mut attributes_from: Option<usize> = None;
         let mut depth = 0_usize;
         let mut i = 0;
 
@@ -1422,37 +1672,67 @@ pub(crate) mod census_domain {
                 let Some(close) = super::matching(bytes, open, b'[', b']') else {
                     return Err(ScanRefusal::UnclosedAttribute { line: line_of(i) });
                 };
-                let raw = &source[open + 1..close];
-                let name = raw
+                let raw = source.get(open + 1..close).unwrap_or_default();
+                let shape = blanked.get(open + 1..close).unwrap_or_default();
+                let name = shape
                     .trim_start()
                     .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
                     .next()
                     .unwrap_or_default();
                 match name {
-                    "cfg" => {
-                        let written = raw
-                            .trim()
-                            .strip_prefix("cfg")
-                            .map(str::trim_start)
-                            .and_then(|rest| rest.strip_prefix('('))
-                            .and_then(|rest| rest.strip_suffix(')'))
-                            .unwrap_or_default()
-                            .trim();
-                        let pred = parse_predicate(written).map_err(|why| {
+                    "cfg" | "cfg_attr" => {
+                        if name == "cfg_attr" && raw.contains("path") {
+                            pending_path = true;
+                        }
+                        let text = with_literal_identity(raw, shape).ok_or_else(|| {
                             ScanRefusal::UnreadablePredicate {
                                 line: line_of(i),
-                                written: written.to_owned(),
-                                why,
+                                written: raw.trim().to_owned(),
+                                why: "its comments and literals do not read as the blanked text \
+                                      does"
+                                    .to_owned(),
                             }
                         })?;
-                        if inner {
-                            return Err(ScanRefusal::UnsupportedInnerCfg { line: line_of(i) });
+                        for applied in applied_attributes(text.trim()) {
+                            if attribute_name(applied.text) != "cfg" {
+                                continue;
+                            }
+                            let written =
+                                attribute_arguments(applied.text).unwrap_or_default().trim();
+                            let gate = parse_predicate(written).map_err(|why| {
+                                ScanRefusal::UnreadablePredicate {
+                                    line: line_of(i),
+                                    written: written.to_owned(),
+                                    why,
+                                }
+                            })?;
+                            let under = applied
+                                .under
+                                .into_iter()
+                                .collect::<Result<Vec<Predicate>, String>>()
+                                .map_err(|why| ScanRefusal::UnreadablePredicate {
+                                    line: line_of(i),
+                                    written: written.to_owned(),
+                                    why,
+                                })?;
+                            if inner {
+                                return Err(ScanRefusal::UnsupportedInnerCfg { line: line_of(i) });
+                            }
+                            pending.push(if under.is_empty() {
+                                gate
+                            } else {
+                                Predicate::Any(vec![
+                                    Predicate::Not(Box::new(Predicate::all(under))),
+                                    gate,
+                                ])
+                            });
                         }
-                        pending.push(pred);
                     }
                     "path" => pending_path = true,
-                    "cfg_attr" if raw.contains("path") => pending_path = true,
                     _ => {}
+                }
+                if !inner {
+                    attributes_from.get_or_insert(i);
                 }
                 i = close + 1;
                 continue;
@@ -1468,6 +1748,7 @@ pub(crate) mod census_domain {
                 }
                 pending.clear();
                 pending_path = false;
+                attributes_from = None;
                 i = close + 1;
                 continue;
             }
@@ -1494,6 +1775,21 @@ pub(crate) mod census_domain {
                 preds.extend(pending.iter().cloned());
                 match body {
                     Some(brace) => {
+                        let effective = Predicate::all(preds);
+                        let close =
+                            super::matching(bytes, brace, b'{', b'}').unwrap_or(bytes.len());
+                        inline.push(ScannedInlineModule {
+                            name: name.clone(),
+                            inline_path: scopes.iter().map(|scope| scope.name.clone()).collect(),
+                            guard: effective.render(),
+                            test_only: entails_test(&effective),
+                            line: line_of(name_at),
+                            outer_attributes: attributes_from
+                                .and_then(|from| source.get(from..i))
+                                .unwrap_or_default()
+                                .to_owned(),
+                            body: source.get(brace + 1..close).unwrap_or_default().to_owned(),
+                        });
                         scopes.push(Scope {
                             open_depth: depth,
                             name,
@@ -1529,11 +1825,13 @@ pub(crate) mod census_domain {
                     }
                 }
                 pending_path = false;
+                attributes_from = None;
                 continue;
             }
 
             pending.clear();
             pending_path = false;
+            attributes_from = None;
             if byte == b'{' {
                 depth += 1;
                 i += 1;
@@ -1554,7 +1852,10 @@ pub(crate) mod census_domain {
             }
             i += 1;
         }
-        Ok(found)
+        Ok(ScannedModules {
+            declared: found,
+            inline,
+        })
     }
 
     struct MacroInvocation {
@@ -1816,7 +2117,7 @@ pub(crate) mod census_domain {
         matches!(decide_without_test(predicate), Some(false))
     }
 
-    fn decide_without_test(predicate: &Predicate) -> Option<bool> {
+    pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {
         match predicate {
             Predicate::Test => Some(false),
             Predicate::Other(_) => None,
@@ -1942,89 +2243,713 @@ pub(crate) mod census_domain {
         }
         Ok(parts)
     }
+
+    #[must_use]
+    pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {
+        let bytes = raw.as_bytes();
+        let shape = blanked.as_bytes();
+        if bytes.len() != shape.len() {
+            return None;
+        }
+        let erased = |from: usize, to: usize| {
+            shape
+                .get(from..to)
+                .is_some_and(|run| run.iter().all(|byte| matches!(byte, b' ' | b'\n')))
+        };
+        let mut out = String::with_capacity(raw.len());
+        let mut at = 0;
+        while let Some(&byte) = bytes.get(at) {
+            let comment_end = match (byte, bytes.get(at + 1)) {
+                (b'/', Some(b'/')) => Some(
+                    bytes
+                        .get(at..)
+                        .and_then(|rest| rest.iter().position(|next| *next == b'\n'))
+                        .map_or(bytes.len(), |length| at + length),
+                ),
+                (b'/', Some(b'*')) => Some(block_comment_end(bytes, at)),
+                _ => None,
+            };
+            if let Some(end) = comment_end {
+                if !erased(at, end) || is_doc_comment(bytes, at) {
+                    return None;
+                }
+                out.push(' ');
+                at = end;
+                continue;
+            }
+            let literal_end = match byte {
+                b'r' | b'b' | b'"' => super::literal_end(bytes, at),
+                b'\'' => super::char_literal_end(bytes, at),
+                _ => None,
+            };
+            if let Some(end) = literal_end {
+                if !erased(at, end) {
+                    return None;
+                }
+                out.push_str(&literal_token(raw.get(at..end)?));
+                at = end;
+                continue;
+            }
+            let character = raw.get(at..)?.chars().next()?;
+            let width = character.len_utf8();
+            let written = shape.get(at..at + width)?;
+            if Some(written) == bytes.get(at..at + width) {
+                out.push(character);
+            } else if super::is_rustc_whitespace(character) && written.iter().all(|b| *b == b' ') {
+                out.push(' ');
+            } else {
+                return None;
+            }
+            at += width;
+        }
+        Some(out)
+    }
+
+    pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {
+        if bytes.get(at) != Some(&b'/') {
+            return false;
+        }
+        match (bytes.get(at + 1), bytes.get(at + 2), bytes.get(at + 3)) {
+            (Some(b'/' | b'*'), Some(b'!'), _) => true,
+            (Some(b'/'), Some(b'/'), next) => next != Some(&b'/'),
+            (Some(b'*'), Some(b'*'), next) => !matches!(next, Some(b'*' | b'/')),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {
+        let mut depth = 1_usize;
+        let mut at = from + 2;
+        while depth > 0 {
+            match (bytes.get(at), bytes.get(at + 1)) {
+                (None, _) => break,
+                (Some(b'/'), Some(b'*')) => {
+                    depth += 1;
+                    at += 2;
+                }
+                (Some(b'*'), Some(b'/')) => {
+                    depth -= 1;
+                    at += 2;
+                }
+                _ => at += 1,
+            }
+        }
+        at.min(bytes.len())
+    }
+
+    fn literal_token(literal: &str) -> String {
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        match string_literal_value(literal) {
+            Some(value) if value.bytes().all(is_kept_value_byte) => format!("\"{value}\""),
+            Some(value) => format!("\"%{}\"", hex(value.as_bytes())),
+            None => format!("\"?{}\"", hex(literal.as_bytes())),
+        }
+    }
+
+    fn is_kept_value_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+    }
+
+    #[must_use]
+    pub(crate) fn literal_token_value(token: &str) -> Option<String> {
+        let inner = token.strip_prefix('"')?.strip_suffix('"')?;
+        let Some(hex) = inner.strip_prefix('%') else {
+            return inner
+                .bytes()
+                .all(is_kept_value_byte)
+                .then(|| inner.to_owned());
+        };
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect::<Option<Vec<u8>>>()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    const MOST_RAW_STRING_HASHES: usize = 255;
+
+    fn string_literal_value(literal: &str) -> Option<String> {
+        let text = literal.replace("\r\n", "\n");
+        if text.contains('\r') {
+            return None;
+        }
+        if let Some(delimited) = text.strip_prefix('r') {
+            let content = delimited.trim_start_matches('#');
+            let hashes = delimited.len() - content.len();
+            let closing = format!("\"{}", "#".repeat(hashes));
+            return (hashes <= MOST_RAW_STRING_HASHES)
+                .then_some(content)?
+                .strip_prefix('"')?
+                .strip_suffix(closing.as_str())
+                .map(str::to_owned);
+        }
+        let content = text.strip_prefix('"')?.strip_suffix('"')?;
+        let mut value = String::with_capacity(content.len());
+        let mut characters = content.chars();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return None,
+                '\\' => unescape(&mut characters, &mut value)?,
+                other => value.push(other),
+            }
+        }
+        Some(value)
+    }
+
+    fn unescape(characters: &mut std::str::Chars<'_>, value: &mut String) -> Option<()> {
+        let escaped = match characters.next()? {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '\\' => '\\',
+            '0' => '\0',
+            '\'' => '\'',
+            '"' => '"',
+            'x' => {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                char::from_u32(high * 16 + low).filter(char::is_ascii)?
+            }
+            'u' => {
+                if characters.next()? != '{' {
+                    return None;
+                }
+                let mut code = 0_u32;
+                let mut digits = 0_usize;
+                loop {
+                    match characters.next()? {
+                        '}' if digits > 0 => break,
+                        '_' if digits > 0 => {}
+                        digit => {
+                            code = code * 16 + digit.to_digit(16)?;
+                            digits += 1;
+                            if digits > 6 {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                char::from_u32(code)?
+            }
+            '\n' => {
+                let rest = characters.as_str();
+                let skipped = rest.len() - rest.trim_start_matches([' ', '\t', '\n', '\r']).len();
+                *characters = rest.get(skipped..)?.chars();
+                return Some(());
+            }
+            _ => return None,
+        };
+        value.push(escaped);
+        Some(())
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod lint_levels {
+    use std::collections::BTreeSet;
+
+    use super::census_domain::{
+        Predicate, block_comment_end, decide_without_test, is_doc_comment, parse_predicate,
+        with_literal_identity,
+    };
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct Resolution {
         pub(crate) level: Option<&'static str>,
         pub(crate) refused_downgrade: bool,
+        pub(crate) undecided: bool,
     }
+
+    pub(crate) type World = (Option<&'static str>, bool);
 
     #[must_use]
     pub(crate) fn file_level_lint_resolution(source: &str, lint: &str) -> Resolution {
+        let worlds = file_level_lint_worlds(source, lint);
+        let mut agreed = worlds.iter();
+        match (agreed.next(), agreed.next()) {
+            (Some(&(level, refused_downgrade)), None) => Resolution {
+                level,
+                refused_downgrade,
+                undecided: false,
+            },
+            _ => Resolution {
+                level: None,
+                refused_downgrade: false,
+                undecided: true,
+            },
+        }
+    }
+
+    struct Statement {
+        effect: Effect,
+        conditions: Vec<String>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Effect {
+        Level {
+            level: &'static str,
+            by_a_group: bool,
+            recorded: bool,
+        },
+        Warnings,
+    }
+
+    #[derive(Debug)]
+    struct Unreadable;
+
+    enum Named {
+        TheLint,
+        AGroupOfIt,
+        Warnings,
+        Other,
+        Unknown,
+    }
+
+    const GROUPS_NAMING_THE_GOVERNED_LINTS: [&str; 2] = ["all", "style"];
+
+    const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];
+
+    const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [
+        ("disallowed_method", "disallowed_methods"),
+        ("disallowed_type", "disallowed_types"),
+    ];
+
+    const LINT_TOOLS_NAMING_NO_GOVERNED_LINT: [&str; 2] = ["rustdoc", "rustc"];
+
+    const MOST_UNDECIDED_PREDICATES: usize = 12;
+
+    #[must_use]
+    pub(crate) fn file_level_lint_worlds(source: &str, lint: &str) -> BTreeSet<World> {
+        let mut worlds = BTreeSet::new();
+        let Some(statements) = lint_statements_in_the_prologue(source, lint) else {
+            return worlds;
+        };
+        let variables: Vec<&str> = statements
+            .iter()
+            .flat_map(|statement| statement.conditions.iter().map(String::as_str))
+            .collect::<BTreeSet<&str>>()
+            .into_iter()
+            .collect();
+        if variables.len() > MOST_UNDECIDED_PREDICATES {
+            return worlds;
+        }
+        for assignment in 0_u64..(1_u64 << variables.len()) {
+            let holds = |condition: &String| {
+                variables
+                    .iter()
+                    .position(|variable| *variable == condition.as_str())
+                    .is_some_and(|index| assignment & (1_u64 << index) != 0)
+            };
+            let applied = statements
+                .iter()
+                .filter(|statement| statement.conditions.iter().all(holds));
+            let Some(world) = replay(applied) else {
+                return BTreeSet::new();
+            };
+            worlds.insert(world);
+        }
+        worlds
+    }
+
+    fn replay<'a>(statements: impl Iterator<Item = &'a Statement>) -> Option<World> {
+        let mut level = None;
+        let mut forbidden_by_a_group = false;
+        let mut unrecorded = false;
+        let mut refused_downgrade = false;
+        let mut warnings_stated = false;
+        for statement in statements {
+            let Effect::Level {
+                level: stated,
+                by_a_group,
+                recorded,
+            } = statement.effect
+            else {
+                warnings_stated = true;
+                continue;
+            };
+            if level == Some("forbid") {
+                match stated {
+                    "deny" => {}
+                    "forbid" => forbidden_by_a_group = by_a_group,
+                    _ if forbidden_by_a_group => {
+                        level = Some(stated);
+                        forbidden_by_a_group = false;
+                        unrecorded = stated != "warn" && !recorded;
+                    }
+                    _ => refused_downgrade = true,
+                }
+            } else {
+                level = Some(stated);
+                forbidden_by_a_group = stated == "forbid" && by_a_group;
+                unrecorded = matches!(stated, "allow" | "expect") && !recorded;
+            }
+        }
+        if unrecorded || (warnings_stated && matches!(level, None | Some("warn"))) {
+            return None;
+        }
+        let level = if forbidden_by_a_group && level == Some("forbid") {
+            Some("deny")
+        } else {
+            level
+        };
+        Some((level, refused_downgrade))
+    }
+
+    fn lint_statements_in_the_prologue(source: &str, lint: &str) -> Option<Vec<Statement>> {
+        let blanked = super::blank_comments_and_strings(source);
+        let bytes = source.as_bytes();
+        let mut statements = Vec::new();
+        let mut at = prologue_start(source);
+        loop {
+            at = past_inner_doc_comments(source, at);
+            if bytes.get(at) != Some(&b'#') {
+                break;
+            }
+            let bang = past_comments_and_whitespace(source, at + 1, false);
+            if bytes.get(bang) != Some(&b'!') {
+                break;
+            }
+            let open = past_comments_and_whitespace(source, bang + 1, false);
+            if bytes.get(open) != Some(&b'[') {
+                return None;
+            }
+            let close = super::matching(blanked.as_bytes(), open, b'[', b']')?;
+            let attribute =
+                with_literal_identity(source.get(open + 1..close)?, blanked.get(open + 1..close)?)?;
+            let recorded = recorded_by_the_placement_census(source.get(at..=close)?, lint);
+            for applied in applied_attributes(attribute.trim()) {
+                let stated = stated_effects(applied.text, lint, recorded);
+                if stated.as_ref().is_ok_and(Vec::is_empty) {
+                    continue;
+                }
+                let mut conditions = Vec::new();
+                let mut in_the_production_build = true;
+                for predicate in &applied.under {
+                    let Ok(predicate) = predicate else {
+                        return None;
+                    };
+                    match decide_without_test(predicate) {
+                        Some(true) => {}
+                        Some(false) => in_the_production_build = false,
+                        None => conditions.push(predicate.render()),
+                    }
+                }
+                if !in_the_production_build {
+                    continue;
+                }
+                for effect in stated.ok()? {
+                    statements.push(Statement {
+                        effect,
+                        conditions: conditions.clone(),
+                    });
+                }
+            }
+            at = close + 1;
+        }
+        (!an_inner_attribute_follows(source, at)).then_some(statements)
+    }
+
+    fn prologue_start(source: &str) -> usize {
+        let start = if source.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        if !source
+            .get(start..)
+            .is_some_and(|rest| rest.starts_with("#!"))
+        {
+            return start;
+        }
+        let next = past_comments_and_whitespace(source, start + 2, false);
+        if source.as_bytes().get(next) == Some(&b'[') {
+            return start;
+        }
+        source
+            .get(start..)
+            .and_then(|rest| rest.find('\n'))
+            .map_or(source.len(), |line| start + line)
+    }
+
+    fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {
+        let bytes = source.as_bytes();
+        let mut at = from;
+        while let Some(rest) = source.get(at..) {
+            let skipped = doc_comments_too || !is_doc_comment(bytes, at);
+            if let Some(character) = rest
+                .chars()
+                .next()
+                .filter(|character| super::is_rustc_whitespace(*character))
+            {
+                at += character.len_utf8();
+            } else if rest.starts_with("/*") && skipped {
+                at = block_comment_end(bytes, at);
+            } else if rest.starts_with("//") && skipped {
+                at += rest.find('\n').unwrap_or(rest.len());
+            } else {
+                break;
+            }
+        }
+        at
+    }
+
+    fn past_inner_doc_comments(source: &str, from: usize) -> usize {
+        let bytes = source.as_bytes();
+        let mut at = past_comments_and_whitespace(source, from, false);
+        while is_doc_comment(bytes, at) && bytes.get(at + 2) == Some(&b'!') {
+            at = if bytes.get(at + 1) == Some(&b'*') {
+                block_comment_end(bytes, at)
+            } else {
+                source
+                    .get(at..)
+                    .and_then(|rest| rest.find('\n'))
+                    .map_or(source.len(), |line| at + line)
+            };
+            at = past_comments_and_whitespace(source, at, false);
+        }
+        at
+    }
+
+    fn an_inner_attribute_follows(source: &str, from: usize) -> bool {
+        let bytes = source.as_bytes();
+        let hash = past_comments_and_whitespace(source, from, true);
+        let bang = past_comments_and_whitespace(source, hash + 1, true);
+        let open = past_comments_and_whitespace(source, bang + 1, true);
+        bytes.get(hash) == Some(&b'#')
+            && bytes.get(bang) == Some(&b'!')
+            && bytes.get(open) == Some(&b'[')
+    }
+
+    fn recorded_by_the_placement_census(attribute: &str, lint: &str) -> bool {
+        let governed = lint.rsplit("::").next().unwrap_or(lint);
+        super::governed_allows(attribute)
+            .iter()
+            .flat_map(|allow| allow.lints.iter())
+            .any(|named| {
+                named == governed || GROUPS_NAMING_THE_GOVERNED_LINTS.contains(&named.as_str())
+            })
+    }
+
+    fn stated_effects(
+        attribute: &str,
+        lint: &str,
+        recorded: bool,
+    ) -> Result<Vec<Effect>, Unreadable> {
         const LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+        let (name_end, name) = attribute_name_token(attribute);
+        if attribute
+            .get(name_end..)
+            .is_some_and(|rest| rest.trim_start().starts_with("::"))
+        {
+            return Err(Unreadable);
+        }
+        let Some(level) = LEVELS.into_iter().find(|level| *level == name) else {
+            return Ok(Vec::new());
+        };
+        let list = attribute_arguments(attribute).ok_or(Unreadable)?;
+        let mut effects = Vec::new();
+        let mut reasoned = false;
+        for entry in top_level_arguments(list) {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if reasoned {
+                return Err(Unreadable);
+            }
+            if is_a_reason(entry) {
+                reasoned = true;
+                continue;
+            }
+            let path = lint_path(entry).ok_or(Unreadable)?;
+            match what_a_lint_path_names(&path, lint) {
+                Named::TheLint => effects.push(Effect::Level {
+                    level,
+                    by_a_group: false,
+                    recorded,
+                }),
+                Named::AGroupOfIt => effects.push(Effect::Level {
+                    level,
+                    by_a_group: true,
+                    recorded,
+                }),
+                Named::Warnings => effects.push(Effect::Warnings),
+                Named::Other => {}
+                Named::Unknown => return Err(Unreadable),
+            }
+        }
+        Ok(effects)
+    }
+
+    fn is_a_reason(entry: &str) -> bool {
+        entry
+            .strip_prefix("r#")
+            .unwrap_or(entry)
+            .strip_prefix("reason")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+            .is_some_and(|value| super::census_domain::literal_token_value(value.trim()).is_some())
+    }
+
+    fn lint_path(entry: &str) -> Option<Vec<&str>> {
+        let mut segments = Vec::new();
+        let mut rest = entry;
+        loop {
+            let (length, name) = attribute_name_token(rest);
+            if name.is_empty() {
+                return None;
+            }
+            segments.push(name);
+            rest = rest.get(length..)?.trim_start();
+            if rest.is_empty() {
+                return Some(segments);
+            }
+            rest = rest.strip_prefix("::")?.trim_start();
+        }
+    }
+
+    fn what_a_lint_path_names(path: &[&str], lint: &str) -> Named {
+        let governed = lint.rsplit("::").next().unwrap_or(lint);
+        let renamed = |old: &str| RENAMED_TO_A_GOVERNED_LINT.contains(&(old, governed));
+        match path {
+            ["clippy", name] if *name == governed || renamed(name) => Named::TheLint,
+            ["clippy", name] if GROUPS_NAMING_THE_GOVERNED_LINTS.contains(name) => {
+                Named::AGroupOfIt
+            }
+            ["clippy", _] => Named::Other,
+            [tool, _] if LINT_TOOLS_NAMING_NO_GOVERNED_LINT.contains(tool) => Named::Other,
+            ["warnings"] => Named::Warnings,
+            [name] if *name == governed => Named::TheLint,
+            [name]
+                if GROUPS_NAMING_THE_GOVERNED_LINTS.contains(name)
+                    || PREFIXLESS_GROUP_ALIASES.contains(name) =>
+            {
+                Named::AGroupOfIt
+            }
+            [_] => Named::Other,
+            _ => Named::Unknown,
+        }
+    }
+
+    pub(crate) struct Applied<'a> {
+        pub(crate) text: &'a str,
+        pub(crate) under: Vec<Result<Predicate, String>>,
+    }
+
+    #[must_use]
+    pub(crate) fn applied_attributes(attribute: &str) -> Vec<Applied<'_>> {
+        let mut into = Vec::new();
+        applied_under(attribute, &mut Vec::new(), &mut into);
+        into
+    }
+
+    fn applied_under<'a>(
+        attribute: &'a str,
+        under: &mut Vec<Result<Predicate, String>>,
+        into: &mut Vec<Applied<'a>>,
+    ) {
+        if attribute_name(attribute) != "cfg_attr" {
+            into.push(Applied {
+                text: attribute,
+                under: under.clone(),
+            });
+            return;
+        }
+        let Some(body) = attribute_arguments(attribute) else {
+            return;
+        };
+        let mut arguments = top_level_arguments(body).into_iter();
+        under.push(parse_predicate(arguments.next().unwrap_or_default().trim()));
+        for argument in arguments {
+            applied_under(argument.trim(), under, into);
+        }
+        under.pop();
+    }
+
+    #[must_use]
+    pub(crate) fn attribute_name(attribute: &str) -> &str {
+        attribute_name_token(attribute).1
+    }
+
+    fn attribute_name_token(attribute: &str) -> (usize, &str) {
+        let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+        let from = if attribute
+            .strip_prefix("r#")
+            .is_some_and(|rest| rest.starts_with(is_identifier))
+        {
+            2
+        } else {
+            0
+        };
+        let rest = attribute.get(from..).unwrap_or_default();
+        let length = rest
+            .find(|character: char| !is_identifier(character))
+            .unwrap_or(rest.len());
+        (from + length, rest.get(..length).unwrap_or_default())
+    }
+
+    #[must_use]
+    pub(crate) fn attribute_arguments(attribute: &str) -> Option<&str> {
+        attribute
+            .get(attribute_name_token(attribute).0..)
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|body| body.strip_suffix(')'))
+    }
+
+    #[must_use]
+    pub(crate) fn top_level_arguments(body: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0_usize;
+        let mut quoted = false;
+        let mut from = 0;
+        for (at, byte) in body.bytes().enumerate() {
+            match byte {
+                b'"' => quoted = !quoted,
+                b'(' | b'[' | b'{' if !quoted => depth += 1,
+                b')' | b']' | b'}' if !quoted => depth = depth.saturating_sub(1),
+                b',' if !quoted && depth == 0 => {
+                    parts.push(body.get(from..at).unwrap_or_default());
+                    from = at + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(body.get(from..).unwrap_or_default());
+        parts
+    }
+
+    #[must_use]
+    pub(crate) fn leading_inner_attributes(source: &str) -> &str {
         let blanked = super::blank_comments_and_strings(source);
         let bytes = blanked.as_bytes();
-        let mut resolution = Resolution {
-            level: None,
-            refused_downgrade: false,
-        };
+        let mut end = 0;
         let mut at = 0;
         while at < bytes.len() {
             if bytes[at].is_ascii_whitespace() {
                 at += 1;
                 continue;
             }
-            if bytes[at] != b'#' || bytes.get(at + 1) != Some(&b'!') {
-                return resolution;
-            }
-            let open = at + 2;
-            if bytes.get(open) != Some(&b'[') {
-                return resolution;
-            }
-            let Some(close) = super::matching(bytes, open, b'[', b']') else {
-                return resolution;
-            };
-            let attribute = blanked[open + 1..close].trim();
-            for level in LEVELS {
-                let Some(rest) = attribute.strip_prefix(level) else {
-                    continue;
-                };
-                let Some(list) = rest
-                    .trim_start()
-                    .strip_prefix('(')
-                    .and_then(|body| body.strip_suffix(')'))
-                else {
-                    continue;
-                };
-                if !list.split(',').any(|entry| names_lint(entry.trim(), lint)) {
-                    continue;
-                }
-                if resolution.level == Some("forbid") {
-                    if matches!(level, "allow" | "warn" | "expect") {
-                        resolution.refused_downgrade = true;
-                    }
-                } else {
-                    resolution.level = Some(match level {
-                        "allow" => "allow",
-                        "expect" => "expect",
-                        "warn" => "warn",
-                        "deny" => "deny",
-                        _ => "forbid",
-                    });
-                }
+            if bytes[at] != b'#'
+                || bytes.get(at + 1) != Some(&b'!')
+                || bytes.get(at + 2) != Some(&b'[')
+            {
                 break;
             }
+            let Some(close) = super::matching(bytes, at + 2, b'[', b']') else {
+                break;
+            };
             at = close + 1;
+            end = at;
         }
-        resolution
+        source.get(..end).unwrap_or_default()
     }
 
     #[must_use]
     pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {
         file_level_lint_resolution(source, lint).level
-    }
-
-    fn names_lint(entry: &str, lint: &str) -> bool {
-        if entry == lint {
-            return true;
-        }
-        match (super::normalize_lint(entry), super::normalize_lint(lint)) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        }
     }
 }
 

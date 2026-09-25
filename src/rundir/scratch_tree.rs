@@ -31,6 +31,17 @@
 //! its two-token form, and `decisions/2026-08-30-test-scratch-tree-ownership.md`
 //! is the record.
 //!
+//! One recursive deletion under the **public** half is authorised by a record
+//! the run wrote rather than by either token: the report writer's own staging
+//! directory, `<public>/.report-staging-<ulid>`, which
+//! `rundir::reclaim_report_staging` removes only when `<private>/report-staging.json`
+//! — written by the run, in its private half, durably, before the directory
+//! existed — names it (PR10's round 10). The record is the run's own writing
+//! in the run's own tree, so what it names is the run's own tree *by the
+//! record*, the way the private half is the run's by the token; a directory
+//! of that shape that no record names is not the run's, is never removed and
+//! never adopted, and is named in the writer's diagnostic instead.
+//!
 //! # Acquisition and the lifetime of the root
 //!
 //! [`acquire`] creates the root with a non-recursive `fs::create_dir` that
@@ -76,7 +87,7 @@
 // a print macro appearing in this file is a build error and not a style note.
 // `decisions.effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-#![deny(clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::fs;
 use std::io;

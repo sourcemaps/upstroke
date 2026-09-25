@@ -18,14 +18,14 @@ an effect: the spawn belongs to whichever `Runner` the caller passes, which
 for `host-v1` is the parent module's `HostRunner::run`.
 
 The request *constructor* stays in the parent and is deliberately not here.
-`runner::tests::every_production_runner_request_is_built_by_its_roles_builder`
-and `runner::tests::a_command_is_assembled_in_one_production_place_per_role`
+`runner::contract::tests::every_production_runner_request_is_built_by_its_roles_builder`
+and `runner::contract::tests::a_command_is_assembled_in_one_production_place_per_role`
 pin `RunnerRequest`'s and `ShellKind::spec`'s one production construction
 site per role by file, and `src/runner/host.rs` is the pinned file -- the
 same kind of pin that keeps `Contained`'s mint and the reserved-key
 vocabulary in the parent. Construction is pinned; execution is not.
 
-## `#![deny(`
+## `#![forbid(`
 
 **This child states its own lint level and inherits nothing.** A Rust lint
 level is scoped by the module tree and not by the file, so an out-of-line

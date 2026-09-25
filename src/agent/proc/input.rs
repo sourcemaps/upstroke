@@ -14,7 +14,7 @@
 //! returning. Delivery of remaining input is best-effort after child exit.
 //! Dropping an uncollected feeder joins and records its failure for the
 //! invocation's retained FailureReport, including early supervisor returns.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros

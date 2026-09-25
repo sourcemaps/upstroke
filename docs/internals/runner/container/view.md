@@ -62,7 +62,7 @@ placement `src/events/log.rs` has: the funnel's declaration is in the module
 the packet names and the body is beside it.
 `decisions.effect_site_inventory.mechanism` (2).
 
-## `#![deny(clippy::disallowed_types, clippy::disallowed_macros)]`
+## `#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]`
 
 `PR6-LANEF-004`: the two lints this file does NOT allow are re-denied here,
 because the Container funnel's allow is an inner attribute and would
@@ -425,9 +425,10 @@ one that misreads.
 ## `pub(crate) mod fixtures {`
 
 -- test-only declarations ----------------------------------------------
-At the BOTTOM: `effects::production_region`, which
-`effects::externally_reachable_fns` and the three censuses in `super::exec`
-still use, cuts a source at its first `#[cfg(test)]`
+At the BOTTOM: `effects::production_region`, which the three censuses in
+`super::exec` still use (`effects::externally_reachable_fns` reads
+`effects::production_code` since `PR7-WRAPPERS-EMPTY-DOMAIN`), cuts a source
+at its first `#[cfg(test)]`
 (`PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN`).
 
 ## `pub(crate) mod fixtures {`

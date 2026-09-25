@@ -298,12 +298,11 @@ the same attempt over ground that already exists.
 
 A `ready` task whose origin is `MergeRepair`.
 
-Named as its own step rather than folded into `Dispatch` because the
-checkpoint refuses it and the loop maps it: `checkpoint_refusals` has PR8
-refuse "dispatch of a Repair-origin task … before any append", and the
-refusal has to be taken on a value nothing has acted on. It is selected
-**without** the ceiling check, because a `budget_exceeded` is an append and
-the refusal comes before any.
+Named as its own step rather than folded into `Dispatch` so the loop can
+say what it performs: PR8's checkpoint refused it before any append, and
+PR9 admits it. The ceiling binds it like any dispatch — a repair spends
+like any attempt — so it is selected through `ceiling_or` with the
+repair's own key, and a breach names the repair.
 
 ## `pub enum Step` › `Backoff,`
 
@@ -322,32 +321,48 @@ The questions blocking, in id order.
 
 Run-end closure is due, with the outcome the fold derives.
 
+## `pub enum Step` › `NotStarted,`
+
+The fold carries no `run_started`. Nothing is selectable and nothing is
+ending; the checkpoint refuses it by name.
+
+## `pub enum Step` › `Finished(RunOutcome),`
+
+`run_finished` is durable with this outcome. The loop is over: the
+checkpoint refuses continuation, quoting the outcome.
+
 ## `pub enum Admitted {`
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **nine** variants and this has six, so **three** do not
-cross: `RepairDispatch`, `Closure` and `Poisoned`. The first two are the
-whole of `checkpoint_refusals` for PR8 — there is no value of this type that
-can carry a repair dispatch or a run end, so no caller holding one can
-append the `task_dispatched` of a repair or `run_finished`. That is the
-refusal made unrepresentable rather than remembered. `Integrate` crossed
-when PR8 implemented every terminal of `merge_verification_started`.
+[`Step`] has **eleven** variants and this has **eight**, so **three** do
+not cross: `Poisoned`, `NotStarted` and `Finished`. None of the three is a
+refusal of a *branch* any more. `Closure` was, for PR7 through PR9 — the
+whole of `checkpoint_refusals`, made unrepresentable rather than remembered:
+no value of this type could carry a run end — and it crossed when PR10
+implemented run-end closure and terminal finalization at `max_parallel =
+1`, as `Integrate` crossed when PR8 implemented every terminal of
+`merge_verification_started` and `RepairDispatch` when PR9 implemented
+`T-REPAIR-DISPATCH`.
 
-The third is not a refusal of a *branch*. `Poisoned` is the absence of one:
-an append errored, this process's fold is not authoritative, and nothing
-further is selected at all. It is excluded from this type for the same
-reason the other two are — a caller holding an `Admitted` may act — but not
-for the same cause, and the count said "seven" and "two" until 2026-08-27
-precisely by folding it into them.
+`Poisoned` is the absence of a branch: an append errored, this process's
+fold is not authoritative, and nothing further is selected at all.
+`NotStarted` is a fold without `run_started`, which admits no transition.
+`Finished` is a run whose `run_finished` is durable: the loop refuses to
+continue it, and a resume of a Complete or Halted run finalizes it and
+refuses too (recovery step (b)); a Parked or BudgetExceeded run resumes
+through `run_resumed`, which clears `finished`.
+All three are excluded for the same reason — a caller holding an
+`Admitted` may act — and the counts said "nine", "seven" and "two" until
+PR10.
 
 Both counts are computed, per §22:
 
 ```text
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-9
+11
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-6
+8
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
@@ -402,6 +417,14 @@ Whether the generation already exists. See [`Step::Dispatch`].
 ## `pub enum Admitted` › `questions: Vec<QuestionId>,`
 
 The questions blocking, in id order.
+
+## `pub enum Admitted` › `Closure(DerivedOutcome),`
+
+Run-end closure crosses since PR10: `TopologyRun::close_run` performs the
+closure procedure and terminal finalization (`closure.md`, `finalize.md`).
+The `DerivedOutcome` it carries is the fold's derivation at selection; the
+closure reads the ending outcome again for itself, because a budget stop or
+a halt outranks a derivation that a retained generation still blocks.
 
 ## `pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {`
 
@@ -467,25 +490,23 @@ ceiling is done whatever the branch would have been — and what the
 verification then spends on its reviews is charged, to the
 candidate's task and to the run, before its terminal is appended
 ([`Spend::record_reviews`]; `Spend::replay` reads it back off
-`merge_prepared` and `merge_rejected`), so the run ceiling that admits
-the *next* integration counts every review the last one ran.
+`merge_prepared`, `merge_rejected` and `merge_verification_unavailable`),
+so the run ceiling that admits the *next* integration counts every review
+the last one ran — in this incarnation and in the one that replaces it.
 
 ## `pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {`
 
 `checkpoint_refusals`: "an intermediate build refuses, **before any
 append**, any operation whose terminals it does not implement".
 
-PR8 implements every terminal of `merge_verification_started` and of
-`merge_prepared`, so an integration crosses. What it refuses is the two
-operations `checkpoint_refusals` names for it: "dispatch of a Repair-origin
-task and repair-admission answers" — the dispatch here, because it is a
-selected step, and the answer at the hard block, where answers are read.
-Repair execution is `T-REPAIR-DISPATCH`, PR9's, and a build that dispatched
-a repair would append a `task_dispatched` whose terminals it does not
-implement — INV-07's "every checkpoint build implements every terminal
-reachable from any start it appends" read from the other end. Run-end
-closure is refused for the same reason: `run_finished` is a terminal whose
-finalization this build does not perform.
+PR8 implemented every terminal of `merge_verification_started` and of
+`merge_prepared`, so an integration crosses; PR9 implements repair
+execution (`T-REPAIR-DISPATCH`) and every origin's answer ingestion, so a
+repair dispatch crosses too, and answers are read at the hard block and
+before each step. What this build refuses is run-end closure:
+`run_finished` is a terminal whose finalization it does not perform —
+INV-07's "every checkpoint build implements every terminal reachable from
+any start it appends" read from the other end.
 
 The refusal is taken on the [`Step`], which is a value nothing has acted
 on: `select` performed no effect and appended nothing, so "before any
@@ -652,9 +673,39 @@ run and to the task.
 ## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergePrepared { data } => {`
 
 The integration verifications whose terminal carries the
-review record. An unavailable terminal carries none, so a
-verification that ended in a park or an outage is charged
-live and not here.
+review record: a publication and a code rejection both embed the
+verification that judged them, and its passes are charged from
+there.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergeVerificationStarted { data } => {`
+
+The third terminal's task, which the terminal itself does not
+carry. `merge_verification_unavailable` records `sequence` and no
+key ([`TopologyEventBody::key`] answers `None` for it, as it does
+for `merge_verification_interrupted` and `task_merged`), and the
+key its reviews belong to is the candidate the *start* of that
+sequence named. Only one verification is open at a time — the fold
+holds a single transaction and refuses a terminal whose sequence is
+not the open one — so the start immediately preceding the terminal
+is its own, and matching the sequence makes a mispairing
+unrepresentable rather than merely unlikely.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `None => spend.record_unattributed_reviews(&data.reviews),`
+
+A terminal this slice gives no start for. The fold cannot produce
+one — it refuses an unavailable record with no open transaction of
+that sequence — so no log that reached a resume arrives here. This
+function is `pub` over an arbitrary slice, though, and the two ways
+of being wrong are not symmetric: attributing the cost to the wrong
+task overstates one ceiling, while dropping it understates the run's,
+which is the overspend this whole path exists to prevent. So the run
+is charged and no task is.
+
+## `impl Spend {` › `fn record_unattributed_reviews(&mut self, reviews: &[crate::events::ReviewRecord]) {`
+
+The run half of a charge with no task to bill. See the `None` arm of
+[`Spend::replay`] for the only caller and why it charges rather than
+skips.
 
 ## `impl Spend {` › `pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {`
 

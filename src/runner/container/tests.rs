@@ -3,7 +3,7 @@
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods)]
-#![deny(clippy::disallowed_types, clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::runtime::Settled;
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,6 +300,42 @@ struct Fixture {
 impl Fixture {
     fn new(tag: &str, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
         let root = scratch(tag);
+        let trace = ContainerTrace::recording();
+        let runtime = FakeRuntime::new(trace.clone());
+        runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
+        runtime.add_image(OTHER_IMAGE_ID, None);
+        runtime.tag(IMAGE_REFERENCE, IMAGE_ID);
+        let record = intent_for(run, incarnation, invocation);
+        let name = name_for(run, incarnation, invocation);
+        let spec = spec_for(&name, &record, &root, IMAGE_ID);
+        let view = GitViewRequest {
+            path: root.join("views").join(name.as_str()),
+            workspace: PathBuf::from("/srv/work/task"),
+            head: Some("0".repeat(40)),
+        };
+        Self {
+            plan: LaunchPlan {
+                private_root: root.clone(),
+                name,
+                invocation: invocation.clone(),
+                intent: record,
+                spec,
+                view,
+            },
+            view: DisposableDirView::new(trace.clone()),
+            runtime,
+            trace,
+            root,
+        }
+    }
+
+    /// [`Fixture::new`], built in `root`, a directory the caller owns.
+    ///
+    /// For the witnesses that hold a `rundir::scratch_tree` guard over their
+    /// fixture, so that the guard reclaims the fixture's private root however
+    /// the witness ends (#292's review round 6). [`Fixture::new`]'s pid-named
+    /// root is left as it was.
+    fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
         let trace = ContainerTrace::recording();
         let runtime = FakeRuntime::new(trace.clone());
         runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
@@ -1208,6 +1244,180 @@ fn a_hook_armed_at_a_phase_fails_the_funnel_at_that_phase() {
     assert!(
         name.intent_path(&fixture.root).exists(),
         "an Err from the After phase is returned after the primitive ran"
+    );
+}
+
+struct ContainerFaultAt {
+    inner: super::HarnessHooks,
+    at: (EffectSiteId, crate::topology::effects::HookPhase),
+}
+
+impl super::ContainerHooks for ContainerFaultAt {
+    fn phase(
+        &mut self,
+        site: EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        let answered = self.inner.phase(site, phase);
+        if (site, phase) == self.at {
+            crate::topology::effects::Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn trace(&self) -> ContainerTrace {
+        self.inner.trace()
+    }
+}
+
+fn a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(
+    phase: crate::topology::effects::HookPhase,
+    tag: &str,
+) {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use super::census::{Census, CensusStart, run_startup_census};
+    use crate::topology::effects::{EntryPhase, HookHarness, HookPhase, ResumeAction};
+
+    // Bound before the fixture, so it is reclaimed after it: the guard owns the
+    // fixture's private root until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(
+        tree.path().to_path_buf(),
+        RUN_A,
+        INCARNATION_1,
+        &shell_probe(),
+    );
+    let site = EffectSiteId::Container(ContainerSite::MountGitView);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the mount's coordinates are its two phases"),
+    });
+    let name = fixture.plan.name.clone();
+    let intent_path = name.intent_path(&fixture.root);
+    let view_path = fixture.plan.view.path.clone();
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = ContainerFaultAt {
+        inner: super::HarnessHooks::new(Arc::clone(&harness))
+            .recording_trace(fixture.trace.clone()),
+        at: (site, phase),
+    };
+    let error = launch(&mut hooks, &fixture.runtime, &fixture.view, &fixture.plan)
+        .expect_err("the armed fault ends the launch");
+    drop(hooks);
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("was made to fail at `{site}` ({phase})")),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    assert!(
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the armed coordinate was reached through the production adapter"
+    );
+    assert!(
+        intent_path.is_file(),
+        "{tag}: R26's intent, written and synced before the mount, stands"
+    );
+    assert_eq!(
+        view_path.exists(),
+        semantics.rows.contains(&ResourceRow::R19),
+        "{tag}: the view is left exactly where the authority's rows say R19 holds it ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        fixture.runtime.container_names(),
+        Vec::<String>::new(),
+        "{tag}: the launch ended before anything was created"
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+
+    let liveness = FakeOwnerLiveness::new();
+    let start = CensusStart::FreshRun {
+        incarnation: INCARNATION_2.to_owned(),
+    };
+    let mut census_hooks =
+        super::HarnessHooks::new(Arc::clone(&harness)).recording_trace(fixture.trace.clone());
+    for round in 0..2 {
+        let complete = run_startup_census(
+            &mut census_hooks,
+            &Census {
+                private_root: &fixture.root,
+                start: &start,
+                runtime: &fixture.runtime,
+                liveness: &liveness,
+                view: &fixture.view,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{tag}: census round {round} completes: {error}"));
+        let reclaimed: Vec<&ContainerName> = complete
+            .report()
+            .reclaimed
+            .iter()
+            .map(|entry| &entry.name)
+            .collect();
+        assert_eq!(
+            reclaimed,
+            if round == 0 { vec![&name] } else { Vec::new() },
+            "{tag}: round {round} reclaims the dead invocation once and then finds nothing"
+        );
+        assert!(
+            !view_path.exists(),
+            "{tag}: round {round}: the view is absent after the census"
+        );
+        assert!(
+            !intent_path.exists(),
+            "{tag}: round {round}: and so is the intent it was discovered through"
+        );
+        assert_eq!(
+            fixture.runtime.container_names(),
+            Vec::<String>::new(),
+            "{tag}: round {round}: no container exists"
+        );
+    }
+    let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+    for (reclaim_site, phase) in [
+        (ContainerSite::UnmountGitView, HookPhase::Before),
+        (ContainerSite::UnmountGitView, HookPhase::After),
+        (ContainerSite::RemoveIntent, HookPhase::Before),
+        (ContainerSite::RemoveIntent, HookPhase::After),
+    ] {
+        assert_eq!(
+            seen.count(EffectSiteId::Container(reclaim_site), phase),
+            1,
+            "{tag}: the census reclaimed through `Container.{}` ({phase}) once",
+            reclaim_site.name()
+        );
+    }
+}
+
+#[test]
+fn a_fault_before_the_git_view_is_mounted_leaves_the_intent_and_the_next_census_reclaims_it() {
+    a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(
+        crate::topology::effects::HookPhase::Before,
+        "mount-fault-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_git_view_is_mounted_leaves_the_view_and_the_next_census_removes_it() {
+    a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(
+        crate::topology::effects::HookPhase::After,
+        "mount-fault-after",
     );
 }
 

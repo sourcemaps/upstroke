@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/runner/policy.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use sha2::{Digest, Sha256};
 
 use crate::error::UpstrokeError;

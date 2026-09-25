@@ -300,13 +300,17 @@ Unrelated transactions and holdings survive. `decline_halts_run` additionally
 records a run halt; it does not decide whether the lineage fails. New repairs
 must name a coherent root and parent and cannot revive a failed ancestor.
 
-These are durable fold and replay rules. The current topology checkpoint
-driver still refuses human answer ingestion before append. It does not yet
-cancel running agent processes on a decline. A concurrent driver that ingests
-answers must stop the affected work and discard late results before appending
-their completion. Event shapes are unchanged; schema-4 replay now refuses the
-unsafe event orders excluded above, including bare questions during active
-lineage work and questions on terminal tasks.
+These are durable fold and replay rules. The topology driver ingests human
+answers: before each step it polls every open question without blocking, and
+at the hard block — nothing runnable, a question open — it waits on the
+answer source; an answer is appended as `question_answered` and its fold
+applied before any further work is selected. The driver runs one attempt at
+a time, so no agent process is running when an answer is ingested and none
+has to be cancelled on a decline. A concurrent driver that ingests answers
+must stop the affected work and discard late results before appending their
+completion. Event shapes are unchanged; schema-4 replay refuses the unsafe
+event orders excluded above, including bare questions during active lineage
+work and questions on terminal tasks.
 
 The live writer checks one event, appends that exact event successfully once,
 and applies its delta once to the same fold with no intervening transition.
@@ -318,13 +322,48 @@ engine emitter's exclusive mutable ownership and call order enforce the live
 protocol.
 
 At actual dispatch, the engine records the then-current integration head as the
-repair's generation base. For a text conflict, it applies the candidate there
-without committing, leaving the unmerged index for the worker to resolve. For a
-semantic rejection, it materializes the clean proposal against that current
-head and supplies the original failed evidence. The payload's rejecting head
-remains immutable lineage evidence, not a promise to start later work from a
-stale tree. The worker may edit but never commit; the engine refuses a result
-with unresolved index entries and then runs the ordinary gates and reviews.
+repair's generation base. For a text or binary conflict, it applies the
+candidate there without committing, leaving the unmerged index and the
+conflicted files for the worker to resolve. The worker resolves each conflicted
+file with its file tools and records the paths it resolved in the run's
+resolution manifest; it runs no git command, because the engine owns git (§4).
+At capture the engine reads the index's unmerged entries as the sole record of
+what is still conflicted — no file is scanned for markers, which have no
+canonical form under `conflict-marker-size` or `-merge` — and for each it
+stages on the worker's behalf the resolution the manifest declares (`git add`,
+or `git rm` for a resolution by deletion). The engine refuses a result with any
+unmerged index entry the manifest did not declare resolved, before any gate or
+review runs; a declared resolution that is wrong reaches the ordinary gates and
+review, whose configured checks decide what is detected, since ground truth is
+the diff. A same-generation retry re-enters the worktree the previous attempt
+left, and its manifest may revise a resolution that attempt declared: the index
+records which entries a capture resolved, and the engine reads those beside the
+unmerged ones. The manifest does not outlive a capture that completes with it
+— the capture that acts on it removes it, and one that finds nothing for it
+to govern removes it unread, as the last step of its staging — so a
+declaration is applied once, by the capture of the attempt that wrote it, and
+a later attempt declares afresh what it revises; what it does not name is
+captured as any path is. Two captures leave the manifest standing: one that
+refuses it, which stages nothing, and one that does not reach the removal — a
+Git error at staging, a held index lock, the process killed — which leaves
+whatever it had staged in the index. A further capture of that worktree would
+read the manifest again, and the driver makes none: a refusal fails the
+attempt as the worker's, with feedback naming the entries and spelling the
+grammar, and is not resumable; a capture error ends the attempt without a
+settlement, and the next resume's recovery settles it interrupted; either
+closes the generation, so the next attempt is dispatched into a fresh
+generation and worktree whose worker resolves and declares afresh, and the
+closed generation's worktree, manifest included, is reclaimed like any closed
+generation's. Correcting a refused manifest in place, in a retained retry, is
+recorded as a successor (`PR249-REFUSED-MANIFEST-HANDOFF`) and not promised
+here. (Until PR #249's sixth repair round this paragraph said only a refused
+manifest stays and that the next capture reads it; that round's
+manifest-contract review executed the staging failures and its record review
+traced the settlement.) For a semantic
+rejection, it
+materializes the clean proposal against that current head and supplies the
+original failed evidence. The payload's rejecting head remains immutable
+lineage evidence, not a promise to start later work from a stale tree.
 
 The repair holds leases on its **actual** affected paths. The queue may continue
 publishing candidates whose known changed paths are disjoint, so one hard merge
@@ -356,7 +395,7 @@ record-before-authoritative-effect plus exact, narrow adoption:
 | Candidate recorded, worktree missing | Recreate the worktree/ref from the recorded SHA; directory existence is never state. |
 | After `merge_rejected`, before repair dispatch or question delivery | No synthesis is required: the same event already registered the complete frozen task, moved its parent to `AwaitingRepair`, and made the repair `Pending` or `AwaitingInput`. A pending repair uses the ordinary record-before-process dispatch; the embedded question is immediately visible in status and notification delivery uses the existing retry/idempotency rules. |
 | Proposed commit exists, no `merge_prepared` or `merge_rejected` terminal event | Settle any dangling merge-verification process as interrupted/unknown-spend, treat the proposal as unverified residue, and rerun verification; a pass or code rejection is never stranded in a separate finished event. |
-| After `merge_prepared`, run ref still equals `expected_head` | Retry the same compare-and-swap to the recorded proposed SHA, then append `task_merged`. For `already_present` the two SHAs are equal, so this is a validation-only no-op followed by the same settlement. |
+| After `merge_prepared`, run ref still equals `expected_head` | Retry the same compare-and-swap to the recorded proposed SHA, then append `task_merged`. For `already_present` the two SHAs are equal, so this is a validation-only no-op followed by the same settlement. A `<ref>.lock` Git left on the ref is reclaimed first when the repository proves it is the engine's own and stale — no process of the run can still be writing (every engine `update-ref` child holds the run's cleanup lease, and a resume is refused while anyone holds it; on Windows the ambient kill-on-close job ends the children with the coordinator), the ref is not in `packed-refs` (so no `pack-refs --prune` can be holding the lock), and the lock names nothing or exactly the SHA the retry writes. A lock naming any other value, a lock on a packed ref, and `packed-refs.lock` are never removed: the write refuses resumably and leaves them for an operator. The same rule governs every engine ref write under the run's namespace. |
 | After the ref moved, before `task_merged` | If the ref equals the recorded proposed SHA, append `task_merged`; any third SHA is foreign history and resume refuses. |
 | `task_merged` exists but the ref disagrees | Refuse; the log and integration branch no longer describe the same run. |
 
@@ -553,3 +592,38 @@ sequence. An entry the format refuses is reported with the format's own error va
 that value carries what the entry wrote in the field the format refused — a residue detail, a
 resume action, a site or phase name as text — so a hand-edited document's own text can reach a
 reader through that one variant, quoted, never interpreted.
+
+#### The unavailable terminal's spend
+
+Added 2026-09-12 under §13's same-change rule; not part of the verbatim record above. It records
+which of the two readings of "the four terminal shapes carry the complete gate/review records,
+usage/cost" the unavailable terminal implements, now that it can implement either.
+
+`merge_verification_unavailable` carries the review passes its verification charged, in the
+`Vec<ReviewRecord>` shape the prepared and rejected terminals carry inside their verification
+record, and replay charges them by the same addition. This is the requirement above read
+literally, and the alternative — amending the record to say the unavailable terminal carries no
+spend — was rejected: the failure it would make permanent is that a restart forgets what the
+parked and deferred verifications of the incarnation it replaces cost, so every incarnation admits
+integration a ceiling had already refused and the overspend compounds once per restart.
+
+The terminal carries review records and no gate verdicts. A gate is a local process with no
+reported cost, so the sentence's "usage/cost" half is satisfied by the reviews alone; the
+gate-record half of it remains unimplemented for this one terminal and is a reporting gap, not a
+budget one. `merge_verification_interrupted` is unchanged and stays the unknown-spend terminal the
+crash table above makes it: a coordinator that died holding a verification recorded no cost for
+anything it was running.
+
+The spend a terminal records is what its verification *charged*, which is not always what a
+judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
+step can fail and take the whole judgement with it, and on an integration that failure settles the
+sequence unavailable rather than ending the command. So the records come from the account that
+charged them rather than from a judgement that may not survive, and the unavailable terminal of a
+verification whose judgement never returned still carries the passes that did.
+
+The field is required, as every schema-4 payload field is. Schema 4 has never shipped in a
+release and a run reaches this vocabulary only by choosing it, so no schema-4 log is under a
+compatibility promise that a defaulted field would be protecting; one written before the field is
+refused at parse rather than folded to a total it cannot account for, which is the safe direction
+for a ceiling. This remains a Class C wire change under the `src/topology/**` freeze and it is the
+whole subject of the pull request that makes it, which is what the classification asks for.

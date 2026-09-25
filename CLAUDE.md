@@ -101,8 +101,42 @@ queue lands the merge commit after both contexts pass on the entry it builds. Th
 must carry the six sections and the exact canonical ledger header; run `validate-pr-body.sh`
 against it locally.
 
-Merging is the owner's act unless the owner has delegated it in writing for that PR; say so in the
-body when it has been.
+Merging is the owner's act, and since 2026-09-12 the delegation of it is standing rather than
+written per PR: the agent doing the work merges once the bar is met, and the body records that the
+merge was made under standing delegation and by which agent. **The standing form reaches a PR only
+where nothing in its diff can change what a required check runs, or how it judges what it ran, and
+nothing in its diff amends this rule.** Two limbs, and a PR clears both.
+
+**First limb.** Ask it of every changed path: *were this file written to deceive, could a required
+check report success without having done its work?* What settles it is what the file **governs**,
+not what kind of file it is. An **instrument** decides whether *other* changes are permitted — the
+gate scripts, the CI-contract tests, and the lint, toolchain and runner configuration a check is
+handed. A **subject** is what is being changed and whatever asserts against it, **its own regression
+tests included**. The line is not "is it a test" and not "can its assertions be edited", because
+both hold of every test here: `no_repository_file_overrides_what_ci_compiles_or_runs` asserts a fact
+about this repository's CI configuration and so governs what everyone else may land — an instrument
+— where `only_the_line_builder_introduces_terminal_layout` asserts a fact about the product and
+governs nothing outside `src/util/terminal.rs` — a subject. **So an ordinary fix, and the regression
+test `MAINTAINING.md` requires of it, is a subject that standing delegation reaches.** A `yes`, or
+an honest *I cannot tell*, leaves the PR with the owner — or with a delegation the owner wrote for
+that PR. Known instruments, **not a closed set, and not a checklist that clears a PR by omission**:
+`.github/workflows/` and `.github/scripts/`; `scripts/`, which
+`.github/scripts/test-pr-ready-audit.sh` sources and executes, so an edit there alone can make that
+gate exit `0` without running a fixture; `.cargo/` and a root toolchain file, which rebind the
+compiler every leg runs and the runner every compiled test harness is handed to; `Cargo.toml`'s
+`[lints]` block; the CI-contract tests under `src/effects/`; the effect allowlists.
+
+**Second limb: this rule itself.** Amending the delegation rule, or the review and triage required
+before a merge, changes no gate, so the first limb clears it — and the amended rule can then license
+the gate change the first limb exists to stop. An amendment to these paragraphs in `CLAUDE.md` and
+`AGENTS.md`, to `MAINTAINING.md` step 7 or its trust boundary, or to `findings/PROCESS.md`
+is the owner's, or carries a delegation written for that PR. It is a separate clause, not another
+path on the list above.
+
+Classifying the diff is the delegate's duty and no check enforces either limb — no required check
+reads this rule. A delegation written for a class of PRs — every P1 fix, say — does not
+satisfy the exception, however it is worded: it was written before the PR existed, so it cannot be
+the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 
 ## Where things are
 
@@ -115,7 +149,8 @@ body when it has been.
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
 | `scripts/pr-ready-audit.sh` | Lane readiness audit: maintains `lane:*` and `ready-to-merge`, enqueues with `--enqueue` |
-| `reviews/` | `reviews/findings/`, the standing finding ledger, one file per finding; `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections; historical review records moved to the private lab repository on 2026-09-04 |
+| `findings/` | The standing finding ledger, one file per open finding, moved here from under `reviews/` on 2026-09-12; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
+| `reviews/` | `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections, and the dated review records still on master; historical review records moved to the private lab repository on 2026-09-04 |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
 
 `src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,
@@ -152,3 +187,9 @@ one unset value. CI is unaffected.
 **`src/export.rs` pins sentences in the docs.** Its tests `include_str!` `README.md`,
 `MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
 `design/25_design_export_decisions_schema.md`; a rewording there fails the suite.
+
+**`reviews/findings/` must not exist.** The finding ledger moved to `findings/` on 2026-09-12 (PR
+#276), and git tracks files, not directories: a branch cut before the move that adds a finding under
+the old prefix merges with no conflict and recreates the directory, holding findings nothing reads.
+`test-docs-consistency.sh` (C5) fails on any tracked path under the old prefix; the remedy is to
+rebase onto `master` and `git mv` the file under `findings/`.

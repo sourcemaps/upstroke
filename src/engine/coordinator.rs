@@ -9,7 +9,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::time::Duration;
 
-use crate::agent::{AdapterSource, Caps};
+use crate::agent::proc::NoHooks;
+use crate::agent::{AdapterSource, BuiltinAdapters, Caps};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -24,6 +25,7 @@ use crate::ladder::{
 use crate::review::{PassBinding, ReviewPass, ReviewPlan};
 use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::Runner;
+use crate::runner::host::{Contained, HostRunner, contain_write_command};
 use crate::topology::effects::EventSite;
 use crate::ulid;
 use crate::util;
@@ -41,6 +43,41 @@ use super::report::{
     ReportHeader, RunOutcome, RunReport, TaskRunStatus, build_report, last_reason,
 };
 
+pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {
+    run_with(opts, &BuiltinAdapters)
+}
+
+pub fn run_with(
+    opts: &RunOptions,
+    adapters: &dyn AdapterSource,
+) -> Result<RunReport, UpstrokeError> {
+    run_harness(opts, &Harness::new(adapters))
+}
+
+pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
+    run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
+}
+
+pub(super) fn run_harness_on(
+    opts: &RunOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+) -> Result<RunReport, UpstrokeError> {
+    run_contained(opts, harness, runner, || {
+        contain_write_command(&mut NoHooks)
+    })
+}
+
+pub(super) fn run_contained(
+    opts: &RunOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+    contain: impl FnOnce() -> Result<Contained, UpstrokeError>,
+) -> Result<RunReport, UpstrokeError> {
+    let contained = contain()?;
+    run_harness_inner_on(opts, harness, runner, &contained).map(|(report, _)| report)
+}
+
 #[cfg(test)]
 pub(super) fn run_harness_inner(
     opts: &RunOptions,
@@ -50,7 +87,7 @@ pub(super) fn run_harness_inner(
     run_harness_inner_on(
         opts,
         harness,
-        &crate::runner::host::HostRunner::new(),
+        &crate::runner::host::HostRunner::for_legacy_workspace(),
         &contained,
     )
 }
@@ -294,7 +331,12 @@ impl Run<'_> {
     pub(super) fn drain_and_report(&mut self) -> Result<RunReport, UpstrokeError> {
         if let Err(error) = self.drain() {
             let partial = self.finish();
-            let _ = rundir::write_report(&self.paths.public, &partial, &mut rundir::NoHooks);
+            let _ = rundir::write_report(
+                &self.paths.public,
+                &self.paths.private,
+                &partial,
+                &mut rundir::NoHooks,
+            );
             return Err(error);
         }
         let report = self.finish();
@@ -316,7 +358,12 @@ impl Run<'_> {
                 parked: u32::try_from(report.parked_tasks().len()).unwrap_or(u32::MAX),
             },
         })?;
-        rundir::write_report(&self.paths.public, &report, &mut rundir::NoHooks)?;
+        rundir::write_report(
+            &self.paths.public,
+            &self.paths.private,
+            &report,
+            &mut rundir::NoHooks,
+        )?;
         Ok(report)
     }
 
@@ -1031,6 +1078,8 @@ impl Run<'_> {
                     Answer::Answered { text } => text.clone(),
                     _ => "declined".to_owned(),
                 },
+                attribution: None,
+                citation: None,
             },
         })?;
 
@@ -1223,11 +1272,21 @@ pub(super) fn question_options(kind: QuestionKind) -> Vec<String> {
         }
         QuestionKind::ApproveSpend => vec![
             "approve: run the escalated attempt".to_owned(),
-            "decline (`skip`) — this task fails and its dependents are blocked".to_owned(),
+            interaction::DECLINE_SPEND_OPTION.to_owned(),
         ],
         _ => vec![
             "retry this task with guidance you type below".to_owned(),
-            "give up on this task (`skip`) — its dependents will be blocked".to_owned(),
+            interaction::GIVE_UP_OPTION.to_owned(),
+        ],
+    }
+}
+
+pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {
+    match kind {
+        QuestionKind::ApproveSpend => question_options(kind),
+        QuestionKind::Clarify | QuestionKind::Unblock | QuestionKind::Continue => vec![
+            "retry this task (typed text un-parks it and is not passed to the agent)".to_owned(),
+            interaction::GIVE_UP_OPTION.to_owned(),
         ],
     }
 }

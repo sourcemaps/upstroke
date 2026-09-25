@@ -65,7 +65,7 @@ above is a third, independent reason: a bind mount is declared at `create`
 and cannot be added to a running container, so `T-CONTAINER`'s prose order
 is not merely non-conforming — it does not run.
 
-## `#![deny(`
+## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
 attribute, and a Rust lint level is scoped by the MODULE TREE rather than by
@@ -76,6 +76,23 @@ is what makes `decisions.effect_site_inventory.mechanism` (1)'s BUILD error
 true of a lane's module, which is the leg the source census cannot supply.
 Enforced for every file in this directory by `runner::container::tests::
 every_child_module_of_the_container_funnel_states_its_own_lint_level`.
+
+**`forbid`, not `deny`, since 2026-09-23 -- conditional for one lint and
+plain for two.** A `deny` is a level an inner `allow` lowers, and #318
+executed that here: a `macro_rules!` emitting `#[allow(clippy::disallowed_methods)]
+pub fn ..(..) { std::fs::write(..) }` at the bottom of the production region,
+called from the production body of `prepared_pin_ref` in
+`engine::topology::integrate`, passed clippy over all targets and the whole
+effects suite and wrote its bytes
+(`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-*`). The only
+allowance of `disallowed_methods` below this file is its whole-file
+`tests.rs`, which exists in the lib test target alone, so the `forbid` is
+applied to every build without `cfg(test)` -- the lib target the three clippy
+legs check -- and the test module's allowance compiles as it did; the same
+patch is `E0453` at the generated attribute (`controls-final/PX2-*`).
+`disallowed_types` and `disallowed_macros` are allowed by nothing below, so
+they are `forbid` in every build. `effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day the conditional `forbid` goes back to `deny`.
 
 ## `pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;`
 
@@ -959,9 +976,10 @@ Do not split a UTF-8 sequence: back up to a character boundary.
 ## `mod tests;`
 
 -- test-only declarations ----------------------------------------------
-At the BOTTOM: `effects::production_region`, which
-`effects::externally_reachable_fns` and the three censuses now in
-`exec/tests.rs` still use, cuts a source at its first `#[cfg(test)]`
+At the BOTTOM: `effects::production_region`, which the three censuses now in
+`exec/tests.rs` still use (`effects::externally_reachable_fns` reads
+`effects::production_code` since `PR7-WRAPPERS-EMPTY-DOMAIN`), cuts a source
+at its first `#[cfg(test)]`
 (`PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN`).
 
 **This declaration carries no `#[allow]`, and that is a change.** While the
@@ -973,7 +991,9 @@ than inherit it. The outer attribute was then allowing the same lint a second
 time for the same module -- `clippy::duplicated_attributes` -- so it was
 deleted rather than suppressed, and this file's `effects/allowlist.toml` row,
 in the **funnel section**, records the empty `allows` that leaves. The
-production region above keeps the file-level `#![deny(...)]`, so a lane's
+production region above keeps its file-level fence -- `forbid` of all three
+governed lints in the production build since 2026-09-23, conditional for
+`disallowed_methods` because this test module allows it -- so a lane's
 production code here still cannot reach a container primitive
 (`PR6-LANEF-004`). `decisions.effect_site_inventory.mechanism` (2).
 

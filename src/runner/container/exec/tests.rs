@@ -3,7 +3,7 @@
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods)]
-#![deny(clippy::disallowed_types, clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -4488,8 +4488,8 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
 
-    let container_rows = crate::runner::tests::adapter_parse_parity(&runner, &workspace);
-    let host_rows = crate::runner::tests::adapter_parse_parity(
+    let container_rows = crate::runner::contract::tests::adapter_parse_parity(&runner, &workspace);
+    let host_rows = crate::runner::contract::tests::adapter_parse_parity(
         &crate::runner::host::HostRunner::new(),
         &workspace,
     );

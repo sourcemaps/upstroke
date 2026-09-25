@@ -588,7 +588,7 @@ and accepts the same starts as the live one.
 
 `RunState::charge_allowance`, as a value.
 
-`runner::tests::the_rungs_allowance_is_counted_in_one_production_place`
+`runner::contract::tests::the_rungs_allowance_is_counted_in_one_production_place`
 carries a `SPELLINGS` fixture listing the ways this call can be written.
 That fixture is a `&str`, so rustc never reads it and a path in it can name
 nothing at all — it named `TaskFold::charge_allowance` for a round. This is
@@ -617,7 +617,7 @@ would satisfy half of this and fail the other.
 
 ### The behavioural half of the `runner` census
 
-`runner::tests::the_rungs_allowance_is_counted_in_one_production_place`
+`runner::contract::tests::the_rungs_allowance_is_counted_in_one_production_place`
 counts the *spelling* `charge_allowance(` in each applier's body, and a
 count over text cannot enforce a property about calls: an alias and a
 closure of the same name leave its per-applier map and its subtree total
@@ -2966,3 +2966,110 @@ verified and rejected in turn.
 The shape a merge repair freezes when `mid` intersects the root's
 ladder empty: the fold's own ladder check accepts it, because an
 absent ceiling is the maximum of no tier.
+
+## `fn an_override_replaces_the_frozen_binding_for_every_later_attempt() {`
+
+E2 as the errata read it: the accepted binding under an override is
+exactly `RungBinding::from_override(binding, floor)` — tier the ladder's
+frozen floor, pinned — and a move in any of the five fields, the tier
+below or above the floor and the pin included, is refused. An override on
+a ladder that records no floor has no binding at all: `rung_binding`
+answers `None` and the attempt is refused naming the missing floor.
+
+## `fn a_repair_members_terminal_failure_folds_its_lineage_live_and_on_replay() {`
+
+B2: a repair's terminal failure fails its lineage — root and members
+`Failed`, the lineage lease released, the same fold live and on replay.
+
+## `fn an_ordinary_tasks_terminal_failure_leaves_a_live_lineage_exactly_as_it_was() {`
+
+The negative half of B2: a task outside the lineage failing changes
+nothing in it.
+
+## `fn a_lineage_lease_is_released_exactly_once_and_a_second_release_is_refused() {`
+
+ST-05 for a lineage lease: the publication that settles the root releases
+it, and a second release finds nothing to release.
+
+## `fn a_rejection_already_folded_is_refused_when_it_arrives_again() {`
+
+A rejection is folded once: replayed at the same sequence, or against the
+same candidate at the next, it finds no open transaction and no queued
+candidate, and is refused with the registry and the lineage unchanged.
+
+## `fn fold_step(fold: &mut TopologyFold, log: &mut Vec<TopologyEvent>, event: TopologyEvent) {`
+
+Apply one event and keep it, so the log the test replays is exactly the
+sequence the live fold saw.
+
+## `fn queue_logged(`
+
+An ordinary task dispatched at `base`, attempted, and its candidate
+prepared and created, every event logged.
+
+## `fn repair_spawn_of(key: TaskKey, root: TaskKey, root_id: &str) -> FrozenSpawn {`
+
+[`repair_spawn`] for a root other than alpha: its own display id, so
+three lineages can register three repairs, and no dependencies, since the
+wide plan's tasks have none.
+
+## `fn conflict_creating_lineage(`
+
+The `merge_rejected` that creates a lineage at `root` and registers
+`repair` as its first member: a conflict, opening and closing its own
+transaction at `sequence`.
+
+## `fn repair_dispatched(repair: TaskKey, root: TaskKey, base: &CommitSha) -> TopologyEvent {`
+
+A repair dispatched inside its lineage's lease from the candidate its
+root's rejection protected.
+
+## `fn repair_candidate_prepared(`
+
+The repair's candidate, whose diff touched `paths` and whose creation
+widens the lineage by exactly them.
+
+## `fn repair_queued(`
+
+A repair dispatched, attempted, and its candidate prepared and created,
+every event logged.
+
+## `fn lineage_published(`
+
+The fast publication of a repair's candidate and the `task_merged` that
+settles its root and releases the lineage lease.
+
+## `fn lineage_age(fold: &TopologyFold, root: TaskKey) -> u32 {`
+
+The age the fold holds for a lineage.
+
+## `fn refused_live_and_on_wide_replay(`
+
+[`refused_live_and_on_replay`] over the wide plan's inputs.
+
+## `fn an_age_once_granted_is_never_reused_and_a_lineage_created_after_a_release_waits_behind_every_survivor()`
+
+The lease table and the queue alone, on the sequence G4's verification
+derived (`G4-LINEAGE-AGE-REUSED-AFTER-RELEASE`): two lineages, the older
+released, a third created and widened onto the survivor's region. The
+third's age is above every survivor's, the queue holds its member behind
+the survivor and not the other way round, and across a second release the
+granted ages are `0, 1, 2, 3` with no repeat; a holding replaced in place
+keeps its age. On the frozen tree at `74da2cbb` the third lineage took age
+1, the survivor's, and its member was eligible.
+
+## `fn a_lineage_created_after_a_release_waits_behind_the_older_survivor_it_widens_onto_live_and_on_replay()`
+
+The same sequence through the fold's doors, on the wide plan: three
+ordinary candidates rejected into lineages at sequences 0, 1 and 3, the
+first lineage's repair published at 2 while the second, with no candidate
+yet, survives; the third lineage's repair touches the survivor's region and
+its candidate creation widens the lineage onto it. The queue answers
+`BehindOlderLineage`, the fold offers nothing to integrate, and an
+integration start for the third lineage's candidate is refused live and on
+replay. The survivor's own repair then queues behind it in position and
+goes first in eligibility; once it is published, the third lineage's
+candidate is next. The whole log replays to the live state, ages included.
+On the frozen tree at `74da2cbb` this sequence gave the third lineage age
+1, the survivor's, and the fold accepted the integration start live and on
+replay: the overtake G4's verification found.

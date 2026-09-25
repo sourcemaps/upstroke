@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/plan/mod.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 pub mod markdown;
 
 use crate::error::UpstrokeError;

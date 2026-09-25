@@ -124,6 +124,21 @@ gone, and for foreign Git state the verification observed
 (`decisions.repairs.not_repairs`). `detail` is what the infrastructure
 reported, carried into the park question.
 
+## `pub enum Verified {` › `reviews: Vec<crate::events::ReviewRecord>,`
+
+Whatever the verification charged before it failed. This is here because
+the failure arm has no `Judgement` to take records from and the money was
+still spent: the reviews run in pass order, each one's cost is charged to
+the run as it returns, and a later pass's snapshot or ledger step can then
+fail and take the whole judgement with it. `IntegrationCx::verify` keeps
+what its account was charged and hands it out through this field, so the
+terminal records the same passes the live total already counted and a
+replay reaches that total again.
+
+Empty for the two Runner arms by construction rather than by choice: a
+`JudgeError::Runner` can only come from a gate verdict, and gates run
+before any reviewer, so no pass has been charged when one is raised.
+
 ## `pub struct VerifyRequest<'a> {`
 
 One integration verification to run.
@@ -403,6 +418,14 @@ is INV-09's "CAS before `task_merged`". The pin and the staging worktree
 of a stale publication go afterwards, because both keep the proposal
 reachable until the integration ref does.
 
+A `<ref>.lock` that a killed `update-ref` left on the integration ref is
+the Ref funnel's business, not this function's: `compare_and_swap_ref`
+reclaims it before the swap when the repository proves it is the
+engine's own and stale, and refuses resumably otherwise
+(`WorkspaceManager::reclaim_own_ref_lock`, and `PR8-CRASH-002` for the
+wedge it closes). Seen from here the retry simply completes, or refuses
+with the lock still in place and nothing appended.
+
 ### Errors
 
 A symbolic or checked-out ref, [`Refusal::IntegrationRefAbsent`],
@@ -492,6 +515,17 @@ proposal the record names ([`reclaim_staging`]). `detail` is what
 
 the infrastructure reported, carried into the park question's context so
 a person sees why the outage exhausted its deferrals.
+
+`reviews` is the spend the terminal carries. Every one of the four call
+sites supplies it: the judged sites from `judgement.reviews`, which is
+every pass that returned before the verdict or the outage that ended the
+verification, and the unjudged one from what
+[`Verified::Unavailable`] carried out. DESIGN §26 asks all four terminal
+shapes to carry their usage and cost; before this field the unavailable
+one could not, and a restart replayed a total without the passes a park or
+a deferral had already paid for (`PR8-R2-SPEND-REPLAY`). Gate verdicts are
+not carried, because a gate is a local process with no reported cost and
+the failure this closes is a spend one.
 
 ## `fn reclaim_snapshots(`
 

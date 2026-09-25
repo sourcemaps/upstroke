@@ -80,13 +80,14 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         path: answers.clone(),
         source,
     })?;
-    interaction::write_answer(&answers, &id, &answer)?;
+    let record = interaction::AnswerRecord::unattributed(answer);
+    interaction::write_answer(&answers, &id, &record)?;
 
     let run_is_live = rundir::is_running(&found.public);
     Ok(Answered {
         run_id: found.run_id,
         question_id: found.question_id,
-        answer,
+        answer: record.answer,
         run_is_live,
     })
 }
@@ -146,7 +147,10 @@ mod tests {
             kind: QuestionKind::Unblock,
             affected_tasks: vec![TaskId::from("t1")],
             context: "every rung failed on the same assertion".to_owned(),
-            options: vec!["retry on frontier".to_owned(), "skip it".to_owned()],
+            options: vec![
+                "retry on frontier".to_owned(),
+                interaction::GIVE_UP_OPTION.to_owned(),
+            ],
         });
         interaction::write_question(&questions, &record).expect("write question");
     }

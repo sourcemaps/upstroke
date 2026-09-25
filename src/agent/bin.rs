@@ -1,5 +1,8 @@
 //! Extended notes: `docs/internals/agent/bin.md`
 
+#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
+
 use std::path::PathBuf;
 
 use crate::error::UpstrokeError;

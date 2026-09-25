@@ -294,6 +294,370 @@ fn a_timed_out_child_keeps_the_transcript_it_had_already_written() {
     );
 }
 
+#[test]
+#[ignore = "subprocess helper"]
+fn terminate_fault_helper() {
+    let Some(signal) = std::env::var_os("UPSTROKE_TERMINATE_FAULT_READY") else {
+        return;
+    };
+    let pid = std::process::id();
+    #[cfg(windows)]
+    let created =
+        super::ambient::process_creation_time(pid).expect("the helper reads its own creation time");
+    #[cfg(not(windows))]
+    let created = 0_u64;
+    readiness::publish(
+        Path::new(&signal),
+        &[&pid.to_string(), &created.to_string()],
+    )
+    .expect("publish the helper's identity");
+    thread::sleep(Duration::from_secs(60));
+}
+
+struct TerminateFaultAt {
+    inner: crate::runner::HarnessHooks,
+    at: HookPhase,
+}
+
+impl SpawnHooks for TerminateFaultAt {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if site == ProcessSite::Terminate && phase == self.at {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+    }
+}
+
+fn terminate_fault_helper_gone(pid: u32, created: u64) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = created;
+        let pid = i32::try_from(pid).expect("a pid fits");
+        // SAFETY: signal 0 performs no delivery; it only asks whether the
+        // pid can be signalled.
+        unsafe { libc::kill(pid, 0) != 0 }
+    }
+    #[cfg(windows)]
+    {
+        !super::ambient::process_alive(pid, created)
+    }
+}
+
+fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use crate::topology::effects::{
+        EffectSiteId, EntryPhase, HookHarness, ResourceRow, ResumeAction,
+    };
+
+    let site = EffectSiteId::Process(ProcessSite::Terminate);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the terminate site's coordinates are its two phases"),
+    });
+    // Owned by a guard that reclaims it when this witness unwinds as well as
+    // when it returns; `rundir::scratch_tree` says, and tests, what a reclaim
+    // that fails does on each path.
+    let scratch = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch directory");
+    let ready = scratch.path().join("ready");
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = TerminateFaultAt {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        at: phase,
+    };
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["terminate_fault_helper", "--ignored", "--nocapture"])
+        .env("UPSTROKE_TERMINATE_FAULT_READY", &ready);
+    let failure = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        command,
+        b"",
+        Duration::from_secs(3),
+        &mut hooks,
+    )
+    .expect_err("the armed fault ends the supervision");
+    let message = failure.error.to_string();
+    assert!(
+        message.contains(&format!(
+            "the process funnel was made to fail at `Terminate` ({phase})"
+        )),
+        "{tag}: the injected error is the one returned: {message}"
+    );
+    assert!(
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the armed coordinate was reached through the production adapter"
+    );
+
+    let identity = readiness::read_published(&ready)
+        .expect("the helper published its identity before the timeout");
+    let pid: u32 = identity
+        .first()
+        .and_then(|field| field.parse().ok())
+        .expect("the helper's pid");
+    let created: u64 = identity
+        .get(1)
+        .and_then(|field| field.parse().ok())
+        .expect("the helper's creation time");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !terminate_fault_helper_gone(pid, created) {
+        assert!(
+            Instant::now() < deadline,
+            "{tag}: the supervised child {pid} outlived the faulted termination"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        failure.fate,
+        if semantics.rows.contains(&ResourceRow::R22) {
+            ProcessFate::Unresolved
+        } else {
+            ProcessFate::Gone
+        },
+        "{tag}: the fate the failure reports is the one the authority's rows imply ({:?}): \
+         {message}",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+
+    let next = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        shell("echo next"),
+        b"",
+        Duration::from_secs(30),
+        &mut hooks,
+    )
+    .unwrap_or_else(|failure| panic!("{tag}: the next command runs: {}", failure.error));
+    assert_eq!(next.code, Some(0), "{tag}: {next:?}");
+    assert!(next.stdout.contains("next"), "{tag}: {next:?}");
+    let spawn = EffectSiteId::Process(ProcessSite::Spawn);
+    let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(
+        (
+            seen.count(spawn, HookPhase::Before),
+            seen.count(spawn, HookPhase::After),
+            seen.count(site, phase),
+        ),
+        (2, 2, 1),
+        "{tag}: both commands went through the production adapter, and only the first was \
+         terminated"
+    );
+    drop(seen);
+}
+
+#[test]
+fn a_fault_before_the_terminate_primitive_settles_the_child_and_leaves_its_fate_unresolved() {
+    a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+        HookPhase::Before,
+        "terminate-fault-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_terminate_primitive_reports_the_child_gone() {
+    a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+        HookPhase::After,
+        "terminate-fault-after",
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+struct SpawnAfterThenTerminateAfterFault {
+    inner: crate::runner::HarnessHooks,
+    created: Vec<(u32, u64)>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if phase == HookPhase::After {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        #[cfg(windows)]
+        let created =
+            super::ambient::process_creation_time(pid).expect("the created child's creation time");
+        #[cfg(not(windows))]
+        let created = 0_u64;
+        self.created.push((pid, created));
+        self.inner.child_created(pid);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use crate::topology::effects::{EffectSiteId, HookHarness};
+
+    // Reclaimed when this witness unwinds as well as when it returns, as above.
+    let scratch =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "spawn-then-terminate-fault")
+            .expect("a scratch directory");
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = SpawnAfterThenTerminateAfterFault {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        created: Vec::new(),
+    };
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["terminate_fault_helper", "--ignored", "--nocapture"])
+        .env(
+            "UPSTROKE_TERMINATE_FAULT_READY",
+            scratch.path().join("ready"),
+        );
+    let failure = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        command,
+        b"",
+        Duration::from_secs(30),
+        &mut hooks,
+    )
+    .expect_err("the error after the spawn ends the supervision");
+    let message = failure.error.to_string();
+    assert!(
+        message.starts_with("the process funnel was made to fail at `Spawn` (after)")
+            && message.contains(
+                "additional cleanup failure: the process funnel was made to fail at `Terminate` \
+                 (after)"
+            ),
+        "the spawn's error is returned with the cleanup termination's after-phase error beside \
+         it: {message}"
+    );
+    let spawn = EffectSiteId::Process(ProcessSite::Spawn);
+    let terminate = EffectSiteId::Process(ProcessSite::Terminate);
+    {
+        let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            (
+                seen.count(spawn, HookPhase::After),
+                seen.count(terminate, HookPhase::Before),
+                seen.count(terminate, HookPhase::After),
+            ),
+            (1, 1, 1),
+            "the cleanup after the spawn's error went through the terminate funnel once: \
+             {message}"
+        );
+    }
+    let &[(pid, created)] = hooks.created.as_slice() else {
+        panic!("one child was created: {:?}", hooks.created);
+    };
+    assert!(
+        terminate_fault_helper_gone(pid, created),
+        "the child {pid} is gone once the funnel returns"
+    );
+    assert_eq!(
+        failure.fate,
+        ProcessFate::Gone,
+        "the cleanup termination's primitive completed before its after phase failed: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
+
+    use crate::topology::effects::HookHarness;
+
+    let mut command = shell("sleep 60");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the closure calls one async-signal-safe syscall. The group is
+    // what `kill_tree` targets, so the fixture must have one of its own.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
+    let pid = tree.child.id();
+    let fate = std::cell::Cell::new(ProcessFate::Unresolved);
+    let mut hooks = TerminateFaultAt {
+        inner: crate::runner::HarnessHooks::new(Arc::new(Mutex::new(HookHarness::new()))),
+        at: HookPhase::After,
+    };
+    let error = kill_tree(&mut hooks, ProcessSite::Terminate, &mut tree, &fate)
+        .expect_err("the after phase returns the injected error");
+    assert!(
+        error
+            .to_string()
+            .contains("the process funnel was made to fail at `Terminate` (after)"),
+        "the error is the after phase's: {error}"
+    );
+    assert!(
+        terminate_fault_helper_gone(pid, 0),
+        "the group leader {pid} is gone once kill_tree returns"
+    );
+    assert_eq!(
+        fate.get(),
+        ProcessFate::Gone,
+        "the primitive completed before the after phase erred: {error}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 #[allow(clippy::zombie_processes)]
@@ -861,7 +1225,13 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         "the fixture holds no pipe, so this test would pass vacuously"
     );
 
-    kill_tree(ProcessSite::Terminate, &mut tree).expect("settle the group");
+    kill_tree(
+        &mut NoHooks,
+        ProcessSite::Terminate,
+        &mut tree,
+        &std::cell::Cell::new(ProcessFate::Unresolved),
+    )
+    .expect("settle the group");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut settled = every_pipe_writer_is_gone(fd);
     while !settled && Instant::now() < deadline {
@@ -1565,7 +1935,13 @@ fn kill_tree_observes_the_windows_job_empty_before_it_returns() {
         );
     }
 
-    kill_tree(ProcessSite::Terminate, &mut tree).expect("settle the tree");
+    kill_tree(
+        &mut NoHooks,
+        ProcessSite::Terminate,
+        &mut tree,
+        &std::cell::Cell::new(ProcessFate::Unresolved),
+    )
+    .expect("settle the tree");
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut escaped = process_alive(pid, created);
     while escaped && Instant::now() < deadline {
@@ -3343,23 +3719,41 @@ fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {
 
     let silent = scratch.join("never");
     let mut producer = readiness_producer("silent", Some(&silent), Stdio::null());
-    let mut spent = Vec::new();
+    const BOUND: Duration = Duration::from_millis(120);
+    let started = Instant::now();
+    match readiness::await_signal(&silent, producer.child(), BOUND) {
+        readiness::Waited::TimedOut(reported) => assert_eq!(reported, BOUND),
+        other => panic!("a silent producer must time the wait out, not give {other:?}"),
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= BOUND,
+        "ended before its own bound: {elapsed:?} < {BOUND:?}"
+    );
+
+    const STEP: Duration = Duration::from_millis(60);
+    let mut readings_per_bound = Vec::new();
     for bound in [Duration::from_millis(120), Duration::from_millis(480)] {
-        let started = Instant::now();
-        match readiness::await_signal(&silent, producer.child(), bound) {
+        let origin = Instant::now();
+        let readings = std::cell::Cell::new(0_u32);
+        let mut clock = || {
+            let reading = origin + STEP * readings.get();
+            readings.set(readings.get() + 1);
+            reading
+        };
+        match readiness::await_signal_by(&silent, producer.child(), bound, &mut clock) {
             readiness::Waited::TimedOut(reported) => assert_eq!(reported, bound),
             other => panic!("a silent producer must time the wait out, not give {other:?}"),
         }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= bound,
-            "ended before its own bound: {elapsed:?} < {bound:?}"
-        );
-        spent.push(elapsed);
+        readings_per_bound.push(readings.get());
     }
-    assert!(
-        spent[1] > spent[0],
-        "the wait spends the bound it was given, not one of its own: {spent:?}"
+    assert_eq!(
+        readings_per_bound,
+        [3, 9],
+        "the wait ends at the first reading of its clock past the bound it was given -- one \
+         reading for the deadline, then one per poll -- so a bound of 120 ms ends at the third \
+         reading of a clock that advances {STEP:?} a reading, and one of 480 ms at the ninth; a \
+         bound of the wait's own would end both at the same reading: {readings_per_bound:?}"
     );
     drop(producer);
 

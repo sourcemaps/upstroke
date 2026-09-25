@@ -8,7 +8,7 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## Module
 
-The bounded reachability census (ST-14), as a skeleton.
+The bounded reachability census (ST-14).
 
 `decisions.bounded_census` asks for an executable breadth-first exploration
 of abstract fold states: at every state, every event class is offered to the
@@ -31,14 +31,95 @@ That last one is why the arm is a value rather than a `panic!`: "this is
 unreachable" is a claim, and a claim wants a census rather than an
 assertion.
 
-### Skeleton
+### What the skeleton shipped, and what PR10 runs
 
-This slice ships the explorer, the bounds, the recording, and the totality
-assertions over fixtures. PR10 raises the fixtures to the packet's full
-bounds and adds the per-arm coverage assertion. What is deliberately *not*
-claimed here is stated by [`Census::truncated`] and by this module's tests:
-a census that stopped early says so rather than reporting the states it did
-reach as if they were all of them.
+PR3 shipped the explorer, the bounds, the recording and the totality
+assertions over a two-original fixture. PR10 raised the fixture to the
+packet's bounds (`decisions.bounded_census.bounds`) and holds the census
+to them:
+
+- **The fixture and the generator.** Three originals (`aleph`, `bet`,
+  `gimel`) in the packet's plan shapes (`PlanShape`: the chain, the fan-out
+  that the shared census explores, and the join — a task after two
+  independent ones, which is the diamond's join with three originals), and
+  `classes` offers every event class the packet's `event_payload_classes`
+  names, for every task the fold registers, within the bounds: two
+  generations per task, two attempts per generation, every settlement
+  transition, the publication dispositions each in a matching and a
+  mismatching shape, a repair's publication with its lineage closure and
+  with the repair alone, rejections (offered where the fold can accept one,
+  each registering the repair the production repair module derives), one
+  hand spawn over merged work, at most two open questions, verification
+  deferrals to the bound, a resume only where a run resumes, the ceiling
+  where the loop consults it, the close reasons per generation class with
+  the run-ending close on the closure's own precedence, and `run_finished`
+  for each outcome.
+- **The census family, and where each member stops.** Since the owner's
+  ST-14 decision of 2026-09-13 (option 3; the packet amendment
+  `2026-09-13-AMENDMENT-st14-census-family.md`) the contract is a family:
+  the breadth-first prefix under the packet's abstraction and bounds
+  explores to a stated state ceiling and reports truncation, one seeded
+  census per dimension the prefix does not reach closes under its own
+  ceiling, and every coverage assertion holds over the union of explored
+  states. `family()` names the members: the prefix, and one seeded census
+  per plan shape of the bounds line — the chain, the fan-out and the join,
+  which `2026-09-15-AMENDMENT-clause1-census-bounds.md` names; Gate 5's
+  second run failed clause 1 because the family held two fan-out members
+  while the chain and the join were explored only outside it, truncated,
+  and since 2026-09-16 each shape has a closing member. The prefix
+  (`census()`) explores
+  the fan-out breadth-first to `max_states` (20,000) and is **truncated**
+  there by design — the space under these bounds is orders of magnitude
+  larger — and says so ([`Census::truncated`], set at the state ceiling
+  and at the trace ceiling alike); measured (`reached_dimensions`), it
+  reaches every one of the ten declared bounds on its own at that
+  ceiling, and did at PR10's round-2 code head too. Each seeded census
+  (`seeded_census`) seeds its shape's integration path
+  (`engaged_originals_prefix`: every original the shape has ready carried
+  to a queued candidate, and where that engaged one original alone, it is
+  integrated at sequence 0 and the originals it releases are carried too),  explores it under the restricted generator `integration_path_classes`
+  and **closes** — measured 2026-09-16, with the generator publishing its
+  repairs (`fn seeded_census`, below): the chain in 25 states from an
+  11-event seed, the fan-out in 31 from a 15-event seed (the seed the
+  family's one seeded member held before, event for event), the join in
+  75 from a 9-event seed, none truncated — each reaching the fourth
+  integration sequence and
+  the second repair, the fan-out and the join the second lineage besides;
+  the chain reaches one lineage and names two dimensions, not three
+  (`fn seeded_census`, below). Since the prefix reaches every bound too,
+  no seeded census is the only route to any bound (until round 6 these
+  notes and the record said the prefix could not reach three of them,
+  which the measurement refutes); the seeded members are the family's
+  closing censuses, one per shape.
+  `the_prefix_reports_its_truncation_and_every_seeded_census_closes`
+  holds each member to its part of the contract, every dimension the
+  prefix misses to a seeded census that names it — an empty set today, said
+  so — and the seeded members to one per shape;
+  `every_plan_shape_is_a_closing_member_of_the_family` holds each member's
+  declared shape to the dependencies its fold was started with and each
+  shape to exactly one closing member;
+  `every_declared_dimension_is_reached_at_its_bound` holds the union to
+  every declared bound by equality and says which member reaches each. The
+  chain and the join are also explored under the full generator to a
+  smaller ceiling, truncated by design (`every_plan_shape_is_explored`);
+  that exploration reaches the outcomes the restricted generator cannot,
+  and it is not a member of the family.
+- **Every arm.** `every_plan_transition_arm_is_executed_by_the_census`
+  enumerates the arms of the production dispatch from its source
+  (`fold/start.rs`) and requires every arm executed by an offer, and every
+  offered kind to have an arm.
+- **The classifier over every state.** The resume classifier
+  (`engine::topology::reachability`) runs over every explored state, live
+  equal to replay; every fault row's durable prefix is a reachable state
+  classified as the row's resume action, with row membership read from the
+  fold alone rather than from the classifier's plan; the `run_resumed`
+  runner-identity sweep; and the summary the G5 gate dumps
+  (`UPSTROKE_CENSUS_SUMMARY`).
+
+What is deliberately *not* claimed is stated by [`Census::truncated`] and
+by this module's tests: a census that stopped early says so rather than
+reporting the states it did reach as if they were all of them, and every
+assertion over the shared census is over its explored prefix.
 
 ## `pub struct CensusBounds {`
 
@@ -48,6 +129,10 @@ Recorded as data rather than as constants so a census can say which bounds
 it ran under, and so the two numbers that actually stop the search —
 [`Self::max_trace`] and [`Self::max_states`] — are visible beside the
 design's own bounds instead of buried in the loop.
+
+## `pub struct Census {`
+
+An exploration, stopped where a ceiling stopped it or where the space ran out.
 
 ## `pub struct CensusBounds` › `pub originals: u32,`
 
@@ -69,9 +154,24 @@ Attempts per generation.
 
 Integration sequences.
 
+## `pub struct CensusBounds` › `pub lineages: u32,`
+
+Distinct lineage roots among the registered repairs — the packet's
+"repairs <= 2 (lineages <= 2)" as its own dimension, measured as the
+number of roots and not inferred from the repair count: two repairs of one
+original are one lineage.
+
 ## `pub struct CensusBounds` › `pub defers: u32,`
 
-Verification defers per candidate — the fixture's `max_defers`.
+Verification defers per candidate, bounded by the fixture's `max_defers`
+(2). The fold parks the `max_defers`th outage rather than deferring it
+(`check_defer_allowance`), so the deferrals a candidate can carry are one
+fewer than the allowance, and one is the bound the census reaches by
+equality; the parked second outage is a class of its own
+(`merge_verification_unavailable/parked`). Until PR10's round 2 the
+dimension was measured from a task's worker backoff (`task.defers`), which
+the packet does not bound; that count is no longer measured, and the
+dimension reads the queue entries alone.
 
 ## `pub struct CensusBounds` › `pub questions: u32,`
 
@@ -89,7 +189,7 @@ The longest trace the search will extend.
 
 The most states the search will record before stopping.
 
-## `impl CensusBounds` › `pub const fn dimensions(&self) -> [(&'static str, u32); 8] {`
+## `impl CensusBounds` › `pub const fn dimensions(&self) -> [(&'static str, u32); 10] {`
 
 Every dimension of the *explored space* this census declares, as
 `(name, bound)`.
@@ -128,21 +228,14 @@ A candidate with a label.
 
 What happened when a class was offered.
 
-## `pub enum TransitionOutcome` › `Accepted {`
+## `pub enum TransitionOutcome` › `Accepted { to: usize },`
 
-The fold accepted it; this is the state it reached.
+The fold accepted it; `to` is the id of the state it reached.
 
-## `pub enum TransitionOutcome` › `to: usize,`
+## `pub enum TransitionOutcome` › `Refused { reason: Arc<str> },`
 
-The state's id.
-
-## `pub enum TransitionOutcome` › `Refused {`
-
-The fold refused it, and said why.
-
-## `pub enum TransitionOutcome` › `reason: String,`
-
-The refusal, rendered.
+The fold refused it, and `reason` is the refusal, rendered — interned, since
+the same refusal is recorded at thousands of states.
 
 ## `pub enum TransitionOutcome` › `Truncated,`
 
@@ -151,7 +244,7 @@ had already recorded [`CensusBounds::max_states`] states.
 
 Recorded rather than dropped: an offer that vanished because the search
 was full is exactly the kind of silent cap that makes a coverage report
-read as complete when it is not.
+read as exhaustive when it is not.
 
 ## `pub struct CensusTransition {`
 
@@ -194,10 +287,6 @@ The fold at that state.
 
 What the total outcome function says here.
 
-## `pub struct Census {`
-
-A completed exploration.
-
 ## `impl Census` › `pub fn explore<F>(`
 
 Explore breadth-first from `start`, offering every class `classes`
@@ -207,6 +296,21 @@ States are identified by the fold state they hold, not by the trace that
 reached it: two different histories that leave the run in the same state
 are one state, which is what makes the search finite and what makes
 "reachable" mean something.
+
+Each state is read once through a checked lookup — the frontier holds ids
+this loop pushed, so each names a state, and the lookup keeps that a fact
+the code establishes rather than one it assumes (§7's indexing rule; PR10's
+round-3 contract lens, F4) — and its offers are planned in one pass over
+that read before the state table grows in a second, since the table is what
+the read borrows. `Planned` is one offer between the two passes: its label,
+its kind, the fold the transition reaches or the reason it was refused, and
+the event, which becomes the new state's trace when the destination is new.
+
+## `pub fn explore<F>(` › `if state.trace.len() >= bounds.max_trace {`
+
+The trace ceiling stops expansion here; if anything legal
+was left to explore, the census says so, the way it says
+so at the state ceiling.
 
 ## `impl Census` › `pub fn bounds(&self) -> CensusBounds {`
 
@@ -228,7 +332,7 @@ because it ran out of new states.
 A truncated census has explored a *subset*, and every assertion over it
 is an assertion about that subset. Reported rather than inferred,
 because a coverage claim over a silently truncated search reads exactly
-like a coverage claim over a complete one.
+like a coverage claim over an exhausted one.
 
 ## `impl Census` › `pub fn outgoing(&self, id: usize) -> impl Iterator<Item = &CensusTransition> {`
 
@@ -252,11 +356,17 @@ against censuses built to make each fail on its own:
 
 ## `impl Census` › `pub fn accepted_labels(&self) -> BTreeSet<&str> {`
 
-Every class that was accepted somewhere.
+Every class the fold accepted somewhere — a `Truncated` transition among
+them, since it is an acceptance whose destination the state ceiling had no
+room for. Until PR10's round 3 the set held `Accepted` alone, and its
+complement counted a truncated offer as a refusal, so the publication tests
+could read "refused / never accepted" of a relation the fold accepts (the
+round-3 contract lens, F1); `a_census_that_hits_its_ceiling_says_so` holds
+the two sets to the fold's answer with a one-state census.
 
 ## `impl Census` › `pub fn refused_labels(&self) -> BTreeSet<&str> {`
 
-Every class that was refused somewhere.
+Every class the fold refused somewhere: `Refused`, and nothing else.
 
 ## `impl Census` › `pub fn states_with(&self, outcome: &DerivedOutcome) -> Vec<&CensusState> {`
 
@@ -365,6 +475,20 @@ A and AB are separate explored states whose answers to the same offer
 differ — an overlap the key forgot would make that pair one state and the
 differing answer unreachable.
 
+## `mod tests` › `enum PlanShape {`
+
+The plan shapes the packet's bounds name. Three originals admit a
+chain, a fan-out and, as the diamond's join, a task after two
+independent ones; a four-node diamond needs a fourth original. `ALL`
+lists the three in the order the family's seeded members take, so a
+shape added here is a member owed, and a test that quantifies over the
+shapes quantifies over this list rather than over a copy of it.
+
+## `mod tests` › `const MAIN_SHAPE: PlanShape = PlanShape::FanOut;`
+
+The shape the shared census explores: aleph first, then bet and
+gimel interleaving under it.
+
 ## `mod tests` › `fn sha(label: &str) -> CommitSha {`
 
 -----------------------------------------------------------------------
@@ -384,10 +508,11 @@ for. Every independently meaningful field takes a value of its own —
 
 A 40-character symbolic sha, one per role.
 
-## `mod tests` › `fn plan() -> Plan {`
+## `mod tests` › `fn plan_for(shape: PlanShape) -> Plan {`
 
-Two independent tasks over two disjoint regions, so the queue can hold
-two candidates at once and a lease has something to be wrong about.
+Three originals over three disjoint regions, in the shape asked for
+(`PlanShape`), so the queue can hold more than one candidate at once and
+a lease has something to be wrong about.
 
 ## `fn run_started_unauthenticated() -> RunStarted4` › `limits: TopologyLimits {`
 
@@ -411,18 +536,20 @@ A fold that has recorded its `run_started` and nothing else.
 
 ## `mod tests` › `fn region(key: TaskKey) -> PathSet {`
 
-Region A or B — the region the entry's frozen hint **derives**, not the
-hint.
+An original's region — the region the entry's frozen hint **derives**, not
+the hint; a repair's is its lineage root's, and a key beyond the three
+originals is a repair of aleph unless the fold says otherwise
+(`region_of`).
 
-The hints are `src/aleph/` and `src/bet/`, and the derivation trims the
-trailing separator, so the literal here carries no slash. It used to
+The hints are `src/aleph/`, `src/bet/` and `src/gimel/`, and the derivation
+trims the trailing separator, so the literal here carries no slash. It used to
 carry one, which made every `task_dispatched` this fixture built record
 a region the fold does not derive — refused by `check_dispatched` since
 the region became derivation-checked, and invisible before that because
 the two spellings name the same components to
-[`crate::topology::leases::paths_overlap`]. The round trip is
-[`the_fixture_region_is_the_one_the_fold_derives`], so the two cannot
-drift apart again silently.
+[`crate::topology::leases::paths_overlap`]. A region the fold does not
+derive is refused at the first dispatch, so the two cannot drift apart
+again silently.
 
 ## `mod tests` › `fn overlap_region() -> PathSet {`
 
@@ -432,6 +559,12 @@ of them and neither of them contains it.
 `decisions.bounded_census.abstraction` names "paths replaced by regions
 A, B, AB" — three labels, not two — and AB is the only one of the three
 under which the overlap relation answers differently from the others.
+
+## `mod tests` › `fn binding_of(fold: &TopologyFold, key: TaskKey, rung: usiz…`
+
+The rung's binding, or `None` for a ladder without rungs — a merge
+repair whose root's rungs all lie below the repair floor, which the
+registry admits only through a human binding.
 
 ## `fn attempt_record(attempt: u32) -> AttemptRecord` › `reviews: vec![ReviewRecord {`
 
@@ -454,6 +587,17 @@ with it — and it is the left operand of the fast publication's head
 relation. So a witness that varies the candidate's base varies this
 event and the prepared record together, and can vary nothing less.
 
+## `mod tests` › `fn attempt_started(`
+
+A fresh attempt of `key`'s open generation. A repair's attempt records
+what its worktree was materialized from (the fold refuses one that
+does not) and an original's records nothing.
+
+## `mod tests` › `fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {`
+
+Whether the registry holds `key` as a merge repair (an entry with a
+lineage); a key it does not hold is no repair.
+
 ## `mod tests` › `let mut record = attempt_record(attempt);`
 
 The record says failed, because every settlement this
@@ -467,6 +611,12 @@ The same record with the region its diff touched named. `actual_paths`
 and the lease it replaces the prediction with are one region by
 `check_candidate_prepared`'s own rule — "the region it takes is not the
 region its diff touched" — so one parameter is the honest shape.
+
+## `mod tests` › `fn candidate_prepared_for(`
+
+The candidate `key`'s in-flight attempt prepares over its region: an
+original's replaces the predicted region and a repair's widens its
+lineage, which is what the fold requires of each.
 
 ## `mod tests` › `fn candidate_prepared_at(`
 
@@ -483,11 +633,51 @@ The same candidate at a named commit. Its commit is part of its
 identity, so every later record that names it carries the same label or
 the fold refuses the log.
 
+## `mod tests` › `fn satisfies_for(fold: &TopologyFold, key: TaskKey) -> Vec<TaskKey> {`
+
+The keys a publication of `key` settles, read from the fold: the
+candidate's own lineage closure (`TopologyFold::satisfies_closure`), which
+is `key` alone for an original and the whole parent chain for a repair —
+the root, every earlier repair of the lineage, and the repair itself. The
+production emitter derives the same value from the same fold
+(`engine::topology::integrate`, the prepared request's `satisfies`), so
+an offer built here is the offer a live run makes. Until 2026-09-16 every
+publication the generator built named `key` alone; the fold refused every
+publication of a repair that reached its closure check as
+`InvalidSatisfies` ("settles [3], and the fold derives [2, 3] as this
+publication's closure"), and no member of the family ever merged a
+repair — filed and fixed as
+`G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED` after #302's first
+review. The inline `merge_prepared/fast/with-verification` offer takes
+its `satisfies` from here too, and nothing can observe it there: the fold
+refuses a fast publication carrying a verification record before it reads
+`satisfies`, so that offer was never refused for its closure, before the
+fix or after. The relation's negative is kept as
+`merge_prepared/fast/self-satisfies/` in `classes`.
+
+## `mod tests` › `fn lease_release_for(fold: &TopologyFold, key: TaskKey, generation: u32) -> MergeLeaseRelease {`
+
+The lease a merge of `key`'s candidate releases: the candidate's own for
+an original, the lineage's for a repair, whose publication settles the
+lineage's root. `check_lease_release` refuses the other one either way,
+and the production emitter chooses the same way
+(`integrate::lease_release`). Until 2026-09-16 the generator released the
+candidate's lease for every key, so a repair's publication, had it been
+accepted, could not have been followed by its merge.
+
 ## `mod tests` › `fn merge_prepared_for(`
 
 The same publication naming its candidate outright, so a witness whose
 whole point is a candidate at a label the fixture does not otherwise
-derive can still be published.
+derive can still be published. Its `satisfies` is the caller's:
+`merge_prepared` passes the fold's closure (`satisfies_for`), the
+self-satisfies negative passes the repair alone, and `fast_publication`
+names aleph, an original whose closure is itself.
+
+## `fn merge_prepared_for(` › `VerificationSource::Verification { .. } => Some(Verificatio…`
+
+A verified publication records its one review pass:
+the bounds' `review_passes`.
 
 ## `mod tests` › `fn task_merged(`
 
@@ -496,7 +686,25 @@ The merge that resolves an open publication.
 `merged_sha` and `satisfies` are read off the transaction the fold is
 holding, because a merge is the ref move a publication already
 authorized: a class that invented either would only ever be refused,
-and the census would then never resolve a transaction.
+and the census would then never resolve a transaction. The lease it
+releases is derived from `key`'s lineage (`lease_release_for`), as the
+emitter derives it: a repair's merge releases the lineage lease and
+settles the lineage's root. So while a publication is open, every repair
+of one lineage offers the same merge under its own labels, at either
+generation, and an accepted `task_merged/` label of a repair says that a
+repair of its lineage merged, not which one: the open transaction's
+candidate says that.
+
+## `mod tests` › `fn rejection_of(`
+
+A rejection of `key`'s candidate at `sequence`, registering the repair
+the production repair module derives — or nothing when the fold is
+not in a state the derivation accepts (a failed ancestor, a full
+registry), which is the generator's own bound on repairs.
+
+## `mod tests` › `fn raised_question(key: TaskKey) -> TopologyEvent {`
+
+A question a task raises on its own (`question_raised`), one per key.
 
 ## `mod tests` › `fn classes(fold: &TopologyFold) -> Vec<Candidate> {`
 
@@ -506,34 +714,293 @@ The event classes
 
 ## `mod tests` › `fn classes(fold: &TopologyFold) -> Vec<Candidate> {`
 
-Every event class the census offers, at every state.
+Every event class the packet's `event_payload_classes` names, offered
+at every state for every task the fold registers — originals and the
+repairs rejections registered — within the bounds: two generations,
+two attempts, a parked settlement or a verification park only while
+fewer than the bound's questions are open, a resume only while the
+epoch is below the bound's resumes. Refusals are offers too: every
+arm of `plan_transition` executes on something.
 
-Parameters range over the bounded identities exactly as
-`event_payload_classes` asks: both tasks, both generations, both
-attempts, the settlement transitions, the three publication
-dispositions each in a matching and a mismatching shape, the budget
-stop, the backoff wake, and `run_finished` for each of the four
-outcomes.
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let may_integrate = fold.transaction().is_some() || sequenc…`
+
+The sequences bound: an integration opened at the next sequence
+beyond it is not offered; an open one is driven to its end.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let repairs = entries`
+
+The repairs bound: a rejection or a spawn registers a repair, and
+the fold registers as many as a run asks for.
 
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `out.push(Candidate::new(`
 
 The fast relation, matching and each way of missing it.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if entry.lineage.is_some() {`
+
+The satisfies relation's negative, for repairs only: the fast
+publication settling the repair alone, which the fold refuses wherever it
+reaches the closure check ("settles [3], and the fold derives [2, 3] as
+this publication's closure"). An original's closure is itself, so for an
+original the negative would be the positive, and it is not offered.
 
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `out.push(Candidate::new(`
 
 A stale verification, then the stale_clean relation both
 ways, and already_present both ways.
 
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let dispatchable = fold.ready(key) && fold.pipeline_reserva…`
+
+A dispatch is offered where the sequential run admits one:
+the task ready (its dependencies merged) and the pipeline
+reservable, which at `max_parallel = 1` is one open
+generation at a time. The fold trusts its emitter here — it
+refuses a dispatch of a task that is not Pending and
+nothing else — so without the run's own rule the census
+would explore interleavings no sequential run performs.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `defers: fold.task(key).map_or(1, |task| task.defers + 1),`
+
+The record carries the count the fold
+expects next, so a second deferral is one.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let class = fold.task(key).and_then(|task| {`
+
+The close reasons, each offered for the class it is about:
+run-ending for any open generation, a missing worktree for
+one no attempt has started in, a discarded session for a
+retained one. Every reason at every generation multiplies
+the closed states by three for no new arm.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let mut reasons = Vec::new();`
+
+The run-ending close is the closure's, offered where the
+closure performs it — a halt, a budget stop, or a derived
+ending — with the outcome the closure's own precedence
+selects; offered elsewhere it closes every open generation
+at every state for no arm the closure does not already
+execute.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let rejectable = match fold.transaction() {`
+
+A rejection is of a queued candidate with no transaction
+open, or of the candidate an open verification is about,
+and the fold refuses any other; the derivation is the
+costly part of an offer, so it is made where the fold can
+accept it.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let spawnable = may_repair`
+
+The same spawn a person could make by hand, offered where
+a person would: over merged work, once, before anything
+else is dispatched. The fold registers a spawn at almost
+any state, and a spawn at every state copies the space per
+repair.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let awaiting = fold.task_state(key) == Some(TaskState::Awai…`
+
+One task raises questions of its own; a raised question for
+every task would multiply every other state by the eight
+combinations of three, and the questions bound is reached
+through the parks the settlements and verifications record.
+The fold parks a lineage's task only with nothing of the
+lineage in flight or under integration; a candidate awaiting
+its merge is where a task raises one on its own.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if fold.finished().is_none() {`
+
+The ceiling's event class is offered at every state of a run that is
+not over: `decisions.bounded_census.event_payload_classes` names
+`budget_exceeded` "as an event class applicable at any state, since its
+trigger is a live ceiling", and the loop appends it at the halting
+drain's settlement as well as where it selects. Until PR10's round 2 it
+was offered only with the pipeline reservable, which withheld the class
+from every in-flight state; the cost is that it creates more states
+than any other class (the round's measurement: 28% of the 20,000).
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let resumes_here = matches!(`
+
+A resume is offered where a run resumes: after a Parked or
+budget-stopped end (the reopening resume) and over a retained
+session (the resume that retries or discards it). Accepted
+mid-run at every state it would copy the whole space once per
+epoch; the classification of every mid-run state as a resume
+action is the classifier tests' claim, over the same states.
+
+## `mod tests` › `fn integration_path_classes(fold: &TopologyFold) -> Vec<Can…`
+
+The classes of the integration path alone: what each seeded census
+explores from its shape's seed, so that four sequences and two repairs
+are a few steps away rather than forty. The one publication negative that
+concerns a repair, `merge_prepared/fast/self-satisfies/`, is admitted
+too, so each seeded census answers the satisfies relation both ways.
+No `question_answered` is among
+them, so a repair whose admission asks a person — in this fixture a
+repair of bet, whose one small rung lies below the repair floor of mid
+(`repair_ladder`, `admission_for`) — parks the run where it stands, and
+the `run_finished` offers reach `Complete` and `Parked` and no other
+outcome.
+
+## `mod tests` › `fn apply_seed_event(`
+
+One event of a seed, applied to the fold and appended to the trace, or a
+panic naming the refusal: a seed is a prefix the fold accepts event by
+event, never a trace assumed.
+
+## `mod tests` › `fn carry_to_queued_candidate(`
+
+One original carried from its dispatch to a queued candidate: dispatched,
+its attempt started, its candidate prepared and created — four events.
+
+## `mod tests` › `fn carry_ready_originals(`
+
+Every original the fold has ready, in key order, carried to a queued
+candidate; readiness is read before each, since the fold answers it and
+the census does not assume it.
+
+## `mod tests` › `fn engaged_originals_prefix(shape: PlanShape) -> (TopologyFold, Vec<TopologyEvent>) {`
+
+The seed of a shape's seeded census, by one rule for the three shapes:
+every original the shape has ready is carried to a queued candidate, and
+where that engaged one original alone, it is integrated at sequence 0
+and the originals its merge releases are carried too. So the chain seeds
+aleph merged and bet queued (11 events: the only two-original engagement
+a chain admits), the fan-out seeds aleph merged and bet's and gimel's
+candidates queued (15 events: the seed the family's one seeded member held
+before this rule existed, event for event), and the join seeds aleph's
+and bet's candidates queued with nothing merged (9 events: its two roots,
+each a rejection away from a repair, so two lineages are as near as two
+repairs). Each seed engages at least two originals, which
+`every_plan_shape_is_a_closing_member_of_the_family` holds it to.
+
+## `mod tests` › `fn seeded_census(shape: PlanShape) -> &'static Census {`
+
+The seeded census of one plan shape: from [`engaged_originals_prefix`],
+the integration path alone (`integration_path_classes`) — each queued
+candidate integrated or rejected, each repair dispatched, carried to a
+queued candidate and integrated in its turn — explored to closure under a
+ceiling of 5,000 states, memoised per shape. Measured 2026-09-16 from the
+family artifact (`UPSTROKE_CENSUS_SUMMARY`) at the tree whose generator
+publishes repairs: the chain closes in 25 states from its 11-event seed
+(1,317 offers, 25 accepted), the fan-out in 31 from its 15-event seed
+(1,756 offers, 32 accepted), the join in 75 from its 9-event seed (4,477
+offers, 91 accepted); none is truncated, no state sits past a trace of 27
+under the trace ceiling of 48, and the only unfinished dead ends are at
+the sequence bound with no transaction open and a candidate still queued
+— one in the chain, one in the fan-out, three in the join
+(`no_seeded_census_has_a_dead_end_below_the_sequence_bound`). Each
+reaches the fourth sequence and the second repair; the fan-out and the
+join reach the second lineage, one rejection of each of two originals'
+candidates; the chain reaches one lineage, because its seed merges aleph,
+a rejected bet's repair has no rung at or above the repair floor and asks
+a person — a question this generator never answers, so the run parks with
+gimel pending — and gimel's rejections repair one lineage. Its `reaches`
+names the two dimensions it reaches and not the third.
+
+**Until 2026-09-16 no repair was integrated in any member, the prefix
+included, and these notes said the opposite of the fan-out member.**
+Every publication the generator built carried `satisfies: [key]`, the
+fold derives a repair's closure as its whole parent chain, so a repair's
+`merge_prepared` was refused wherever it was otherwise admissible, no
+`task_merged` of a repair followed, and three of the seeded members' six
+unfinished dead ends sat below the sequence bound with that wrongly built
+publication as their only way forward (the chain then closed in 22
+states, the fan-out in 25, the join in 49). Filed as
+`G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED` and fixed in the same
+pull request after its first review: `satisfies_for` and
+`lease_release_for` build every publication and merge from the fold, as
+the emitter does, and
+`every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease`
+holds every seeded member to a repair publication accepted, its lineage
+lease released at the merge, its root merged, and the self-satisfies
+negative refused with the closure. With the fix the prefix makes 175,800
+offers of a repair's `merge_prepared` or `task_merged`, the negative
+apart, and the fold accepts 379 of them: 169 whose successors the prefix
+explores and 210 `Truncated`, accepted where the state ceiling left no
+room. The chain accepts 3 of 32, the fan-out 6 of 88 and the join 14 of
+232, none truncated (measured for #302's round-1 repair, the split by its
+second review). The artifact's `accepted` counts the first kind alone and
+its `truncated_offers` the second. Until
+PR10's round 2 the fan-out seed had two originals merged and one
+candidate, whose two repairs were one lineage. The prefix reaches every
+bound at its own ceiling (measured in round 6), so these members exist as
+the family's closing censuses, one per shape, rather than as the only
+route to any bound.
+
+## `mod tests` › `fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'s…`
+
+What each census reached in every declared dimension, from its states
+and traces: the largest value any state holds.
+
 ## `mod tests` › `fn census() -> &'static Census {`
 
-The one exploration every assertion below runs over.
+The prefix census of the family: the fan-out plan under the packet's
+bounds, explored breadth-first to `CensusBounds::default().max_states`
+states. The bounded space is larger than that ceiling by orders of
+magnitude, so the census stops there and says so (`truncated`); every
+assertion over it is over the explored set. At that ceiling it reaches
+every declared bound on its own (`reached_dimensions`, held by
+`every_declared_dimension_is_reached_at_its_bound`); the seeded censuses
+(`seeded_census`) close, one per plan shape, and reach the sequence and
+repair bounds again from their seeds, the fan-out's and the join's the
+lineage bound too.
+
+## `mod tests` › `struct FamilyMember {`
+
+One member of the census family the amended `decisions.bounded_census`
+describes: its name, the plan shape its fold was started with (`shape`,
+held to the root fold's registry by
+`every_plan_shape_is_a_closing_member_of_the_family`, so the field cannot
+name one shape while the census explores another), its census, the
+dimensions it exists for and reaches at their bound, whether its generator
+is the restricted one of a seeded census, and that generator — so a test
+that re-offers a member's classes at its states offers the ones the member
+was explored under, and a test that replays a member's traces replays
+them under its shape's inputs.
+
+## `mod tests` › `fn family() -> [FamilyMember; 4] {`
+
+The family: the prefix, then one seeded census per plan shape in
+`PlanShape::ALL`'s order — the chain, the fan-out and the join. The union
+of their explored states is what every coverage assertion of
+`bounded_census` runs over; a member's `reaches` is what
+`the_prefix_reports_its_truncation_and_every_seeded_census_closes` holds it
+to, and its `shape` what
+`every_plan_shape_is_a_closing_member_of_the_family` holds it to. Until
+2026-09-16 the family was two members, both fan-out; Gate 5's second run
+failed clause 1 on exactly that, since the bounds line names three shapes
+and the union explored one.
+
+## `mod tests` › `fn declared_bound(name: &str) -> u32 {`
+
+The packet's bound for one named dimension, read from
+`CensusBounds::default().dimensions()`.
+
+## `mod tests` › `fn the_prefix_reports_its_truncation_and_every_seeded_census_closes() {`
+
+The amended ST-14, member by member: the prefix explores to its stated
+state ceiling and reports truncation; every seeded census closes — not
+truncated, the frontier exhausted under its state ceiling, no state at the
+trace ceiling — names the dimensions it exists for and reaches each at its
+bound; and every dimension the prefix does not reach at its ceiling is named
+by some seeded census. Measured, that last set is empty: the prefix alone
+reaches all ten bounds at 20,000 states, and the test says so rather than
+leaving the contract's per-dimension clause to hold vacuously in silence — a
+generator change that left a dimension to the prefix's ceiling would fail
+here and would need a seeded census named for it. And the seeded members
+are one per plan shape: the set of their shapes is `PlanShape::ALL` and
+their count its length, so a shape dropped from the family fails here as
+well as in `every_plan_shape_is_a_closing_member_of_the_family`.
 
 Memoised rather than re-explored per test: the search is deterministic
 and the value is shared behind `&`, so a second run would be the same
-bytes at the price of another quarter of a million `plan_transition`
-calls. Sharing it is what makes the independent re-derivation in
+bytes at the price of another five million `plan_transition` calls. Sharing it is what makes the independent re-derivation in
 `the_census_transition_table_is_reproducible_from_the_folds_alone`
 affordable.
+
+## `mod tests` › `fn every_key(fold: &TopologyFold) -> Vec<TaskKey> {`
+
+Every key the fold registers: the originals and the repairs.
 
 ## `mod tests` › `fn common(fold: &TopologyFold) -> bool {`
 
@@ -559,21 +1026,28 @@ verification-deferred.
 
 `questions_open`: any open question.
 
+## `mod tests` › `fn blocked(fold: &TopologyFold, key: TaskKey) -> bool {`
+
+Whether `key` can never run: one of its dependencies, transitively,
+has failed, so the task stays Pending and the run completes around it.
+
 ## `mod tests` › `fn complete_shape(fold: &TopologyFold) -> bool {`
 
 The Complete arm's own condition, read off the durable state.
 
-## `fn complete_shape(fold: &TopologyFold) -> bool` › `let every_task_terminal = [ALEPH, BET].iter().all(|key| {`
+## `fn complete_shape(fold: &TopologyFold) -> bool` › `let every_task_terminal = every_key(fold).iter().all(|key| {`
 
 "every task is Merged, Failed, or Pending with a Failed task in its
-transitive dependency closure". The fixture plan has no dependencies,
-so no Pending task is ever derived-Blocked and the arm reduces to
-Merged-or-Failed here. PR10's fixtures carry the dependency shapes.
+transitive dependency closure". `every_key` ranges over the originals and
+the repairs the fold registered, and `blocked` reads the Pending case's
+transitive closure — the fan-out, chain and join shapes all have
+dependencies to fail.
 
-## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let census = census();`
+## `fn the_derived_outcome_is_total_over_every_explored_state()` › `for member in family() {`
 
 ST-14's headline: `NotEnding` or exactly one outcome at every
-explored state, and the `FoldError` arm never reached.
+explored state, and the `FoldError` arm never reached — over every member
+of the family, so over the union.
 
 Run through `TotalityAudit` rather than over `state.outcome`,
 because `state.outcome` is written by the explorer this assertion is
@@ -581,15 +1055,15 @@ evidence about: see that type's own documentation, and
 `the_totality_audit_reports_a_fold_error_a_normalisation_and_a_short_domain`
 for the three failures it is shown reporting.
 
-## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let reached: BTreeSet<usize> =`
-
-The domain first, and named from somewhere other than the list being
-audited: the seed, plus every state some accepted offer landed on.
-
 ## `fn the_derived_outcome_is_total_over_every_explored_state()` › `assert!(`
 
 The arm the design argues is unreachable, counted from the recorded
 value and from a fresh evaluation of the same fold alike.
+
+## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let reached: BTreeSet<usize> =`
+
+The domain first, and named from somewhere other than the list being
+audited: the seed, plus every state some accepted offer landed on.
 
 ## `fn the_derived_outcome_is_total_over_every_explored_state()` › `assert!(not_ending > 0 && ending > 0, "{not_ending}/{ending}");`
 
@@ -606,14 +1080,17 @@ packet's precedence chain rather than by the function under test.
 The necessary conditions of the two arms the oracle above does
 not compute forwards, asserted backwards.
 
-## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `let census = census();`
+## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `for member in family() {`
 
-The pre-`budget_exceeded` counterexample the packet names: a run
+Over every member of the family; the seeded members' restricted generator
+offers no `budget_exceeded`, so each has a pre-budget interval and no
+post-budget state, and the test asserts that rather than skipping them. The
+pre-`budget_exceeded` counterexample the packet names: a run
 with structurally admissible work and no budget record is NotEnding
 *whatever the unmodeled spend*, and BudgetExceeded only after the
 record exists.
 
-## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `let admissible_work = [ALEPH, BET].iter().any(|key| {`
+## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `let admissible_work = every_key(fold).iter().any(|key| {`
 
 The prefix itself: a dispatched, un-attempted generation is
 admissible work, and there is no budget record.
@@ -623,8 +1100,11 @@ admissible work, and there is no budget record.
 Both halves of the counterexample are populated, so neither branch
 above is vacuous.
 
-## `fn every_deferred_state_has_a_legal_next_transition()` › `let census = census();`
+## `fn every_deferred_state_has_a_legal_next_transition()` › `for member in family() {`
 
+Over every member of the family, each re-offered its own generator's
+classes; the seeded members' generator offers no deferral, so they hold no
+deferred state, and the test asserts that rather than skipping them.
 `coverage_assertions`: "every state with a Deferred task or
 verification-deferred candidate has at least one legal next
 transition (defer_wait_elapsed when neither halting nor
@@ -665,13 +1145,6 @@ explorer's own record. Pinned rather than assumed: were a
 ceiling state extended after all, this branch would be
 asserting about a state the other branch already covers.
 
-## `fn every_deferred_state_has_a_legal_next_transition()` › `let recorded: BTreeSet<String> = census`
-
-Below the ceiling the explorer did record answers, and they
-are the fold's — label for label. Asserted so the evaluation
-above cannot be a weaker oracle quietly standing in for the
-recorded one.
-
 ## `fn every_deferred_state_has_a_legal_next_transition()` › `assert_eq!(`
 
 And the accessor over that record. Both halves of what
@@ -681,6 +1154,13 @@ state and about acceptance rather than about
 `has_legal_transition_is_local_to_the_state_and_excludes_refusals`,
 which is what makes this line depend on a tested predicate
 rather than on a second reading of the same record.
+
+## `fn every_deferred_state_has_a_legal_next_transition()` › `let recorded: BTreeSet<String> = census`
+
+Below the ceiling the explorer did record answers, and they
+are the fold's — label for label. Asserted so the evaluation
+above cannot be a weaker oracle quietly standing in for the
+recorded one.
 
 ## `fn every_deferred_state_has_a_legal_next_transition()` › `assert!(`
 
@@ -720,23 +1200,24 @@ verification-deferred candidate — a different field, on a different
 record, cleared by a different rule — gets its own census rather
 than a claim that the first one covered it.
 
-## `fn a_verification_deferred_candidate_is_a_deferred_state_wi…` › `assert!(state.fold.halted_at().is_none());`
-
-Neither halting nor budget-stopped, so the packet's first arm
-applies verbatim: `defer_wait_elapsed` is the way out.
-
 ## `fn a_verification_deferred_candidate_is_a_deferred_state_wi…` › `assert!(`
 
 And the deferral is what makes the candidate ineligible: the
 verification it just refused cannot be restarted from here.
 
+## `fn a_verification_deferred_candidate_is_a_deferred_state_wi…` › `assert!(state.fold.halted_at().is_none());`
+
+Neither halting nor budget-stopped, so the packet's first arm
+applies verbatim: `defer_wait_elapsed` is the way out.
+
 ## `fn a_verification_deferred_candidate_is_a_deferred_state_wi…` › `assert_eq!(`
 
 A deferred candidate holds the run open whatever else is true.
 
-## `fn the_publication_relations_are_exercised_in_both_directio…` › `let census = census();`
+## `fn the_publication_relations_are_exercised_in_both_directio…` › `let members = family();`
 
-`coverage_assertions`: every `merge_prepared(fast)` matching the
+The accepted and refused label sets are the unions over the family's
+members. `coverage_assertions`: every `merge_prepared(fast)` matching the
 relation is accepted and every mismatch refused, and the stale_clean
 and already_present relations exercised both ways. Both directions
 of each, over the states the census actually reached.
@@ -750,9 +1231,12 @@ verification record, whose own hostile candidate
 (`merge_prepared/fast/with-verification`) is asserted refused the same
 way.
 
-## `fn no_offer_is_unmapped_and_every_class_is_offered_everywhe…` › `let census = census();`
+## `fn no_offer_is_unmapped_and_every_class_is_offered_everywhe…` › `for member in family() {`
 
-"no (state, event class) pair is unmapped": every offer produced an
+Over every member of the family, each held to its own generator's offers;
+the prefix explored exactly to its state ceiling and reports truncation,
+each seeded member closed with no truncated offer at all. "no (state, event
+class) pair is unmapped": every offer produced an
 acceptance or a refusal, and the count is the product rather than
 whatever survived.
 
@@ -761,14 +1245,17 @@ whatever survived.
 Both directions occur for the census as a whole, and the search ran
 to exhaustion rather than stopping at its state ceiling.
 
-## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `let census = census();`
+## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `for member in family() {`
 
-INV-02 over the whole explored set: the live path and the replay
+INV-02 over the whole explored set of every member of the family: the live path and the replay
 path are one transition function, so a trace folded event by event
 during exploration and the same trace replayed from nothing must be
-the same state.
+the same state. Each trace is replayed under its member's own shape
+(`inputs_for(member.shape)`): a chain's `run_started` freezes a registry
+the fan-out's plan does not derive, so a replay under the wrong plan is a
+refusal and not a comparison.
 
-## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `let again = TopologyFold::replay(inputs(), &state.trace).expect("replays again");`
+## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `let again = TopologyFold::replay(inputs_for(member.shape), &state.trace)`
 
 Replaying twice is equal, which is the property a resume needs
 and a fold with hidden state would not have.
@@ -785,19 +1272,21 @@ A second `run_finished` is refused whatever the derived outcome,
 so the comparison the guard makes is only visible before the
 first one. Both halves are asserted.
 
-## `fn the_skeleton_states_the_bounds_it_ran_under_and_the_ones…` › `let bounds = CensusBounds::default();`
+## `mod tests` › `fn the_census_runs_at_the_packets_bounds_and_says_where_it_stopped() {`
 
-What this slice does *not* establish, as an assertion rather than as
-a paragraph: the fixture is two originals with no repairs, and the
-packet's bounds are three originals with two repairs and two
-lineages. PR10 raises them; nothing here should read as if it
-already had.
-
-## `fn the_skeleton_states_the_bounds_it_ran_under_and_the_ones…` › `assert!(`
-
-No repair is spawned by any class this skeleton offers, so no
-lineage lease is ever taken: the lineage half of the census is
-PR10's.
+The bounds the census runs under are the packet's
+(`decisions.bounded_census.bounds`: three originals, two repairs and two
+lineages, two generations per task, two attempts per generation, four
+integration sequences, verification defers per candidate under the
+fixture's `max_defers` of two — one, the allowance's last outage parking —
+two open questions, one review pass, two resumes), asserted number by
+number, and the fixture is what they name:
+three originals fanning out from aleph, rejections registering repairs, a
+repair dispatched, a lineage lease held somewhere in the explored set. And
+the census is truncated at its state ceiling and says so: the space under
+these bounds does not close under 20,000 states — nor under the 50,661,094
+abstract states the PR10 orchestrator's research reached without closing —
+and a census that stopped there must not read as exhaustive.
 
 ## `fn the_fixture_varies_every_field_a_relation_reads()` › `let started = run_started();`
 
@@ -902,7 +1391,17 @@ rather than a shorter list that still looks total.
 And the honest list, so the three above are differences rather than
 the only thing this checker ever says.
 
-## `fn the_census_transition_table_is_reproducible_from_the_fol…` › `let census = census();`
+## `fn the_census_transition_table_is_reproducible_from_the_fol…` › `for member in family() {`
+
+Over every member of the family, each under the generator it was
+explored with: until PR10's round 7 this ran over the prefix alone, and
+it is the only test that holds a row's `from` to the state it was
+recorded at, its label to the offer, a refusal to the fold's own reason
+and an acceptance to the fingerprint applying the offer reaches — so a
+seeded census with a wrongly mapped row passed every family-wide check
+(the round-7 fix-check lens, P1; the recipe
+`census-seeded-row-misattributed`, `from = usize::MAX` on the seeded
+census's first row, fails it now at the seeded member's state 0).
 
 PR3-ST14-001, the half no loop over `states()` can reach: a
 successor that was dropped before it was recorded is not in
@@ -984,6 +1483,20 @@ PR3-ST14-002 — what the abstraction key must keep
 A stale-clean verification of a candidate, with the three fields the
 `merge_prepared` relations are about named.
 
+## `mod tests` › `fn consumed_verification_defers_survive_publication() {`
+
+R14's `verification_defers` after the candidate it counts is published (the round-4 contract
+lens, F1): the deferred-verification trace observed reads `Present(1)`; the wait elapses, the
+verification starts and prepares stale-clean, and `task_merged` removes the queue entry — and
+the observation still reads `Present(1)`, because the ledger counts the outage events of the
+durable prefix rather than the entries of the current queue, where the unit vanished until PR10's
+round 4.
+
+## `mod tests` › `fn deferred_verification_trace() -> Vec<TopologyEvent> {`
+
+The queued candidate's trace with its verification started and deferred by one outage; the fold
+helper beneath replays it, and the ledger's observers take both.
+
 ## `mod tests` › `fn queued_candidate_trace(paths: PathSet) -> Vec<TopologyEvent> {`
 
 The prefix every abstraction witness below shares: one task's
@@ -1019,7 +1532,8 @@ prefix above.
 
 ## `mod tests` › `fn fast_publication(base: CommitSha, commit: CommitSha) -> TopologyEvent {`
 
-The fast publication of `aleph`'s first candidate at one head.
+The fast publication of `aleph`'s first candidate at one head, settling
+aleph alone — its closure, as an original.
 
 The two labels are the offer side of the two relations
 `decisions.bounded_census.abstraction` retains, so an offer built from
@@ -1142,19 +1656,24 @@ witnesses of their own below, and a second obligation with them:
 distinct fingerprints, *and* one fast publication that the two legs
 answer in opposite directions.
 
+## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `assert!(`
+
+And the two answers the key owes.
+
 ## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `match &witness.shape {`
 
 The witness is one difference, checked rather than asserted into
 being by the way it was written.
 
+## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `assert_eq!(`
+
+And the second obligation is carried by both candidate-side operands
+rather than by whichever one was written first.
+
 ## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `if let Some(operand) = &witness.recorded {`
 
 The trace's one difference, again as one difference in the
 record the relations actually read.
-
-## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `assert!(`
-
-And the two answers the key owes.
 
 ## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `if let Some((for_left, for_right)) = &witness.opposed {`
 
@@ -1168,11 +1687,6 @@ by refusing the one offer aimed at it.
 
 Every relation named once, so a witness cannot be counted twice.
 
-## `fn the_abstraction_key_separates_states_that_differ_in_one_…` › `assert_eq!(`
-
-And the second obligation is carried by both candidate-side operands
-rather than by whichever one was written first.
-
 ## `mod tests` › `fn overlap_classes(fold: &TopologyFold) -> Vec<Candidate> {`
 
 The overlap census: one route, branching only where a region is chosen.
@@ -1182,7 +1696,9 @@ The overlap census: one route, branching only where a region is chosen.
 PR3-ST14-002's other half: A3-ST14-014 normalises AB to A or drops
 path regions from the key. `decisions.bounded_census.abstraction`
 names three regions, and AB is the only one under which the overlap
-relation answers differently.
+relation answers differently. The join shape is explored here: aleph and
+bet independent, so region A leaves bet dispatchable while aleph is parked
+and region AB does not.
 
 The two states here differ in one thing: whether `aleph`'s candidate
 lease covers `bet`'s region as well as its own. Under A, `bet` is
@@ -1217,70 +1733,81 @@ Two states, and two different answers to the same offer.
 
 Both regions really are in play, and AB is neither of the other two.
 
-## `mod tests` › `fn generated_by_the_classes() -> (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<String>) {`
+## `mod tests` › `fn every_declared_dimension_is_reached_at_its_bound() {`
 
------------------------------------------------------------------------
-PR3-ST14-004 — the bounds it generated, and one-field negatives
------------------------------------------------------------------------
+`dimensions()` is every dimension `CensusBounds` declares, read off the
+struct's own rendering minus the two search limits, so a bound added to the
+struct and forgotten there fails. Each declared bound is then measured from
+the explored states themselves (`reached_dimensions`: the registry's
+originals and repairs, the generations and attempts per task, the next
+sequence, the defers, the open questions, the epoch, the review passes a
+verified publication records) and held by **equality**, never merely below:
+the family's union reaches every declared bound, the test says which
+member reaches each (a member that names a dimension must be among them),
+the prefix reaches all ten on its own at its state ceiling (until round 6
+the assertion covered seven, and the notes said the deep census was the
+only route to the other three; the measurement says otherwise), and each
+seeded census reaches the fourth sequence and the second repair, the
+fan-out's and the join's the second lineage and the chain's one
+(`fn seeded_census` says why), each closing under its ceilings. A boundary
+the family did not reach
+is not evidence it explored it — which is what `PR3-ST14-004`'s below-bound
+assertion used to read as, and what the round-1 review of PR10 refused.
 
-## `mod tests` › `fn generated_by_the_classes() -> (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<String>) {`
+## `mod tests` › `fn production_arms() -> BTreeSet<&'static str> {`
 
-Every generation id, attempt number and question id the fixture's
-classes construct, read off the events rather than off their labels: a
-label is a string a change to the payload it names can leave alone.
+The arms of the production dispatch, read from the source of
+`check_started_run` (`src/topology/fold/start.rs`): every
+`TopologyEventBody::Variant` the match names, mapped to its wire kind
+through the `kind()` table in `src/topology/events.rs`.
 
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let bounds = CensusBounds::default();`
+## `mod tests` › `fn every_plan_transition_arm_is_executed_by_the_census() {`
 
-PR3-ST14-004. A3-ST14-011 turns the attempt generator's `1..=2` into
-`1..2`. Attempt 2 stops being offered anywhere, an attempt-2-only
-transition defect becomes invisible, and `CensusBounds` goes on
-reporting `attempts_per_generation: 2` — a boundary the skeleton did
-not generate. So each declared dimension is measured against what
-the fixture actually built, and the shortfalls are named rather than
-left to read as coverage.
+`coverage_assertions[0]`: every `plan_transition` arm executed at
+least once — the arms enumerated from the production source, the
+executions from the transitions of every member of the family, whose
+kinds the explorer records as it offers. Both ways: an arm no offer reached fails, and
+an offered kind the dispatch has no arm for fails.
 
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let open_questions = census`
+## `mod tests` › `fn expected_dependency_keys(shape: PlanShape) -> Vec<Vec<TaskKey>> {`
 
-The most questions any explored state holds open at once, which is
-what the bound is about.
+The dependencies each shape's registry must hold, as a literal beside
+`PlanShape::deps` rather than derived from it: the chain's bet after
+aleph and gimel after bet, the fan-out's bet and gimel after aleph, the
+join's gimel after aleph and bet.
 
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let mut sequences = BTreeSet::new();`
+## `mod tests` › `fn every_plan_shape_is_explored() {`
 
-Integration sequences the census ran, and verification deferrals any
-candidate took.
+The packet's plan shapes under the **full** generator: every shape but the
+main one — the chain and the join, since the fan-out is the prefix —
+explored under `classes` to a smaller ceiling of 3,000 states, truncated
+by design and asserted so. What it covers that the family's seeded members
+cannot: the full generator's settlements, halts, budget stops, parks and
+resumes over a dependency structure the prefix never holds, so every
+outcome — `Complete`, `Halted`, `BudgetExceeded`, `Parked` — is reached on
+each shape, the fold's error arm is never reached there, and every
+explored state classifies alike live and on replay under the shape's own
+inputs. What it does not do is close, and since 2026-09-16 it no longer
+has to: the closing exploration of each shape is the family's seeded
+member, and this test asserts that member exists beside its own
+truncation, so the two readings of one shape — closed under the
+integration-path restriction, truncated under the full generator — are
+stated together rather than left to read as a contradiction. Its
+dependency oracle is `expected_dependency_keys`, the literal each shape's
+registry is held to here and in
+`every_plan_shape_is_a_closing_member_of_the_family`.
 
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let generated: BTreeMap<&str, u32> = [`
+## `mod tests` › `fn every_plan_shape_is_a_closing_member_of_the_family() {`
 
-What the fixture generated, per declared dimension.
-
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `assert_eq!(`
-
-The declared list and the measured list are the same list, so a
-ninth dimension cannot be declared without being measured.
-
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let rendered = format!("{bounds:#?}");`
-
-...and `dimensions()` is every dimension `CensusBounds` declares,
-read off its own rendering rather than off a list beside it. A field
-added to the struct and forgotten here fails.
-
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let at_maximum = [`
-
-Which dimensions this fixture takes to their declared maximum, and
-which it does not. Both lists are asserted, so a shortfall cannot
-become coverage and coverage cannot quietly become a shortfall.
-
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `assert_eq!(attempts, BTreeSet::from([1, 2]));`
-
-And maximum-plus-one is excluded rather than merely unobserved: the
-identities the fixture generates are exactly `1..=max`, densely,
-with nothing above.
-
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `assert_eq!(question_ids.len(), 4);`
-
-Four question identities are constructed and at most two are ever
-open together, so the bound is about simultaneity and is measured as
-such.
+The regression test Gate 5's clause 1 asked for: the family's shape
+coverage asserted directly, not its member count. `PlanShape::ALL` names
+the bounds line's three shapes; every member's declared `shape` is the
+shape its root fold's registry holds (`expected_dependency_keys`) and its
+seed replays to its root under that shape's inputs, so the field cannot
+name one shape while the census explores another; and for each shape
+exactly one seeded member closes, from a seed that engaged at least two
+originals, reaching a completed run. A shape dropped from `family()`, or
+a member whose census was started from another shape's plan, fails here.
 
 ## `mod tests` › `fn merge_prepared_diff(left: &MergePrepared, right: &MergePrepared) -> Vec<&'static str> {`
 
@@ -1303,7 +1830,133 @@ The diff names every field of the record, checked against the
 record's own rendering: a field added to `MergePrepared` and
 forgotten here would make "exactly one" a claim about a subset.
 
-## `fn every_publication_negative_differs_from_its_positive_in_…` › `assert!(refused.contains(label), "{label} was never refused");`
+## `fn every_publication_negative_differs_from_its_positive_in_…` › `let negative = merge_prepared_of(label);`
 
 And only then the answers: the positive accepted somewhere, this
 negative refused everywhere.
+
+## `mod tests` › `fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {`
+
+"the explorer … classifies every reachable state with a resume action
+by running the recovery classifier over it (Complete and Halted
+classify as finalize-then-terminal)", and "the classification computed
+during live emission equals the classification recomputed from the
+durable prefix alone": the incremental fold each state was reached
+with, against a replay of its trace under its member's shape, at every
+state of every member of the family, the three kinds counted over the
+union.
+
+## `mod tests` › `fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {`
+
+"every fault row's durable prefix is a reachable census state and its
+fold-derived classification matches the row's resume action". Row
+membership is read from the fold alone (`rows_reached`) and the
+classification checked item by item (`matches_row`), so a classifier that
+drops an item cannot also drop the assertion about it, over every state of
+every member of the family. The prefix reaches nineteen of the twenty-one
+rows on its own — the repair rows
+through the rejections the generator offers, the retained and retry rows
+through its retained settlements and resumed attempts, where the
+two-original skeleton reached fifteen and seeded the other four — and the
+two rows outside the fold (a container, an append) have no fold state to
+classify and say so in the summary. The seeded tests that follow keep the
+repair and retained prefixes as constructed witnesses beside the census.
+
+## `mod tests` › `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled() {`
+
+The repair rows: a conflict rejection registers a repair of aleph
+inside a new lineage (T-REJECT), and the repair's dispatch inherits the
+lineage and names its source candidate (T-REPAIR-DISPATCH). Both
+prefixes are explored as census states from that seed and classify as
+tabled: nothing to settle for the rejection, an open repair generation
+to recreate at its base for the dispatch.
+
+## `pub(crate) mod tests` › `use crate::engine::topology::reachability::{`
+
+-----------------------------------------------------------------------
+PR10: the resume classifier over every explored state, the fault rows,
+the runner identity in both directions, and the summary (ST-14).
+-----------------------------------------------------------------------
+
+## `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefi…` › `let seeded = Census::explore(`
+
+Both prefixes are census states when explored from the seed.
+
+## `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefi…` › `assert!(seeded.truncated() && seeded.states().len() < 500);`
+
+One step deep by construction, so the trace ceiling stops legal
+continuations and the census says so; the state ceiling is not hit.
+
+## `mod tests` › `fn a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled() {`
+
+The retained rows: a retained settlement leaves the generation idle
+with its session (T-RETAINED: a fresh process closes it), and the
+same-session retry the retaining incarnation starts is in flight at
+attempt two (T-RETRY: a fresh process settles it interrupted). Both
+prefixes are explored as census states from that seed.
+
+## `fn a_retained_generation_and_its_retry_are_reachable_prefix…` › `assert!(seeded.truncated() && seeded.states().len() < 500);`
+
+One step deep by construction, so the trace ceiling stops legal
+continuations and the census says so; the state ceiling is not hit.
+
+## `mod tests` › `fn run_resumed_is_accepted_with_an_identical_runner_and_refused_with_any_different_field() {`
+
+"every run_resumed with an identical runner identity is accepted and
+every run_resumed with any different field (kind, policy, reference,
+id, digest, volumes) is refused" — offered at every explored state of
+every member of the family. A Complete or Halted state refuses the
+identical one too, because the
+run is over; every other state accepts it, and the state it reaches
+has the next epoch, no budget stop, no deferral and no end.
+
+## `mod tests` › `fn the_census_summary_names_every_fault_row_and_serializes() {`
+
+The summary the G5 gate dumps, for the prefix as before — every fault
+row, the two outside the fold marked, every action and outcome counted,
+the bounds it ran under — and, since round 6, the family artifact around
+it: one entry per member with its name, its plan shape, whether its
+generator is restricted, whether it closed, the dimensions it reaches at
+their bound, its seed's length and its own summary (ceiling, states,
+offers, truncation), the union's reach in every dimension, and whether the
+union reaches every bound; since 2026-09-16 the artifact carries one
+seeded member per plan shape, each closed, and the test holds it to that.
+Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
+
+## `mod tests` › `fn names_a_repair(label: &str) -> bool {`
+
+Whether a class label is about a repair: the registry's fourth, fifth and
+sixth entries, which `label` names `r3`, `r4` and `r5`.
+
+## `mod tests` › `fn every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease() {`
+
+The regression test of `G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED`:
+in every seeded census some repair's fast publication is accepted; some
+repair's merge is accepted, and at each such merge the source state held
+the lineage lease of the repair's root, the landed state holds it no
+longer, and the root is merged; the self-satisfies negative is offered,
+refused everywhere, and somewhere refused with the closure the fold
+derives; and the prefix merges a repair too. On the generator that named
+the repair alone it fails at its first assertion — the chain's accepted
+publications were bet's and gimel's and no repair's.
+
+## `mod tests` › `fn no_seeded_census_has_a_dead_end_below_the_sequence_bound() {`
+
+An unfinished dead end is a state with no `run_finished`, below the trace
+ceiling, at which no offer is accepted. In a seeded census the only
+legitimate ones are where the sequence bound withholds integration: the
+next sequence at the bound and no transaction open, so `classes` offers
+no publication, merge or rejection, and a candidate stays queued. The
+test holds every unfinished dead end of every seeded member to all three,
+and every seeded member to at least one. The next sequence alone would
+not do: a fast publication advances it as it opens its transaction, and
+while that transaction is open `classes` still offers its merge, so a
+dead end at the bound holding one is a merge the generator could not
+build, not the bound. On the generator that named the repair alone the
+fan-out's state 18 and the join's 26 and 42 were dead ends below the
+bound, their only way forward the repair publication the generator could
+not build. With a merge that settles a repair's root and the repair
+rather than the open transaction's `satisfies`, the join's state 53 is a
+dead end at the bound holding the transaction of r4's publication at
+sequence 3, and only the transaction assertion catches it (#302's second
+review, M12).

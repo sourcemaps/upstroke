@@ -69,6 +69,10 @@ impl Fixture {
         let private = root.join("private");
         make_dir(&private);
         let (head, _previous) = git_fixtures::repository(&base);
+        // The run's public directory, where every ref write's Git child holds
+        // the run's cleanup lease (`rundir::hold_cleanup_lease_for_child`);
+        // a coordinator would have created it before its first ref write.
+        make_dir(&crate::rundir::public_dir(&base, RUN_ID));
 
         let manager = WorkspaceManager::derive(&base, &private, RUN_ID, INCARNATION)
             .expect("derive the manager");
@@ -321,6 +325,19 @@ impl Journal {
             .task(ALPHA)
             .and_then(|task| task.generations.first())
             .map(|generation| generation.class.clone())
+    }
+
+    fn replay_twice_equal(&self) {
+        let bytes = std::fs::read(&self.path).expect("the log");
+        let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+        let first = TopologyFold::replay(inputs(), &events).expect("the log replays");
+        let second = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+        assert_eq!(first.state(), second.state(), "two replays disagree");
+        assert_eq!(
+            self.fold.state(),
+            first.state(),
+            "the live fold and a replay of its own log disagree"
+        );
     }
 }
 
@@ -686,6 +703,10 @@ fn spawn_kill_child(fixture: &Fixture, which: &str) -> ProcessOutput {
         .env(ENV_BASE, fixture.base.to_string_lossy().into_owned())
         .env(ENV_PRIVATE, fixture.private.to_string_lossy().into_owned())
         .env(ENV_SITE, which);
+    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
+        Err(_) => spec,
+    };
     HostRunner::new()
         .run(&gate_request(
             spec,
@@ -847,6 +868,7 @@ fn orphan_candidate_pin_removed_after_kill() {
         ),
         "the deletion went through its own funnel site"
     );
+    journal.replay_twice_equal();
 }
 
 #[test]
@@ -1085,6 +1107,7 @@ fn kill_after_candidate_prepared_appends_candidate_created_once() {
         refused.to_string().contains("is present at") && refused.to_string().contains(&commit.0),
         "the refusal names the ref's actual value: {refused}"
     );
+    journal.replay_twice_equal();
 }
 
 #[test]

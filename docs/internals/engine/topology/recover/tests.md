@@ -73,6 +73,51 @@ worktree is cut at.
 
 The committed first line, without its newline.
 
+
+## `struct Fixture` › `resume_attempts: Cell<u32>,`
+
+How many times this process has tried to resume the run through one of the
+fixture's three trunks (`resume_with`, `resume_as_certified_by`,
+`resume_holding_manager`), counting refusals. Zero is a first resume, and a
+first resume never waits for the run's cleanup lease: every test that plants
+a hold and expects the immediate production refusal is a first resume. From
+one on, the trunk first waits for the previous incarnation's release
+(`await_previous_incarnations_release`).
+
+## `struct Fixture` › `release_bound: Cell<Duration>,`
+
+The bound of that wait: `RELEASE_BOUND` unless a test lowers it, as
+`a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation`
+does to show the expiry boundary in half a second rather than twenty.
+
+## `struct Fixture` › `hold_past_bound: Cell<Option<CleanupHoldPastBound>>,`
+
+What the most recent wait reported when it ran out, or `None` when it found
+the lease free inside its bound; a test asserting on the expiry reads it
+here rather than from a clock of its own.
+
+## `struct Fixture` › `release_once_held: RefCell<Option<crate::workspace_manager::fixture::ParkedFork>>,`
+
+A parked fork (`workspace_manager::fixture::ParkedFork`) that the later
+resume's wait is to release the moment it has observed the lease held, and
+not before: the choreography of
+`a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes`.
+`holder_observed` takes it out on the first observation that found the
+lease held and releases it; `None` otherwise, which is every other test.
+Unix only, as the fork is. A fixture dropped with the fork still here drops
+the fork, which releases and reaps its child on its own bound, so a test
+that unwinds first leaves no child behind.
+
+## `struct Fixture` › `holder_released: Cell<Option<(u32, std::process::ExitStatus)>>,`
+
+Which observation of the wait released the fork in `release_once_held`, and
+how the released child ended; `None` until it happens. The test reads the
+order here: a release recorded at observation one is a release the wait
+made after seeing the hold, and the resume that follows it followed the
+release. A wait deleted from the trunk produces no observation, so no
+release and no record, and the resume is refused by production while the
+fork still holds — which is the reason the test then fails with, whatever
+the scheduler did to either side.
 ## `struct Damage {`
 
 What a fixture may be built wrong in.
@@ -144,6 +189,16 @@ needs a ladder deep enough to hold two failures below the rung that reads
 them, and this is that ladder. Additive so no existing fixture's chain
 moves.
 
+## `struct Damage {` › `alternative_reviewer: bool,`
+
+The review plan names an alternative reviewer, so a candidate whose
+implementer is the primary reviewer is reviewed by someone else.
+
+## `struct Damage {` › `no_automatic_repairs: bool,`
+
+`max_merge_repairs = 0`: the first rejection registers its repair with
+human admission.
+
 ## `impl Fixture` › `fn manager(&self) -> crate::workspace_manager::WorkspaceManager {`
 
 The manager recovery step (g) rebuilds worktrees through.
@@ -203,9 +258,19 @@ Without it every "no census effect followed this refusal" assertion
 below is vacuously true, and the census's own write has nothing to be
 the anchor of.
 
+## `fn build(tag: &str, damage: Damage) -> Self` › `rundir::write_plan(&public, b"{\"plan\":\"planted\"}\n", &m…`
+
+The normalized plan the creator writes at P2, through its funnel: R21
+names it among the persistent outputs, so the ledger looks for it.
+
 ## `fn build(tag: &str, damage: Damage) -> Self` › `let mut warnings = Vec::new();`
 
 The log, through the Event funnel and nothing else.
+
+## `impl Fixture {` › `fn two_tasks(tag: &str) -> Self {`
+
+A healthy two-task run: what every stale-verification fixture needs,
+since only a publication moves the integration head past the base.
 
 ## `impl Fixture` › `fn worktree_lock_file(&self) -> PathBuf {`
 
@@ -347,6 +412,11 @@ Off by default, because most tests here only care that a process ran.
 A driver test that means to reach the **candidate sequence** needs a
 non-empty diff: the ladder's cheap rungs reject an empty one, which is
 what `pr_sequence[8]`'s "empty-diff attempt failures" names.
+
+## `struct RecordingRunner` › `per_task: Mutex<bool>,`
+
+Name the edited file by the attempt's task, so two tasks' workers leave
+two different edits and a dependent task's diff is not empty.
 
 ## `impl RecordingRunner` › `fn filtering() -> Self {`
 
@@ -571,6 +641,22 @@ takes [`resume_holding`].
 
 [`resume`], with the hook bundle supplied — so a test can arm one.
 
+
+## `impl Fixture` › `fn holder_observed(&self, observation: u32) {`
+
+The wait's acknowledgement of a held observation, and the one thing the
+fixture does with it: release the fork a test put in `release_once_held`,
+once, on the first observation that found the lease held, and record the
+observation's number and the child's status in `holder_released`. The
+release is `ParkedFork::release`, bounded, and returns with the child
+collected, so the wait's next observation reads the lease free. On Windows
+there is no fork to release and the fn does nothing.
+
+## `fn resume_with(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+The wait before a later resume, and the annotation of a refusal that follows
+an expired one. See `await_previous_incarnations_release`; the other two
+trunks carry the same two lines.
 ## `fn any_lock_site_ran(harness: &Arc<Mutex<HookHarness>>) -> Vec<&'static str> {`
 
 Whether any lock site ran — the R17 half of "no hold was taken".
@@ -711,6 +797,9 @@ emptiness is asserted rather than assumed, and the anchor is the census's
 first effect *here*: if the barrier's three sites do not all precede it, the
 resume decided something from a prefix it had not proven.
 
+After the resume the durable log replays twice to states equal to each other
+and to the fold the resumed handle holds (`assert_log_replays_twice_equal`).
+
 ## `fn resume_establishes_stable_prefix_barrier_before_any_fold_derived_effect() {` › `assert_eq!(`
 
 Asserted **before** the resume, because the resume reclaims what it walks:
@@ -802,6 +891,147 @@ ladder decided something, and §11.4's feedback is on the record it decided
 from. `detail` is what the next attempt is told, and it is the field this
 helper exists to put in a log.
 
+## `enum AlphaEnd {`
+
+How alpha ends in a planted finished run.
+
+## `enum AlphaEnd` › `Queued,`
+
+The candidate queued: `AwaitingMerge`, its candidates ref present.
+
+## `enum AlphaEnd` › `Published,`
+
+The candidate published fast: `Merged`, the integration ref moved.
+
+## `enum AlphaEnd` › `Parked,`
+
+The attempt parked on a question: `AwaitingInput`, the question open.
+
+## `struct FinishedResidue {`
+
+Terminal residue planted beside the finished run, for the cleanup steps
+that prune it: a snapshot (ii), a staging worktree (iii) and a
+`prepared/<seq>` pin (iv).
+
+## `struct FinishedPlanting {`
+
+A run planted at its end: alpha as `alpha` says, beta's one attempt
+failed with the halting policy the outcome needs, beta's closed generation
+still holding its worktree and intent, the residue asked for, and
+`run_finished` durable. What terminal finalization then has to act on,
+with nothing yet done to it.
+
+## `struct FinishedPlanting` › `surplus_candidate_pin: bool,`
+
+Whether the planting carries alpha's candidate-prepared pin as declared damage
+(`with_a_candidate_pin_no_crash_leaves`). `plant_finished_run_with` leaves it false;
+`finalization_effects` expects the pin's deletion in the cleanup order only where it is true.
+
+## `struct PlantedAnswerFiles {`
+
+A published answer and a writer's `.partial` beside it, planted under
+`answers/` by every finished-run fixture and compared byte for byte after
+a fault, after the recovery's finalization (`assert_finalized`) and after
+the repeated finalization, at every terminal outcome; the Complete ledger
+fixture plants them too, so R21's `answer_files` and `partial_files`
+parts observe one each and are held retained. Until PR10's round 2 only
+the Halted test planted them (the round-2 crash lens, P1-2).
+
+## `fn plant_finished_run_with(`
+
+A run planted at its end for the ST-18 tests: alpha queued, published or
+parked, beta's one attempt failed with the halting policy the outcome
+needs, beta's closed generation still holding its worktree and intent, the
+residue asked for (a snapshot, a staging worktree, a proposal pin), and
+`run_finished` durable — what terminal finalization has to act on, with
+nothing yet done to it. Since PR10's round 7 the planting also leaves an
+already-unreachable object in the store (`plant_unreachable_object`) and
+records the objects the run's refs and worktrees reference and the whole
+store as it stands, so that every finalization driven from it is held to
+R27 by `assert_finalized` (`assert_objects_kept`); since round 8 it also
+leaves a staged report a dead writer would have — since round 10 the
+record of the staging directory's name in the run's private half and the
+directory it names under the public run directory, `.report-staging-<ulid>/`,
+with the half-written `report.json` inside, planted through the writer's own
+record-then-create helper (`plant_report_leftover`); in round 9 a directory
+made by hand at the fixed `.report-staging/`; in round 8 a regular file
+under a name `rundir::report_staging_name` produced — so that both branches
+of the report site are held to reclaiming it.
+
+Since the second repair round of #311 the planting completes alpha's promotion through its
+cleanup. `plant_queued_candidate` and `publish_alpha` write alpha's candidate-prepared pin beside
+`task_candidate_created` and leave it standing with no generation worktree, and the planting
+prunes it (`prune_the_planted_candidate_pins`): a finished run is planted with its candidates ref
+and no candidate-prepared pin, which is what `reclaim_after_creation` leaves before
+`promote_candidate` returns. Until then the pin stood. The second review of that change
+(`4231db05`) executed the consequence on the kill matrix Gate 5's audit credits for 26 registry
+rows: the pin stood at 19 of the Complete half's 26 boundaries, alpha's worktree and intent
+absent, and each of those 19 fresh-process resumes deleted it (`Ref.DeleteCandidatePin`), a repair
+of damage the cell's kill had not left. A census of that site over the 568 topology tests at
+`4231db05`, one process per test, read the same 19 in the resume children; and of the 137
+deletions finalization's sweep made across 17 tests, every one was of a pin test code had written,
+none of a pin `pin_candidate` made (`~/orch-pr10/clause2-evidence-r2/census/`).
+
+## `fn with_a_candidate_pin_no_crash_leaves(planted: FinishedPlanting) -> FinishedPlanting {`
+
+**Declared damage: a candidate-prepared pin no crash leaves.** This writes alpha's
+candidate-prepared pin back beside a finished run whose planting completed alpha's promotion, and
+marks the planting (`surplus_candidate_pin`). Production's order leaves no such state:
+`TopologyRun::promote_candidate` returns only after `reclaim_after_creation` has deleted the pin; a
+crash inside it leaves no `run_finished`; every resume of an unfinished log runs
+`finish_promotions`, which prunes an orphan pin and completes a promotion a standing pin leaves
+unfinished, before the loop can close the run; and `TopologyRun::close_run` is the only emitter of
+`run_finished`. Finalization's sweep of `candidate-prepared/` refs is therefore defensive, and a
+test that needs the sweep to find something has to plant damage. It is planted here, by name, and
+nowhere silently: in the two tests that fault and kill the sweep over it,
+`a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`
+and `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`, and in
+the four behaviour tests that assert on the sweep (`resume_finalizes_halted_then_refuses` and the
+three report-barrier tests); in neither finalization matrix. **A test that plants it constructs no
+crash's prefix and earns no exactness credit under ST-07's first obligation**, and none of the six
+that plant it is cited by the sequential registry, by `coverage.rs` or by Gate 5's audit. (The
+second repair round of #311 planted it at the two `Ref.DeleteCandidatePin` cells of each matrix;
+the third review read those cells as credited evidence, the registry and `coverage.rs` naming the
+error-return matrix for rows 41 and 42 and the audit having selected the kill matrix for them, and
+the third round moved them out.) What it holds is the sweep's
+behaviour: that the step runs after the prepared pins and before the candidates refs, that a fault
+or a kill inside it converges on the next resume, and that no pin of either family is pruned
+before the report is durable. The exact constructions of `Ref.DeleteCandidatePin` before and after
+are the two kills inside the promotion
+(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`), which the cited test runs
+at both phases as its two cells of the site.
+
+Measured over the 570 topology tests at `ae673768`, one process per test
+(`~/orch-pr10/clause2-evidence-r2/census/at-ae673768/`): the loop's own `close_run` reached
+finalization's sweep 32 times in 25 tests and found no candidate-prepared pin in any of them;
+recovery step (b) reached it 239 times and found one only in the seven tests that plant it here.
+That is what the suite shows, not a proof over every history.
+
+The helper first asserts that no candidate-prepared pin stands, so it cannot pass over a planting
+that left one.
+
+## `fn candidate_pins_on_disk(fixture: &Fixture) -> Vec<String> {`
+
+The `candidate-prepared/` refs Git lists under `refs/upstroke/` (`upstroke_refs_on_disk`): the
+on-disk reading the finalization matrices take before the fault and at the boundary the next
+resume reads.
+
+## `fn plant_report_leftover(fixture: &Fixture) -> PathBuf {`
+
+What a report writer that died between its stage and its rename leaves
+(PR10's round 10): the record of its staging directory's name in the
+private half, the directory under the public run directory, and
+`report.json` half-written inside — planted through the writer's own
+record-then-create helper, `rundir::plant_report_staging_of_a_dead_writer`,
+never by hand: a directory made by hand carries no record and is not the
+protocol's, and the writer removes only what a record names (the round-10
+lenses, P2; until round 10 the fixture made a directory by hand at a fixed
+name and the writer removed whatever directory stood there). Planted by
+every finished-run fixture and again by the matrix before its third resume,
+and read reclaimed — the record, the directory and the file — by
+`assert_finalized`, and the re-planted one by the matrix after its third
+resume.
+
 ## `fn resume_finalizes_halted_then_refuses() {`
 
 ===========================================================================
@@ -810,26 +1040,36 @@ helper exists to put in a log.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
-A Halted run does not continue.
+A Halted run does not continue. Since PR10's round 2 the fixture also plants
+a staging orphan under `intents/` and reads it reclaimed; since round 3 it
+plants, beside it, a registration Git cannot list, prune or repair — an
+add of a task slot killed between opening `gitdir` and writing it, with the
+slot's intent durable and its empty checkout directory made, the state the
+ST-07 sampler measured at `1c9ff5a7` — and reads step (b)'s refusal name it
+as passed over, the contained checkout reclaimed under the finalizer's
+proof (`WorkspaceManager::WriterProof::NoWriterAlive`), and the registration
+itself left byte-identical, since nothing on disk binds it to the slot.
 
 ### About the word "finalizes" in this test's name
 
-Step (b) is "terminal finalization **then** refuse continuation", and this
-slice implements the refusal only: `RunDir.WriteReport` carries
-`fault_row: t_finalize`, which is not one of PR7's eleven rows, so writing a
-report here would be an out-of-row effect with no fault coverage in this
-slice. The name is the packet's and is kept unchanged so the row and the
-test still correspond; what it asserts is the half in range, and it asserts
-the other half's **absence** explicitly rather than leaving it unstated —
-no `report.json`, and no `RunDir.WriteReport`.
+Step (b) is "terminal finalization **then** refuse continuation", and since
+PR10 the test asserts both halves: the report written through
+`RunDir.WriteReport` once, every cleanup step's residue gone, the refusal
+naming the outcome and what finalization did; and on the second resume the
+report found current and left byte-identical while the report's sites are
+consulted again for the fresh branch's directory barrier (round 5), nothing
+appended. Until PR10 the slice implemented the refusal only —
+`RunDir.WriteReport` carries `fault_row: t_finalize`, which was not one of
+PR7's eleven rows — and the test asserted the other half's absence, no
+`report.json` and no `RunDir.WriteReport`; the name is the packet's and was
+kept so the row and the test still correspond.
 
-## `fn resume_finalizes_halted_then_refuses()` › `attempt_finished(`
+## `fn resume_finalizes_halted_then_refuses()` › `let planted = with_a_candidate_pin_no_crash_leaves(plant_finished_run(`
 
-`halts_run: false`: the task ends terminal and the run does
-not halt, so the derived outcome is Complete rather than
-Halted — which is what makes both arms of (b) constructible
-without any integration terminal this slice does not
-implement.
+The candidate-prepared pin this test reads standing before the resume and pruned by step (iv)
+after it is declared damage (`with_a_candidate_pin_no_crash_leaves`), as the staging orphan and
+the unlistable registration beside it are: the test holds what finalization does to a pin it
+finds, and constructs no crash's prefix.
 
 ## `fn resume_rebuilds_runner_from_record_and_warns_on_config_drift() {`
 
@@ -926,6 +1166,44 @@ An intent this run's *creator* incarnation left behind, in the recorded
 root. It is dead by construction: the run lock is exclusive, so only one
 incarnation of a run is ever live, and this process is a different one.
 
+## `struct ProbeDiesLeaving<'a> {`
+
+A `RunnerPreflight` for a resume that ends in its pre-flight probe: `certify` runs the residue
+the witness hands it (what a launch that died part way leaves) and then refuses, so the command
+ends at step (c) of the recovery order with nothing cleaned up. The refusal stands in for the
+death; the residue is planted, not left by a launch.
+
+## `fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()`
+
+Rows 153 to 158 and 161 to 168 of Gate 5's audit, the container launch and release coordinates.
+The gate's third run found each cell's container state exact and the run around it not: the state
+was planted beside `Fixture::healthy`'s published creation marker and labelled with the creator's
+incarnation, where a probe container beside a committed run is left by a *resume* that died in its
+`RunnerPreflight` probe, whose census had already removed the marker (the census precedes
+`PreflightCertified::certify`). So each cell's state is now left by the run's first resume,
+`FIRST_RESUMER`: that resume runs `run_recovery_order` for real, its census removes the creator's
+marker through `RunDir.RemoveMarker` (asserted on its harness), and its pre-flight seam
+(`ProbeDiesLeaving`) plants the cell's state under that incarnation and refuses. What stands
+before the credited resume is asserted: the marker gone; no execution root, no integration ref and
+no `run_resumed`, because the probe precedes all three; no process holding the run; and the cell's
+intent, view and container. The next resume, a different incarnation over the real refs, reclaims
+the state in its container census and enters no `RunDir.RemoveMarker`; the execution root and the
+integration ref are its own to create, once each, because no resume of the run had reached them.
+
+The states a container launch or release can leave between its funnels,
+each left by the dead incarnation of a run with a log and resumed over:
+nothing; the intent alone (between `Container.WriteIntent` and the mount, or
+after the view's unmount); the intent and the view with no container (before
+`Container.Create`, or after `Container.Remove`); and the intent, the view and
+a container, exited (created and never started, or stopped) or running. The
+fake runtime gives a created container the state a stopped one has
+(`Liveness::Exited`), so those two are one cell. Each cell asserts the planted
+state before the resume, that the resume's container census leaves no
+container, intent or view, and that the log then replays twice to the fold
+the resumed handle holds (`assert_log_replays_twice_equal`): Gate 5's recovery
+audit found these states reclaimed by container unit fixtures, which carry no
+log to replay.
+
 ## `fn resume_reclaims_a_provable_husk_beside_the_run_and_retains_a_possibly_committed_one() {`
 
 A resume **reclaims** the husks beside the run it is resuming: the private
@@ -975,14 +1253,17 @@ the failure never reached this run's own directory at all — and recovery step
 (a1) gives this run's stale-marker repair to its owner, which is this
 process. So the repair was collateral damage of a different run's residue.
 
-## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(stuck.public.exists(), "the public half was removed anyway");`
-
-The husk: retained where it was, with the locator the next census needs.
+After the resume the durable log replays twice to states equal to each other
+and to the fold the resumed handle holds (`assert_log_replays_twice_equal`).
 
 ## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(`
 
 And this run's own stale marker, which sorts after the failure, was still
 repaired by its owner.
+
+## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(stuck.public.exists(), "the public half was removed anyway");`
+
+The husk: retained where it was, with the locator the next census needs.
 
 ## `fn the_resume_census_reports_the_husk_it_could_not_reclaim() {`
 
@@ -1024,6 +1305,12 @@ and asserts on both platforms that the observation site executed — a Windows
 build that skipped the question entirely would pass a test that only
 asserted the outcome.
 
+The resume that succeeds also takes and gives back the run lock's exclusive
+cleanup probe (`Lock.ProbeCleanupExclusive`, both phases), and its log replays
+twice to the fold its handle holds (`assert_log_replays_twice_equal`). The refused
+resume never reaches that probe: `LocksHeld::take` takes the worktree lease,
+whose `Lock.ObserveCleanupHold` refuses, before the run lock.
+
 ## `fn resume_refused_while_reaper_hold_observed_then_succeeds()` › `let cleanup = fixture.public().join("cleanup.lock");`
 
 Bound inside the `cfg`, because only the `cfg` uses it. Bound
@@ -1033,7 +1320,26 @@ recorded as `windows-gate-lint-level-gap`: a local
 `--target x86_64-pc-windows-msvc` check accepts code the guest does
 not, because only the guest sets the lint level.
 
+
+## `fn resume_refused_while_reaper_hold_observed_then_succeeds()` › `let started = std::time::Instant::now();`
+
+The refusal is timed: this is a first resume of the fixture, and a first
+resume never waits for the hold it observes (the directory planted at
+`cleanup.lock` makes the observation fail closed, so a wait here would run
+its whole bound). Five seconds is a quarter of `RELEASE_BOUND` and a hundred
+times the resume's own cost, so the assertion tells a wait from a slow box
+and fails a fixture that waited on a first attempt. The block it sits in is
+Unix-only; on Windows the test's remainder makes a first resume with no
+hold, so the Windows leg runs neither this assertion nor any later-wait path
+through this test — other tests that resume a fixture more than once are
+what exercise the wait's free path there.
 ## `fn replayed(fixture: &Fixture) -> TopologyFold {`
+
+The fold alone; `replayed_with_events` for the observers that take the
+durable prefix as well (R14's consumed verification deferrals are counted
+from it since round 4).
+
+## `fn replayed_with_events(fixture: &Fixture) -> (TopologyFold…`
 
 ===========================================================================
 (d), (e), (h)
@@ -1050,6 +1356,15 @@ INV-02's "live state and replay use one checked transition over the exact
 wire event" means a claim made against the replayed fold is a claim about
 the bytes, not about a `TopologyFold` this process happens to hold.
 
+## `fn assert_log_replays_twice_equal(fixture: &Fixture, live: Option<&TopologyFold>, context: &str) {`
+
+Replay twice equal, after a recovery: the log's bytes on disk replayed twice,
+the two states equal to each other and, where the recovery hands back the fold
+it holds (a resume's handle, or a driven run's `fold()`), equal to that fold's
+state. The once/twice pair of the two-crash proof, with the live comparison
+the scaffold's `Run::replay_twice_equal` makes. A resume that refuses hands
+back no fold, and passes `None`.
+
 ## `fn resume_clears_budget_stop_and_wakes_deferred() {`
 
 A resume clears the previous epoch's budget stop and wakes every Deferred
@@ -1061,9 +1376,24 @@ resume" the answer to a budget stop, and a build that cleared it only in
 memory would leave the next process refusing for a stop the log still
 carries.
 
+## `fn resume_finalizes_halted_then_refuses()` › `attempt_finished(`
+
+`halts_run: false`: the task ends terminal and the run does
+not halt, so the derived outcome is Complete rather than
+Halted — which is what makes both arms of (b) constructible
+without any integration terminal this slice does not
+implement.
+
 ## `fn steps_d_and_e_reach_every_generation_not_the_first() {`
 
-**Steps (d) and (e) handle every entry, not the first one.**
+**Steps (d) and (e) handle every entry, not the first one.** The two retained generations stand
+in the log alone — each task's dispatch, its attempt and a settlement retained for epoch 0 — on
+the P6 fixture (the creator's marker still published, no execution root, no integration ref). The
+test plants no worktree and no intent for either, so this is not the retry row's prefix of Gate
+5's audit (rows 9 and 10), which a crash at `Worktree.Verify` leaves with the generation's
+worktree and intent standing (R9). The resume is production's `run_recovery_order`: it repairs the
+fixture's damage, closes both generations at step (e) with nothing to scrub, and afterwards the
+log replays twice to equal states.
 
 Two catalogue entries survived the whole suite at `6a21be6` for one reason —
 no fixture had a second thing for these loops to reach:
@@ -1084,6 +1414,13 @@ condition a carried row would have named. It is cheaper to hold it than to
 write it down: PR11 inherits a substrate whose recovery loops are witnessed
 rather than a note saying they are not.
 
+## `const BETA: TaskKey = TaskKey(1);`
+
+---------------------------------------------------------------------------
+T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
+resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
+---------------------------------------------------------------------------
+
 ## `fn steps_d_and_e_reach_every_generation_not_the_first()` › `dispatched(),`
 
 alpha: retained and idle — step (e)'s subject.
@@ -1097,11 +1434,42 @@ beta: the same, and the second entry the loop must reach.
 The premise: two retained generations before the resume. Without this the
 assertion below is satisfied by a fixture that only ever had one.
 
+## `fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {`
+
+`T-ATTEMPT.resume_action`, the clause after the settlement: "the task
+worktree scrubbed with force". Step (d) closes the generation and its
+worktree and intent go with it — the sibling arm of (e)'s reclaim, found by
+asking whether the class had another member.
+
+## `fn a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(retained: bool) {`
+
+PR #249's adequacy review, finding 4's second half, in both arms. The first
+recovery's closing append — `attempt_interrupted` or `generation_closed` —
+returns an error at its `Synced` point, so the close is durable and the
+scrub never ran: the generation is `Closed` and its checkout and intent are
+still there. The next recovery closes nothing and reclaims them all the
+same, from the closed state (`reclaim_closed_generations`); a third removes
+no worktree at all. The review's witness failed at `3bce2c6a` with
+`worktree=true, intent=true` after the second recovery. The second
+recovery's removals are not counted exactly, because it also finishes the
+promotions the interrupted first never reached (step (f)).
+
 ## `fn retry_refused_after_resume() {`
 
 A retained session belongs to the incarnation that retained it. Step (e)
 closes the generation, so after the resume there is no retry to evaluate —
 and the fold refuses one.
+
+This is the retry row's prefix of Gate 5's audit (rows 9 and 10, `Worktree.Verify` before and
+after): a `RetainedIdle` generation with its worktree, and no retry started. The resume is
+production's `run_recovery_order`, the worktree is reclaimed with the close, and the log replays
+twice to equal states. The prefix stands on the P6 fixture and carries its damage: the creator's
+marker still published, the integration ref missing, and the settlement retained for epoch 0, the
+creator's, which never steps. `plant_task_worktree` writes the generation's intent and adds its
+worktree under the execution root, so the resume removes the marker and creates the ref but never
+creates the root;
+`a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed`
+builds the same prefix as a crash leaves it.
 
 `recovery_order` (i): "`ready_retry` is never evaluated before (h) and the
 fold refuses a stale-incarnation retry". The first clause is structural
@@ -1113,6 +1481,24 @@ directly, against the replayed fold.
 
 And the transition itself is refused: a forged retry into the closed
 generation does not plan.
+
+## `fn a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed()`
+
+Rows 9 and 10 of Gate 5's audit, `Worktree.Verify` before and after: the retry row's prefix (a
+`RetainedIdle` generation and no retry started) built as a crash leaves it, where
+`retry_refused_after_resume` builds it on the P6 fixture. A stepping incarnation has always resumed
+once, because the creator never steps, so the run is resumed first — the creator's marker removed,
+the execution root and the integration ref created, `run_resumed` durable, the handle released —
+and only then does the dead incarnation's work go in: the dispatch at the recorded base, the
+attempt, and its settlement retained for that incarnation's epoch (the fold refuses any other), with
+the attempt's worktree standing at the base and the worker's edit staged in it (R9). The next
+resume performs the row's action, step (e): the generation is closed
+`ResumeDiscardsRetainedSession` before the resume's own `run_resumed`, the worktree and its intent
+are reclaimed through their own funnels (the directory gone, its registration gone, the staged
+edit released to Git and not deleted), nothing is verified, and neither a marker nor a missing
+root is repaired, because the prefix carries neither. Its first step opens a fresh generation,
+never a retry, and that attempt is accepted; the log replays twice to equal states, before and
+after the step.
 
 ## `fn run_resumed_records_identical_runner_identity() {`
 
@@ -1179,7 +1565,8 @@ whether the proven prefix contains the line".
 ## `fn resume_after_append_error_follows_surviving_prefix()` › `let second = harness();`
 
 The next resume: a fresh harness, nothing armed, and it follows the
-surviving prefix.
+surviving prefix. Its log then replays twice to the fold its handle holds
+(`assert_log_replays_twice_equal`).
 
 ## `fn an_append_error_during_recovery_cancels_the_reservation_and_every_running_invocation() {`
 
@@ -1400,14 +1787,6 @@ The fourth bound, "**before (d)**", is not here: it is asserted positively by
 [`kill_after_run_started_creates_integration_ref`], which reads the log at
 the instant the funnel ran.
 
-## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
-
-(b): a Halted run.
-
-## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
-
-(c): a shell probe that does not answer.
-
 ## (end of `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()`)
 
 **(f)'s pin-absent refusal is gone with the convergence it guarded.**
@@ -1423,6 +1802,14 @@ The refusal that still bounds (f) is the integration transaction's, and
 holds that ordering. Removed rather than rewritten around a predicate
 that cannot fire — a case asserting a refusal nothing can reach would
 pass for the wrong reason.
+
+## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
+
+(b): a Halted run.
+
+## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
+
+(c): a shell probe that does not answer.
 
 ## `fn recovery_kill_child() {`
 
@@ -1674,32 +2061,26 @@ observation. This fixture leaves the one state (g) exists for — a generation
 dispatched and never attempted, which is what a crash between
 `task_dispatched` and `attempt_started` leaves.
 
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice() {`
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g() {`
 
-A repair generation cannot reach step (g) in this slice, and the reason is
-measured rather than asserted.
+An inherited lease on an ordinary task is refused by the fold at the
+barrier's checked replay, before (g) sees anything — the consistency rule
+that keeps a `task_dispatched` from claiming a lineage its entry does not
+descend from. Until PR9 this test also stood for "a repair generation
+cannot reach (g)"; repairs now reach it, through entries `merge_rejected`
+registers, and their path is
+`a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
-(g) refuses a generation whose lease is an inherited lineage: `T-DISPATCH`'s
-resume action for a repair is to re-run the recorded materialization, whose
-source candidate the fold does not retain, and `checkpoint_refusals` gives
-repair execution to PR8. That arm is **unreachable here**, and this test
-pins both walls that make it so, because "unreachable" written in a comment
-is the same sentence as "I did not check".
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g()` › `let repair = {`
 
-The wall this test will lose first is the second one: the day a slice admits
-repairs, `TaskRegistry::from_plan` starts producing entries with a lineage,
-this test fails, and (g)'s arm becomes reachable — which is precisely when
-someone should be made to look at it.
+The fold refuses an inherited lease on an ordinary task, at the barrier's
+checked replay — so the event never becomes fold state at all.
 
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice()` › `let repair = {`
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g()` › `let registry = TaskRegistry::originals_with_agents(`
 
-Wall one: the fold refuses an inherited lease on an ordinary task, at the
-barrier's checked replay — so the event never becomes fold state at all.
-
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice()` › `let registry = TaskRegistry::originals_with_agents(`
-
-Wall two: and there is no task it *would* be legal on, because this
-slice's registry gives every entry `lineage: None`.
+And no *original* entry could carry one legally: `originals_with_agents`
+gives every entry `lineage: None`; lineage members enter the registry only
+through `merge_rejected`.
 
 ## `fn the_recovery_order_hands_the_run_on_rather_than_dropping_it() {`
 
@@ -1762,6 +2143,19 @@ would pass whichever branch the fixture happened to reach — a fixture
 that silently started reaching a different one would take the assertion
 with it.
 
+## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
+
+The dispatch AND the attempt are real and durable, in that order. Both
+went through the production emitter, which is what makes them subject to
+the append-error protocol; the scaffold's emitter re-implements the
+append and runs none of it.
+
+## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
+
+And the provisional reservation did not leak. O24 converts it AT the
+append; a refusal after that must not leave an entitlement held, or the
+next selection at width 1 sees a full pipeline forever.
+
 ## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert!(`
 
 **Not accepted, and the reason is the contract's.** This fixture's runner
@@ -1775,13 +2169,6 @@ It asserted `accepted` before the ladder's cheap rungs were wired, and
 passed: `judge` starts at gates, the plan configures none, and nothing
 had asked what the diff contained. A driver that accepted this would have
 pinned a candidate whose commit is its own parent.
-
-## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
-
-The dispatch AND the attempt are real and durable, in that order. Both
-went through the production emitter, which is what makes them subject to
-the append-error protocol; the scaffold's emitter re-implements the
-append and runs none of it.
 
 ## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert!(`
 
@@ -1808,12 +2195,6 @@ The fixture's hint is a glob (`src/alpha/*.rs`), which is what makes this
 assertion able to fail: the fold strips it to the literal prefix
 `src/alpha`, and a driver taking hints literally would record a prefix
 that overlaps nothing. Measured — that shipped, for one commit.
-
-## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
-
-And the provisional reservation did not leak. O24 converts it AT the
-append; a refusal after that must not leave an entitlement held, or the
-next selection at width 1 sees a full pipeline forever.
 
 ## `fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {`
 
@@ -2006,16 +2387,16 @@ spent and nothing escalates" — `next_step`'s own words, and the cell that
 was wrong when the settlement derived the allowance from `Next` instead
 of from the failure.
 
-## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `let parked = TopologyFold::parse_log(&fixture.log_bytes())`
-
-The settlement is durable and carries its question.
-
 ## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `assert!(`
 
 **The words are the legacy authorities', not the driver's.** The context
 quotes the agent as data and names the task; the options are what
 `question_options` gives a `Clarify`. A driver that worded its own would
 pass every assertion above and fail these.
+
+## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `let parked = TopologyFold::parse_log(&fixture.log_bytes())`
+
+The settlement is durable and carries its question.
 
 ## `fn the_driver_refuses_a_tree_a_filter_has_transformed() {`
 
@@ -2090,6 +2471,13 @@ indistinguishable, and `run.rs` passing a literal `None` left the whole
 suite green. Measured, twice: once as `R3-SEAMS-001` and once when round
 4 restored the literal.
 
+## `fn the_retaining_incarnation_retries_in_place()` › `assert!(`
+
+Balance, which says every registration was settled. It does **not** say
+the reviewers were registered — an empty ledger balances too — so R4's
+review coverage is asserted where reviewers actually run, in
+`attempt::tests`.
+
 ## `fn the_retaining_incarnation_retries_in_place()` › `let retained = TopologyFold::parse_log(&fixture.log_bytes())`
 
 The generation is retained, not closed: only a retained one is retried in
@@ -2117,13 +2505,6 @@ fixture can reach the arm". This fixture reaches it, and reached it then.
 rung; the plan hard-coded `retry: None`, so the second attempt got the
 first attempt's prompt verbatim and no reason to behave differently. A
 retry that is not informed is a rung's allowance spent to learn nothing.
-
-## `fn the_retaining_incarnation_retries_in_place()` › `assert!(`
-
-Balance, which says every registration was settled. It does **not** say
-the reviewers were registered — an empty ledger balances too — so R4's
-review coverage is asserted where reviewers actually run, in
-`attempt::tests`.
 
 ## `fn the_retaining_incarnation_retries_in_place()` › `let resumed = runner`
 
@@ -2485,6 +2866,13 @@ real one or round-tripped against it; a fixture that hand-built an
 `AttemptPlan` here would be exactly the fifth copy the `frozen_binding`
 precedent warns about.
 
+## `fn the_driver_spends_the_allowance_the_log_records()` › `assert!(`
+
+**And the human is told how many attempts actually ran.** The count in
+the question is the task's spend on this rung, not the new generation's
+attempt number — a park that said "1 attempt" after two would send an
+operator looking for a run that had barely started.
+
 ## `fn the_driver_spends_the_allowance_the_log_records()` › `let SettlementTransition::Parked { question } = transition else {`
 
 **Parked, not failed** — and that is `next_step`'s answer, not a
@@ -2492,13 +2880,6 @@ weakening of the assertion. A spent chain asks a human rather than
 failing the task: "Nothing further can move this task ... and the
 escalation chain is spent." What matters here is that the allowance was
 seen as spent at all.
-
-## `fn the_driver_spends_the_allowance_the_log_records()` › `assert!(`
-
-**And the human is told how many attempts actually ran.** The count in
-the question is the task's spend on this rung, not the new generation's
-attempt number — a park that said "1 attempt" after two would send an
-operator looking for a run that had barely started.
 
 ## `fn the_loop_continues_an_attempt_recovery_recreated() {`
 
@@ -2552,6 +2933,25 @@ question a reader would otherwise ask.
 This fixture's Mid rung is `High` and its review axis is `Medium`, so the two
 are distinguishable. A fixture where they matched would assert nothing.
 
+## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
+
+The implementer's own pool, so the two values in play are distinguishable
+and the assertion below is about which one the reviewer got.
+
+## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
+
+**And its own agent's pool**, which is the other cell of
+`a_reviewers_profile_is_accounted_for_at_both_callers` whose value the
+extraction dropped. That census checks the roll is complete and cannot
+check a value — a cell is prose. This is the value.
+
+§11.3/§13: a cross-vendor second opinion draws on a different
+subscription than the implementer, so the pool is looked up from the
+reviewer's own agent. `coordinator.rs` did it and `assembly.rs` did
+not, leaving `profile_for`'s empty string — so the capacity engine
+attributed a reviewer's spend to a pool with no name. Sol's
+independent `seams` read, round 3.
+
 ## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `use crate::engine::topology::scaffold::REVIEW_AGENT;`
 
 **The reviewer is bound to a different agent than the implementer, and it
@@ -2572,25 +2972,6 @@ the implementer's pool yields `the-implementers-pool` and fails.
 Through the scaffold's own constant rather than a literal: it is the
 agent that fixture's `alternative` binding already names, so this is the
 second agent the run actually probed and not one invented here.
-
-## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
-
-The implementer's own pool, so the two values in play are distinguishable
-and the assertion below is about which one the reviewer got.
-
-## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
-
-**And its own agent's pool**, which is the other cell of
-`a_reviewers_profile_is_accounted_for_at_both_callers` whose value the
-extraction dropped. That census checks the roll is complete and cannot
-check a value — a cell is prose. This is the value.
-
-§11.3/§13: a cross-vendor second opinion draws on a different
-subscription than the implementer, so the pool is looked up from the
-reviewer's own agent. `coordinator.rs` did it and `assembly.rs` did
-not, leaving `profile_for`'s empty string — so the capacity engine
-attributed a reviewer's spend to a pool with no name. Sol's
-independent `seams` read, round 3.
 
 ## `fn the_loop_inherits_the_committed_digest_recovery_verified() {`
 
@@ -2701,6 +3082,185 @@ same reason the add was.
 crate and the effect denylist refuses the raw call even in a fixture,
 which is the rule working rather than getting in the way.
 
+## `struct PlantedTransaction {`
+
+--- integration-transaction recovery fixtures (PR8, step (f)) -------------
+
+A planted integration transaction: the candidate it publishes and the
+commit the fast path proposes.
+
+
+## `fn append_events(fixture: &Fixture, bodies: &[TopologyEventBody]) {`
+
+Append event bodies to the fixture's already-committed log, the way a live
+run would have, so a resume folds them as part of its proven prefix.
+
+## `fn alpha_commit(fixture: &Fixture) -> (CommitSha, CommitSha) {`
+
+A commit for ALPHA on the fixture base, adding `candidate.txt`, left in the
+object store with the worktree restored to the base.
+
+## `fn obliged_reviews_for(fixture: &Fixture, key: TaskKey) -> Vec<crate::events::ReviewRecord> {`
+
+The review passes ALPHA is frozen to require, as records that pass — read
+off the registry the current log folds to, exactly as a live candidate's
+would be.
+
+## `fn alpha_candidate_prepared(`
+
+The `candidate_prepared` for ALPHA's generation 0 at `commit`/`tree`.
+
+## `fn candidate_prepared_for(`
+
+The `candidate_prepared` of `key`'s generation 0 at `commit`/`tree`, whose
+attempt edited exactly `path` on the fixture base.
+
+## `fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {`
+
+Plant a queued candidate for ALPHA on the base: its objects and refs, the
+integration ref at the base, and the log through `task_candidate_created`.
+
+## `fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {`
+
+ALPHA's queued candidate on the base — its objects, refs and events —
+leaving the integration ref wherever it is. Its refs are the candidates ref and the
+candidate-prepared pin, and the pin is left standing: the finalization witnesses take it through
+`plant_finished_run_with` as the residue their cleanup order prunes. A witness of a state a
+completed promotion left prunes it (`prune_the_planted_candidate_pins`).
+
+## `fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {`
+
+The `merge_prepared(fast)` of sequence 0 for a planted candidate at the
+base.
+
+## `fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {`
+
+Plant a fast integration transaction: the candidate objects and refs, the
+integration ref at the base, and the log through `merge_prepared(fast)` with
+no `task_merged` — the exact durable state a crash after the stable-prefix
+barrier but before the compare-and-swap leaves.
+
+## `fn a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas() {` › `let fixture = Fixture::healthy("finish-fast");`
+
+The two-crash shape: `merge_prepared(fast)` is durable in the log (the
+stable-prefix barrier held before the process died) and the integration
+ref is still at the base (the compare-and-swap had not run when power was
+lost). A resume must finish the one authorized publication.
+
+## `fn resume_with_real_refs(`
+
+Resume through the real `WorkspaceManager` as *both* ref interfaces — the
+P7/P8 startup repair reads the same refs the transaction recovery moves.
+
+The `RecordingRefs` double every other resume here supplies answers
+"absent" to the startup repair whatever the repository holds, which is
+exactly how a resume that refused its own published head stayed green.
+A publication test resumes through this.
+
+## `fn resume_as_certified_by(`
+
+`resume_as` with the pre-flight seam a parameter, for the one witness whose resume has to end in
+its probe (`ProbeDiesLeaving`). `resume_as` passes `AlwaysCertifies`, as it always did.
+
+
+## `fn resume_as_certified_by(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+As `resume_with`: the wait before a later resume, and the annotation of a
+refusal that follows an expired one.
+## `const FIRST_RESUMER: &str = "01KZTFFFFFFFFFFFFFFFFFFFFF";`
+
+The incarnation that resumes a run first in the witnesses below and then dies: neither the
+creator nor `RESUMER`, so the resume a witness credits is a different incarnation from the one
+whose work it recovers.
+
+## `fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag: &str) -> usize {`
+
+`Fixture::build` plants P6: `run_started` durable, the creator's marker still published, no
+integration ref and no execution root. A creator never steps, and a resume's census removes the
+marker before that resume appends anything, so no crash leaves a dispatch, a queued candidate, a
+rejection or a prepared transaction beside a published marker or a missing root. The gate's third
+run graded the witnesses that planted such events on the fixture near-exact for it (report §8.4,
+"the recover fixture's P6 hybrid"): their credited resume removed the marker, and at some rows
+recreated the root, besides performing the row's action.
+
+This is the setup resume that report asks for. `FIRST_RESUMER` resumes the fixture through
+`run_recovery_order` over the real refs and its handle is dropped: the marker is removed, the
+execution root and the integration ref are created, `run_resumed` is the log's second line and no
+process holds the run (all asserted). A witness plants the dead incarnation's work after it, so the
+planted events follow a `run_resumed`, as a stepping incarnation's do. Returns the number of
+durable events, for `kinds_after`.
+
+Two simplifications remain and are the fixture's, not this helper's: `Fixture::manager` derives the
+manager under the creator's incarnation, so an intent planted through it names the creator (the
+recovery never reads an intent's incarnation), and the planted run carries no `run.lock` or private
+skeleton from its creation (a resume opens or creates the lock file and reads neither).
+
+## `fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {`
+
+The on-disk half of the exactness claim, asserted after the plant and before the credited
+recovery: no creation marker (published or staged), the execution root a directory, the
+integration ref present, and no candidate-prepared pin under the run's refs (`git for-each-ref`,
+filtered to `candidate-prepared`). With these standing, a resume has no marker to remove, no root
+to recreate, no ref to create and no pin to delete.
+
+## `fn prune_the_planted_candidate_pins(fixture: &Fixture, keys: &[TaskKey], tag: &str) {`
+
+Completes a planted candidate's promotion through its cleanup. `plant_queued_candidate_events` and
+`plant_published_beta_editing` write each candidate's candidate-prepared pin beside its candidates
+ref and leave it standing. A promotion `TopologyRun::promote_candidate` completed leaves no
+such pin: `reclaim_after_creation` deletes it, expected-old, before it removes the generation
+worktree and the loop continues, so a pin beside `task_candidate_created` and no generation
+worktree is a state no crash leaves. Nor is the pin inert: `candidate::recovery_for` reads it as
+an unfinished promotion and `finish_promotions` deletes it, which the frontier review of this
+change's first head (`523dac5f`) found in the five witnesses below as `Ref.DeleteCandidatePin`
+entries their coordinates' crashes would not have left. Each of the five prunes the pins its plant
+left, by name, as Git does (`update-ref -d` with the pinned commit as the old value), and asserts
+the prefix complete after.
+
+Since the second repair round the finished-run planting completes alpha's promotion the same way
+(`plant_finished_run_with`), and the finalization tests that need the sweep to find a pin plant
+one as declared damage (`with_a_candidate_pin_no_crash_leaves`); until then those tests took the
+shared plants' pin as residue, which is why the first round left the plants alone. The shared
+plants still write the pin. The five witnesses above prune what those plants write and fail by
+name when nothing was written, so a plant that stopped writing it would change five witnesses two
+reviews graded established; and the behaviour tests that resume over those plants in their setup
+have `finish_promotions` delete the pin there, with no exactness claimed of them (59 tests at `ae673768`). Of the witnesses Gate 5's
+audit selected, only the finalization kill matrix let a credited recovery delete a planted pin;
+the others that meet one, and #305's three other staging-path kills, lose it to an earlier resume
+before their credited crash (rows 1, 2, 43, 58, 112, 126, 127, 159 and 160; the census and the
+boundary probes under `~/orch-pr10/clause2-evidence-r2/`). What
+is left is the deferred finding `PR311-SHARED-PLANTS-WRITE-A-CANDIDATE-PIN-NO-CRASH-LEAVES`: a
+witness credited over one of those plants has to complete it here and hold its recovery to
+`assert_no_repair_of_the_creation_prefix`, and nothing forces it to.
+
+## `fn assert_no_repair_of_the_creation_prefix(harness: &Arc<Mutex<HookHarness>>, tag: &str) {`
+
+The executed half: the credited recovery's harness holds no entry into `RunDir.RemoveMarker`,
+`Worktree.CreateExecutionRoot`, `Ref.CreateIntegration` or `Ref.DeleteCandidatePin`. The first
+three are the repairs the gate's exactness listing (`audit/exactness/resumes-per-witness.py`) reads
+a hybrid prefix by; the fourth is the cleanup `finish_promotions` performs for a candidate-prepared
+pin a plant left standing (`prune_the_planted_candidate_pins`), asserted so that a plant which
+leaves one again fails here rather than passing with a recovery that repaired it.
+
+## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
+
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
+completions" among what recovery continues from: once sequence 0 has
+published, the integration ref legitimately names the proposal, not
+`run_started.base_sha`, and the next resume must accept it rather than
+refuse its own work as foreign history.
+
+## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `drop(first);`
+
+The first resumer exits, releasing its locks; the next incarnation must
+accept the durable result of the publication it finds.
+
+## `fn a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log() {` › `let fixture = Fixture::healthy("published-disagrees");`
+
+DESIGN §26: "`task_merged` exists but the ref disagrees — refuse; the
+log and integration branch no longer describe the same run". Neither a
+ref moved elsewhere nor a deleted one is repaired from the base.
+
 ## `struct FixedIds;`
 
 An [`IdSource`] whose question id is a constant.
@@ -2718,6 +3278,875 @@ The kinds in a fixture's durable log, in order.
 
 A sleeper that records rather than sleeps.
 
+## `fn commit_on(`
+
+A commit on `parent` that adds `file` with `content`, left in the object
+store with the worktree restored.
+
+## `fn plant_staging_intent(fixture: &Fixture, sequence: u32) {`
+
+Write a staging intent for `sequence` through the manager, the record a live
+stale cherry-pick would have left.
+
+## `fn plant_staging_worktree(fixture: &Fixture, sequence: u32, head: &str) -> PathBuf {`
+
+Write a staging intent for `sequence` and add its worktree at `head`
+through the manager: the residue a live stale sequence leaves.
+
+## `fn plant_snapshot(fixture: &Fixture, sequence: u64, commit: &str) -> PathBuf {`
+
+Add the integration gate snapshot of `sequence` at `commit` through the
+manager, as a verification that was killed mid-gate leaves it.
+
+## `fn plant_stale_verification(`
+
+Plant an interrupted stale-clean verification: BETA published fast at
+sequence 0 (the only way the integration head moves), ALPHA's candidate on
+the base and therefore stale, its cherry-pick proposal pinned under
+`prepared/1`, the staging worktree at the proposal with its intent, and the
+log through `merge_verification_started` for sequence 1 with no terminal —
+the state a crash mid-verify leaves. Needs a two-task fixture.
+
+## `fn plant_stale_verification(` › `let proposal = commit_on(`
+
+The cherry-pick produced a proposal on the moved head.
+
+## `fn append_event_hooked(`
+
+Append one event through the hooked Event funnel, so an injection armed
+on `harness` fires inside the append exactly as it would in a live run.
+
+## `fn proven_durable_len(hooks: &HarnessTopologyHooks, fixture: &Fixture) -> u64 {`
+
+The length the durability ledger proves durable for the fixture's log: the
+last file length a sync reported, after which every write is unsynced.
+
+## `fn lose_unsynced_writes(fixture: &Fixture, durable: u64) {`
+
+A simulated power loss: every byte no sync proved durable is gone.
+
+## `fn crash_with_unsynced_merge_prepared(`
+
+The first crash of the two-crash proof: `merge_prepared(fast)` is written
+to the log as one complete line and never synced — the append's flush was
+made to fail after the full write — and the process ends under the
+append-error protocol. Returns the hooks whose ledger recorded it.
+
+## `struct ReportingHooks {`
+
+A hook bundle for a child that will be killed: it forwards to the harness
+bundle and writes, in order, every sync of the log file and every entry
+into the integration compare-and-swap to a report file the parent reads
+after the kill — the durability oracle carried across the process
+boundary, since the child's ledger dies with it. It also writes a `repair <site>` line for every
+entry into `RunDir.RemoveMarker` (`ReportingRunDir`), `Worktree.CreateExecutionRoot`,
+`Ref.CreateIntegration` or `Ref.DeleteCandidatePin`, so the parent's comparison of the whole
+report also holds that the killed incarnation's resume repaired nothing of the creation's prefix
+and deleted no candidate-prepared pin.
+
+## `struct ReportingRunDir {`
+
+The run-directory half of `ReportingHooks`: the production adapter on the shared harness, with an
+entry into `RunDir.RemoveMarker` written to the report.
+
+## `fn two_crash_kill_child() {` › `let repo_root = PathBuf::from(`
+
+The restart of the two-crash proof, in a process of its own: the
+barrier, the compare-and-swap, and then a kill at `Written` of the
+task_merged append — the whole line in the file, nothing having synced
+it — reported to the parent as it happens.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let fixture = Fixture::healthy("two-crash");`
+
+`C.proof_tests[3]` and `[T-PREPARED].test`, the two-crash proof. A
+complete but unsynced merge_prepared line; restart; recovery step (a1)
+syncs and proves the prefix before the pre-CAS recovery of T-FAST; the
+CAS moves the integration ref; a kill at `Written` of task_merged; then
+a simulated power loss discards every unsynced write. The log still
+contains merge_prepared, the ref is at proposed_sha, and the next resume
+appends task_merged — on a real repository, with the sync ledger as the
+durability oracle: in-process for the first crash, reported across the
+process boundary for the second.
+
+Rows 33 and 34 of Gate 5's audit (`Ref.CompareAndSwapIntegration` before and after). The run is
+resumed once first (`the_runs_first_resume_by_an_incarnation_that_then_dies`), so the queued
+candidate and the unsynced `merge_prepared` follow a `run_resumed` and stand beside no creation
+marker and an execution root: the gate's third run graded both rows near-exact because the
+incarnation that issued the swap had first removed the marker and recreated the root. The queued
+candidate's pin is pruned after the plant (`prune_the_planted_candidate_pins`), so what the killed
+child resumes over is what a completed promotion leaves. The child's report is compared whole, and
+it would carry a `repair` line for any of the four sites; the third resume's harness is held to
+the same (`assert_no_repair_of_the_creation_prefix`).
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
+
+Restart, in a process of its own, killed at the task_merged write.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let reported = std::fs::read_to_string(&report_path).expect("the child reported");`
+
+(a1) before the CAS: the child's barrier synced the whole surviving
+prefix — the unsynced merge_prepared included — and only then was the
+swap entered, once.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `lose_unsynced_writes(&fixture, prefix_with_prepared);`
+
+The second power loss: every unsynced write is discarded. What the
+child proved durable is exactly what its barrier synced — the prefix
+through merge_prepared — and nothing after it.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let third = harness();`
+
+The next resume records the merge it finds done, with no second swap.
+
+## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `let fixture = Fixture::healthy("barrier-sync-fails");`
+
+`C.proof_tests[3]`, second sequence: the barrier's sync fails at
+(a1). No CAS is issued, the command ends resumably having done nothing,
+and after the loss of the unsynced line the before-append order holds:
+the candidate is still queued, and the next incarnation integrates it.
+
+Rows 98 and 133 of Gate 5's audit (`Event.OpenLog`'s `SyncPrefix` error return, and
+`Lock.ProbeCleanupExclusive`/after). The run is resumed once first, so the queued candidate and the
+unsynced line stand beside no creation marker; the gate's third run graded both rows near-exact
+because the converging resume removed the marker and recreated the root. The queued candidate's
+pin is pruned after the plant (`prune_the_planted_candidate_pins`). The converging resume is
+made here on a harness of its own rather than inside `drive_observing`: it enters none of the
+four repairs `assert_no_repair_of_the_creation_prefix` names, and it is observed taking
+`Lock.AcquireRun` and repeating
+`Lock.ProbeCleanupExclusive`, before and after, which row 133's reading had inferred from the
+resume's success.
+
+## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `lose_unsynced_writes(&fixture, durable);`
+
+The loss: the unsynced merge_prepared is gone, and the before-append
+order stands — the candidate queued, no transaction, the ref at the
+base — which the next incarnation carries through to publication. After
+that step the log replays twice to the driven run's fold
+(`drive_observing`, `assert_log_replays_twice_equal`).
+
+## `fn a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha() {` › `let fixture = Fixture::healthy("finish-third-sha");`
+
+The barrier proved `merge_prepared` durable, but by the time recovery
+runs the integration ref names neither the expected head nor the proposal
+— a third writer moved it. Recovery refuses rather than clobbering it.
+
+## `fn a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge() {` › `let fixture = Fixture::healthy("finish-cas-done");`
+
+The kill landed between the compare-and-swap and its `task_merged`: the
+ref is already at the proposal. Recovery issues no second swap and records
+the merge, so the log and the ref converge.
+
+## `fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue() {` › `let driven = drive(&fixture, &DriveSeams::default(), 1);`
+
+And it does: the next incarnation's loop takes the requeued candidate
+through a fresh stale sequence — cherry-pick, pin, verification,
+publication — under sequence 2.
+
+## `fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() {` › `let fixture = Fixture::two_tasks("interrupted-snapshot");`
+
+T-VERIFY's resume action: "append merge_verification_interrupted; delete
+pin expected-old; reclaim snapshots". The gate snapshot a killed
+verification left is reclaimed with force — and only after the
+interrupted terminal is durable, the order the contract fixes.
+
+## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let fixture = Fixture::healthy("finish-orphan");`
+
+T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
+before anything was recorded left `merge/s0` and, killed between the pin
+and `merge_verification_started`, the exact orphan `prepared/<next_seq>`.
+Both are reclaimed; the proposal object is left to Git. After the resume
+the log replays twice to the fold its handle holds
+(`assert_log_replays_twice_equal`).
+
+## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let snapshot = plant_snapshot(&fixture, 0, orphan_commit.as_str());`
+
+A kill between a verification's terminal and its snapshot removal
+leaves a snapshot with no transaction to own it.
+
+## `fn a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned() {` › `let fixture = Fixture::healthy("orphan-outside");`
+
+`expected_failures_refusals`: "orphan pin outside next sequence". With
+the next sequence at 0, `prepared/3` is a ref the log never accounts for:
+recovery refuses it, before any append, and leaves it exactly as found.
+
+## `fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {` › `let fixture = Fixture::two_tasks("substituted-pin");`
+
+T-VERIFY's refusal condition: "pin SHA differs from record". A writer
+moved `prepared/0` away from the proposal the verification recorded.
+Expected-old deletion at what the ref *now* names would prove only that
+nothing moved it since the read; authority comes from the record, and
+the record disagrees, so recovery refuses — before the interrupted
+terminal, and without touching the ref.
+
+## `fn stale_clean_prepared(`
+
+The `merge_prepared(stale_clean)` that authorizes the planted stale
+verification's publication.
+
+## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `let fixture = Fixture::two_tasks("prepared-pin-kept");`
+
+T-PREPARED: `merge_prepared(stale_clean)` is durable and the ref has been
+moved to a third SHA. Publication refuses, the transaction stays open,
+and its pin — a resumably open resource the cleanup rule forbids
+touching — is still there for the resume that will complete it.
+
+## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `{`
+
+What the resume will read back is exactly what the live sequence
+authorized: a stale-clean publication with its pin and its staging.
+
+## `fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere() {` › `for substituted in [false, true] {`
+
+A kill between `task_merged` and the pin's deletion leaves a pin for a
+resolved sequence. It is pruned expected-old at the proposal the
+verification recorded, and at any other SHA it refuses and stays.
+
+## `fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging()` › `let fixture = Fixture::healthy("already-present-at-candidate");`
+
+The head was moved onto the candidate's own commit, so the stale path
+found an empty cherry-pick and authorized `already_present` with
+`expected_head == proposed_sha == candidate.commit_sha`. Inferring "fast"
+from those SHAs would leak the staging worktree; the fold retains the
+disposition, so recovery reclaims it after the no-op swap.
+
+## `struct DriveSeams {`
+
+---------------------------------------------------------------------------
+Driving the loop after a resume: the run's own `TopologyRun::step` over a
+resumed handle, with recording stand-ins for the seams a test varies.
+---------------------------------------------------------------------------
+
+The seams a driven step varies. Everything not named here is the run's
+production assembly: `FrozenPlans` over the fixture's recorded gates and
+review plan, the scaffold adapters, and a Runner that answers exit 0.
+
+
+## `struct DriveSeams {` › `gate_fails: Option<crate::error::ProcessFate>,`
+
+The gate's process fails with this fate — never started, or gone — instead of returning
+an output.
+
+## `struct DriveSeams {` › `input_rejected: bool,`
+
+The review-input policy refuses the proposed tree.
+
+## `struct DriveSeams {` › `review_cost_usd: Option<f64>,`
+
+What each review pass reports as its cost.
+
+## `struct DriveSeams {` › `answer: Option<crate::ir::Answer>,`
+
+What the answer source answers every question with; `None` answers
+nothing.
+
+## `struct DriveSeams {` › `answer_delivery: AnswerDelivery,`
+
+Which read of the answer source delivers `answer`; the other refuses or
+reports nobody there, so a test says which ingestion path it exercises and
+the other cannot stand in for it.
+
+## `enum AnswerDelivery {`
+
+How `DrivenAnswers` delivers the seam's answer. PR #249's refusals review
+found the mock answering `poll` and `resolve` alike, so removing the
+pre-step ingestion (M4), replacing the non-blocking poll with the blocking
+resolve (M5) and restoring PR8's hard-block refusal (M11) each passed every
+topology test: either path satisfied the same assertions. `Polled` — the
+default — answers `poll` and refuses `resolve`, which must never be reached
+while a delivered answer is there; `Blocking` is terminal-style, `poll`
+finds nobody and `resolve` (the hard block's prompt) answers.
+
+## `struct Driven {`
+
+What a driven run observed.
+
+## `struct Driven {` › `implementers: Vec<PassBinding>,`
+
+The implementer each verification plan was requested against.
+
+## `struct Driven {` › `reviewer_models: Vec<String>,`
+
+The model each review pass actually ran as.
+
+## `struct Driven {` › `runs: Vec<DrivenRun>,`
+
+Every process the driven runner was asked to run — gates and reviewers
+alike — with its role, the workspace it was pointed at and that
+workspace's HEAD at spawn. The verifier oracle reads the reviewers' entries
+to prove each reviewer judged the recorded proposal in its own snapshot
+slot and never in staging (`PR8-R4-REVIEW-ORACLE`).
+
+## `struct DrivenPlans<'a> {` › `implementers: std::cell::RefCell<Vec<PassBinding>>,`
+
+One driver owns this record; `RefCell` lets the read-only seam write it.
+
+## `impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews` › `fn run(`
+
+The driven review double runs a process through the Runner in the
+workspace it was handed before answering its scripted verdict, for the
+reason the scaffold's does (`scaffold.md`): a double that reads only the
+profile cannot see where the production judge pointed it, and the cover
+review of `8a5f59e8` moved that pointer into staging past every test.
+
+## `struct DrivenRun {`
+
+One process the driven runner ran: identity, role, workspace and the
+workspace's HEAD at spawn.
+
+## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
+
+What the workspace held when the process was invoked: every tracked file and its
+content, read at the moment `DrivenRunner` stands in for the agent. The
+dependency regression asserts on this rather than on a recorded SHA, because a
+SHA assertion is the shape that would have passed for the whole life of
+`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
+other throughout, and both were wrong.
+
+## `fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {`
+
+
+Resume the fixture, then step the run's loop `steps` times under `seams`.
+
+## `fn plant_live(`
+
+Append `bodies` through the production emitter on a handle the caller
+already resumed — the live epoch — so the state a closure test plants is
+what the loop closes against, with no `run_resumed` between the planting
+and the loop to clear a budget stop or wake a deferred task.
+
+## `fn drive_observing(`
+
+`drive` with an observer called after every step with the step number and
+the run, so a test can read the live fold and the process-local ledgers
+before the run is dropped; `drive_handle` is the same loop with a no-op
+observer.
+
+## `fn drive_handle_observing(`
+
+The steps of [`drive_handle`], each followed by `observe`.
+
+## `fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {` › `let fixture = Fixture::build(`
+
+The candidate was produced at rung 0 (mid, claude-opus-5) of a two-rung
+ladder whose last rung is claude-fable-5, and the review plan's primary
+is claude-opus-5 with claude-fable-5 as the alternative. Selecting
+reviewers against the last rung would find primary != implementer and
+hand the candidate back to its own author; against the recorded binding
+the alternative reviews it.
+
+## `fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers() {` › `let fixture = Fixture::two_tasks("gate-spawn-outage");`
+
+`transaction_fault_matrix[T-VERIFY].resume_action`: an observed
+infrastructure failure terminates merge_verification_unavailable
+{Infrastructure, Deferred} inside the frozen allowance and Parked at it;
+`invariants[INV-23]`: a Runner that cannot run the process is a
+RunnerSpawnFailure outage. The fixture allows three deferrals.
+
+## `fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {` › `if let Err(held) = wait_for_cleanup_hold_release_within(&fixture.public(), RELEASE_BOUND) {`
+
+The last assertion is a bounded wait, not a single observation, and the
+three above it are unchanged: the first is a genuine reaper-startup
+failure and means the opposite of this one. `Supervisor::finish` waits
+for the gate's reaper without a bound (`ReaperEnding::AcknowledgedExit`),
+so by the time the drive returns the reaper that took this run's
+`cleanup.lock` has exited and its shared hold is gone. What one
+observation could still find held, under a whole parallel suite, is a
+copy of the run's lease descriptor: the ref funnel keeps the lease open
+in this process for the life of each `git update-ref` child
+(`rundir::hold_cleanup_lease_for_child`), a child another test thread
+forks in that window inherits the open file description, and the shared
+`flock` lasts until that child closes it, which a reaper, guard or probe
+does in its own `close_inherited_fds` and an `exec` does at `CLOEXEC`.
+
+Measured under the finding's recipe, two full suites concurrently on one
+box (`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`,
+2026-09-22): 4 of 8 instrumented suite runs found the hold at the first
+observation, and every one of them was gone within a millisecond, before
+a read of `/proc/locks` made right after it; the untouched merge base,
+run beside them, failed the single observation 2 of 8 times. The bound is
+the 20 s `wait_for_cleanup_hold_release` already gives the eighteen other
+observations of this lease in this module, some ten thousand times the
+longest hold measured, and a passing run pays for it only until its first
+free observation. A hold that never clears still fails, at the bound,
+with a message that says how long it waited of what bound, so a future
+red reads as "held for the whole bound" and not "held at one instant".
+Closing the inheritance is not done here, and the production
+`RunLock::acquire` probe, which reads the same inherited hold as
+`Refused` at `drive_as`'s resume, is out of this wait's reach.
+
+## `fn a_paid_review_that_parks_is_charged_live_and_its_cost_replays() {`
+
+`PR8-R2-SPEND-REPLAY` from both ends, inside one incarnation: a 2.50
+review returns needs_human under a 2.20 ceiling, the park is charged
+live, the answered candidate's next integration is refused in the same
+incarnation, the terminal carries the pass, and a replay of the log
+reaches the total the run held rather than the one it started from.
+
+This was the test that pinned the gap. Its last assertion required the
+replayed total to equal the *opening* one and said in its message that
+the day the terminal gained its record the assertion would fail and the
+ledger row would close. It did, and it now asserts the closing total.
+
+## `fn the_cost_of_a_parked_verification_still_refuses_the_next_integration_after_a_restart() {`
+
+The same finding's harm, which is not a number but a decision, across the
+restart that is the whole of it. One incarnation parks the paid
+verification and answers it; a second resumes the log it wrote and must
+refuse the integration the first one refused. Withdraw the replay of the
+terminal's reviews and the second incarnation reports `Integrated`
+instead — the spend assertion sits last precisely so the failure names
+the decision and not the arithmetic behind it.
+
+Two incarnations because one cannot witness this: the live account holds
+the cost inside an incarnation whatever the log says, so any assertion
+made without crossing a resume passes with the terminal empty.
+
+## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
+
+R4: a review input that cannot be judged is HumanRequired, not a code
+rejection and not a publication. The review-input policy refuses the
+proposed tree before any reviewer runs.
+
+## `fn an_integration_reviews_cost_reaches_the_run_spend() {` › `let fixture = Fixture::two_tasks("integration-spend");`
+
+The ceiling is checked against `Spend`, so a review an integration ran
+must be charged there, live and on replay of the terminal's record.
+
+## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
+
+R13: the loop ingests an answer to a verification-park question —
+Answered returns the candidate to the queue, and the next step integrates
+it. The repair-admission half of PR8's version of this test, a refusal,
+became
+`a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue`.
+
+## `fn plant_rejected_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {`
+
+The one planting every repair test starts from: alpha's candidate,
+stale-verified at beta's published head and rejected by review, so the
+rejection registers alpha's first repair. Its admission is whatever the
+fixture's `max_merge_repairs` decides — `Runnable` at the default of one,
+`HumanRequired` under `no_automatic_repairs`, `HumanBinding` under
+`small_only` (the root's one Small rung leaves the repair's Mid floor
+empty).
+
+## `fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {`
+
+An over-limit repair is `AwaitingInput`, the run hard-blocks on its one
+question, and nothing is spent or appended beyond the resume's own record
+until a person answers.
+
+## `fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue() {`
+
+The whole of a repair's life at the loop, once per answer delivery: the
+admission answer is ingested (`question_answered` before `task_dispatched`),
+the repair dispatches inside its root's lineage lease at the head current
+at its dispatch, materializes the rejected candidate (`Clean`, recorded
+before the spawn), runs to a candidate that widens the lineage, and merges
+exact-base with `satisfies` the canonical closure and the lineage lease
+released. R11's candidates ref is still there afterwards. What the worker
+saw and what was published are compared as bytes against the protected
+source's blob and the content already merged at the base — PR #249's
+refusals review (M6) showed the SHA oracles green over a corrupted checkout.
+
+## `fn a_delivered_answer_is_ingested_before_unrelated_runnable_work_dispatches() {`
+
+DESIGN §4 (6) at the loop: with beta genuinely runnable and a halting
+decline already delivered to the polled source, the decline is ingested
+first, beta never dispatches and no process runs. The test the admission
+fixtures could not be — nothing else was runnable there, so ingestion
+removed (M4) or made blocking (M5) still passed.
+
+## `fn plant_published_beta(fixture: &Fixture) -> CommitSha {`
+
+Publish BETA's candidate fast at sequence 0 — the candidate on the base,
+`merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
+legitimately moved past the base. Needs a two-task fixture. Like
+`plant_queued_candidate_events`, it leaves BETA's candidate-prepared pin standing beside the
+candidates ref; a witness of a state a completed promotion left prunes it
+(`prune_the_planted_candidate_pins`).
+
+## `fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {`
+
+A queued candidate whose base the integration head has legitimately moved
+past — BETA published at sequence 0 — so ALPHA's integration takes the
+staging path under sequence 1: returns the planted candidate and the head.
+
+## `fn worktree_git_dir(worktree: &Path) -> PathBuf {`
+
+The per-worktree git dir of a linked worktree, where its administrative
+residue lives.
+
+## `fn assert_staging_residue_reclaimed(fixture: &Fixture, staging: &Path, handle: &RunHandle) {`
+
+After the residue is gone: the staging slot and every prepared pin, and
+the candidate still queued for the next incarnation.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let fixture = Fixture::build(`
+
+The Internal residue class of Object.ProposalCherryPick, constructed by
+hand: objects the pick wrote that nothing references, and CHERRY_PICK_HEAD,
+MERGE_MSG, index.lock and sequencer state in the staging git dir. The
+resume reclaims the staging worktree with force — administrative
+residue and all — leaves the objects to Git, and the next incarnation
+integrates the candidate under the very sequence the residue held.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let orphan_file = fixture.root.join("orphan-bytes");`
+
+Objects written and never published: a blob and a commit no ref names.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);`
+
+The workspace manager's classifier reads it as the site's Internal class
+and names what was planted.
+
+## `fn remove_packed_refs_lock_residue(git_dir: &Path) -> Option<PathBuf> {`
+
+Git's one ref-lock residue recovery may not touch: `packed-refs.lock` in
+the repository's common git dir. It is the repository's rather than the
+run's, any Git process can be holding it, and a wrong removal would let a
+concurrent `pack-refs` publish an empty packed file over every packed
+ref, so the engine never reclaims it and the operator does. A lock on one
+of the run's own refs is no longer removed here: the Ref funnel reclaims
+it when the repository proves it stale
+(`WorkspaceManager::reclaim_own_ref_lock`). Not the run's
+`upstroke-worktree.lock`, which is the coordinator's lock file (R25), and
+not a linked worktree's git dir, which recovery reclaims itself.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const SAMPLING_N: u32 = 8;`
+
+Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const MAX_SPAWNS: u32 = 2 * SAMPLING_N;`
+
+One bounded retry, the shape `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` gave
+the T-ATTEMPT sampler: when no kill of the first `SAMPLING_N` landed inside a
+writing pick — every child completed before its kill, or every kill found a
+child that had not begun or one that had finished — the ladder has by then
+been re-aimed inside every pick that completed, and `SAMPLING_N` more are
+sampled on it before the refusals at the end fire. Every child, in either
+half, is classified, reclaimed and driven to integration, so a completed pick
+is verified as a control and counted as nothing. The refusals count kills
+only, over every spawn, and the retry does not weaken them: sixteen clean
+exits are still a run in which nothing was killed, and sixteen kills of
+children that had not begun are still a run in which no pick under way was
+interrupted.
+
+The second batch is a whole batch. The loop plans `SAMPLING_N` spawns and,
+when the eighth is in and no kill has landed inside a writing pick, plans
+`MAX_SPAWNS`; until 2026-09-10 it went on only while no kill had landed, so
+the second batch ended at its first kill — reproduced: eight controls, run 8
+killed at 117 µs and classified `None`, `spawns=9`, a pass — and one
+earliest-rung, pre-write kill stood as the evidence of a batch (the ultra
+review of `f837f4ca`, finding 1). Reproduced again at `62f55943` with the
+first batch's aims fifty times too long: the old loop stops at `spawns=9,
+killed=1`; this one runs `spawns=16, killed=8`, every kill in the second
+batch, the ladder having followed the first batch's eight completions. The
+batch's condition widened from "no kill" to "no kill inside a writing pick"
+with the floor below (`killed_while_writing`), so that the retry serves it as
+it serves the vacuity refusal. A batch of kills that all found children that
+had not begun leaves the budget nothing to follow — a killed child measures no
+pick — so the second batch is aimed as the first was, and when it lands the
+same way the refusal fires with every aim and class in its message: the honest
+outcome for a budget short of every pick, which the ladder can correct only
+through a completion.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
+
+How long the same pick takes when nothing kills it, measured in a probe
+fixture of its own: four uninterrupted picks in the probe's staging
+worktree, the worktree reset to the head between them, the first discarded
+as the warm-up and the median of the other three taken
+(`fixture::KillBudget`). The kill ladder is fractions of that budget, and
+the budget then follows the samples — a child that completed before its
+kill has measured the pick under the sampler's own conditions, at that
+moment, and the next rung is aimed inside the median of the last three
+such completions.
+
+Until 2026-09-10 the budget was one pick, the first cherry-pick in a fresh
+staging worktree, and every kill was `sleep(fraction)` then `kill`.
+`RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE`: on the hosted `test (macos-latest)`
+leg that one measurement was, five times in two days, more than nine
+times the picks it scheduled — all eight children exited 0 before the
+lowest rung — and the refusal fired, with this text, on two pull requests
+(run 34304029954 at `828da6cd`, whose diff was Markdown, and 34353183264
+at `fbf3e50b`), on two pushes to master (34328230257 at `9a6897ea`,
+34356671343 at `74da2cbb`) and on a merge-queue entry for #258
+(34433061085): 5 of the 155 hosted macOS runs that completed between
+2026-09-07 and 2026-09-10, in a census that names every run and matches
+this message rather than the test's name (#259's body). The refusal was
+right each time: nothing had been sampled. Measured on the
+build box at `81ee09ef`: the first pick in a fresh staging worktree takes
+1.1 ms against 0.94 ms warm, a pick's first write lands about 0.6 ms in
+and the eight rungs land five `None` and three `Internal`, so an aim even
+twice too long misses every write window; 0 of 25 runs alone failed here
+before the change and 0 of 25 after it, and the leg's own evidence is CI's.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let mut killed_while_writing = 0_u32;`
+
+The second floor, added 2026-09-10: at least one kill must have found the
+pick's own state — `Internal`: its index lock, its sequencer state, an object
+written and not yet published — which is a kill after the pick's first write
+and before its publish, inside a pick under way. A kill that found nothing
+written (`None`) interrupted a child that had not begun; one that found the
+commit published (`After`) interrupted a pick that had finished; both are
+kills, and `killed_while_running >= 1` — which stays, and fires first —
+accepts either. Both P1s this pull request produced had one shape: the budget
+collapsed, every kill landed before the first write, and this sampler passed
+on seven `None` kills (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding
+1 of each) while the dispatch sampler's `while_writing` floor refused the same
+ladder both times. The floor here is that one's, on the class the classifier
+answered for a killed child: `Internal` only — a killed `After` is not
+counted, where the dispatch floor counts an `After` whose `MERGE_MSG` is
+missing, because this sampler reads no element of a published pick before
+recovery reclaims it.
+
+Measured on the build box before it was added, 25 unmutated runs, every run
+eight kills in eight spawns: 2 to 4 of the eight were `Internal` (median 3; 10
+runs with 2, 12 with 3, 3 with 4), the rest `None` but for one `After`, and
+every run had at least one. Where they land is structural: with the probe's
+median at 946 µs (894–1072) and the first write about 0.6 ms in, rungs 1 to 3
+(aimed at about 105, 210 and 315 µs) were `None` in all 25 runs, rung 4 (421
+µs) `Internal` once, rung 5 (526 µs) 6 times, rung 6 (631 µs) 20 times, rung 7
+(736 µs) 24 times and rung 8 (841 µs) 17 times, with 7 `None` — picks whose
+first write came after 841 µs — and the one `After`. With the floor in place,
+0 of 25 runs failed. Against it: every kill aimed at zero at spawn, which this
+sampler passed before, now refuses twice with `none of the 16 kills in 16
+spawns landed while the pick was writing`; and the failed-kill injection with
+the feedback reverted to the kill's clock — the ladder collapsed as at
+`8441c5fe` — refuses twice with `none of the 15 kills in 16 spawns`, the whole
+second batch having run. macOS is reasoned, not measured: the three hosted
+dispatch reds in the census each had only their lowest rung inside the pick,
+at about two thirds of it, and 9 of those 18 kills had found the pick writing
+(4 of 6, 3 of 7, 2 of 5), so the runner's first write sits where this box's
+does relative to the pick; the full pick's write phase — index, tree, commit,
+ref and the sequencer's cleanup — is longer than the no-commit pick's; and the
+dispatch floor has caused none of that leg's reds. What the floor cannot do is
+correct a budget short of every pick: a killed child measures no pick, so a
+batch of `None` kills leaves the second batch aimed as the first was, and
+sixteen of them refuse with every aim and class in the message — a red that
+says what it sampled, which is the outcome this floor prefers to a pass on
+kills of nothing.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);`
+
+The rung's aim, `(rung + 1) / (SAMPLING_N + 1)` of the current budget, and
+`KillableGitChild::run_until` in place of a sleep then a kill: the child is
+polled to the aim — once a millisecond while it is far, continuously through
+its last four — and the poll that reaches the aim with the child still
+running sends the kill itself, with no return to the caller between the two,
+so the sleep that used to sit between the aim and the kill is gone. A child
+that exits first is observed at the poll that finds it gone, and that
+observation is the number the budget follows: the parent's clock, from an
+origin read before the spawn — the next poll's when the parent holds a core,
+the wake-up's when it does not — not the child's own time, which no wait reports
+to a parent (`wait4` carries CPU times; Windows' `GetProcessTimes` carries
+an exit time and the fixture does not bind it). What remains is the window
+between that last poll's `try_wait` and the kill's system call: a parent
+descheduled there lets the child finish, the kill misses, and the child's
+status is a completion. Such a pick is fed back too, where until 2026-09-10 it was thrown away (the
+ultra review of `f837f4ca`, finding 2), and the number it is fed back as is
+the clock at which the parent established the exit: for a child the poll found
+gone, that poll's; for a child that was running at its aim and ended with a
+completion's status, the clock `KillableGitChild::wait` reads once
+`Child::wait` has returned that status (`reaped`). The kill's own clock is not
+that number. `Child::kill` returns `Ok` once the signal is sent and also for a
+child that has already exited, and `Err` when nothing was sent, so the clock
+once it has returned orders the call and bounds no child; two heads fed it
+back as a bound and each was a P1. At `62f55943` the clock was read *before*
+the system call, and the ultra review of `2d3fa9d1` (finding 1) showed what
+that fed back: a 20 ms pause planted between the read and the call let run 0's
+pick run to completion and fed it back as the instant before the pause — 120.8
+µs, for a pick the probe had just measured at 1.09 ms, below the pick, clamped
+to the 200 µs floor — so every later rung was aimed at 44–178 µs, before the
+pick's first write at about 0.6 ms; seven children died as `None` with nothing
+written, `killed_while_running >= 1` was satisfied, and the run passed on
+kills of nothing (`spawns=8 killed=7 completions=1`, twice at `2d3fa9d1`),
+where the reviewer's control with that feedback off reached two `Internal`
+residues. At `95eece1c` the clock was read after the call and its `Result`
+discarded, and the ultra review of `8441c5fe` (finding 1) made the first kill
+return `Err` without sending, asserted `try_wait()` still `Ok(None)` once the
+clock was recorded — the child alive after the alleged bound — and let it
+finish: fed back as 117 µs, the same collapse, `spawns=8 killed=7
+completions=1`, a pass. The same injection here, with an oracle in
+`KillBudget::completed` that the value fed back does not precede the clock at
+which the child's status came in: at `8441c5fe` it fails on run 0 (105.6 µs
+fed back for a child whose exit was established at 1.20 ms; 102.2 µs against
+966 µs the second time), and at this head the value fed back is the wait's
+clock itself (the kill failed at 109.8 µs, the wait returned at 1.092 ms,
+1.092 ms fed back; 108.6 µs, 1.036 ms, 1.036 ms), the ladder follows a real
+pick and the run passes on kills inside it. The 20 ms pause, from `95eece1c`
+on, feeds run 0 back as the pause's own length — here 20.174 and 20.172 ms
+against a pause that ended at 20.169 and 20.167 ms, the value asserted not to
+precede it; at `2d3fa9d1` that assertion fails on the first kill — and the
+next two rungs, aimed at 4.5 and 6.7 ms, are past the pick and complete in
+1.1–2.1 ms, the median of the three is back at the pick and the later rungs
+are killed inside it (at `95eece1c`: runs 3 to 7 killed at 470–939 µs, four of
+them `Internal`, `spawns=8 killed=5 completions=3`, twice). A pause on every
+spawn refuses, having followed all sixteen completions: the vacuity floor is
+unchanged and still fires when no kill can land. The clock's origin was the
+last of the three reads to move: until 2026-09-10 `KillableGitChild::spawn`
+read it once `Command::spawn` had returned, so a child could run, or finish,
+before the origin existed (the ultra review of `d1fef26d`, finding 1). A 20
+ms pause planted there on the first child — after the spawn had returned,
+before the origin was read — let run 0's pick complete during the pause; the
+first poll found it gone at 2.6–3.1 µs against a probe of 912–915 µs, that
+was fed back and clamped to the 200 µs floor, every later rung was aimed at
+22–178 µs, and the floor above refused, twice, with `none of the 15 kills in
+16 spawns landed while the pick was writing` — the whole second batch run,
+fifteen kills of children that had not begun: a red where the two earlier
+collapses had passed, and the red this change exists to remove. The origin is
+read before the spawn now, and the same pause feeds run 0 back as 20.1 ms
+against a pause of 20.05 ms, the value asserted not to be shorter than the
+pause the child was alive through; the next picks complete in 1.1–2.2 ms and
+the rest of the batch is killed inside the pick (#259's body, W4). What the
+budget follows is a
+median over however many of the last three completions exist — one completion
+sets the budget alone, of two the longer is taken, of three the middle — so a
+late observation is not corrected by the next pick: a late first observation
+holds until two shorter completions follow it, and three late ones hold until
+two do, each correction costing the batch two controls. Measured on the build
+box, and only there: over three unmutated runs at `95eece1c`, 24 kills, the
+clock a kill recorded — read after `Child::kill` returned, so with the system
+call inside it — was 2.9–5.6 µs past its aim, and the dispatch sampler's 24
+were 1.6–3.6 µs; and over three separate populations of forty `git --version`
+children each, the median clock at which a blocking `wait` saw its child gone
+was 269 µs (242–382), at which `run_until` saw it while spinning 341 µs
+(311–438) and while sleeping 1.054 ms (1.037–1.065). Those are medians of
+separate populations, not per-exit lags and not maxima; they size the
+observation's lateness on this host and bound nothing, and macOS and Windows
+are reasoned, not measured. Every spawn's aim and outcome goes into the
+refusals' messages — completed, in the poll's clock; killed, with the clock at
+which the kill returned; outran the kill, with that clock and the wait's; or
+outlived a kill that failed, with its error and the wait's clock — with the
+probe and the number of completions the ladder followed, so a red leg carries
+the timing evidence the finding said it lacked.
+
+## `const SAMPLING_N: u32 = 8;` › `let mut child = KillableGitChild::spawn(`
+
+The real child, killed at an uncontrolled point of the ladder.
+
+## `const SAMPLING_N: u32 = 8;` › `let _ = remove_packed_refs_lock_residue(&fixture.git_dir);`
+
+A killed git child can also leave `packed-refs.lock` in the repository's
+common git dir — observed on the macOS runner's git — which no residue
+class of the site names and no recovery step may remove
+(`PR8-CRASH-002-PACKED-REFS-LOCK`). It is removed here as the operator
+would, so the sampler measures the staging residue the site registers.
+
+## `const SAMPLING_N: u32 = 8;` › `let (_, handle) = resume_with_real_refs(&fixture, &harness())`
+
+Whatever the sample left, the resume reclaims it and the candidate
+integrates under a fresh pick.
+
+## `fn plant_integration_lock(fixture: &Fixture, content: &[u8]) -> PathBuf {`
+
+The lock file a killed `git update-ref` leaves on the integration ref,
+with the content Git leaves at the point of the kill. Measured on git
+2.43 under `strace`: the file is empty from Git's `open` to its content
+write — the longer part of the window, where the object lookup sits —
+and holds the new object id and its newline from that write to the
+publishing rename.
+
+## `fn an_empty_ref_lock_left_by_a_killed_compare_and_swap_is_reclaimed_and_the_publication_completes()`
+
+PR8-CRASH-002, closed: a coordinator killed inside `git update-ref` left
+`<ref>.lock` and every later resume refused on it until an operator
+removed the file. The Ref funnel now reclaims the lock before the retry
+when the repository proves it the engine's own and stale
+(`WorkspaceManager::reclaim_own_ref_lock`), and the publication the log
+authorized completes on the first resume. Witnessed against the
+unrepaired tree: the resume refused with Git's own "integration.lock …
+File exists".
+
+## `fn a_ref_lock_naming_the_authorized_proposal_is_reclaimed_with_or_without_its_newline() {`
+
+The other shape a kill leaves: the lock already names the proposal,
+with its newline after Git's second write and without it between the
+two. Both are the engine's own write of this transition and both are
+reclaimed.
+
+## `fn a_ref_lock_naming_another_object_is_left_and_refuses_resumably_until_removed() {`
+
+The negative control, and what still holds of the old behaviour: a lock
+naming a value the swap would not write belongs to another write, so it
+is left where it is. The refusal says why, the ref is unchanged,
+`merge_prepared` stays durable, nothing is appended, and once an
+operator removes the lock the next resume completes the publication.
+
+## `fn a_ref_lock_on_a_packed_integration_ref_is_left_and_refuses_resumably_until_removed() {`
+
+With the ref in `packed-refs`, a `git pack-refs --prune` may be holding
+its lock at this instant and nothing the repository records says
+otherwise, so the lock is left and the resume refuses
+(`PR8-CRASH-002-PACKED-RUN-REF`). Once the operator has removed it the
+swap writes the loose ref over the packed copy, as any swap of a packed
+ref does.
+
+## `fn a_surviving_ref_writer_of_the_dead_coordinator_refuses_the_resume_until_it_exits() {`
+
+The liveness fact the reclaim rests on, end to end: a process holding
+the run's cleanup lease the way an engine `git update-ref` child does
+(`rundir::hold_cleanup_lease_for_child`) makes the resume refuse at its
+worktree lease, with the lock untouched and nothing appended; once it
+exits the kernel releases the lease, the lock is stale, and the next
+resume reclaims it and completes the publication. Its log then replays
+twice to the fold that resume's handle holds (`assert_log_replays_twice_equal`).
+
+
+## `fn a_lease_copy_a_sibling_fork_inherited_is_waited_out_before_the_next_incarnation_resumes() {`
+
+The neighbour of `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`,
+constructed. The production refusal at a later `drive_as` — *"still has a
+process of its own alive … holds the run's cleanup lease"* — reads a copy of
+the run's lease descriptor: `WorkspaceManager::update_ref` keeps one open in
+this process for the life of each `git update-ref` child, a `fork` by any
+other thread copies it, and the copy holds the shared `flock` until that
+child's `exec` or its own close. Under a whole parallel suite the previous
+incarnation's last ref writes end about a millisecond before the next
+incarnation's first probe, and a sibling's fork window can outlast that.
+
+`workspace_manager::fixture::ParkedFork::holding_the_lease_of` makes one such
+copy last as long as the test says: a copy taken exactly as a ref write
+takes it, a child forked while the copy is open and parked, before it exits,
+on a socket read — every other inherited descriptor closed first, each
+close checked, so no other test's is held with it — this process's copy
+closed. The child's report arrives over the socket from inside that window,
+so *alive and holding* is observed, not inferred; `observe_cleanup_hold`
+then finds the lease held with only the parked child left to hold it. The
+fork is then handed to the fixture (`release_once_held`), and the later
+resume's wait releases it from inside the first observation that reads the
+lease held (`holder_observed`): the test asserts that record — released at
+observation one, the child exited cleanly — then that the resume succeeded
+and the wait ended inside its bound. Held, released, resumed is an order the
+wait acknowledged, so a scheduler that delays the resume's thread, or the
+wait's, changes nothing. Without the wait in the trunks nothing observes,
+nothing releases, and the resume is refused with the fingerprint while the
+fork still holds; with it, the run's next incarnation resumes.
+
+## `fn a_lease_holder_that_outlives_the_bound_still_refuses_the_next_incarnation() {`
+
+The boundary the wait must not cross. With the bound lowered to 500 ms and
+the parked fork never released until after, the later resume is still made
+and still refused by production: the message is the refusal's own, naming
+the run, with the fixture's note appended that it waited the whole bound
+first (`refusal_after_an_expired_wait`); `hold_past_bound` records the
+expiry, and the time it waited is at least the bound — how many
+observations fit inside the bound is the scheduler's and is reported, not
+asserted; the refusal took at least the bound; the holder is alive and
+holding after the refusal returned, so the probe that refused saw a live
+hold; and nothing was appended to the log. Released, the fork exits cleanly.
+The lease is still held then, by the second parked copy the test made
+beside the holder — a sibling fork's copy outlasting the holder's release,
+the condition an observation after a release is bounded for
+(`PR320-R2-MAIN-002`, `PR320-R2-REG-003`) — so the lease is observed through
+`wait_for_cleanup_hold_release_observing` within `RELEASE_BOUND`, the sibling
+released from inside the first observation that reads its copy held, and only
+once the lease reads free does the next resume proceed; a single observation
+right after the holder's release, which reads the sibling's copy, is never
+made. A trunk that answered an expired wait with anything but the real
+resume fails here (`m4`), as does one that waited less than the bound
+(`m2`).
 ## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
 
 **A call census's needle is not satisfied by a longer name ending in it.**
@@ -2844,505 +4273,6 @@ round 4. Not pinned to exactly one definition, because
 `settle_interrupted` legitimately names three items and `form` is
 what separates them.
 
-## `struct Damage {` › `alternative_reviewer: bool,`
-
-The review plan names an alternative reviewer, so a candidate whose
-implementer is the primary reviewer is reviewed by someone else.
-
-## `struct Damage {` › `no_automatic_repairs: bool,`
-
-`max_merge_repairs = 0`: the first rejection registers its repair with
-human admission.
-
-## `impl Fixture {` › `fn two_tasks(tag: &str) -> Self {`
-
-A healthy two-task run: what every stale-verification fixture needs,
-since only a publication moves the integration head past the base.
-
-## `struct PlantedTransaction {`
-
---- integration-transaction recovery fixtures (PR8, step (f)) -------------
-
-A planted integration transaction: the candidate it publishes and the
-commit the fast path proposes.
-
-
-## `fn append_events(fixture: &Fixture, bodies: &[TopologyEventBody]) {`
-
-Append event bodies to the fixture's already-committed log, the way a live
-run would have, so a resume folds them as part of its proven prefix.
-
-## `fn alpha_commit(fixture: &Fixture) -> (CommitSha, CommitSha) {`
-
-A commit for ALPHA on the fixture base, adding `candidate.txt`, left in the
-object store with the worktree restored to the base.
-
-## `fn obliged_reviews_for(fixture: &Fixture, key: TaskKey) -> Vec<crate::events::ReviewRecord> {`
-
-The review passes ALPHA is frozen to require, as records that pass — read
-off the registry the current log folds to, exactly as a live candidate's
-would be.
-
-## `fn alpha_candidate_prepared(`
-
-The `candidate_prepared` for ALPHA's generation 0 at `commit`/`tree`.
-
-## `fn candidate_prepared_for(`
-
-The `candidate_prepared` of `key`'s generation 0 at `commit`/`tree`, whose
-attempt edited exactly `path` on the fixture base.
-
-## `fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {`
-
-Plant a queued candidate for ALPHA on the base: its objects and refs, the
-integration ref at the base, and the log through `task_candidate_created`.
-
-## `fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {`
-
-ALPHA's queued candidate on the base — its objects, refs and events —
-leaving the integration ref wherever it is.
-
-## `fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {`
-
-The `merge_prepared(fast)` of sequence 0 for a planted candidate at the
-base.
-
-## `fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {`
-
-Plant a fast integration transaction: the candidate objects and refs, the
-integration ref at the base, and the log through `merge_prepared(fast)` with
-no `task_merged` — the exact durable state a crash after the stable-prefix
-barrier but before the compare-and-swap leaves.
-
-## `fn a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas() {` › `let fixture = Fixture::healthy("finish-fast");`
-
-The two-crash shape: `merge_prepared(fast)` is durable in the log (the
-stable-prefix barrier held before the process died) and the integration
-ref is still at the base (the compare-and-swap had not run when power was
-lost). A resume must finish the one authorized publication.
-
-## `fn resume_with_real_refs(`
-
-Resume through the real `WorkspaceManager` as *both* ref interfaces — the
-P7/P8 startup repair reads the same refs the transaction recovery moves.
-
-The `RecordingRefs` double every other resume here supplies answers
-"absent" to the startup repair whatever the repository holds, which is
-exactly how a resume that refused its own published head stayed green.
-A publication test resumes through this.
-
-## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
-
-`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
-completions" among what recovery continues from: once sequence 0 has
-published, the integration ref legitimately names the proposal, not
-`run_started.base_sha`, and the next resume must accept it rather than
-refuse its own work as foreign history.
-
-## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `drop(first);`
-
-The first resumer exits, releasing its locks; the next incarnation must
-accept the durable result of the publication it finds.
-
-## `fn a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log() {` › `let fixture = Fixture::healthy("published-disagrees");`
-
-DESIGN §26: "`task_merged` exists but the ref disagrees — refuse; the
-log and integration branch no longer describe the same run". Neither a
-ref moved elsewhere nor a deleted one is repaired from the base.
-
-## `fn commit_on(`
-
-A commit on `parent` that adds `file` with `content`, left in the object
-store with the worktree restored.
-
-## `fn plant_staging_intent(fixture: &Fixture, sequence: u32) {`
-
-Write a staging intent for `sequence` through the manager, the record a live
-stale cherry-pick would have left.
-
-## `fn plant_staging_worktree(fixture: &Fixture, sequence: u32, head: &str) -> PathBuf {`
-
-Write a staging intent for `sequence` and add its worktree at `head`
-through the manager: the residue a live stale sequence leaves.
-
-## `fn plant_snapshot(fixture: &Fixture, sequence: u64, commit: &str) -> PathBuf {`
-
-Add the integration gate snapshot of `sequence` at `commit` through the
-manager, as a verification that was killed mid-gate leaves it.
-
-## `fn plant_stale_verification(`
-
-Plant an interrupted stale-clean verification: BETA published fast at
-sequence 0 (the only way the integration head moves), ALPHA's candidate on
-the base and therefore stale, its cherry-pick proposal pinned under
-`prepared/1`, the staging worktree at the proposal with its intent, and the
-log through `merge_verification_started` for sequence 1 with no terminal —
-the state a crash mid-verify leaves. Needs a two-task fixture.
-
-## `fn plant_stale_verification(` › `let proposal = commit_on(`
-
-The cherry-pick produced a proposal on the moved head.
-
-## `fn append_event_hooked(`
-
-Append one event through the hooked Event funnel, so an injection armed
-on `harness` fires inside the append exactly as it would in a live run.
-
-## `fn proven_durable_len(hooks: &HarnessTopologyHooks, fixture: &Fixture) -> u64 {`
-
-The length the durability ledger proves durable for the fixture's log: the
-last file length a sync reported, after which every write is unsynced.
-
-## `fn lose_unsynced_writes(fixture: &Fixture, durable: u64) {`
-
-A simulated power loss: every byte no sync proved durable is gone.
-
-## `fn crash_with_unsynced_merge_prepared(`
-
-The first crash of the two-crash proof: `merge_prepared(fast)` is written
-to the log as one complete line and never synced — the append's flush was
-made to fail after the full write — and the process ends under the
-append-error protocol. Returns the hooks whose ledger recorded it.
-
-## `struct ReportingHooks {`
-
-A hook bundle for a child that will be killed: it forwards to the harness
-bundle and writes, in order, every sync of the log file and every entry
-into the integration compare-and-swap to a report file the parent reads
-after the kill — the durability oracle carried across the process
-boundary, since the child's ledger dies with it.
-
-## `fn two_crash_kill_child() {` › `let repo_root = PathBuf::from(`
-
-The restart of the two-crash proof, in a process of its own: the
-barrier, the compare-and-swap, and then a kill at `Written` of the
-task_merged append — the whole line in the file, nothing having synced
-it — reported to the parent as it happens.
-
-## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let fixture = Fixture::healthy("two-crash");`
-
-`C.proof_tests[3]` and `[T-PREPARED].test`, the two-crash proof. A
-complete but unsynced merge_prepared line; restart; recovery step (a1)
-syncs and proves the prefix before the pre-CAS recovery of T-FAST; the
-CAS moves the integration ref; a kill at `Written` of task_merged; then
-a simulated power loss discards every unsynced write. The log still
-contains merge_prepared, the ref is at proposed_sha, and the next resume
-appends task_merged — on a real repository, with the sync ledger as the
-durability oracle: in-process for the first crash, reported across the
-process boundary for the second.
-
-## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
-
-Restart, in a process of its own, killed at the task_merged write.
-
-## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let reported = std::fs::read_to_string(&report_path).expect("the child reported");`
-
-(a1) before the CAS: the child's barrier synced the whole surviving
-prefix — the unsynced merge_prepared included — and only then was the
-swap entered, once.
-
-## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `lose_unsynced_writes(&fixture, prefix_with_prepared);`
-
-The second power loss: every unsynced write is discarded. What the
-child proved durable is exactly what its barrier synced — the prefix
-through merge_prepared — and nothing after it.
-
-## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let third = harness();`
-
-The next resume records the merge it finds done, with no second swap.
-
-## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `let fixture = Fixture::healthy("barrier-sync-fails");`
-
-`C.proof_tests[3]`, second sequence: the barrier's sync fails at
-(a1). No CAS is issued, the command ends resumably having done nothing,
-and after the loss of the unsynced line the before-append order holds:
-the candidate is still queued, and the next incarnation integrates it.
-
-## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `lose_unsynced_writes(&fixture, durable);`
-
-The loss: the unsynced merge_prepared is gone, and the before-append
-order stands — the candidate queued, no transaction, the ref at the
-base — which the next incarnation carries through to publication.
-
-## `fn a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha() {` › `let fixture = Fixture::healthy("finish-third-sha");`
-
-The barrier proved `merge_prepared` durable, but by the time recovery
-runs the integration ref names neither the expected head nor the proposal
-— a third writer moved it. Recovery refuses rather than clobbering it.
-
-## `fn a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge() {` › `let fixture = Fixture::healthy("finish-cas-done");`
-
-The kill landed between the compare-and-swap and its `task_merged`: the
-ref is already at the proposal. Recovery issues no second swap and records
-the merge, so the log and the ref converge.
-
-## `fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue() {` › `let driven = drive(&fixture, &DriveSeams::default(), 1);`
-
-And it does: the next incarnation's loop takes the requeued candidate
-through a fresh stale sequence — cherry-pick, pin, verification,
-publication — under sequence 2.
-
-## `fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() {` › `let fixture = Fixture::two_tasks("interrupted-snapshot");`
-
-T-VERIFY's resume action: "append merge_verification_interrupted; delete
-pin expected-old; reclaim snapshots". The gate snapshot a killed
-verification left is reclaimed with force — and only after the
-interrupted terminal is durable, the order the contract fixes.
-
-## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let fixture = Fixture::healthy("finish-orphan");`
-
-T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
-before anything was recorded left `merge/s0` and, killed between the pin
-and `merge_verification_started`, the exact orphan `prepared/<next_seq>`.
-Both are reclaimed; the proposal object is left to Git.
-
-## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let snapshot = plant_snapshot(&fixture, 0, orphan_commit.as_str());`
-
-A kill between a verification's terminal and its snapshot removal
-leaves a snapshot with no transaction to own it.
-
-## `fn a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned() {` › `let fixture = Fixture::healthy("orphan-outside");`
-
-`expected_failures_refusals`: "orphan pin outside next sequence". With
-the next sequence at 0, `prepared/3` is a ref the log never accounts for:
-recovery refuses it, before any append, and leaves it exactly as found.
-
-## `fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {` › `let fixture = Fixture::two_tasks("substituted-pin");`
-
-T-VERIFY's refusal condition: "pin SHA differs from record". A writer
-moved `prepared/0` away from the proposal the verification recorded.
-Expected-old deletion at what the ref *now* names would prove only that
-nothing moved it since the read; authority comes from the record, and
-the record disagrees, so recovery refuses — before the interrupted
-terminal, and without touching the ref.
-
-## `fn stale_clean_prepared(`
-
-The `merge_prepared(stale_clean)` that authorizes the planted stale
-verification's publication.
-
-## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `let fixture = Fixture::two_tasks("prepared-pin-kept");`
-
-T-PREPARED: `merge_prepared(stale_clean)` is durable and the ref has been
-moved to a third SHA. Publication refuses, the transaction stays open,
-and its pin — a resumably open resource the cleanup rule forbids
-touching — is still there for the resume that will complete it.
-
-## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `{`
-
-What the resume will read back is exactly what the live sequence
-authorized: a stale-clean publication with its pin and its staging.
-
-## `fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere() {` › `for substituted in [false, true] {`
-
-A kill between `task_merged` and the pin's deletion leaves a pin for a
-resolved sequence. It is pruned expected-old at the proposal the
-verification recorded, and at any other SHA it refuses and stays.
-
-## `fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging()` › `let fixture = Fixture::healthy("already-present-at-candidate");`
-
-The head was moved onto the candidate's own commit, so the stale path
-found an empty cherry-pick and authorized `already_present` with
-`expected_head == proposed_sha == candidate.commit_sha`. Inferring "fast"
-from those SHAs would leak the staging worktree; the fold retains the
-disposition, so recovery reclaims it after the no-op swap.
-
-## `struct DriveSeams {`
-
----------------------------------------------------------------------------
-Driving the loop after a resume: the run's own `TopologyRun::step` over a
-resumed handle, with recording stand-ins for the seams a test varies.
----------------------------------------------------------------------------
-
-The seams a driven step varies. Everything not named here is the run's
-production assembly: `FrozenPlans` over the fixture's recorded gates and
-review plan, the scaffold adapters, and a Runner that answers exit 0.
-
-
-## `struct DriveSeams {` › `gate_spawn_fails: bool,`
-
-The Runner returns an error for every process instead of an output.
-
-## `struct DriveSeams {` › `input_rejected: bool,`
-
-The review-input policy refuses the proposed tree.
-
-## `struct DriveSeams {` › `review_cost_usd: Option<f64>,`
-
-What each review pass reports as its cost.
-
-## `struct DriveSeams {` › `answer: Option<crate::ir::Answer>,`
-
-What the answer source answers every question with; `None` answers
-nothing.
-
-## `struct Driven {`
-
-What a driven run observed.
-
-## `struct Driven {` › `implementers: Vec<PassBinding>,`
-
-The implementer each verification plan was requested against.
-
-## `struct Driven {` › `reviewer_models: Vec<String>,`
-
-The model each review pass actually ran as.
-
-## `struct DrivenPlans<'a> {` › `implementers: std::cell::RefCell<Vec<PassBinding>>,`
-
-One driver owns this record; `RefCell` lets the read-only seam write it.
-
-## `struct Driven {` › `runs: Vec<DrivenRun>,`
-
-Every process the driven runner was asked to run — gates and reviewers
-alike — with its role, the workspace it was pointed at and that
-workspace's HEAD at spawn. The verifier oracle reads the reviewers' entries
-to prove each reviewer judged the recorded proposal in its own snapshot
-slot and never in staging (`PR8-R4-REVIEW-ORACLE`).
-
-## `impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews` › `fn run(`
-
-The driven review double runs a process through the Runner in the
-workspace it was handed before answering its scripted verdict, for the
-reason the scaffold's does (`scaffold.md`): a double that reads only the
-profile cannot see where the production judge pointed it, and the cover
-review of `8a5f59e8` moved that pointer into staging past every test.
-
-## `struct DrivenRun {`
-
-One process the driven runner ran: identity, role, workspace and the
-workspace's HEAD at spawn.
-
-## `fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {`
-
-
-Resume the fixture, then step the run's loop `steps` times under `seams`.
-
-## `fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {` › `let fixture = Fixture::build(`
-
-The candidate was produced at rung 0 (mid, claude-opus-5) of a two-rung
-ladder whose last rung is claude-fable-5, and the review plan's primary
-is claude-opus-5 with claude-fable-5 as the alternative. Selecting
-reviewers against the last rung would find primary != implementer and
-hand the candidate back to its own author; against the recorded binding
-the alternative reviews it.
-
-## `fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers() {` › `let fixture = Fixture::two_tasks("gate-spawn-outage");`
-
-`transaction_fault_matrix[T-VERIFY].resume_action`: an observed
-infrastructure failure terminates merge_verification_unavailable
-{Infrastructure, Deferred} inside the frozen allowance and Parked at it;
-`invariants[INV-23]`: a Runner that cannot run the process is a
-RunnerSpawnFailure outage. The fixture allows three deferrals.
-
-## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
-
-R4: a review input that cannot be judged is HumanRequired, not a code
-rejection and not a publication. The review-input policy refuses the
-proposed tree before any reviewer runs.
-
-## `fn an_integration_reviews_cost_reaches_the_run_spend() {` › `let fixture = Fixture::two_tasks("integration-spend");`
-
-The ceiling is checked against `Spend`, so a review an integration ran
-must be charged there, live and on replay of the terminal's record.
-
-## `fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()` › `let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);`
-
-R13: the loop ingests an answer to a verification-park question at the
-hard block — Answered returns the candidate to the queue, and the next
-step integrates it — and refuses an answer to a repair-admission
-question before any append, which is PR9's.
-
-## `const BETA: TaskKey = TaskKey(1);`
-
----------------------------------------------------------------------------
-T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
-resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
----------------------------------------------------------------------------
-
-## `fn plant_published_beta(fixture: &Fixture) -> CommitSha {`
-
-Publish BETA's candidate fast at sequence 0 — the candidate on the base,
-`merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
-legitimately moved past the base. Needs a two-task fixture.
-
-## `fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {`
-
-A queued candidate whose base the integration head has legitimately moved
-past — BETA published at sequence 0 — so ALPHA's integration takes the
-staging path under sequence 1: returns the planted candidate and the head.
-
-## `fn worktree_git_dir(worktree: &Path) -> PathBuf {`
-
-The per-worktree git dir of a linked worktree, where its administrative
-residue lives.
-
-## `fn assert_staging_residue_reclaimed(fixture: &Fixture, staging: &Path, handle: &RunHandle) {`
-
-After the residue is gone: the staging slot and every prepared pin, and
-the candidate still queued for the next incarnation.
-
-## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let fixture = Fixture::build(`
-
-The Internal residue class of Object.ProposalCherryPick, constructed by
-hand: objects the pick wrote that nothing references, and CHERRY_PICK_HEAD,
-MERGE_MSG, index.lock and sequencer state in the staging git dir. The
-resume reclaims the staging worktree with force — administrative
-residue and all — leaves the objects to Git, and the next incarnation
-integrates the candidate under the very sequence the residue held.
-
-## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let orphan_file = fixture.root.join("orphan-bytes");`
-
-Objects written and never published: a blob and a commit no ref names.
-
-## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);`
-
-The workspace manager's classifier reads it as the site's Internal class
-and names what was planted.
-
-## `fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {`
-
-Git's own ref-lock residue in the repository's common git dir:
-`packed-refs.lock` and any `*.lock` under `refs/`. Not the run's
-`upstroke-worktree.lock`, which is the coordinator's lock file (R25), and
-not a linked worktree's git dir, which recovery reclaims itself.
-
-## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const SAMPLING_N: u32 = 8;`
-
-Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
-
-## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
-
-How long the same pick takes when nothing kills it, measured in a probe
-fixture of its own; the kill ladder is fractions of it.
-
-## `const SAMPLING_N: u32 = 8;` › `let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(`
-
-The real child, killed at an uncontrolled point of the ladder.
-
-## `const SAMPLING_N: u32 = 8;` › `let _ = remove_git_ref_lock_residue(&fixture.git_dir);`
-
-A killed git child can also leave a lock file in the repository's
-common git dir — `packed-refs.lock`, observed on the macOS runner's
-git — which no residue class of the site names and no recovery step
-may remove (PR8-CRASH-002). It is removed here as the operator would,
-so the sampler measures the staging residue the site registers.
-
-## `const SAMPLING_N: u32 = 8;` › `let (_, handle) = resume_with_real_refs(&fixture, &harness())`
-
-Whatever the sample left, the resume reclaims it and the candidate
-integrates under a fresh pick.
-
-## `fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed() {` › `let fixture = Fixture::healthy("cas-lock");`
-
-PR8-CRASH-002 (deferred): a coordinator killed inside `git update-ref`
-leaves `<ref>.lock`, and the frozen effect inventory registers no
-residue class for any Ref site, so no recovery step may reclaim it.
-What holds today, pinned here: the authorized publication is retried,
-Git refuses on the lock, the refusal is resumable — the ref unchanged,
-merge_prepared durable, nothing appended — and once an operator removes
-the lock the next resume completes the publication.
-
 ## `struct BlockNthSnapshotAdd {`
 
 The obstruction the final cover reviewer's witness used: the second reviewer's
@@ -3362,9 +4292,15 @@ the loop's next admission — in this same incarnation, with no restart — has 
 be made against a total that holds it. Charging only on a successful judgement
 return discarded the whole vector with `?` and let another sequence in.
 
-Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the frozen
-terminal cannot carry: this one involves no restart, and the cost is known and
-in memory when it is thrown away.
+That was the whole of this test. `PR8-R2-SPEND-REPLAY` was the restart half of
+the same money — the frozen terminal could carry no record, so a resumed run
+replayed a total without it — and closing it reached this arm too, which is the
+one with no judgement to record from. The terminal now carries the pass that
+returned, taken from what the account charged rather than from a judgement that
+did not survive, and the last two assertions hold the terminal's `reviews` and
+the replayed total to it. Withdraw `charged` from the Git-error arm of
+`IntegrationCx::verify` and the terminal comes back `reviews: []` while the live
+total still reads 3.80.
 
 ## `fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {`
 
@@ -3383,15 +4319,6 @@ which the generic mapping turns into `ReviewUnavailable` — a statement about
 the reviewer where the invariant names one about the runner. Deferral and
 containment were right, and the `Gone` arm is the control that says this repair
 changed only the attribution of the one fate the invariant names.
-
-## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
-
-What the workspace held when the process was invoked: every tracked file and its
-content, read at the moment `DrivenRunner` stands in for the agent. The
-dependency regression asserts on this rather than on a recorded SHA, because a
-SHA assertion is the shape that would have passed for the whole life of
-`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
-other throughout, and both were wrong.
 
 ## `fn a_dependent_task_is_dispatched_into_its_dependencys_merged_work() {`
 
@@ -3414,3 +4341,2160 @@ head that has since been published is not substituted, and no second
 `task_dispatched` appears. Mutating `continue_open` to re-derive its base
 through [`super::super::integrate::dispatch_head`] fails it at the worker's
 HEAD.
+
+## `fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once() {`
+
+`T-REPAIR-DISPATCH` across the process boundary, for three of the states a
+kill leaves between `task_dispatched` and `attempt_started`: no worktree, a
+worktree with the pick's held `MERGE_MSG.lock`, a completed pick (which is
+also the shape of a kill after the index publish and before the message
+lock, the K2 state). Recovery (g) recreates the first two at the base and
+reuses the third, materializing nothing (`R6`); the continuation
+materializes exactly once, in the same generation — onto the restored base
+tree, not as a no-op onto the merged index — and the observation
+`attempt_started` records is the continuation's.
+
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again() {`
+
+`ST-11` for a repair: (e) closes the retained generation
+`ResumeDiscardsRetainedSession` with `LineageHeld`, the repair opens its
+next generation from the same recorded source, and that generation is
+materialized again, once; the closed one never is. The closed generation's
+real worktree and intent, planted before the retained prefix, are gone
+after the resume and still gone after the replacement merges and another
+resume runs — PR #249's crash review, finding 2. After that last resume the log replays twice
+to equal states (Gate 5's audit, rows 9 and 10: the retry row's prefix, resumed by production).
+
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_…` › `let events = TopologyFold::parse_log(&fixture.log_bytes()).…`
+
+INV-13: the projection names the repair's origin and its whole lineage.
+
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_…` › `let registered = rejection`
+
+The registry's own lineage, member for member: alpha's first repair
+is member 0 of alpha's lineage (`lineage_members` counts the repairs
+registered before it, and the root is not a member), and the
+projection carries the index the rejection registered rather than
+a count of its own.
+
+## `fn a_rejected_candidates_ref_survives_a_budget_stop_and_the_repair_dispatches_after_the_resume() {`
+
+R11 across a budget stop: the candidates ref protecting the repair's source
+is untouched by the stop and by the resume that clears it, and the repair
+dispatches from it in the next epoch.
+
+## `fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {`
+
+`ST-12` at the loop, once per answer delivery: a `HumanBinding` admission,
+answered with an agent, carries the five-field override derived once at
+ingest — the repair ladder's Mid floor, the catalogue's lowest model for the
+agent at or above it, the policy's Mid effort — and the attempt runs under
+exactly that binding, pinned, at rung 0. The `Blocking` arm is the one
+PR8's hard-block refusal fails: PR #249's refusals review restored that
+refusal (M11) and every test passed, because the polled path had ingested
+the answer before the block was reached.
+
+## `fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {`
+
+PR #249's conformance review, finding 1, end to end: two agents offered,
+`2` typed at the production parser, and the repair runs under the second
+agent with `option_index: 1` and the catalogue's lowest model for it —
+where the last-option rule had recorded a decline and failed the lineage.
+
+## `fn a_binding_answer_naming_no_frozen_option_is_refused_before_any_append() {`
+
+Text that names no frozen option is refused, the log gains nothing beyond
+the resume's own record, and the question stays open.
+
+## `fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_asked_to() {`
+
+Each halting value arrives by a different delivery, so a decline is proven
+ingested at the poll and at the hard block.
+
+A decline fails the repair and its root, releases the lineage lease, and
+ends the run exactly when `halts_run` says so; what follows is the run's
+closure, which this build refuses.
+
+## `fn a_repairs_same_session_retry_records_retained_and_is_not_materialized_again() {`
+
+`ST-15` for a repair, in the incarnation that retained the session: the
+retry is the same generation's second attempt, resumes the session,
+records `Materialization::Retained`, and the materialization funnel ran
+once. This test is what found the funnel leaving `MERGE_MSG` behind, which
+failed the retry's `HoldsTree` verification and closed the generation.
+
+## `fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {`
+
+Staged and not yet published, the answer is resumed over first: that
+incarnation ingests nothing, parks the run again and leaves the partial
+byte-identical, and only then is the answer published. Both incarnations end
+with their log replayed twice to the driven run's fold (`drive_observing`,
+`assert_log_replays_twice_equal`).
+
+Row 122 of Gate 5's audit (`Answer.StageWrite`/before) is the first drive: the open question with
+no answer file, resumed over, and the run parked. The gate's third run graded it near-exact because
+that drive's resume removed the creation marker standing beside the planted rejection. The run is
+now resumed once before the rejection is planted, both candidates' pins are pruned after the plant
+(`prune_the_planted_candidate_pins`), the first drive runs on a harness of its own and enters none
+of the four repairs `assert_no_repair_of_the_creation_prefix` names, and the log is replayed twice
+after it parks, where the pair the row had was the one made after the second drive.
+
+`T-ANSWER` through the production reader: with no answer file the run
+hard-blocks; an answer staged and published into `answers/` while the
+engine is away is ingested by the next incarnation's first step, `via`
+`event-log`, before anything else is selected.
+
+## `const ANSWER_INGEST_KILL_CHILD: &str =`
+
+The kill child of the two `Answer.Ingest` witnesses below.
+
+## `struct IngestKilledAt {`
+
+The run directory's production adapter with a kill armed at one phase of `Answer.Ingest`. The
+harness records the phase first; the kill is exported (`Exported::carried`) before it is handed
+back, because the funnel aborts right after and a process that dies at a hook never reaches the
+drop that would otherwise write the record.
+
+## `struct FunnelAnswers {`
+
+The answer reader the kill child ingests through. The production reader, `EventLogAnswers`,
+reaches `rundir::ingest_answer` with `NoHooks` (`interaction::read_answer`), so no hook of
+`Answer.Ingest` is ever consulted on the schema-4 ingestion path and no adapter can be armed
+there. This reads the same file through the same funnel with an armed adapter, answering `id`
+`event-log` as the production reader does; it is the seam, not a second reader — the recovery in
+the witnesses ingests through the production `EventLogAnswers`.
+
+## `fn answer_ingest_kill_child() {`
+
+Resumes the planted run as `RESUMER` and takes one step with `FunnelAnswers`, whose adapter kills
+the process at the phase `UPSTROKE_TEST_KILL_PHASE` names. The first step's first branch is the
+ingestion, so the process dies inside the read of the published answer, before (or just after)
+the file is read and before any `question_answered` exists. Reaching the panic means the kill did
+not land.
+
+## `fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(`
+
+G5's clause 2 found both phases of `Answer.Ingest` observed under the production adapter and
+faulted by no committed test; G4 had killed the ingestion's append (`T-ANSWER`, `G4B-O9`) with
+temporary tests it did not commit. This kills a real process at each phase of the read itself: an
+over-limit repair's human admission is planted, the answer is staged and published into
+`answers/`, and the child dies at the phase. What it leaves is the exact durable prefix — the
+planted log plus the child's `run_resumed` and nothing after it, no `question_answered` — and the
+answer file byte for byte (R21), read here through `Answer.Ingest` under the production adapter.
+The authority's rows for both phases are empty (a read-only observation) and its actions are the
+before phase's and the repeated observation. The tabled recovery is the next incarnation's first
+step, through the production reader: it ingests the answer exactly once, `via` `event-log`, the
+activated repair runs, the file is left as it was published, and the log replays twice to equal
+states.
+
+A further incarnation then resumes with the file still on disk and ingests nothing, because the
+question the file answers is closed. The log still holds one `question_answered` and the file is
+untouched. That is the claim Gate 5's temporary witness B made for `Answer.Ingest`/after (row 127
+of the strict re-audit): an answer on disk is read again by every later incarnation, and only a
+still-open question makes the read an ingestion. The witness below commits B itself.
+
+## `fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again()`
+
+Gate 5's temporary witness B, committed under a house name. An over-limit repair's question is
+open when a budget stop is appended, and the answer is published into `answers/` while the run is
+stopped. The resume's first step ingests it, in epoch 1 rather than in the stopped epoch: the stop
+is cleared, the question is closed, and the file is retained byte for byte (R21). A second resume
+with the file still on disk ingests nothing, the log still holds exactly one `question_answered`
+for the repair, and it replays twice to equal states.
+
+## `fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal()`
+
+Row 15 of Gate 5's audit, `Worktree.WriteStagingIntent`/before: beta published and the integration
+head moved, alpha's candidate queued at the old base, and nothing of the staging path on disk (no
+staging intent, no staging worktree, no prepared pin for the next sequence, all asserted). The
+resume and its first step take the staging path from there, through the staging intent, the
+staging add, the pick and the pin, and the candidate integrates under sequence 1 on the moved
+head; the log then replays twice to equal states. The gate's third run graded the row near-exact
+because the queue was planted on the P6 fixture and the credited resume removed the creation
+marker and recreated the execution root before the step. The run is now resumed once before the
+queue is planted (`the_runs_first_resume_by_an_incarnation_that_then_dies`), both candidates' pins
+are pruned after the plant (`prune_the_planted_candidate_pins`), the prefix is asserted complete,
+and the credited resume and step enter none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names.
+
+## `fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()`
+
+Rows 18 and 57 of Gate 5's audit, `Worktree.AddStaging`/after and `Object.ProposalCherryPick`/before,
+which are one durable state: the sequence's staging intent and its worktree at the integration
+head with nothing picked into it (`classify_object_residue` answers `None`). The resume reclaims
+the worktree and its intent as stale residue, creates no pin and leaves the candidate queued, and
+the next step stages again and integrates the candidate under sequence 1. Near-exact in the gate's
+third run for the P6 fixture's marker, which the credited resume removed; the run is now resumed
+once before the queue and the staging worktree are planted, both candidates' pins are pruned after
+the plant (`prune_the_planted_candidate_pins`), and the credited resume enters none of the four
+repairs `assert_no_repair_of_the_creation_prefix` names.
+
+## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
+
+The kill child of the two candidate-sequence witnesses below.
+
+## `struct EffectKilledAt {`
+
+The production adapter bundle with a kill armed at one phase of one Git-effect site. Only the
+effects family is wrapped; the run directory, the event log, the container and the process
+funnels answer through the bundle unchanged, and the fold projections are handed on.
+
+## `struct KillingEffects {`
+
+The effect family's production adapter, with the kill answered at `at`. The harness records the
+phase first, and the observation is exported (`Exported::carried`) before the kill is handed back:
+the funnel aborts right after, and a process that dies at a hook never reaches the drop that would
+otherwise write the record. The existing `ArmedFinalization` answers its injection without that
+export, so it is not reused here.
+
+## `fn adopted_by_a_kill_child(root: PathBuf, plan: Plan) -> std::mem::ManuallyDrop<Self> {`
+
+The parent's fixture, as its kill child sees it. Every path is the parent's, and the recorded
+start is read back from the planted log's first line rather than built again. The value is never
+dropped, because `Fixture`'s drop removes the tree the parent still has to read.
+
+## `fn candidate_sequence_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one step of the driver with an editing
+worker. With nothing planted, that step is a whole attempt: the dispatch, the attempt, the judge
+and then the candidate sequence. The child dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE`
+names. In the capture: after `Object.CandidateStage` stages the worker's edit, and before and
+after `Object.CandidateWriteTree` writes the tree. In the judge's gates snapshot: after
+`Object.SnapshotCommitTree` writes the ephemeral commit and at its `IdUnread` point, after
+`Snapshot.WriteIntent`, and before and after `Snapshot.Add`. In the candidate sequence: before
+`Object.CandidateCommitTree` writes the candidate commit and at its `IdUnread` point (the object
+written and its id not yet read; a point is armed in kill mode on the shared harness), before and
+after `Ref.PinCandidatePrepared` pins the written commit, before and after
+`Ref.CreateCandidates` creates the candidates ref, and, since the second repair round of #311,
+before and after `Ref.DeleteCandidatePin` deletes the pin inside `reclaim_after_creation`.
+Reaching the panic means the kill did not land.
+
+## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
+
+Runs the child at one coordinate and returns how many events the planted log held, so a witness
+reads exactly the prefix the dead process appended.
+
+## `fn assert_no_unreachable_commit_but_snapshot_inputs(fixture: &Fixture, tag: &str) {`
+
+The judge snapshots the attempt's tree for its gates and reviewers, and every snapshot's ephemeral
+commit is unreferenced once its snapshot is removed (R27). Those commits are expected. A candidate
+commit is the other unreferenced commit a kill here could leave, and it carries the attempt's own
+message, so this refuses any unreachable commit whose subject is not the snapshot input's.
+
+## `fn registered_with_git(`
+
+Whether Git lists the worktree among the repository's registered worktrees; the settlement
+witnesses below assert it before and after, beside the directory itself. A registration is compared
+by its name and its parent directory, which outlives the removed worktree: `util::same_path` on the
+full paths panics when neither resolves.
+
+## `fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()`
+
+Gate 5's strict re-audit, row 54: `Object.CandidateCommitTree`/before had no committed witness. The
+audit's shape was a `candidate_kill_child` arm classified by `recovery_for`, but review round 3
+refused exactly that for the adjacent row 39: `recovery_for` describes the interrupted settlement
+and nothing performs it. Only a resume performs it, so the kill is taken inside the driver's own
+candidate sequence and the recovery is the next incarnation's.
+
+The kill leaves the exact prefix the authority tables for this phase: `run_resumed`,
+`task_dispatched` and `attempt_started`, no `candidate_prepared`, no candidate commit, no pin and
+no candidates ref, with the attempt's worktree and intent still standing (R9). The rows are empty
+and the action is the before phase's. `recovery_for` agrees: settle interrupted, no object, no
+promotion. The next incarnation's recovery performs that settlement, step (d): one
+`attempt_interrupted` before its `run_resumed`, and the closed generation's worktree and intent
+reclaimed (the directory gone and no longer registered with Git, which it was before), without
+writing a candidate commit itself. Its first step then performs the site's
+action from the prefix in which nothing was performed. The next generation's attempt is accepted
+and writes the candidate commit through `Object.CandidateCommitTree` (both phases observed under
+the production adapter). It is pinned, prepared and created, the candidates ref names it, the pin
+is pruned, nothing is owed, and the log replays twice to equal states.
+
+## `fn candidate_commits_left_to_git(fixture: &Fixture) -> Vec<String> {`
+
+The commits the object store holds that nothing references, other than the judge's snapshot
+inputs: the candidate commits a dead capture wrote and never pinned.
+
+## `fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(`
+
+Rows 39, 55 and 56 of Gate 5's audit: `Ref.PinCandidatePrepared`/before, and
+`Object.CandidateCommitTree` after and at its `IdUnread` kill point. The first two share one
+durable prefix (only the id's read lies between the commit-tree's after phase and the pin's before
+phase), and the third leaves the same objects: the attempt in flight (`run_resumed`,
+`task_dispatched`, `attempt_started`), its worktree and intent standing, exactly one candidate
+commit in the object store that nothing references, and no pin or candidates ref. The candidate
+module's kill witnesses stop at `recovery_for`, a plan; here the next incarnation's resume
+performs it. Step (d) settles the attempt interrupted, finishes no promotion, reclaims the closed
+generation's worktree (gone and no longer registered with Git) and intent, writes no commit and no
+pin of its own, and leaves the dead
+capture's commit to Git exactly as it was. The next generation's attempt is accepted with its own
+commit-tree performed, which, with a tree, parent and message identical to the dead one's, may
+write the same object: the dead commit is afterwards either still Git's or that commit, never
+adopted by name. The log holds the settlement and then one whole candidate sequence, nothing is
+owed afterwards, and the log replays twice to equal states. The kill child's record holds the
+coordinates; the parent never kills at them.
+
+## `fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_which_appends_the_queue_position_once()`
+
+Gate 5's strict re-audit, row 36: `Ref.CreateCandidates`/after had no committed witness. It is
+driven the same way as row 54, and for the same reason: the recovery the authority tables is the
+resume's step (f), `finish_promotions`, which composes `create_candidates_ref`,
+`append_candidate_created` and `reclaim_after_creation`. That step is not called by hand.
+
+The kill leaves the candidate prepared and its candidates ref created (R11, at the recorded
+commit), with the pin not yet pruned, the worktree not reclaimed, the generation `Promoting` and
+no `task_candidate_created`. The rows are R11 and the action is adoption. The next incarnation's
+recovery finishes the promotion. It enters no create funnel for the ref the dead process created
+(`Ref.CreateCandidates` before is never reached), and it appends `task_candidate_created` before
+its own `run_resumed`. It leaves the ref where it was, prunes the pin and reclaims the worktree and
+intent. The next step integrates the adopted candidate: the integration ref is at the commit the
+dead incarnation prepared, the log holds one queue position across the kill and the recovery, and
+it replays twice to equal states.
+
+Because the recovery adopts, this parent's own observation record never holds the coordinate. The
+registry cites the kill child for it, whose record does.
+
+## `fn index_blobs_of(worktree: &Path) -> Vec<String> {`
+
+The blob ids a worktree's index holds, so a witness can name the worker's staged edit and follow
+it from R9 (index-referenced) to R27 (released to Git by the scrub).
+
+## `fn ephemeral_snapshot_commits_left_to_git(fixture: &Fixture) -> Vec<String> {`
+
+The judge's snapshot inputs that nothing references any more, by id: the commits
+`assert_no_unreachable_commit_but_snapshot_inputs` tolerates by subject, here compared across a
+recovery to show they were neither adopted nor deleted.
+
+## `fn object_present(fixture: &Fixture, object: &str) -> bool {`
+
+Whether the object store still holds an object; released to Git is not deleted.
+
+## `fn snapshot_slots_of(`
+
+The snapshot intents the manager reads, which is what `reclaim_snapshot_residue` reads.
+
+## `enum AttemptResidue {`
+
+The four shapes a kill inside the attempt's capture or its gates snapshot leaves, beside the
+attempt in flight and its worktree with the worker's edit staged: the staged edit alone; one
+ephemeral snapshot commit unreferenced; the snapshot intent durable with no worktree; or the
+snapshot worktree checked out at that commit. A witness names the shape it expects, and the driver
+asserts that shape before the resume and its reclaim after.
+
+## `fn a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(`
+
+Rows 23 to 26 and 48 to 53 of Gate 5's audit: `Snapshot.WriteIntent` and `Snapshot.Add` before and
+after, `Object.CandidateStage`/after, `Object.CandidateWriteTree` before and after, and
+`Object.SnapshotCommitTree` before, after and at its `IdUnread` kill point. The attempt module's
+kill witnesses construct these same prefixes and recover them through
+`AttemptContext::settle_interrupted`, which production never calls (its only caller is
+`cancel_in_flight`, which nothing outside tests calls); the gate's run 3 declined them for that. Here
+the kill is taken inside the driver's own attempt, in the kill child, and the recovery is the next
+incarnation's `run_recovery_order`: `recover::settle_interrupted` at step (d),
+`reclaim_closed_generations` at step (e) and `reclaim_snapshot_residue` through
+`finish_integration`.
+
+Every prefix holds `run_resumed`, `task_dispatched` and `attempt_started` and nothing after; the
+worktree and intent stand (R9), Git lists the worktree, and its index holds the worker's edit,
+reachable. The snapshot residue is the named shape. `recovery_for` owes an interrupted settlement
+and nothing of a candidate. The resume settles the attempt interrupted (one `attempt_interrupted`
+before its `run_resumed`), scrubs the worktree through `Worktree.Remove` and `Worktree.RemoveIntent`
+(the directory and its registration gone, the staged edit released to Git and still present),
+reclaims the snapshot intent and worktree through `Snapshot.Remove` and `Snapshot.RemoveIntent`
+exactly when an intent named them, leaves every ephemeral commit to Git, and performs none of the
+five sites' own effects. Nothing is owed afterwards and the log replays twice to equal states. The
+next step's attempt is accepted, performing the killed site in both phases from the prefix in
+which nothing was performed, and the log replays twice again. The `Object.SnapshotCommitTree`/before
+and `Snapshot.WriteIntent`/before rows are read from the adjacent after-phase kills,
+`Object.CandidateWriteTree`/after and `Object.SnapshotCommitTree`/after: between the first pair
+lie only reads (the candidate diff, the assessment, the review inputs and the snapshot input's
+resolution), and between the second only the id's parse and the intent's validation.
+
+## `fn a_kill_before_the_candidates_ref_is_created_is_finished_by_the_next_resume_which_creates_it_and_appends_the_queue_position_once()`
+
+Row 35 of Gate 5's audit, `Ref.CreateCandidates`/before. The candidate module's witness recovers
+through `complete_promotion`, which production reaches only from `promote`, which nothing outside
+tests calls. Here the kill is the driver's own and the recovery is the resume's step (f),
+`finish_promotions`. The prefix holds `candidate_prepared` and nothing after it: the pin at the
+prepared commit (R23), no candidates ref, the worktree and intent standing, the generation
+`Promoting`, an unfinished promotion owed. The resume finishes it, performing `Ref.CreateCandidates`
+in both phases from the prefix in which nothing was performed, appends `task_candidate_created`
+before its `run_resumed`, leaves the candidates ref at the recorded commit, prunes the pin and
+reclaims the worktree and intent. The next step integrates the candidate at that commit, the log
+holds one queue position across the kill and the recovery, and it replays twice to equal states.
+
+## `fn a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(phase: HookPhase) {`
+
+`Ref.DeleteCandidatePin` before and after (registry rows 41 and 42, `fault_row: t_cand_ref`),
+constructed where a candidate-prepared pin stands by production's own hand: inside the promotion.
+The kill child resumes the healthy run and takes one step with an editing worker, so the pin is
+the one `pin_candidate` made, and the death is a real kill inside `reclaim_after_creation` during
+`TopologyRun::promote_candidate`, at the phase the argument names.
+
+The prefix, asserted before the recovery: `candidate_prepared` and `task_candidate_created`
+durable and nothing after them; the candidates ref at the recorded commit; the pin at that commit
+before its deletion and gone after it, and Git listing no other candidate-prepared pin; the commit
+reachable either way, because R11 holds it, so in this transaction the deletion releases nothing
+to Git and the after phase's tabled `ReclaimReleased` finds nothing to reclaim; the generation's
+worktree and intent standing, since the deletion precedes the reclaim; the generation `Closed`;
+and `recovery_for` reading the standing pin as an unfinished promotion and the deleted one as
+nothing owed.
+
+The recovery is the next incarnation's `run_recovery_order`. From the before prefix step (f)
+finishes the promotion: the resume enters `Ref.DeleteCandidatePin` once, at both phases, and
+`recovered.finished` names alpha. From the after prefix it enters the site at neither phase and
+finishes nothing, and the closed generation's worktree is reclaimed all the same. In both the
+resume creates no candidates ref, appends its `run_resumed` and no second
+`task_candidate_created`, leaves no pin, no worktree, no Git registration and no intent, and
+classifies again as owing nothing. The recovered log replays twice equal; the candidate then
+integrates on the next step, the integration ref at the commit the dead incarnation created, one
+queue position across the kill and the recovery, and the log replays twice equal again.
+
+Until this witness the two coordinates' only kill construction was the finalization matrix's
+pair of cells, over a pin no crash leaves (`with_a_candidate_pin_no_crash_leaves`); the Gate 5
+audit's own note on row 41 reads that cell as built "not in the candidate-promotion transaction
+that t_cand_ref names". Since the third repair round of #311
+`kill_after_report_before_each_cleanup_step`, the test the sequential registry and `coverage.rs`
+cite for rows 41 and 42, runs this witness at both phases as its two cells of the site, so the
+citation's observation record holds this construction and no finalization cell over a planted
+pin; the two tests below run it on its own.
+
+## `fn a_kill_before_the_candidate_pin_is_deleted_is_finished_by_the_next_resume_which_deletes_it_once()`
+
+The before phase: the pin stands, and the next resume deletes it once.
+
+## `fn a_kill_after_the_candidate_pin_is_deleted_is_adopted_by_the_next_resume_which_deletes_nothing()`
+
+The after phase: the deletion is durable, and the next resume adopts it.
+
+## `fn a_kill_after_the_candidate_pin_is_settled_interrupted_by_the_next_resume_which_prunes_the_orphan_pin()`
+
+Row 40 of Gate 5's audit, `Ref.PinCandidatePrepared`/after, which the gate's run 3 regraded: the
+candidate module's witness composes `recovery_for`, a plan, with a direct `prune_orphan_pin` and
+only classifies the interrupted settlement. Here the kill is the driver's own and the resume
+performs both. The prefix holds the attempt in flight, its worktree and intent, and the pin alone
+at the candidate commit it keeps reachable (R23): no `candidate_prepared`, no candidates ref, no
+loose candidate commit. `recovery_for` owes the settlement and the orphan pin at its exact recorded
+value. The resume settles the attempt interrupted at step (d) and prunes the pin at step (f)
+through `Ref.DeleteCandidatePin`: the pin is gone, the commit is again Git's and not deleted, no
+pin or candidates ref is created, and the closed generation's worktree and intent are reclaimed.
+Nothing is owed, the log replays twice to equal states, and the next generation's attempt is
+accepted, pinning its own candidate and pruning that pin with its promotion.
+
+## `fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()`
+
+Gate 5's strict re-audit, row 96: `Event.OpenLog`'s `TruncateTornTail` point in error-return mode had
+no committed witness. The coverage test fires it on a bare log and drives nothing.
+
+The run is resumed once and that incarnation dies writing its first event: the log is
+`run_started`, `run_resumed` and an unterminated final line, beside no creation marker, with the
+execution root and the integration ref standing. Until Gate 5's third run the torn line followed a
+dispatch planted on the P6 fixture, which that run graded near-exact: a dispatch beside a published
+marker is a state no crash leaves, and the converging resume removed the marker and recreated the
+root. The dispatch is gone rather than moved after the first resume, because a torn append after a
+dispatch is the attempt's start, which the generation's worktree precedes. Both resumes go through
+the real refs. The resume is armed to fail at the point. The open truncates the torn tail, the point answers the error, and the
+barrier stops at the open. The refusal names the point and says the run is resumable. What the
+refusal leaves is the registry's residue for the point, R21 with the unterminated final line
+truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
+event: nothing derived from the log was acted on, and the refused resume's harness holds no site
+but its locks and the open. The next resume enters none of the four repairs
+`assert_no_repair_of_the_creation_prefix` names and repeats the barrier: it opens
+and proves the prefix, and has nothing left to truncate because the refused open's truncation
+stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
+states.
+
+## `fn worktree_lease_answer(fixture: &Fixture) -> String {`
+
+Asks `rundir::tests::worktree_lease_probe_child`, in a process of its own, whether the fixture's
+worktree lease is absent, free or refused. The lease is an `fcntl` lock, which never conflicts
+within the process that holds it, so only another process can say whether a hold survived. The
+probe is spawned through the process funnel, as this module requires.
+
+## `fn a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(`
+
+Gate 5's strict re-audit, row 131, `Lock.AcquireWorktree`/after, together with the lease's other
+three coordinates. Rows 136 and 137 (`Lock.CreateWorktreeLockFile` before and after) and
+`Lock.AcquireWorktree`/before were witnessed at the module in `rundir::tests`, and those witnesses
+replay no log. Here each one is a resume of a planted run.
+
+The resume is armed with an error at the coordinate, and the command ends there. The error named is
+the injected one, nothing after the lease ran, and the log is untouched. The lease's file is left
+exactly when its create was performed, and the authority's rows agree: R25 after the create, R17
+after the hold, nothing before either. The run lock is gone, and another process finds the lease
+free (or its file absent), because the command that ended released its hold with it. The file the
+faulted command created is then marked. The next resume runs all four lease coordinates, holds the
+lease while its handle lives and releases it with the handle. It adopts the marked file rather than
+replacing it (read only after the release, because closing any descriptor of the file drops the
+process's `fcntl` lock), appends its `run_resumed` after the planted prefix, and the log replays
+twice to equal states.
+
+## `const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";`
+
+The kill child of the worker-spawn witnesses below.
+
+## `struct SpawnPhaseFault {`
+
+The process funnel's production adapter with an optional injection at one phase of a process site.
+The harness records the phase, and the injection is exported before it is handed back, because a
+kill there aborts the process. With a `pid_file` it also records the spawned worker's pid (and its
+creation time on Windows) as soon as the child is created, so that the parent can check the
+worker is gone after its coordinator's death.
+
+## `const SPAWNED_WORKER_PID: &str = "spawned-worker.pid";`
+
+Where the kill child records the worker it spawned, beside the fixture.
+
+## `struct SpawningRunner {`
+
+The runner the spawn witnesses run the driver with. The implementer's invocation runs a real
+process, this test binary, through the host runner and so through `Process.Spawn` under whatever
+adapter the host runner carries. It then edits the worktree as `RecordingRunner::editing` does, so
+an attempt that survives its spawn is accepted. Every other invocation is the recording runner's.
+The driver's own step holds the run's cleanup scope while it runs, so the reaper the funnel starts
+takes the run's cleanup lease, just as it does in production.
+
+## `fn process_spawn_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one driver step. Its worker is
+`sleeps_until_terminated`, a process that outlives the kill unless something settles it. The child
+dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names: `Process.Spawn`'s after phase, or one
+of its points armed in kill mode on the shared harness. `AmbientJobJoined`, which the containment
+step consults rather than the spawn, is driven through `contain_write_command` before anything is
+resumed. Every other coordinate is reached by a coordinator already contained, as a write command
+is before it spawns anything: on Windows this is what puts a child created suspended inside the
+ambient kill-on-close job from its creation (INV-18). Without it, the first Windows guest run of
+the `CreatedSuspended` arm orphaned a suspended worker outside any job. That worker held the
+handles it inherited, and the guest's command wrapper could not append to its own log after cargo
+exited (`guest/variant-only-CreatedSuspended.log`). Reaching a panic means the kill did not land.
+
+## `fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {`
+
+Gate 5's strict re-audit, rows 141 and 144 to 152: `Process.Spawn`'s after phase and the spawn's
+kill points, each driven to the recovery the authority tables. The kill leaves the worker's
+attempt in flight (`run_resumed`, `task_dispatched`, `attempt_started`); the containment kill
+leaves nothing appended. The run's cleanup hold is then released. On Unix this is the reaper
+settling the worker's process group, which would otherwise hold the lease for the sleeper's two
+minutes. A control run with the reaper's cleanup delayed by thirty seconds fails this assertion
+(`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows there is no reaper, and the worker the
+child recorded must be gone within the same bound, because the ambient job and the private job
+close with the process that held them. The run lock is gone. The next resume converges: step (d) settles the attempt
+interrupted, and the next attempt, run through the recording runner (which spawns nothing), is
+accepted. The log replays twice to equal states.
+The kill child's record holds the coordinates, because the parent never spawns under the armed
+adapter.
+
+## `fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {`
+
+Gate 5's strict re-audit, row 140: `Process.Spawn`/before. The driver's step runs the worker with
+an error at the spawn's before phase. The phase is observed and the after phase is not. That the
+funnel created no process is measured, not inferred from the phases: the adapter records every
+`child_created` callback the funnel makes, and the refused step made none (#292's round-1
+fix-check lens, finding 2, whose mutation moves the before phase after `ProcessTree::spawn` and
+leaves the phase observations as they were; under it this assertion fails). The attempt started
+and produced no candidate, and no cleanup hold outlives the step. The next resume converges. Its
+step runs the implementer through the host runner under an unarmed adapter, which records the
+worker process the funnel creates, and that attempt is accepted. The log replays twice to equal
+states.
+
+## `fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(`
+
+`Process.Terminate` before and after (rows 142 and 143 of Gate 5's strict re-audit), driven through
+the driver rather than the funnel alone. The funnel witnesses in `agent::proc::tests` replay no log.
+The worker is the sleeper with a one-second timeout, so the funnel terminates it, and an error is
+armed at the phase. The step returns that error with the attempt in flight, and the funnel has
+settled the worker it could not terminate cleanly: no cleanup hold outlives the step. The next
+resume settles the attempt interrupted, the next attempt is accepted, and the log replays twice to
+equal states. This parent's record holds both phases, because its own runner's adapter observed
+them.
+
+## `fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {`
+
+On Windows, `AmbientJobJoined` in error-return mode: the containment step refuses before the join,
+the armed point fires, and nothing is appended; the next resume converges, appends its
+`run_resumed`, and the log replays twice to equal states. Row 145 of Gate 5's audit is cited to
+`engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges`
+instead, which drives a production write-command facade whose continuation can be seen (#292's
+round-1 fix-check lens, finding 4): this test calls the containment step itself, so a facade that
+went on after the refusal would not be on its path.
+
+## `const CONTAINER_MOUNT_KILL_CHILD: &str =`
+
+The kill child of the git-view mount witnesses below.
+
+## `struct ContainerKilledAt {`
+
+The container funnels' production adapter with a kill at one phase of one site. The harness
+records the phase first, and the kill is exported before it is handed back, because the funnel
+aborts the process on it.
+
+## `fn mount_phase_named(name: &str) -> HookPhase {`
+
+The phase `UPSTROKE_TEST_KILL_COORDINATE` names, in the parent's `Debug` spelling.
+
+## `fn container_mount_kill_child() {`
+
+Adopts the parent's two-task run with its stale verification, and drives one step with the
+production container runner (`production_container_runner`, the fake runtime, a disposable view)
+carrying `ContainerKilledAt` at `Container.MountGitView`'s phase. The step settles the planted
+verification interrupted, starts the re-verification, and launches its gate container: the intent
+is written and synced, and the process dies at the mount's phase. Reaching the panic means the kill
+did not land. This child's record holds the coordinate; the parent never mounts under the armed
+adapter.
+
+## `fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(`
+
+Rows 159 and 160 of Gate 5's audit, `Container.MountGitView` before and after, in a run that has a
+log. The module witnesses in `runner::container::tests` fault a bare `launch` and census the
+residue twice; they hold no event log, so nothing there replays (#292's round-1 fix-check lens,
+finding 5). Here the launch is a topology run's gate: the kill child dies at the phase with
+`merge_verification_interrupted`, `run_resumed` and `merge_verification_started` appended after
+the planted prefix, exactly the dead incarnation's intent in the container namespace, and the view
+present exactly where the authority's rows put R19. The run lock went with the process. The next
+resume's container census reclaims the dead launch through its funnels (the view unmounted once,
+the intent removed once) before it appends anything; neither survives, and the verification the
+kill took is settled interrupted after the planted one. A further step re-verifies the candidate
+and publishes it under the next sequence, and the log replays twice to equal states.
+
+
+## `fn integration_ref_reflog(fixture: &Fixture) -> Vec<String> {`
+
+The integration ref's reflog, one new value per entry, as Git reports it. The ref lives under
+`refs/upstroke/`, where Git keeps a reflog only under `core.logAllRefUpdates=always`, which the
+witness below sets on its scratch repository before anything writes the ref.
+
+## `fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {`
+
+Every ref under `refs/upstroke/` with its value, as `git for-each-ref` lists them: what the
+repository holds, read without the engine.
+
+## `fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(`
+
+Rows 31 and 32 of Gate 5's audit, `Ref.CreateIntegration` before and after, and row 68,
+`RunDir.RemoveMarker`/after. The creator removes its marker (P6 to P7) and then creates the
+integration ref (P8), with nothing durable between the two (`create.rs`, `p8_create_integration_ref`
+takes the `MarkerRemoved` state directly), so a creation killed after its marker's removal leaves
+row 68's prefix and row 31's alike. `Fixture::healthy` is the committed run with its marker still
+standing (P6); the prefix is built through the funnels whose phases it ends at: `rundir::remove_marker`
+under the production adapter, and for row 32 also P8's own body, `ensure_integration_ref`, over
+the real `WorkspaceManager` under the production effects adapter, so the run's log is exactly its
+committed prefix, the marker is gone, the ref exists only when its creation was performed, and
+nothing a later step does (the execution root) is on disk. **The ref is a Git ref in the fixture's
+repository.** Until the gate's third run it was `RecordingRefs`, an in-memory double read through
+the resume's `IntegrationRefs` seam, and that run graded both rows near-exact for it (report §8.4).
+The prefix is read three ways before the resume: through the manager's `direct_ref_target`, which
+is what the recovery reads; through `git for-each-ref` over the run's namespace, which lists that
+ref and no other; and, after the resume, through the ref's reflog, which holds one entry at the
+recorded base whether the prefix or the resume created it. The resume is `resume_with_real_refs`,
+whose refs seam is the manager. `kill_after_run_started_creates_integration_ref` and
+`a_resume_adopts_an_integration_ref_already_at_the_recorded_base` resume `Fixture::healthy` with its
+marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
+enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
+and the resume, the ref is created once at the recorded name and base), appends `run_resumed`
+after the committed prefix, and the log replays twice to equal states.
+
+## `const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";`
+
+The kill child of the staging-path witness below.
+
+## `fn staging_path_kill_child() {`
+
+Adopts the parent's two-task run with a stale queued candidate on a moved head and drives one step,
+which takes the staging path, and dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names:
+after `Worktree.WriteStagingIntent` writes the staging intent, before `Worktree.AddStaging` adds
+its worktree, or before or after `Ref.PinPrepared` pins the proposal the pick produced. Reaching
+the panic means the kill did not land. This child's record holds the coordinates.
+
+## `fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()`
+
+Rows 43 and 58 of Gate 5's audit, `Ref.PinPrepared`/before and `Object.ProposalCherryPick`/after,
+one durable prefix: the pick complete, the staging worktree's head the proposal commit on the moved
+head, no prepared pin. The committed plants put a pinned proposal (`Ref.PinPrepared`/after) or the
+integration head with the pick's internal residue in the staging worktree; this kills the staging
+path at the pin's before phase instead. The dead step recorded nothing but its `run_resumed`, the
+staging worktree and its intent stand (R10) and no pin names the proposal. The resume reclaims the
+staging worktree with force and its intent, creates no pin, leaves the candidate queued with nothing
+recorded for the interrupted pick, and leaves the proposal commit to Git. The next step takes the
+staging path again and publishes the candidate under sequence 1 on the moved head, and the log
+replays twice to equal states.
+
+## `fn kill_the_staging_path(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
+
+Runs the staging-path child at one coordinate and returns how many events the planted log held,
+as `kill_the_candidate_sequence` does for the candidate sequence.
+
+## `fn a_kill_between_the_staging_intent_and_its_worktree_leaves_an_intent_the_next_resume_reclaims(`
+
+Rows 16 and 17 of Gate 5's audit, `Worktree.WriteStagingIntent`/after and
+`Worktree.AddStaging`/before, one durable prefix: the staging intent durable, the only intent, and
+no staging worktree added or registered; no pin, and nothing of the sequence recorded. The only
+committed plant of a bare staging intent puts it in a log with no candidate, which is not this
+prefix; here the kill is the staging path's own, over the stale queued candidate. The resume
+reclaims the intent through `Worktree.RemoveStaging` and `Worktree.RemoveStagingIntent`, performs
+none of the path's own sites, creates no pin, leaves the candidate queued with nothing recorded, and
+the log replays twice to equal states. The next step takes the staging path again, performing the
+killed site in both phases, and publishes the candidate under sequence 1 on the moved head.
+
+## `fn a_kill_after_the_proposals_pin_leaves_a_pinned_staging_worktree_the_next_resume_reclaims_with_its_pin_and_the_candidate_integrates()`
+
+Row 44 of Gate 5's audit, `Ref.PinPrepared`/after: the pick complete, the staging worktree's head
+the proposal on the moved head (R10), the prepared pin at sequence 1 naming it (R12), and
+`merge_verification_started` not yet appended, so nothing durable records the sequence. The
+committed plants of a prepared pin either append that event after it or put the pin in a
+candidate-less log. The resume deletes the orphan pin at the next sequence through
+`Ref.DeletePreparedPin`, reclaims the staging worktree and its intent, pins nothing and stages
+nothing of its own, leaves the proposal commit to Git, and the log replays twice to equal states.
+The next step pins its own proposal and publishes the candidate under sequence 1 on the moved
+head.
+
+## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
+
+Two lineages overlapping on one path, the younger's repair already queued
+when the older's has not started: the younger candidate is queued but
+ineligible (`BehindOlderLineage`), the older repair dispatches and
+publishes first, and the younger publishes onto the head it left —
+lineage order, not queue position, each publication satisfying its own
+closure and releasing its own lineage lease.
+
+## `fn with_live_run<R>(`
+
+PR10's loop-level fixture: a resumed `TopologyRun` under a ceiling of the
+test's choosing, handed to a body with its seams and hooks, the resume
+run first so an arming inside the body lands in the loop and not in
+recovery. `with_live_run_hooked` takes the caller's hooks;
+`with_live_run_hooked_runner` the caller's runner as well.
+
+## `fn with_live_run_hooked<R>(`
+
+[`with_live_run`] through the caller's hooks, so an arming that lives in
+the hooks rather than in the harness (an error at a hook phase) reaches
+the loop.
+
+## `fn closure_refuses_an_in_flight_generation_and_an_unresolve…`
+
+R1's negative witness (the round-4 contract lens, F2: the record named a
+test that constructs an unclosable log, and the only reference was a
+positive fixture). Two logs no sequential process writes — an attempt
+started and never settled, and a verification started and never settled,
+the census's deferred-verification trace without its outage — replayed
+into folds, and `closure::unclosable` names the in-flight generation and
+the unresolved transaction while `closure::refuse_unclosable` refuses
+each, naming the shape, PR11 and "nothing was appended". The refusal is a
+reading of the fold: `TopologyRun::close_run` consults it after the
+ending outcome and before its first append, so what the loop would append
+for such a log is nothing. The promoting shape has no fixture here.
+
+## `fn a_budget_stopped_run_with_a_retained_generation_is_close…`
+
+`PR7-R4-LOOP-004`: a budget-stopped run with a retained generation
+derives NotEnding while the generation blocks `common`; closure closes it
+`RunEnding { BudgetExceeded }`, re-derives, and ends the run — and the
+residual diagnostic names the retained generation rather than saying
+"closure derives NotEnding" to an operator whose run is budget-stopped.
+
+## `fn a_budget_stopped_run_with_a_retained_generation_is_close…` › `let runtime = runtime_holding_the_record();`
+
+The resumable half: a resume with the same ceiling reopens the run, recreates the root
+it pruned, clears the epoch's stop, and offers alpha again from a fresh generation.
+
+## `fn a_live_worktree_missing_close_reclaims_the_generations_w…`
+
+`G4B-O3-LIVE-WORKTREE-MISSING-CLOSE-KEEPS-THE-INTENT`: the live retry
+path's `Close` arm reclaims the closed generation's worktree and intent
+after the `generation_closed` append, as recovery step (e) does for a
+close it makes — with the intents read `G4G` made.
+
+## `fn a_live_worktree_missing_close_reclaims_the_generations_w…` › `let git_file = std::fs::read_to_string(worktree.join(".git"…`
+
+Residue, not absence: an interrupted command's `index.lock` in the worktree's
+git dir fails `Worktree.Verify` while the checkout is still there.
+
+## `fn over_budget_prefix_without_budget_exceeded_is_not_ending…`
+
+`over_budget_prefix_without_budget_exceeded_is_not_ending` (T-FINISH): a
+structurally admissible state with an exhausted ceiling classifies
+NotEnding, the loop appends `budget_exceeded` first, and only then does
+the closure end the run for budget.
+
+## `fn run_finished_complete_refused_with_queued_candidate() {`
+
+`run_finished_complete_refused_with_queued_candidate` (T-FINISH).
+
+## `fn run_finished_parked_refused_with_admissible_work() {`
+
+`run_finished_parked_refused_with_admissible_work` (T-FINISH): a question
+on alpha does not stop the runnable frontier (`DESIGN.md` §4 (6)); the
+fold refuses `Parked` while beta is admissible, and the loop dispatches
+beta instead of hard-blocking.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…`
+
+`run_finished_parked_or_complete_refused_while_deferred_items_exist`
+(T-FINISH): pending backoff makes Parked and Complete NotEnding, and the
+loop sleeps the backoff rather than closing.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…` › `let fixture = Fixture::healthy("closure-deferred-task");`
+
+(a) A Deferred task, at the fold and at the loop within one epoch.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…` › `let fixture = Fixture::two_tasks("closure-deferred-candidat…`
+
+(b) A verification-deferred candidate, at the fold. The loop half is
+`a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers`,
+whose every deferral is followed by a wait.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…`
+
+`run_finished_halted_and_budget_exceeded_accepted_with_deferred_items`
+(T-FINISH, closure step (5b)): a Deferred task never blocks Halted (void
+with the run) or BudgetExceeded (resumably_open, woken by `run_resumed`).
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-halted-deferred");`
+
+Halted: alpha deferred, beta's halting failure — both planted in the
+live epoch, after the resume, so the closure meets alpha Deferred with
+its backoff pending rather than the Pending task `run_resumed` wakes.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-budget-deferred");`
+
+BudgetExceeded: alpha deferred by an outage in this epoch, the ceiling refusing beta's
+dispatch, closure ending the run with the deferral resumably_open.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fresh = Arc::new(Mutex::new(HookHarness::new()));`
+
+And the resume wakes it (`resume_clears_budget_stop_and_wakes_deferred` is the same
+claim from a planted log).
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-halted-verification-deferred");`
+
+The packet's coverage assertion names verification-deferred candidates
+beside deferred tasks, and until PR10's round 3 only the worker deferral
+was driven live (the round-3 contract lens, F2). Two more halves: alpha's
+queued candidate is verification-deferred in the live epoch
+(`plant_live_verification_deferral`), then beta halts, or the ceiling is
+met, and closure finishes with the candidate's queue entry still deferred
+and its candidates ref retained — Halted's forensic output, BudgetExceeded's
+resumably-open one — while step (iv) prunes the prepared pin as at every
+outcome. The resume after BudgetExceeded wakes the candidate
+(`CandidateQueue::wake_deferred`). A closure that refused a deferred
+candidate would fail both `Progress::Finished` assertions.
+
+## `fn verification_deferred(fold: &TopologyFold) -> bool {`
+
+Whether any queue entry is verification-deferred.
+
+## `fn plant_live_verification_deferral(`
+
+A stale-clean verification of the planted candidate started and deferred
+by an infrastructure outage, appended through the production emitter on
+the resumed handle so `run_resumed` cannot have woken it. The fold requires
+the recorded head to differ from the candidate's base (the exact-base case
+is the fast path) and the proposal to differ from the head, so both are
+commits made for the purpose, and the prepared pin the basis names is
+created at the proposal.
+
+## `fn publish_alpha(fixture: &Fixture) -> PlantedTransaction {`
+
+Alpha merged on the fast path with a real candidates ref behind it: the
+queued candidate's prepared and candidates refs, `merge_prepared` fast and
+`task_merged` durable, the integration ref moved to the candidate. The
+finished-run planting's Published end and the two closure fixtures below
+share it; the closure fixtures need a candidates ref that outlives the
+closure, so that "every candidates ref is kept" compares something.
+
+## `fn recorded_spend(fixture: &Fixture) -> f64 {`
+
+What the planted log has already spent (`Spend::replay`), so a ceiling
+set just above it admits exactly one live attempt and refuses the retry:
+the planted candidate's attempt record carries a cost, and a ceiling
+chosen by eye met it before any live step (the round-2 rebuild of the
+closure fixtures found that out).
+
+## `fn step_until_budget_stop(`
+
+Drive the loop until `Progress::BudgetExceeded`, at most six steps,
+returning every shape on the way.
+
+## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…`
+
+T-FINISH's closure prefix with a fault inside it: beta's retained
+generation's `generation_closed` is durable and the scrub that follows
+it is refused at `Worktree.Remove`'s before phase, so the command ends
+between the close and the `run_finished`. The next resume finds one
+close for that generation, reclaims its worktree and intent, keeps every
+candidates ref, clears the epoch's budget stop, and the loop meets the
+ceiling again in the new epoch. Alpha is published first with a real
+candidates ref (`publish_alpha`), asserted present before the closure:
+until PR10's round 2 the fixture was a single task and "every candidates
+ref is kept" compared two empty lists (the round-2 crash lens, P2-5).
+The fault is armed at the second `Worktree.Remove` before phase, because
+the resume of the planted log scrubs alpha's closed generation first;
+the count of two is asserted, so the faulted execution is the closure's.
+
+## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…` › `let log = TopologyFold::parse_log(&fixture.log_bytes()).exp…`
+
+A budget stop per epoch, each in the epoch the resumes before it
+opened: the live run above is itself a resume of the planted log, so
+the first stop is epoch 1's, and the resume that reclaimed the closure
+opened epoch 2 for the second.
+
+## `fn an_append_error_at_the_run_ending_close_ends_the_command…`
+
+The run-ending close's `generation_closed` append errors — the partial
+line at `Written`; the whole line with the append's own flush failing at
+`WrittenFull`; and the whole line with the replacement barrier failing
+too (`Event.OpenLog`'s `SyncPrefix` armed beside the append), which is the
+undetermined outcome the append-error protocol asserts neither way — and
+the command ends with the fold poisoned, the worktree and intent
+standing, no removal or report hook reached and no report derived; the
+close is durable exactly when the whole line was written, and the
+diagnostic says "undetermined" exactly when the barrier failed. A fresh
+resume converges in every case: it reclaims beta's worktree and intent,
+keeps alpha's candidates ref, clears the stop, and the log holds one
+close for beta — the closure's own (`RunEnding`) when the line was
+durable, the resume's (`ResumeDiscardsRetainedSession`) when the torn
+tail was truncated. Until PR10's round 2 no test guarded the error's
+propagation from this append (the round-2 crash lens, P1-1), and until
+round 3 none produced the undetermined outcome at this caller, so a
+close that swallowed exactly that error and scrubbed survived (the
+round-3 fix-check lens, B6). In every case the fresh resume's log replays
+twice to the fold its handle holds (`assert_log_replays_twice_equal`).
+
+## `fn run_finished_budget_exceeded_refused_after_halting_drain…`
+
+`run_finished_budget_exceeded_refused_after_halting_drain_settlement`
+(T-FINISH): a halting settlement recorded after `budget_exceeded` makes
+the derived outcome Halted; `run_finished(BudgetExceeded)` is refused and
+the closure ends the run Halted. At `max_parallel = 1` no drain exists —
+the prefix is one a concurrent build's drain would write — and the
+precedence is the same either way.
+
+## `fn run_finished_budget_exceeded_refused_after_halting_drain…` › `plant_live(`
+
+Planted in the live epoch: the budget stop and the halting settlement
+after it are what the closure meets, not a budget stop a resume between
+the planting and the loop would have cleared.
+
+## `fn run_finished_halted_accepted_after_declined_verification…`
+
+`run_finished_halted_accepted_after_declined_verification_park`
+(T-FINISH): a declined verification-park question with
+`decline_halts_run` halts the run, and the closure ends it Halted.
+
+## `fn replayed_conflicting_outcome_refused() {`
+
+`replayed_conflicting_outcome_refused` (T-FINISH): a log whose
+`run_finished` names an outcome its state does not derive is refused by
+the checked replay, live and at a resume's stable-prefix barrier.
+
+## `fn append_error_inside_closure_ends_command_and_resume_comp…`
+
+`append_error_inside_closure_ends_command_and_resume_completes_closure`
+(T-FINISH, T-APPEND): the `run_finished` append returns an error; the
+append-error protocol poisons the fold and ends the command with nothing
+finalized from memory; the next process's closure ends the run, and after
+its second step the log replays twice to the driven run's fold
+(`drive_observing`, `assert_log_replays_twice_equal`).
+
+## `fn closure_kill_child() {`
+
+The child `kill_inside_closure_recovers` spawns: resume the run the parent
+planted, then step the loop with a kill armed at the `Written` point of
+`Event.Append`, so the process dies inside the closure's `run_finished`
+append in the shape `UPSTROKE_TEST_KILL_SHAPE` names.
+
+## `fn kill_inside_closure_recovers() {`
+
+`kill_inside_closure_recovers` (T-FINISH): a coordinator killed inside
+the closure's `run_finished` append — the line torn, and the line
+complete — leaves a prefix the next process converges from: a torn line is
+truncated at open and the closure repeats; a complete line is the run's
+end and the next process finalizes it then refuses. Both reach one
+`run_finished`, one report, and the cleanup. After the next process the
+log replays twice (`assert_log_replays_twice_equal`): to the driven run's fold
+for the torn line, and replay against replay for the complete one, whose
+refusing resume hands back no fold.
+
+## `struct ArmedFinalization {`
+
+Hooks that inject an error return — or, in `finalization_kill_child`, a
+kill — at one `(site, phase)` of one
+finalization, the nth time it is reached, so the T-FINALIZE matrix is
+driven at every cleanup site in turn and the next resume is shown to
+converge from each. `answering` arms the first execution;
+`answering_at_nth` the nth, for a fixture whose resume reaches the site
+before the execution under test does.
+
+## `struct OrderedHooks {`
+
+The harness bundle with one timeline across the Event and effect
+families, so a test can read which of an append and an effect came
+first.
+
+## `impl ArmedFinalization` › `fn answering(`
+
+Armed to answer `injection` — an error return, or the kill the
+finalization kill child dies by — the first time `at` is consulted.
+
+## `impl ArmedFinalization` › `fn reporting_to(mut self, path: &Path) -> Self {`
+
+Also writes every consultation the bundle's effect and run-directory hooks
+answer to `path`, one JSON `(site, phase)` line each, appended before the
+answer is given (`report`, the two-crash proof's writer). A child the armed
+kill takes therefore leaves its parent the cells it consulted, the armed one
+last: the harness's observations carried across the process boundary, since
+the harness dies with the child. The parent needs them for one effect.
+`assert_finalization_order` reads the run lock's release from the harness,
+and after a death the lock file cannot tell a release through the funnel
+from the death, which frees it too.
+
+## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten()` › `let records = hooks.ledger_records();`
+
+The between-phases barrier count is held to two file barriers and two
+directory barriers since PR10's round 10, and beside it the ledger is read
+for the report's own: a `SyncedFile` of `report.json` inside a staging
+directory of the write's shape directly under the run directory, and a
+`SyncedDirectory` of the run directory. The staging record the write
+publishes first (its file synced, the private directory synced) is one
+barrier of each kind, and under the round-10 shape it satisfied the old
+"one of each" count on a mutant that wrote the report in place with no
+barrier of its own — `report-write-unsynced-finalization` survived this
+test at the round's first code head — so the count is doubled and the
+ledger names the report's file and directory outright.
+
+## `fn assert_finalized(planted: &FinishedPlanting, outcome: &R…`
+
+The outcome equation's terminal half, as the physical state after a
+complete finalization of `planted`: the worktrees, intents, pins, refs and
+root, the answer files, the report, the events — and, since PR10's round
+7, the object store (`assert_objects_kept`), which until then no
+finalization the matrix or the real kill drove was held to (the round-7
+crash lens, P1: a terminal resume that found the report current and
+pruned Git's unreachable objects converged); and, since round 8, the
+staged report the planting left for a dead writer, reclaimed inside the
+report site on the write branch and on the fresh branch alike, with
+nothing of the report's protocol left staged
+(`rundir::report_staging_leftovers`: since round 10 the record in the
+private half, the directory it names and whatever it holds, none standing;
+in round 9 the fixed staging directory and its entries).
+
+## `fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {`
+
+R27 after a finalization, read through the ledger's own inventory
+(`ledger_inventory`, the same accounting the five ledger tests consume):
+nothing the run's refs and worktrees referenced at the planting is
+missing, nothing the store held then is missing (the diagnostic names
+what is), and the already-unreachable object the planting left is still
+in the store and still unreachable — neither pruned nor referenced.
+Called by `assert_finalized`, after the matrix's third resume, and after
+the real kill before and after its restart (the round-7 crash lens, P1).
+
+## `struct FinalizationEffect {`
+
+Every finalization site and phase a fault can land on, in the order the
+steps run. `Ref.DeleteCandidatesRef` is Complete's alone.
+One durable effect of terminal finalization, in the order
+`CleanupStep::ORDER` performs them: the sites whose funnels perform it,
+and how the planted residue shows it done. Every effect has one site but
+the report, which has two: `Report.Write` is consulted inside
+`RunDir.WriteReport`, around the one publication, so both sites' phases
+are cells of the matrix and both share the effect's "done". Until PR10's
+round 3 the report's inner site was observed by the matrix and never
+selected, so an error swallowed at either of its phases left the matrix
+green (the round-3 crash lens, P1).
+
+## `fn finalization_effects(outcome: &RunOutcome) -> Vec<Finali…`
+
+What finalization does to a run planted with every kind of residue, in
+order: the report, then every cleanup step's effects site by site, then
+the run lock's release. `Lock.Release` is last and its "done" is the lock
+being free, which the guard's drop also achieves: the fault at it is
+survivable, so a resume faulted there still reaches the refusal.
+
+Each effect also says whether a planting holds its residue (`planted`). Every effect's residue
+is planted by `plant_finished_run_with` but one: the candidate-prepared pin's deletion has
+residue only in a planting that declared it (`with_a_candidate_pin_no_crash_leaves`), so it is
+part of the expected order in the two declared-pin tests, which fault and kill the sweep, and at
+no cell of either matrix, whose plantings declare nothing and which skip the site.
+
+## `fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectS…`
+
+Every cell of the finalization matrix: both hook phases of every effect's
+site, in effect order.
+
+## `fn assert_finalization_order(`
+
+What a fault at `cell` leaves: every effect before the faulted site is
+done, the faulted site's own effect is done only when the fault came
+after it, and nothing later is. The lock's release is read from the
+harness rather than the file — the faulted resume's guard drops and
+frees the file whatever happened, so the file cannot tell a release
+through the funnel from a drop; the funnel's after phase can. A fault
+at the release itself is absorbed (`RunLock::release` discards the
+funnel's error), so it leaves every earlier effect done.
+
+An effect whose residue the planting does not hold is not placed in the order: it is asserted
+done, as it was before the fault, and never the faulted one. For the candidate-prepared pin at
+every cell of either matrix, that is the assertion that no such pin stands after the fault; the
+site's own two cells are driven by the declared-pin tests, whose plantings hold it.
+
+## `fn fault_at_a_finalization_cell_and_converge(`
+
+One cell of the error-return finalization matrix, over a planting the caller made: the fault
+injected at the cell, the faulted resume's refusal and what it left (`assert_finalization_order`),
+the next resume finalizing and refusing (`assert_finalized`), and the third resume's fresh branch,
+as the section on `kill_after_report_before_each_cleanup_step` describes cell by cell. The
+candidate-prepared pin's two readings follow the planting's own declaration
+(`surplus_candidate_pin`): Git lists one before the fault, and the next resume enters
+`Ref.DeleteCandidatePin` once when the fault came before its deletion, only where the planting
+declared the damage; over the matrix's plantings both read zero at every cell. Split out of the
+matrix in the third repair round of #311 so the sweep's own cells could move to a test nothing
+cites without a second copy of the cell.
+
+## `fn kill_after_report_before_each_cleanup_step() {`
+
+`kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
+every finalization site but the candidate-prepared pin's, before and after the effect, for
+Complete and for Halted — 24 and 22 cells, the report's two sites among them, counted by the
+test — each driven by `fault_at_a_finalization_cell_and_converge` over a planting that declares
+no damage. Since the second repair round of #311 the finished run's planting completes alpha's
+promotion, and since the third round the test asserts at every cell that no candidate-prepared
+pin stands before the fault and that the next resume enters `Ref.DeleteCandidatePin` at no cell.
+Its two cells of that site are the two kills inside the promotion,
+`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume` at both phases, run under
+this test's name because `coverage.rs` and the sequential registry (rows 41 and 42, `fault_row:
+t_cand_ref`) cite it for both phases of the site: what its observation record holds for the site
+is the promotion's own crash, resumed by the next incarnation, and no cell over a planted pin.
+(The second round drove the two cells here over a pin planted as declared damage; the third
+review graded that a credited construction carrying damage no crash leaves, so those cells moved
+to `a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges`,
+which nothing cites.) The
+faulted resume ends there with the log untouched and exactly the effects
+before the fault done; the next resume finalizes the rest and refuses; a
+third finds nothing to do — it finds the report current, takes its
+directory barrier through the report's two sites (round 5) and writes
+nothing, the bytes byte-identical, and runs no other site again. Since
+round 7 the third resume is held to R27 too (`assert_objects_kept`), as the
+second is through `assert_finalized`: it is the resume that takes the fresh
+branch, and a fresh branch that pruned Git's unreachable objects after its
+barrier converged under this matrix until then — the recipe
+`st18-fresh-branch-prunes-objects` fails at exactly that cell. The report
+effect's "done" reads the report present *and* the dead writer's staged
+report gone, so the cells around the report's two sites hold the write
+branch's reclaim to the site's phases; and the third resume — the one
+that always finds the report current — meets a staged report planted
+anew after the second (`plant_report_leftover`: since round 10 the dead
+writer's record and the directory it names with the half-written file
+inside, planted through the writer's own helper; in round 9 a directory
+made by hand at the fixed name), so the
+fresh branch's reclaim is held as well
+(round 8; the recipes `report-leftover-not-reclaimed-on-write` and
+`-on-fresh`, the second of which survived the matrix until the
+re-planting: every finalization the cells drove had met the write branch
+first, which had already reclaimed what the planting left). Until the fix
+of `PR10-ST18-THIRD-RESUME-LEFTOVER-ASSERTION` the third resume was held
+only to the first leftover, already gone after the second resume, and to
+`rundir::report_staging_leftovers`, which lists the directory through the
+record, so a fresh branch that removed the record alone and left the
+directory and its half-written file passed (the round-11 crash lens's
+recipe, `r11-third-resume-leftover-record-only`, executed by Gate 5 at
+`caf6bed0`); the matrix now keeps the path the re-planting returns and
+reads the staged file, the directory its record names and the record each
+gone after the third resume, and that recipe fails it. The round-8
+crash lens's recipe — a file re-created inside beta's worktree after the
+`Worktree.RemoveIntent`/after cell, the shape a power loss between the
+checkout's deletion and its intent's leaves when the deletion rolls back
+— failed this matrix at `bab5a4b7` ("the closed generation's worktree is
+pruned") and is retired with the barrier that makes the deletion durable
+inside the removal's site: a rollback of a synced deletion is not a shape
+the fault model admits, and the order is
+`a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`'s to
+guard.
+
+## `fn a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges()`
+
+The two `Ref.DeleteCandidatePin` cells of the error-return matrix, at Complete and at Halted, over
+a pin planted as declared damage (`with_a_candidate_pin_no_crash_leaves`), driven by
+`fault_at_a_finalization_cell_and_converge`: a fault before the sweep leaves the pin standing
+beside the deleted prepared pin and the next resume deletes it once; a fault after it leaves the
+pin gone and the next resume deletes nothing; either way the cleanup order holds around the sweep
+and the third resume runs no ref site again. Cited by nothing: it holds the sweep's behaviour and
+constructs no crash's prefix (the section on `with_a_candidate_pin_no_crash_leaves`). Until the
+third repair round of #311 these four cells ran inside the matrix the registry cites for the site.
+
+## `fn a_checkouts_deletion_is_made_durable_before_its_intent_i…`
+
+The order the round-8 crash lens asked for, asserted the way the report's
+barrier is (`BarrierHooks`'s timeline, the directories the ledger had
+synced at each hook): for beta's task worktree, the snapshot and the
+staging worktree, at Complete and at Halted, the checkout's directory —
+its slot kind's directory under the execution root — is not among the
+synced directories when the removal's before phase fires, is among them
+at the removal's after phase, and so before the intent site's before
+phase; and, since round 9, the barrier's own ledger record — the
+`SyncedDirectory` of that directory whose `entry` is the checkout — shows
+the checkout absent at the instant of the sync (`util::EntryObserved`,
+read by `symlink_metadata` in the statement before the barrier inside
+`sync_checkout_removed`), which is what makes this an ordering guard
+rather than a guard of the barrier's existence: the round-9 fix-check lens
+moved the sync ahead of the removal and the round-8 form passed, since a
+sync between two hook phases is between them whichever side of the
+deletion it falls on. The directory and the checkout are compared in their
+plain canonical form — the test canonicalizes both before the resume and
+strips the verbatim prefix Windows' `canonicalize` adds, since the removal
+syncs and records the path `canonical_prefix` hands it, prefix stripped —
+and nothing is canonicalized after the resume, when the root is already
+pruned (the guest's full suite at `0eccb5dd` failed the first form of this
+test on exactly that: `\\?\C:\…\tasks` against `C:\…\tasks`, a string
+fallback after a failed `canonicalize`; `fc131b2c`). The recipes
+`scrub-checkout-unsynced-before-intent` (the barrier removed from the
+removal) and `checkout-synced-before-its-deletion` (the barrier moved
+ahead of the removal) fail it — the first at the after phase, the second
+at the record's `present`.
+
+## `fn a_failed_checkout_barrier_is_retried_before_its_intent_i…`
+
+The round-9 crash lens's recipe, its P1 and its P2 in one: the checkout's
+parent directory has its barrier armed to fail (`util::fail_barriers_at`)
+and a finished run of either outcome is resumed twice under the fault. The
+first resume removes beta's checkout and ends at the barrier's own
+diagnostic, the intent that names the checkout still present; the second
+meets the checkout already absent and, since round 9, takes the barrier
+again and ends the same way — at `c82767f4` it read the absence as proof,
+removed the intent and finished cleanup (the recipe placed in that tree
+fails at the second attempt's diagnostic,
+`~/pr10-evidence/r9/before-c82767f4/prefix-b2-failed-barrier-retried.log`).
+With the fault dropped the third resume finalizes and refuses, and
+`assert_finalized` reads everything pruned. The recipe
+`checkout-barrier-error-swallowed` (the barrier's result discarded with
+`.unwrap_or(())`) fails it at the first attempt's diagnostic: the round-8
+guards both passed under it, since neither armed a checkout's parent.
+
+## `fn an_absent_slot_directory_is_made_durably_absent_in_the_root_…`
+
+The one state in which the checkout barrier has no directory to sync: a
+finished run whose beta checkout is gone *and* whose slot kind's directory
+(`tasks/`) was never made — thirty-eight resume fixtures of this module
+plant an intent without the scaffolding `create_execution_root` lays down,
+and the first shape of the round-9 barrier errored at every one of them
+with `NotFound` on that directory (`~/pr10-evidence/1c5bb58c…/full-suite-export.log`,
+the superseded round-9 head). Here the shape is reached the way a run
+reaches it: a first resume under the parent's barrier fault removes the
+checkout and ends at the barrier, the intent standing; then the emptied
+directory is removed (`fixture::remove_dir`, the fixture's non-recursive
+removal — a checkout tree is not the tests' to delete by hand) and the
+fault dropped; the second resume is held to syncing the execution root
+instead, with the absent directory observed in the statement before the
+barrier (`sync_slot_directory_absent`; the `SyncedDirectory` record of the
+root whose `entry` is the slot kind's directory, `present: false`),
+removing the intent and finalizing. The recipe
+`sync-absent-slot-directory-skipped` (the directory's absence taken on
+faith, no barrier in the root) fails it at the missing record; at
+`c82767f4`'s `workspace_manager.rs`, which took no barrier on the absent
+branch at all, it fails the same way
+(`~/pr10-evidence/r9/before-c82767f4/prefix-b2-absent-slot-directory.log`).
+
+## `fn a_failed_execution_root_barrier_is_retried_before_the_intent_is_removed() {`
+
+Rule 2 for the barrier round 9 added — the round-10 lenses' P1, named by
+every lens that looked: the round-9 guard above faults `tasks/`, drops that
+fault, removes `tasks/` and resumes with the execution root's barrier
+unarmed, asserting only the ledger entry, which `sync_slot_directory_absent`
+writes whether or not its barrier held; the saved recipe
+`sync-absent-slot-directory-skipped` removes the helper and its record
+together, so its `101` proves the record is required and not that the error
+propagates, and the swallow `outcome.unwrap_or(()); Ok(())` at the helper's
+end passed that guard
+(`~/pr10-evidence/r10/before-bbd3f2ee/prefix-b1-root-barrier-error-swallowed-existing-test.log`).
+Here the same state is reached — the checkout removed by a first resume
+whose parent barrier was refused, the intent standing, the emptied slot
+directory then removed by hand — and then `fail_barriers_at` is armed on the
+execution root itself, at both outcomes: two resumes each end at the
+barrier's diagnostic with the intent still present, the intent read before
+the diagnostic so that a swallowed barrier fails at the intent first; with
+the fault dropped the third finalizes and `assert_finalized` holds. The
+recipe `root-barrier-error-swallowed` fails it at the first attempt's
+intent assertion; unmutated, the test passes at `bbd3f2ee` too, where the
+production code already propagated the error — the gap was the guard's, not
+the code's (`prefix-b1-root-barrier-retry-unmutated.log`,
+`prefix-b1-root-barrier-error-swallowed-new-test.log`).
+
+## `fn an_absent_checkout_retries_its_parent_barrier() {`
+
+The round-9 fix-check lens's unit form of the same retry: the funnel
+`remove_worktree_proving` called twice under the parent's barrier fault
+with `WriterProof::NoWriterAlive`, no resume between. The first call
+deletes the checkout and errors at the barrier; the second, meeting an
+absent checkout, errors at the barrier again, the intent untouched
+throughout; with the fault dropped a third call converges. At `c82767f4`
+the second call returned `Ok`
+(`~/pr10-evidence/r9/before-c82767f4/prefix-b2-absent-checkout-retries-barrier.log`).
+
+## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
+
+The matrix's fixture plants no staging leftover, so the removal of a
+leftover at the root step — an intent-removal site's second occurrence,
+after the ordinary intent's — was never faulted (the round-3 crash lens,
+P1). Here a finished run of either outcome carries one leftover of each
+kind, and the kind's own removal site is armed at its second occurrence,
+before and after: the command ends naming the injected fault, the
+leftover stands at a fault before its removal and is gone at one after,
+the root is not pruned past it, nothing is appended, and the un-injected
+resume reclaims every leftover and converges. A finalizer that discarded
+the leftovers' error would reach the refusal instead.
+
+## `struct BarrierSeen {`
+
+One entry of the barrier timeline: the site and phase reached, the
+durability barriers this thread had entered by then
+(`util::barriers_on_this_thread`), so a test can read whether a file and
+its directory were synced between two phases, and the directories the
+bundle's durability ledger had recorded synced by then, so a test can name
+*which* directory was synced before a site rather than count directories
+(the round-4 crash lens: the worktree and intent removals sync other
+directories, so a count says nothing about the public one).
+
+## `type BarrierTimeline = Arc<Mutex<Vec<BarrierSeen>>>;`
+
+One timeline of every effect and run-directory hook a finalization
+reaches.
+
+## `fn barrier_seen(`
+
+Stamps one entry, from the thread's counters and the ledger's records.
+
+## `struct BarrierHooks {`
+
+The harness bundle whose effect and run-directory hooks record the
+barrier timeline and answer an `ArmedSite` — one `(site, phase)` armed with
+an injection, or none — and hand both funnel families one recording
+durability ledger, read back through `ledger_records`.
+
+## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_cur…`
+
+DESIGN.md §26 lets the refs be pruned only after the report is durable
+(the round-3 crash lens, P2). A Complete finalization faulted before its
+first ref deletion shows the file and the directory barriers both rise
+between `Report.Write`'s two phases, that phase pair preceding every ref
+site, the report present under its name and current by digest, and the
+candidates ref still there. The restart finds the report current, takes
+its directory barrier through the report's two sites — `Report.Write`
+inside `RunDir.WriteReport`, the public directory synced between the inner
+site's phases, nothing staged, written or renamed under the public
+directory — leaves the bytes byte-identical and prunes the refs: the
+durability of a report the restart does not rewrite is the rename's for
+its bytes — made after the sync, so a name that survived holds synced
+bytes — and the directory barrier's for its name, which the fresh branch
+takes again before it prunes (the two tests below; until PR10's round 4 it
+carried no barrier of its own, the round-4 crash lens, P2; until round 5
+the barrier reached no site, the round-5 contract lens, F1).
+
+## `fn assert_no_ref_site(timeline: &[BarrierSeen], tag: &str) {`
+
+No ref site in a barrier timeline: nothing was pruned.
+
+## `fn assert_report_site_entered_and_not_left(timeline: &[BarrierSeen], tag: &str) {`
+
+`Report.Write` entered and not left: the barrier failed inside the site —
+the shape both a first finalization whose directory barrier fails and a
+restart whose fresh branch meets the same fault leave, since the fresh
+branch's barrier runs inside the report's sites too (round 5).
+
+## `fn assert_fresh_branch_took_the_report_sites(`
+
+What a restart that finds the report current does, read from the barrier
+timeline and the run-directory ledger: `RunDir.WriteReport` then
+`Report.Write` entered and left in that nesting, the public directory
+among the directories synced at the inner site's after phase and not at its
+before phase — the barrier ran between them — and under the public
+directory nothing but that directory sync: no `Staged`, `SyncedFile` or
+`Renamed` entry, no staged report. The fresh branch's one external effect,
+inside the inventory (the round-5 contract lens, F1).
+
+## `fn a_report_directory_barrier_that_fails_refuses_pruning_on…`
+
+The fresh branch's barrier, refused, at Complete and at Halted (the
+round-5 crash lens, P1: until round 5 the Complete fixture alone, so a
+barrier taken at Complete only survived): the public directory's barrier
+fails at the first finalization (`util::fail_barriers_at`, scoped to that
+directory) after the rename landed, so the report is visible under its
+name and current by digest while the candidates ref and both pin families
+stand; the next resume, the fault still armed, takes the fresh branch,
+enters the report site and is refused at the same barrier inside it, with
+the ref and the pins still standing; with the fault cleared the barrier
+holds through the report's two sites, the public directory is among the
+directories synced before the first ref deletion, the pins are pruned,
+the candidates ref is pruned at Complete and retained at Halted, and
+finalization converges. A fresh branch without the barrier prunes at the
+second resume instead; one that takes it at Complete only prunes the
+Halted run's pins behind an unproven name. The dead writer's staged report
+the planting leaves is reclaimed before the fault is armed
+(`rundir::sync_report_dir`): since the fix of
+`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION` the reclaim takes the
+public directory's barrier between removing the directory and removing its
+record, so with the leftover in place the first finalization would be
+refused there, before any report was renamed. After the first finalization
+the one thing of the report's protocol left is the record of the staging
+directory the publication removed, which outlives the refused barrier as
+the fix requires, and the converging finalization reclaims it.
+
+Of the two pin families the candidate-prepared one is declared damage since the second repair
+round of #311 (`with_a_candidate_pin_no_crash_leaves`, called on the planting): the test holds
+that neither family is pruned behind an unproven name, and constructs no crash's prefix.
+
+## `fn a_report_rename_without_directory_sync_is_proven_before_…`
+
+The crash lens's restart case, at Complete and at Halted: a rename whose
+directory barrier failed leaves the name visible, not proven. Between the
+faulted finalization and the converging restart, the round-5 contract
+lens's recipe: a restart armed with an error at `Report.Write`'s before
+phase observes that coordinate on the fresh branch — inside
+`RunDir.WriteReport`, neither site left — reaches no ref site, syncs,
+stages or renames nothing under the public directory, and leaves the
+candidates ref and both pin families standing; the coordinate is
+selectable, which is what puts the branch inside the typed inventory.
+Then the unarmed restart finds the report current, takes the barrier
+through the report's two sites, and the timeline's entry at the first ref
+deletion carries the public directory itself among the directories the
+run-directory ledger recorded synced — that path, not the aggregate
+directory count, which the worktree and intent removals raise on other
+directories — and under the public directory the restart synced and
+staged or renamed nothing. The dead writer's staged report the planting
+leaves is reclaimed before the fault is armed, as in
+`a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`
+and for its reason: the reclaim's own barrier would otherwise refuse the
+faulted finalization before the rename this test is about. The
+candidate-prepared pin among "both pin families" is declared damage here too
+(`with_a_candidate_pin_no_crash_leaves`).
+
+## `fn fresh_report_hook_errors_stop_cleanup_and_retry()` › `let planted = with_a_candidate_pin_no_crash_leaves(planted);`
+
+The third of the report-barrier tests that read "a prepared pin and a candidate-prepared pin stand
+to be pruned" before they fault the report's sites. The candidate-prepared one is declared damage
+(`with_a_candidate_pin_no_crash_leaves`): what is held is that an error at any of the fresh
+branch's four coordinates stops cleanup with both families standing, not a crash's prefix.
+
+## `const FINALIZATION_CHILD_BOUND: Duration = Duration::from_s…`
+
+How long the parent waits for either child of a finalization kill cell,
+the kill child or the resume child, before it kills and reaps the child and
+fails the cell by name (`fixture::run_kill_child_within`). The bound is
+120 s. `kill_inside_closure_recovers` already gives its own kill child that
+bound, through the host runner. It is also about 110 times the 1.07 s a
+kill child took from spawn to death on the build box
+(`~/pr10-evidence/fix-g5-c/matrix/profile-halted-instrumented.log`); on
+the Windows guest a whole cell took about 5 s at `af712163`, counting the
+planting, the kill child's death, the resume and the assertions: 131.94 s
+for the Complete half's 26 cells run alone
+(`~/pr10-evidence/fix-g5-c/guest/guest-timing-af712163.log`).
+Until round 1 of #291 the wait had no bound (F3). A child that wedged
+before reaching its armed cell then held the matrix, with no abort, cell or
+convergence assertion run, until CI's job timeout. The recipe
+`wedge-before-arming` parks the kill child before arming. It now fails the
+Halted half at its first cell after 120.05 s, and the child is killed and
+reaped (`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/wedge-before-arming.log`).
+
+## `fn resume_the_planted_run_in_this_child(`
+
+What both children of the finalization kill tests do with the run their
+parent planted. The repository and its git directory come from
+`UPSTROKE_TEST_KILL_REPO` and `UPSTROKE_TEST_KILL_GITDIR`, read with
+`var_os`, so a path that is not Unicode arrives as it was sent. The resume's
+seams are the ones `resume_with` builds for a `Fixture`: the recorded
+runtime, `AlwaysCertifies`, a fresh `FakeOwnerLiveness`, the `RESUMER`
+incarnation, the planted run's plan. Then `run_recovery_order` runs once
+through `hooks`. A child cannot build a `Fixture` of its own, because a
+`Fixture`'s `Drop` removes its root, and that root is the parent's.
+
+## `fn finalization_kill_child() {`
+
+The child of the finalization kill tests (`kill_inside_finalization`). It
+is armed with `Injection::Kill` at the one `(site, phase)` the parent names
+in `UPSTROKE_TEST_KILL_SITE` (the cell as JSON, read with `std::env::var`),
+and reports every consultation to the file `UPSTROKE_TEST_KILL_REPORT`
+names (`reporting_to`). It then resumes the planted run
+(`resume_the_planted_run_in_this_child`) and dies by abort at that cell's
+first consultation. The hooks only answer. The abort is the
+production funnels' own: `rundir`'s and `workspace_manager::hooks`'s
+`apply` turn `Injection::Kill` into `std::process::abort()`, so the death
+lands exactly where the same funnel returns the error-return matrix's
+injected error. A recovery that returns past the armed kill writes what it
+returned to the report and panics. Until 2026-09-14 the child was armed at
+`Worktree.RemoveExecutionRoot`'s after phase alone — inside finalization,
+after the last cleanup step's effect and before the guards drop.
+
+The report path, like the two paths above, is read with `var_os` since
+round 1 of #291 (F2). Read with `var`, a report path that is not Unicode, a
+valid one on Unix, made the child panic before arming. The Halted half then
+failed its abort assertion at its first cell without exercising
+finalization
+(`~/pr10-evidence/fix-g5-c/r1/before-af712163/non-unicode-kill-report.log`).
+Read with `var_os`, the same path works, for the kill child's report and
+for the resume child's (`r1/at-5eb16256/non-unicode-kill-report.log`,
+`non-unicode-kill-and-resume-reports.log`).
+
+## `fn finalization_resume_child() {`
+
+The next resume of a finalization kill cell, in a process of its own. It
+resumes the planted run once through the harness bundle `resume` uses,
+`HarnessTopologyHooks` with a recording durability ledger. It then writes
+one JSON object to the report file, with four fields:
+
+- `candidate_pin_deletions`: how many times the resume entered
+  `Ref.DeleteCandidatePin` (its before phase, counted on the harness);
+- `refusal`: the resume's error message, or null when it continued;
+- `continued`: the `Recovered` it returned when it did;
+- `released_through_the_funnel`: whether `Lock.Release` was observed at
+  both hook phases.
+
+It asserts nothing. The parent reads the object
+(`resume_in_a_fresh_process`).
+
+## `fn kill_inside_finalization(`
+
+Spawns `finalization_kill_child` against `planted`, armed at `cell`
+(`fixture::run_kill_child_within`: this test binary again,
+`--exact --ignored`, waited for within `FINALIZATION_CHILD_BOUND`). A child
+still running at the bound is killed and reaped, and the cell fails naming
+`tag`, which carries the outcome, and the armed cell. The death
+must be the abort's (`died_by_abort`), not merely an unsuccessful exit,
+which a child that returned past the kill and panicked also has; that
+refusal quotes the child's report. The last consultation the child
+reported must be `cell`. Returns the reported consultations recorded into
+a fresh harness, the shape `assert_finalization_order` takes. The control
+`control-kill-child-answers-an-error-instead-of-dying`, the child armed
+with `Injection::Error`, fails both halves of the matrix at their first
+cell on the child's exit 101
+(`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`).
+
+## `fn resume_in_a_fresh_process(planted: &FinishedPlanting, ta…`
+
+Spawns `finalization_resume_child` against `planted` through the same
+bounded wait. The child must finish with success, or the call fails quoting
+its report. Returns the refusal it reported and whether the release was
+observed at both phases. A resume that continued past a finished run fails
+here, naming what it returned.
+
+## `fn candidate_pin_deletions_of_the_fresh_resume(planted: &FinishedPlanting, tag: &str) -> u64 {`
+
+Reads `candidate_pin_deletions` from the report the resume child left, after
+`resume_in_a_fresh_process` has read the rest: what the kill matrix holds each cell's credited
+recovery to. A report without the field fails the cell, quoting it.
+
+## `fn a_kill_inside_finalization_after_the_execution_root_is_r…`
+
+T-FINALIZE with a real process death inside finalization: the child
+resumes a Complete run planted at its end, performs the report and every
+cleanup step, and is killed right after the execution root is removed —
+before the run lock is released and the guards drop. The log is untouched
+by the death, the lock is free once the child is gone, and the next
+resume finds the report current, nothing left to prune, releases the lock
+through the funnel and refuses. Since round 7 the object store is read
+after the death and again after the restart (`assert_objects_kept`): the
+restart takes the fresh branch, and the same recipe as the matrix's,
+`st18-fresh-branch-prunes-objects-real-kill`, fails it there. Since
+2026-09-14 the child is spawned through `kill_inside_finalization`; the cell
+is also one of the Complete kill matrix's, and this test keeps what the
+matrix does not read there: every effect's own predicate after the death,
+the release's included, and R27 before the restart. Since round 1 of #291
+the restart runs in a process of its own as well
+(`resume_in_a_fresh_process`), and the release at both phases is read from
+that child's report.
+
+## `fn kill_at_a_finalization_cell_and_converge(`
+
+One cell of the kill matrix, over a planting the caller made: the kill child, what its death left
+read against the cleanup order, the fresh-process resume, `assert_finalized` and the replay pair,
+as the section on `kill_at_every_finalization_cell` lists. The candidate-prepared pin's readings
+follow the planting's declaration as in `fault_at_a_finalization_cell_and_converge`, the deletion
+count read from the resume child's report (`candidate_pin_deletions_of_the_fresh_resume`). Split
+out of the matrix in the third repair round of #311, for the same reason as its error-return twin.
+
+## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
+
+The ST-18 matrix executed as kills. The child is killed at every cell of
+`finalization_sites(outcome)` but the candidate-prepared pin's two: both hook phases of every
+other effect's site, in effect order, 24 at Complete and 22 at Halted asserted as exact counts,
+the cells `kill_after_report_before_each_cleanup_step` drives with error returns. Each cell
+plants a finished run with every kind of residue a crash leaves finalization and no
+candidate-prepared pin, which the matrix asserts at every cell (Gate 5's audit selected this test
+for rows 41 and 42, and until the third repair round of #311 its two cells of that site ran over a
+pin planted as declared damage; they are `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s
+now, which nothing cites); kills the child there (`kill_inside_finalization`, through
+`kill_at_a_finalization_cell_and_converge`) and requires, in order:
+
+- before the kill, Git listing no candidate-prepared pin; and at the boundary the next resume
+  reads, none;
+- the log untouched by the death, and the answer files byte-identical;
+- `assert_finalization_order` over what the death left: every effect before
+  the cell done, the cell's own effect done only at its after phase, nothing
+  later, the release read from the child's reported consultations;
+- the next resume, in a fresh process of its own
+  (`resume_in_a_fresh_process`), finalizing what is left and refusing, with
+  the report "regenerated" when the death came before its publication and
+  "already current" when it came after;
+- that resume entering `Ref.DeleteCandidatePin` at no cell
+  (`candidate_pin_deletions_of_the_fresh_resume`), so what a cell's recovery
+  repairs is what the kill at that cell left;
+- `assert_finalized`, and the log still untouched;
+- the report naming the runner `run_started` recorded, and the run lock
+  released through its funnel, at both phases, by that resume;
+- replay from disk twice equal, ending at the outcome.
+
+The parent plants, spawns and asserts. It resumes nothing itself, so no
+cell's resume runs in a process that has run an earlier cell.
+
+Why kills as well as error returns. The PR10 record's R11 reads an error
+return at a hook phase as leaving the durable state a kill there leaves.
+Gate 5's first run graded "kills between every terminal-finalization
+effect" asserted on that reading, executed as a real kill at one cell only
+(`reviews/2026-09-14-gate-G5.md` on `gate/g5-run1`, §8 groups 1 and 5).
+Here every cell's death is held to the order the error-return matrix
+asserts at the same cell. The error-return matrix also has a blind spot the
+reading does not name: its faulted resume and its next resume share a
+process, so a convergence that depends on what the interrupted attempt held
+in memory passes it. The recipe `finalize-remembers-the-report-attempt-in-memory`
+lets the fresh branch trust a current report only when this process
+attempted the write, and otherwise return without pruning. It passes
+`kill_after_report_before_each_cleanup_step` and the single real kill, and
+fails this matrix at `Halted/RunDir.WriteReport/after` and
+`Complete/RunDir.WriteReport/after`.
+
+Until round 1 of #291 the next resume ran in the parent, one process for
+every cell of an outcome, and that left the same blind spot one step
+removed (F1). The reviewer's variant of the recipe remembers whether this
+process attempted any report write at all. It passed both halves at
+`af712163`, because cell 0's resume, run in the parent, had written one
+(`~/pr10-evidence/fix-g5-c/r1/before-af712163/unkeyed-memory.log`,
+`cargo exit=0`). With each resume in a fresh process it fails both halves at
+`RunDir.WriteReport/after`, *"(i) the closed generation's worktree is
+pruned"* (`r1/at-5eb16256/unkeyed-memory.log`). The path-keyed recipe fails
+there too (`path-keyed-memory.log`).
+
+The matrix fails at the cell named under three more recipes, and a fourth
+moved to the declared-pin kill test in the third repair round of #311, all under
+`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`:
+
+- `finalize-fresh-branch-skips-cleanup`, a resume that reads a current
+  report as a finished finalization: `…/RunDir.WriteReport/after`;
+- `finalize-reads-a-missing-report-as-current`:
+  `…/RunDir.WriteReport/before`;
+- `finalize-skips-candidate-pins-once-prepared-pins-are-gone`:
+  `…/Ref.DeletePreparedPin/after` until the second repair round of #311, over
+  the pin the planting then left at every cell; since then
+  `…/Ref.DeleteCandidatePin/before`, the declared cell, where the fresh resume
+  is held to deleting the pin once and the recipe deletes none
+  (`~/orch-pr10/clause2-evidence-r2/mutations/`, row H4, with the other five
+  recipes of this list and the last re-run unchanged as rows H1 to H6); since
+  the third round that cell is
+  `a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume`'s,
+  which dies there on the same count (`~/orch-pr10/clause2-evidence-r3/mutations/`,
+  row H4: `Halted/Ref.DeleteCandidatePin/before`, `left: 0 right: 1`, its
+  error-return twin the same), and the matrix, with no candidate-prepared pin
+  at any cell, survives the recipe, as stated in advance;
+- `remove-execution-root-refuses-an-absent-root`, a removal that refuses a
+  root the dead child already removed: `…/Worktree.RemoveExecutionRoot/after`.
+
+On the build box each outcome took about 30 s alone with both children
+per cell: 31.05 s at Complete and 28.33 s at Halted
+(`~/pr10-evidence/fix-g5-c/r1/matrix/timing-complete-alone-5eb16256.log`,
+`timing-halted-alone-5eb16256.log`). With the resume in the parent they had
+taken 30.14 s and 28.38 s
+(`~/pr10-evidence/fix-g5-c/matrix/timing-complete-alone-71229117.log`,
+`timing-halted-alone-71229117.log`). The error-return matrix's 50 cells
+took 6.44 s (`r1/matrix/timing-error-matrix-alone-5eb16256.log`). About
+1.07 s of each cell is the kill child's spawn to its death
+(`matrix/profile-halted-instrumented.log`, an uncommitted timer, at
+`71229117`). On that host a `python3` `os.abort()` takes 1.06 s too, where
+`os._exit` and a `SIGKILL` of itself take 0.00 s, and `core_pattern` names
+a pipe helper (`matrix/abort-cost-on-this-box.log`).
+
+## `fn a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_next_resume()`
+
+The two `Ref.DeleteCandidatePin` cells of the kill matrix, at Complete and at Halted, over a pin
+planted as declared damage, driven by `kill_at_a_finalization_cell_and_converge`: the child killed
+before the sweep leaves the pin standing and the fresh resume deletes it once; killed after it,
+the pin is gone and the fresh resume deletes nothing. Cited by nothing, for the reason the
+error-return twin gives.
+
+## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
+
+The Complete half of the kill matrix: 24 cells, the candidates ref's
+deletion among them.
+
+## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
+
+The Halted half: 22 cells. One test per outcome, so the two halves run in
+parallel.
+
+## `fn kill_after_run_finished_before_report() {`
+
+`kill_after_run_finished_before_report` (T-FINALIZE): the live closure
+faults at `RunDir.WriteReport` after `run_finished` is durable; the run
+is over and unfinalized, and the next resume finalizes it then refuses.
+
+## `fn halted_report_lists_candidate_refs() {`
+
+`halted_report_lists_candidate_refs` (T-FINALIZE): at Halted the report
+lists every candidates ref with its SHA, and the refs are what Git holds.
+
+## `fn publish_answer_file(answers: &Path, id: &crate::ir::Ques…`
+
+Publish an answer the way `upstroke answer` does: `Answer.StageWrite`
+then `Answer.PublishRename`, the two funnels `interaction::write_answer`
+delegates to.
+
+## `fn answer_files_untouched_by_finalization() {`
+
+`answer_files_untouched_by_finalization` (T-FINALIZE, R21): an answer
+published for the open question and a writer's `.partial` residue are
+left byte-identical by finalization, never ingested, and never pruned.
+
+## `fn late_answer_after_finalization_is_inert_and_reported_not…`
+
+`late_answer_after_finalization_is_inert_and_reported_not_live`
+(T-ANSWER): `upstroke answer` after finalization writes its file — through
+the `Answer.StageWrite`/`PublishRename` funnels the command delegates to —
+and finds the run not live by the same `rundir::is_running` probe the
+command reports (`src/answer.rs`,
+`an_answer_lands_where_the_engine_will_find_it`); the file stays inert
+across every later resume.
+
+## `fn late_answer_before_halting_settlement_is_inert_and_retai…`
+
+`late_answer_before_halting_settlement_is_inert_and_retained` (T-ANSWER):
+an answer file published before a halting settlement in the same epoch is
+never ingested — the halt outranks ingestion — and finalization leaves it.
+
+## `fn private_records_untouched_by_finalization() {`
+
+`private_records_untouched_by_finalization` (T-FINALIZE, R21): the
+private owner and commit records are byte-identical after finalization,
+and so is every other file of the private half but for the one the report
+write owns there since PR10's round 10 — the dead writer's staging record
+the planting left, `report-staging.json`, which the write reclaims with the
+directory it names; the test requires it present before and gone after.
+
+## `fn finalized_report_names_runner_identity() {`
+
+`finalized_report_names_runner_identity` (T-FINALIZE, ST-20): the report
+names the run's runner kind, policy, image reference, id and digest from
+`run_started`; the renderer prints them; the status reader over a
+barrier-proven prefix derives the same report.
+
+## `fn finalized_report_names_runner_identity()` › `assert_eq!(report.tasks.len(), 2);`
+
+INV-13's projections name each task's origin and lineage: two originals here.
+
+## `fn finalized_report_names_runner_identity()` › `let report_path = fixture.public().join("report.json");`
+
+A stored report is fresh only when its digest is the digest of its own
+content and its outcome and runner are this report's. A file carrying
+the current digest over another image reference, or another outcome,
+is stale: the next resume regenerates it and says so; an untouched file
+is left alone.
+
+## `struct LiveVsReplay {`
+
+The live incremental fold of a stepped run against a fresh replay of the
+bytes on disk, and the report each derives: Q1's comparison, made against
+the live state and not between two replays. The G4 gate ran this as an
+uncommitted measurement (`live_vs_replay`) and asked for it committed.
+
+## `fn live_vs_replay(`
+
+Q1's comparison, committed at the G4 gate's request: the live incremental
+fold of a stepped run and the report derived from it, against a fresh
+replay of the bytes on disk and its report.
+
+## `struct UserCheckout {`
+
+What a user sees of their repository: `HEAD`, every tracked file's bytes,
+the porcelain status with untracked files listed, and a digest of every
+untracked file's bytes, ignored or not.
+
+## `fn user_checkout(repo_root: &Path) -> UserCheckout {`
+
+The observation the acceptance subset's "byte-for-byte unchanged" is
+held to. Until PR10's round 3 it ignored untracked files, so a note the
+run overwrote left the assertion green (the round-3 record lens, P2-3);
+the acceptance test now plants one and compares its digest. Until round 4
+it listed untracked files with `--exclude-standard` alone, which leaves
+out the files the user's excludes ignore, so an ignored note the run
+overwrote left it green too (the round-4 fix-check and record lenses); the
+ignored files are listed beside them now (`--others --ignored
+--exclude-standard`), and the acceptance test plants one of those as
+well, through `.git/info/exclude`. The engine's own run directory lives
+under the repository and is untracked; what the claim is about is the
+user's checkout, so the engine's `.upstroke/` is the one prefix the
+observation leaves out.
+
+## `fn max_parallel_one_completes_a_two_task_chain_with_one_lin…`
+
+`acceptance_subset[0]`: "max_parallel = 1 topology completes a multi-task
+plan with one linear engine commit per plan task, user checkout
+byte-for-byte unchanged" — a two-task chain driven to `run_finished
+(Complete)`, with the live fold and its report compared against a replay
+of the bytes on disk after every step (`projection equivalence`), and the
+checkout — `HEAD`, the tracked bytes, the status, and the untracked and
+ignored notes the test plants beside them — compared whole before and after.
+
+## `fn with_live_run_hooked_runner<R>(`
+
+[`with_live_run_hooked`] with the runner chosen by the caller.
+
+## `fn projections_are_equal_between_live_and_replay_at_every_p…`
+
+`projection equivalence` over a run that defers, stops for budget, closes
+and refuses: the report derived from the live fold **at every successful
+append** — recorded by the hooks bundle's `folded` hook, which the emitter
+calls after each applied delta — equals the report derived from a replay
+of that prefix of the bytes on disk, and every durable prefix this
+process appended had such a live comparison. The whole-step comparison
+(`assert_live_equals_replay`) runs beside it, and the last loop checks the
+weaker property it always checked: a prefix replays to one report.
+
+## `fn referenced_objects(fixture: &Fixture) -> Vec<String> {`
+
+Every object the run's refs, pins and worktree HEADs reference: what a
+pruning releases to Git, and what R27 says is still in the store after.
+
+## `fn slots_present(`
+
+Intents and directories of one slot namespace, counted as one set: a
+worktree without its intent and an intent without its worktree are each
+still a held slot.
+
+## `fn files_under(dir: &Path) -> u32 {`
+
+Every regular file under `dir`, recursively.
+
+## `fn store_objects(repo_root: &Path) -> Vec<String> {`
+
+Every object in the repository's store, reachable or not: what R27
+holds the run end to — nothing present before it is gone after it.
+
+## `fn plant_unreachable_object(fixture: &Fixture, tag: &str) -…`
+
+Write one object nothing references into the store, so the run end has
+an already-unreachable object to leave alone: R27 says the run never
+deletes one, and a verdict that only checked the objects pruned refs
+released could not see a finalization that pruned Git's own residue.
+
+## `fn ledger_inventory(`
+
+The physical half of the ledger, measured from the fixture: slots by
+namespace, refs and pins, the run directory and the private half (the
+normalized plan, the report, the question, answer and `.partial` files,
+the marker, the owner and commit records), the two lock files, container
+intents, the volume classification, and Git's store: the objects the
+pre-finalization observation saw referenced, checked present after, the
+whole store as that observation listed it, so R27 can ask whether any
+object at all went missing, and what `fsck` reports unreachable.
+
+## `fn ledger_inventory(` › `let no_volume_site = EffectSiteId::all()`
+
+R20 is operator-owned by classification: no site in the inventory creates or removes a
+volume, and the volume map the run recorded at `run_started` is the one it ends with.
+
+## `fn ledger_inventory(` › `cleanup_lock_file_present: public.join("cleanup.lock").exis…`
+
+`cleanup.lock` is the reaper's Unix hold file beside the run lock.
+
+## `struct CleanupHoldPastBound {`
+
+What `wait_for_cleanup_hold_release_within` reports when the run's
+cleanup lease was still held at the end of its bound: the bound, how long
+it actually waited, and how many observations found the lease held. Its
+`Display` is the assertion message, which is what tells a hold that never
+cleared from one observed at a single instant.
+
+## `const RELEASE_BOUND: Duration = Duration::from_secs(20);`
+
+One number for one condition throughout the file: the bound
+`wait_for_cleanup_hold_release` gives the finalization and kill matrices'
+observations, the bound `a_host_integration_reaper_holds_the_runs_cleanup_lease`
+gives its last assertion, and the default bound of a later resume's wait.
+Some ten thousand times the millisecond an inherited copy lasts; paid only
+by a run that is failing.
+
+## `fn wait_for_cleanup_hold_release_within(`
+
+The bounded wait behind `wait_for_cleanup_hold_release`, with the bound a
+parameter and the failure reported rather than answered `false`: polls
+`rundir::observe_cleanup_hold` every 50 ms until it is free (`Ok`) or the
+bound has elapsed (`Err`).
+
+## `fn wait_for_cleanup_hold_release_observing(`
+
+`wait_for_cleanup_hold_release_within` with `on_held` run after every
+observation that found the lease held, given that observation's number and
+before the bound is checked. It is how a wait acknowledges what it saw to
+the test choreographing a holder: the release of a parked fork is made from
+inside the observation that read it held, so the order — held, released,
+free — is a fact the wait itself established, never one a timer was
+trusted to arrange (the second pull request's first review found the timed
+form accepting a deleted wait under a 600 ms scheduling delay and rejecting
+the correct one, `PR320-R1-MAIN-004` and `PR320-R1-REG-002`). `_within`
+passes a closure that does nothing; `await_previous_incarnations_release`
+passes `Fixture::holder_observed`.
+
+Each rest between two observations is one attempt:
+`workspace_manager::fixture::rest_within`, one `nanosleep` on Unix and one
+wait on Windows, capped at what is left of the bound and never made again.
+`std::thread::sleep` made a refused or interrupted sleep again inside
+itself, so a later resume whose every rest a policy refused never came back
+to the bound, never reached production and never returned
+(`PR320-R6-REG-001`: all three trunks and the rundir twin entered and held
+to the reviewer's cutoff). A rest the OS refuses costs less than the tick,
+and the loop spins to its bound instead of resting; where the OS lets it,
+it rests. The observation itself is production's `observe_cleanup_hold`,
+one probe per turn whose `File::options().open` retries an interrupted open
+inside std; this wait's bound cannot see inside that probe, and it is
+carried as its own deferred row
+(`PR320-R7-PRODUCTION-LEASE-PROBE-RETRIES-AN-INTERRUPTED-OPEN`). Each of the
+three trunks holds the one-attempt rest in a process of its own
+(`a_later_resume_through_resume_with_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+`a_later_resume_through_resume_as_certified_by_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+`a_later_resume_through_resume_holding_manager_whose_every_rest_is_refused_reaches_production_at_its_bound`,
+the child `a_later_resume_whose_every_rest_is_refused_child`): the child
+makes the first real resume, which production refuses at once, refuses
+every rest of its thread and proves the refusal in force with a real
+`nanosleep`, and makes the later resume through the trunk the parent names
+with a 100 ms bound; the parent waits for the child within
+`run_kill_child_within`'s bound, so a wait that never comes back fails the
+parent and is killed with the child's process.
+
+## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
+
+Wait, bounded, for the run's cleanup lease to be free: `RELEASE_BOUND`
+through `wait_for_cleanup_hold_release_within`, answering only whether it
+was released. A `git` child of the ref funnel holds the lease while it
+lives, through a descriptor made inheritable for it, and under a parallel
+suite a child another test thread forks in that window can inherit the
+descriptor and hold the lease until it exits. The wait is bounded so a
+hold that never clears still fails the assertion that follows it; the
+ledger's post-drop observation and the finalization matrix's resumes wait
+through it.
+
+## `fn await_previous_incarnations_release(fixture: &Fixture) -> Option<CleanupHoldPastBound> {`
+
+The fixture's model of "the previous coordinator is gone". A production
+resume follows the death of another process and cannot inherit its
+descriptors; these tests resume in the process that drove the run, about a
+millisecond after its last ref write, while sibling threads fork, so the
+copies this process leaked into their exec windows are still held. Before a
+later resume — the fixture's second and every one after, counted in
+`resume_attempts` — this waits, bounded by `release_bound`, until the run's
+cleanup lease is observed free, and records in `hold_past_bound` what the
+wait found. It never decides the resume: the trunk makes the real resume
+whatever the wait found, and a refusal that follows an expired wait is the
+production refusal with the wait's report appended. A first resume returns
+at once, so the immediate-refusal tests keep their immediate refusal, and
+`resume_refused_while_reaper_hold_observed_then_succeeds` asserts it. The
+wait runs through `wait_for_cleanup_hold_release_observing` with
+`Fixture::holder_observed` as its acknowledgement, which does nothing unless
+a test has put a parked fork in `release_once_held`.
+
+## `fn refusal_after_an_expired_wait(`
+
+The annotation: a `Refused` whose message is the cleanup-lease refusal, after
+a wait that ran out, carries the bound and the observations that found the
+lease held, so a red reads as *"still held after the whole bound"* and never
+as *"held at one instant"*. Every other error passes through untouched, and
+so does the refusal when no wait preceded it.
+## `fn process_local_of(`
+
+R3, R4, R13, R17, R22 and R28 as the live process sees them.
+
+## `fn process_local_after(public: &Path, last: (bool, u32)) ->…`
+
+The same rows once the run has been dropped: the process-local ledgers
+as the run last reported them, the locks as the OS reports them — after
+a bounded wait for a lease a concurrently forked child may still hold.
+
+## `fn observe_live(`
+
+The live observation: the fold as the process holds it, the store as it
+is now (`store` lists it for the later observation to compare against).
+
+## `fn observe_after_drop(`
+
+The observation once the run has been dropped: the fold replayed from
+the bytes, the store compared with `store_before`.
+
+## `fn assert_ledger(before: &Ledger, after: &Ledger, outcome: …`
+
+The outcome equation, checked; the rendered ledger is written to
+`$UPSTROKE_LEDGER_EXPORT/<tag>.md` when the variable names a directory,
+which is how the record quotes it.
+
+## `fn tree_of(root: &Path) -> Vec<String> {`
+
+Every path under `root`, relative, sorted: what an execution root still
+holds when a finalization reports it not removed.
+
+## `fn the_ledger_balances_at_complete() {`
+
+`resource_accounting.outcome_equations.Complete`: the acceptance chain,
+observed live before the ending step and again from the bytes on disk
+once the process has let go.
+
+## `fn the_ledger_balances_at_parked() {`
+
+`outcome_equations.Parked`: alpha's queued candidate publishes, beta's
+worker asks a question, the hard block finds nobody there and the closure
+ends the run Parked — the candidates ref retained, the question open.
+
+## `fn the_ledger_balances_at_halted() {`
+
+`outcome_equations.Halted`: a declined verification park with the halting
+policy; the ledger after the decline is ingested and after the closure
+ends the run Halted — the candidates ref kept for forensics, the queue
+position and the question consumed, the proposal pin and the staging
+worktree pruned.
+
+## `fn a_closed_settlement_scrubs_the_generations_worktree_and_…`
+
+R9 at the live loop: a `Closed` settlement — here a deferral — closes the
+generation in the fold, and the loop prunes the generation's worktree and
+intent right after the `attempt_finished` append, as the retry path's
+`Close` arm and run-end closure do for the closes they make. Found by
+the ledger at Parked: before this, every closed settlement other than a
+promotion left its slot for the next resume to reclaim.
+
+## `fn a_closed_settlement_scrubs_the_generations_worktree_and_…` › `let seen = timeline.lock().unwrap_or_else(PoisonError::into…`
+
+The order, observed: the settlement's append is durable
+(`Event.Append` after) before the scrub's first effect
+(`Worktree.Remove` before) is consulted.
+
+## `fn the_ledger_balances_at_budget_exceeded() {`
+
+`outcome_equations.BudgetExceeded`: a spend already over the ceiling
+refuses beta's queued candidate its integration, `budget_exceeded` is
+appended, and the closure ends the run — the queue position, the
+candidate lease and the candidates ref resumably open, the pins pruned.
+
+## `struct ArmedAppendError {`
+
+Hooks that return `Err` from the `Written` point of the nth transaction
+append counted from the moment the countdown is set — the append-error
+protocol, aimed at one line of the test's choosing, which is how the
+NoRunFinished ledger is driven rather than planted.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…`
+
+`outcome_equations.NoRunFinished`: "a command ended by the append-error
+protocol leaves exactly this shape with the surviving prefix as the fold".
+Alpha publishes; beta's first settlement append errors after
+`attempt_started` is durable, so the surviving prefix holds an in-flight
+generation, its worktree and intent, and the execution root — every row
+resumably open, the process-local rows empty. The next incarnation then
+settles what the fold holds and the run ends Complete, with the ledger
+balanced there too.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…` › `countdown.store(3, Ordering::SeqCst);`
+
+Beta's dispatch appends `task_dispatched` and `attempt_started`; the third
+append is the first line after the worker ran, and it errors.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…` › `let released = referenced_objects(&fixture);`
+
+The pre-exit observation: the process still holds the run, its
+lock and its fold; the after-drop observation below is taken
+from the bytes and the OS once it has let go.
+
+## `fn observation_export_env() -> Vec<(String, String)> {`
+
+The ST-07 observation export directory, handed on to a spawned kill child:
+the host runner composes the child's environment from scratch, so a
+variable the parent test was started with does not reach the child unless
+the request carries it.
+
+
+## `fn certified_resume(fixture: &Fixture) -> PreflightCertified {`
+
+The resume's own chain up to step (c) — locks, records, the stable-prefix barrier, the census, the
+rebuilt runner and the pre-flight certificate — so a recovery step can be driven directly, with
+the run lock held as the resume holds it.
+
+## `fn with_emit_context<T>(fixture: &Fixture, body: impl FnOnce(&mut EmitContext<'_>) -> T) -> T {`
+
+The smallest `EmitContext` the recovery steps take: a frozen clock, harness hooks, the fixture's
+inputs and empty ledgers.
+
+## `fn tear(`
+
+Tear the registration of the linked worktree at `checkout` the way a `git worktree add` killed
+while it writes `commondir` leaves it (the workspace manager's fixture writes it; this module cannot),
+and assert Git's enumeration now dies on it, read by its signature — the message names the
+administrative directory and `commondir` — never by the word the platform prints for errno 0.
+
+## `fn plant_task_checkout(`
+
+The task slot `ALPHA`/`GEN` with its intent and worktree, through a manager the test holds, so the
+registration can be torn after the manager was derived: `WorkspaceManager::derive` enumerates, and
+a manager derived after the tear refuses (`PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`).
+
+## `fn assert_unregistered(manager: &crate::workspace_manager::WorkspaceManager, paths: &[&Path]) {`
+
+Git enumerates again, and none of `paths` is registered.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_the_snapshot_reclaim() {`
+
+`reclaim_snapshot_residue` over two snapshot slots, the second one torn (`PR5-RD-002-ENGINE-RECLAIM-LOOPS`,
+the torn slot of the loop's own kind). The first slot's intent removal repairs the second before its
+enumeration, and one reclaim converges. At `dfab458b` it refused there with Git's enumeration
+failure.
+
+## `fn a_torn_task_registration_does_not_wedge_the_snapshot_reclaim() {`
+
+The torn slot of another kind: a task slot, which the snapshot reclaim never removes. The snapshot's
+intent removal runs the task slot's forced removal — its checkout and registration go, its intent
+stays — and the snapshot reclaim converges; the task's own step (`dispatch::scrub`, as a closed
+generation's reclaim runs it) then finds nothing to remove and converges too.
+
+## `fn a_torn_staging_registration_does_not_wedge_the_stale_staging_reclaim() {`
+
+`reclaim_stale_residue`'s staging loop over two stale staging slots, the second one torn: one reclaim
+converges, where at `dfab458b` it refused at the first slot's intent removal.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_the_stale_staging_reclaim() {`
+
+A stale staging slot and a torn snapshot, which the staging loop never removes: the staging slot's
+intent removal repairs the snapshot, and the snapshot reclaim that owns it then converges with
+nothing left to remove.
+
+## `fn a_torn_snapshot_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {`
+
+Step (f) over an interrupted verification (`finish_integration`, the `VerificationStarted` arm): the
+live staging slot is removed straight after its worktree, before the snapshot reclaim that follows.
+With the verification's snapshot torn, the staging intent's removal refused at `dfab458b`; now it
+repairs the snapshot, and the step settles the verification, prunes its pin and reclaims both slots.
+
+## `fn a_torn_staging_registration_does_not_wedge_an_interrupted_verifications_staging_removal() {`
+
+The same step with the torn slot of its own kind: a second staging slot. The live slot's intent
+removal repairs it; after the verification is settled the transaction is closed, so the stale
+staging reclaim owns the second slot, and it converges with nothing left to remove.
+
+## `fn resume_holding_manager(`
+
+The whole recovery order with a manager the test derived before it tore a registration, and the
+recording refs double, whose `assert_publishable` asks Git nothing. With the manager as the refs,
+the resume's `assert_publishable` runs Git's enumeration before any step can repair, and a manager
+derived after the tear refuses in `derive`: both are
+`PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`.
+
+
+## `fn resume_holding_manager(` › `let past_bound = await_previous_incarnations_release(fixture);`
+
+As `resume_with`: the wait before a later resume, and the annotation of a
+refusal that follows an expired one.
+## `fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {`
+
+A torn add a killed conductor can leave: an open generation's own worktree, and nothing
+else to reclaim, so no intent removal runs before step (g). Step (g) verifies the generation's
+worktree, the verification's revalidation repairs the torn registration — the slot's forced
+removal, its intent kept — and the worktree reads as not registered, so (g) recreates it at its
+base. At `dfab458b` that verification refused on every resume.

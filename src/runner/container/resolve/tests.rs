@@ -3,7 +3,7 @@
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-#![deny(clippy::disallowed_macros)]
+#![forbid(clippy::disallowed_macros)]
 
 #[cfg(test)]
 mod this_file_is_test_only {}
@@ -1326,6 +1326,7 @@ fn no_module_outside_the_container_runner_writes_a_container_intent() {
     ];
     const EXCLUDED: &[&str] = &[
         "src/effects/tests.rs",
+        "src/engine/topology/coverage/tests.rs",
         "src/engine/topology/create/tests.rs",
         "src/engine/topology/recover/tests.rs",
         "src/runner/container/census/tests.rs",

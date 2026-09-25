@@ -23,8 +23,9 @@
 // this file is reached only through `#[cfg(test)] mod tests;` so it has no
 // attribute of its own to cut on. The marker below is redundant to the compiler
 // and load-bearing to every reader that still consults the TRUNCATING region —
-// `effects::externally_reachable_fns` and the three censuses in
-// `src/runner/container/exec.rs` — for which it makes this file's production
+// the three censuses in `src/runner/container/exec.rs`;
+// `effects::externally_reachable_fns` reads `effects::production_code` since
+// `PR7-WRAPPERS-EMPTY-DOMAIN` — for which it makes this file's production
 // region empty. It does **not** do that for the four whole-tree censuses, which
 // read `effects::production_code`: that excises this marker as the configured
 // item it is and scans the file in full, and what keeps this file out of their
@@ -41,7 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     CensusInputs, FailedStep, Planned, RunDirCensusReport, RunDirEntry, RunDirOutcome,
-    WorktreeLocked, apply, census_run_dirs, startup_census,
+    WorktreeLocked, apply, census_run_dirs, scan_classified, startup_census,
 };
 use crate::error::UpstrokeError;
 use crate::events::log::EventLog;
@@ -327,6 +328,13 @@ impl<'a> Husk<'a> {
             .expect("P3b: the staged owner record");
         rundir::publish_owner_record(&private, &mut rundir::NoHooks)
             .expect("P3b: the owner record");
+        self
+    }
+
+    /// P3b, after the owner record: the private skeleton directories.
+    fn create_skeleton(self) -> Self {
+        rundir::create_private_skeleton(&self.private(), &mut rundir::NoHooks)
+            .expect("P3b: the private skeleton");
         self
     }
 
@@ -1096,7 +1104,126 @@ fn every_retain_reason() -> Vec<RetainReason> {
         },
         RetainReason::MarkerlessWithContent,
         RetainReason::PossiblyCommitted,
+        RetainReason::ClassificationIncomplete,
     ]
+}
+
+/// A directory `classify_run_dir` could not finish observing is **retained**,
+/// and the reclaim path that would otherwise have deleted both its halves
+/// deletes nothing (`SWEEP-CLASSIFY-001`).
+///
+/// **One directory, two classifications, and the control is the second half of
+/// the same test.** The fixture is a husk at P3b — marker published, private
+/// half created, owner record published, no commit record — which is exactly
+/// the shape the ownership proof answers `Proven` for, so the census reclaims
+/// *both halves* of it. Classified `Indeterminate` it is retained byte for
+/// byte; classified `Husk` the same directory is destroyed. Without the second
+/// half, "nothing was deleted" is also what a fixture nothing could delete
+/// answers, and that is the shape of assertion the finding says PR #137's own
+/// test had.
+///
+/// **Why the class is supplied rather than produced.** No directory a test here
+/// can build classifies `Indeterminate`: the class exists for a read a signal
+/// interrupted, and nothing in this suite arranges a signal — a fixture's
+/// `events.jsonl` is an ordinary regular file whose reads deliver bytes or end.
+/// The interrupting source itself is measured over a `Read` fixture in
+/// `rundir::tests`. `scan` is one call to `scan_classified` with the class it
+/// read, so this drives every part of the census's decision except that single
+/// line.
+#[test]
+fn a_directory_the_probe_could_not_classify_is_retained_and_both_halves_survive() {
+    let fixture = Fixture::new("unclassified");
+    let run_id = "01UNCLASSIFIED000000000000";
+    let husk = Husk::at_p0(&fixture, run_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let public = husk.public();
+    let private = husk.private();
+    let private_before = tree_bytes(&private);
+    let public_before = tree_bytes(&public);
+    assert!(
+        !private_before.is_empty(),
+        "the private half must really be on disk, or the retention below measures nothing"
+    );
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = rundir::HarnessHooks::new(Arc::clone(&harness));
+    let scanned = scan_classified(
+        run_id,
+        public.clone(),
+        RunDirClass::Indeterminate,
+        &fixture.inputs(),
+        None,
+    );
+    assert_eq!(scanned.class, RunDirClass::Indeterminate);
+    assert!(
+        matches!(
+            scanned.plan,
+            Planned::Retain(RetainReason::ClassificationIncomplete)
+        ),
+        "the plan must be a retention, and it must name why: {:?}",
+        scanned.plan
+    );
+    assert!(
+        scanned.locator.is_none(),
+        "the marker is not read: a locator is a claim about a private half, and this \
+         directory's own log is what could not be read"
+    );
+
+    let outcome = apply(&mut hooks, &public, scanned.plan);
+    assert_eq!(
+        outcome,
+        RunDirOutcome::Retained(RetainReason::ClassificationIncomplete)
+    );
+    assert!(!outcome.reclaimed_anything());
+    assert!(!outcome.deleted_a_private_half());
+    assert!(
+        !outcome.may_have_deleted_a_private_half(),
+        "not even the weak form: nothing on this path can have touched a private half"
+    );
+    assert_eq!(
+        harness.lock().expect("harness").executions(),
+        0,
+        "the retain arm reaches no funnel at all, so nothing can be deleted by it"
+    );
+    assert_eq!(
+        tree_bytes(&private),
+        private_before,
+        "the private half must be byte-identical afterwards"
+    );
+    assert_eq!(
+        tree_bytes(&public),
+        public_before,
+        "the public half must be byte-identical afterwards"
+    );
+
+    // The control. The same directory, the same census, the same funnel — only
+    // the classification differs, and this one is destroyed.
+    let scanned = scan_classified(
+        run_id,
+        public.clone(),
+        RunDirClass::Husk,
+        &fixture.inputs(),
+        None,
+    );
+    assert!(
+        matches!(scanned.plan, Planned::ReclaimBothHalves(_)),
+        "the fixture is reclaimable as a husk, or the retention above is not the reason \
+         it survived: {:?}",
+        scanned.plan
+    );
+    let outcome = apply(&mut rundir::NoHooks, &public, scanned.plan);
+    assert_eq!(outcome, RunDirOutcome::ReclaimedBothHalves);
+    assert!(
+        !exists(&private),
+        "the control must really delete the private half"
+    );
+    assert!(
+        !exists(&public),
+        "the control must really delete the public half"
+    );
 }
 
 /// `owner_record_disagreement_retained`.
@@ -1735,6 +1862,407 @@ fn a_public_removal_that_refuses_after_the_private_half_went_says_so() {
         RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent)
     );
     assert!(!exists(&husk.public()));
+}
+
+/// The run-directory funnels' production adapter with an error returned at one
+/// `(site, phase)`, recording into a harness whose export names this test.
+///
+/// [`ArmedRunDir`] records into a bare harness that no export reads; the four
+/// witnesses below are cited by the sequential registry, whose merge check needs
+/// their own observation records to hold the coordinate.
+struct ExportedErrorAt {
+    inner: rundir::HarnessHooks,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl ExportedErrorAt {
+    fn new(at: (EffectSiteId, HookPhase)) -> Self {
+        Self {
+            inner: rundir::HarnessHooks::new(Arc::new(Mutex::new(HookHarness::new()))),
+            at,
+        }
+    }
+
+    fn observed(&self) -> HookHarness {
+        self.inner
+            .harness()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl rundir::RunDirHooks for ExportedErrorAt {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.hook(site, phase);
+        if (site, phase) == self.at {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
+/// A [`Fixture`] named after `name` and this process.
+///
+/// `Fixture::new` removes whatever tree stands at its name before it builds, so
+/// a test process running a witness under a fixed name removes the husk another
+/// process running the same witness has built, and that census finds nothing
+/// (#292's review round 5). The census witnesses below build under this name.
+fn fixture_of_this_process(name: &str) -> Fixture {
+    Fixture::new(&format!("{name}-{}", std::process::id()))
+}
+
+/// The husk a creator leaves when it dies after publishing its owner record: the
+/// marker published, `run.lock` taken at P2 and released by the death, the
+/// private half created and the owner record published. The lock file is part
+/// of that prefix, so the census reads it through `rundir::is_running`'s
+/// existing-but-unheld branch, as it would read a real husk.
+fn husk_its_creator_left_after_taking_the_run_lock<'a>(
+    fixture: &'a Fixture,
+    run_id: &str,
+) -> Husk<'a> {
+    let husk = Husk::at_p0(fixture, run_id).stage_marker().publish_marker();
+    let lock = RunLock::acquire(&husk.public()).expect("P2: the run lock");
+    let husk = husk.create_private().publish_owner();
+    drop(lock);
+    assert!(
+        exists(&husk.public().join("run.lock")),
+        "the lock file the creation took stands, unheld"
+    );
+    husk
+}
+
+/// Gate 5's audit, row 87: `RunDir.RemovePrivateHusk`/before, recovered.
+///
+/// The census that refuses at the private removal's before phase keeps the
+/// whole husk and says so (the test above); what that prefix is owed is the
+/// **next** census, which the committed tests never ran. It reclaims the husk
+/// through the proof-token funnel, private half first, then the public
+/// directory with the marker last. No event log is involved.
+#[test]
+fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first() {
+    let fixture = fixture_of_this_process("private-refused-then-reclaimed");
+    let husk =
+        husk_its_creator_left_after_taking_the_run_lock(&fixture, "01PRIVREFUSED0000000000000");
+    let private = tree_bytes(&husk.private());
+    assert!(!private.is_empty());
+
+    let site = EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk);
+    let mut refusing = ExportedErrorAt::new((site, HookPhase::Before));
+    let first = census_run_dirs(&mut refusing, &fixture.inputs(), None)
+        .expect("a funnel that refuses is an outcome, not the census's error");
+    assert!(
+        refusing.observed().observed(site, HookPhase::Before),
+        "the refusal came at the private removal's before phase"
+    );
+    drop(refusing);
+    assert!(
+        matches!(
+            only(&first).outcome,
+            RunDirOutcome::Unreclaimable {
+                step: FailedStep::PrivateHalf,
+                ..
+            }
+        ),
+        "{:?}",
+        only(&first).outcome
+    );
+    assert!(exists(&husk.public().join(MARKER)), "the locator is kept");
+    assert_eq!(
+        tree_bytes(&husk.private()),
+        private,
+        "the refusal came before the removal"
+    );
+
+    let (second, seen) = fixture.run_census_observed();
+    assert_eq!(only(&second).outcome, RunDirOutcome::ReclaimedBothHalves);
+    assert!(!exists(&husk.private()), "the private half is gone");
+    assert!(!exists(&husk.public()), "the public half is gone");
+    let order: Vec<EffectSiteId> = seen
+        .coverage()
+        .iter()
+        .filter(|seen| seen.phase == HookPhase::After)
+        .map(|seen| seen.site)
+        .collect();
+    assert_eq!(
+        order,
+        vec![site, EffectSiteId::RunDir(RunDirSite::RemovePublicHusk)],
+        "the next census removes the private half through the proof-token funnel, then the \
+         public directory"
+    );
+}
+
+/// Gate 5's audit, row 90: `RunDir.RemovePublicHusk`/after, recovered.
+///
+/// A census whose public removal completed and then returned an error leaves
+/// the husk gone: its runs entry is removed with it. What that prefix is owed is
+/// a later census that finds nothing to do, which no committed test ran over a
+/// runs directory a removal emptied. No event log is involved.
+#[test]
+fn a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census() {
+    let fixture = fixture_of_this_process("public-removed-then-erred");
+    let run_id = "01PUBREMOVED00000000000000";
+    let husk = husk_its_creator_left_after_taking_the_run_lock(&fixture, run_id);
+
+    let site = EffectSiteId::RunDir(RunDirSite::RemovePublicHusk);
+    let mut erring = ExportedErrorAt::new((site, HookPhase::After));
+    let first = census_run_dirs(&mut erring, &fixture.inputs(), None)
+        .expect("a funnel that refuses is an outcome, not the census's error");
+    assert!(
+        erring.observed().observed(site, HookPhase::After),
+        "the error came at the public removal's after phase"
+    );
+    drop(erring);
+    assert!(
+        matches!(
+            only(&first).outcome,
+            RunDirOutcome::Unreclaimable {
+                step: FailedStep::PublicHalfAfterPrivate,
+                ..
+            }
+        ),
+        "{:?}",
+        only(&first).outcome
+    );
+    assert!(
+        !exists(&husk.private()) && !exists(&husk.public()),
+        "both halves are gone: the public removal ran before its after phase erred"
+    );
+
+    let (second, seen) = fixture.run_census_observed();
+    assert!(
+        second.of(run_id).is_none() && second.entries().is_empty(),
+        "the next census has no entry for the removed husk: {:?}",
+        second.entries()
+    );
+    assert!(
+        !seen
+            .coverage()
+            .iter()
+            .any(|observation| matches!(observation.site, EffectSiteId::RunDir(_))),
+        "and executes no run-directory funnel: {:?}",
+        seen.coverage()
+    );
+}
+
+/// Gate 5's audit, rows 69 and 129: the creation prefix P2, the marker
+/// published and the run lock taken, with the private half not yet created.
+///
+/// A process that dies there leaves `run.lock` on disk, unheld, and
+/// `rundir::is_running` answers an existing unheld lock file on a different
+/// branch from an absent one. `marker_with_absent_private_target_reclaims_public_only`
+/// plants no lock file, so it does not reach that branch (review round 4 of the
+/// gate report: a mutation making the unheld-file branch answer "running" left it
+/// green). Each witness takes the lock through its funnel and leaves it released
+/// on disk: after an error at `Lock.AcquireRun`'s after phase (row 129), and
+/// after the lock was held and an error came at `RunDir.CreatePrivateDir`'s
+/// before phase (row 69). The census then reclaims the husk public-only.
+fn a_creation_prefix_with_a_released_run_lock_is_reclaimed_public_only(
+    run_id: &str,
+    construct: impl FnOnce(&Husk<'_>) -> HookHarness,
+    coordinate: (EffectSiteId, HookPhase),
+) {
+    let fixture = fixture_of_this_process(run_id);
+    let husk = Husk::at_p0(&fixture, run_id)
+        .stage_marker()
+        .publish_marker();
+    let seen = construct(&husk);
+    assert!(
+        seen.observed(coordinate.0, coordinate.1),
+        "the prefix ends at `{}` ({})",
+        coordinate.0,
+        coordinate.1
+    );
+    assert!(
+        exists(&husk.public().join("run.lock")),
+        "the lock file the creation took stands"
+    );
+    assert!(!exists(&husk.private()), "and no private half was created");
+
+    let report = fixture.run_census();
+    assert_eq!(
+        only(&report).outcome,
+        RunDirOutcome::ReclaimedPublicOnly(UnboundShape::TargetAbsent)
+    );
+    assert!(!exists(&husk.public()));
+}
+
+#[test]
+fn a_run_lock_whose_acquisition_erred_after_taking_it_leaves_a_husk_the_census_reclaims_public_only()
+ {
+    let coordinate = (
+        EffectSiteId::Lock(crate::topology::effects::LockSite::AcquireRun),
+        HookPhase::After,
+    );
+    a_creation_prefix_with_a_released_run_lock_is_reclaimed_public_only(
+        "01RUNLOCKAFTER000000000000",
+        |husk| {
+            let mut erring = ExportedErrorAt::new(coordinate);
+            assert!(
+                RunLock::acquire_hooked(&husk.public(), &mut erring).is_err(),
+                "the acquisition returns the injected error"
+            );
+            erring.observed()
+        },
+        coordinate,
+    );
+}
+
+#[test]
+fn a_creation_stopped_before_its_private_half_leaves_a_released_run_lock_the_census_reclaims_public_only()
+ {
+    let coordinate = (
+        EffectSiteId::RunDir(RunDirSite::CreatePrivateDir),
+        HookPhase::Before,
+    );
+    a_creation_prefix_with_a_released_run_lock_is_reclaimed_public_only(
+        "01PRIVATEBEFORE00000000000",
+        |husk| {
+            let lock = RunLock::acquire(&husk.public()).expect("P2: the run lock");
+            let mut erring = ExportedErrorAt::new(coordinate);
+            assert!(
+                rundir::create_private_dir(&husk.private(), &mut erring).is_err(),
+                "the private half's creation returns the injected error"
+            );
+            drop(lock);
+            erring.observed()
+        },
+        coordinate,
+    );
+}
+
+/// The entries of `dir`, by name, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Gate 5's audit, row 80: `RunDir.WritePlan`/after, recovered.
+///
+/// A creator that stops once its plan is written leaves the marker published,
+/// `run.lock` (and on Unix the cleanup lease file) taken at P2 and released,
+/// the private half with its owner record and its skeleton, the plan, and no
+/// log: P5 opens the log after the plan.
+/// `bound_husk_without_commit_record_reclaimed_private_then_public` plants a plan
+/// beside no lock file and no skeleton, so its census reads
+/// `rundir::is_running`'s absent-file branch, which the gate's third run declined
+/// for this row as review round 2 of #292 declined it for rows 87 and 90. Here
+/// the lock is the real `RunLock`, taken before the private half as P2 takes it
+/// and held across the plan's write; the error comes at that write's after
+/// phase, with the plan's bytes on disk; and the lock is released with nothing
+/// cleaned up, as a death releases it. The census reads the existing unheld lock
+/// file, proves the husk its creator's and reclaims both halves, the private
+/// half first. No event log is involved: the prefix holds none and the census
+/// appends nothing.
+#[test]
+fn a_creation_stopped_after_writing_its_plan_leaves_a_husk_the_census_reclaims_private_half_first()
+{
+    let run_id = "01PLANWRITTEN0000000000000";
+    let plan: &[u8] = b"{\"tasks\":[]}\n";
+    let fixture = fixture_of_this_process(run_id);
+    let coordinate = (
+        EffectSiteId::RunDir(RunDirSite::WritePlan),
+        HookPhase::After,
+    );
+
+    let husk = Husk::at_p0(&fixture, run_id)
+        .stage_marker()
+        .publish_marker();
+    let lock = RunLock::acquire(&husk.public()).expect("P2: the run lock");
+    let husk = husk.create_private().publish_owner().create_skeleton();
+    let mut erring = ExportedErrorAt::new(coordinate);
+    assert!(
+        rundir::write_plan(&husk.public(), plan, &mut erring).is_err(),
+        "the plan's write returns the injected error"
+    );
+    assert!(
+        erring.observed().observed(coordinate.0, coordinate.1),
+        "the prefix ends at `{}` ({})",
+        coordinate.0,
+        coordinate.1
+    );
+    drop(erring);
+    drop(lock);
+
+    let mut left_in_public = vec![
+        MARKER.to_owned(),
+        rundir::PLAN.to_owned(),
+        "run.lock".to_owned(),
+    ];
+    if cfg!(unix) {
+        left_in_public.push("cleanup.lock".to_owned());
+    }
+    left_in_public.sort();
+    assert_eq!(
+        names_in(&husk.public()),
+        left_in_public,
+        "the marker, the lock files P2 took and the plan, and no log"
+    );
+    assert_eq!(
+        fs::read(husk.public().join(rundir::PLAN)).expect("the plan was written"),
+        plan,
+        "the error came after the plan's bytes were written"
+    );
+    assert_eq!(
+        names_in(&husk.private()),
+        vec![
+            "gate-worktrees".to_owned(),
+            "gates".to_owned(),
+            OWNER_RECORD.to_owned(),
+            "reviews".to_owned(),
+            "settings".to_owned(),
+            "transcripts".to_owned(),
+        ],
+        "the owner record and the private skeleton, and no commit record"
+    );
+    assert!(
+        !rundir::is_running(&husk.public()),
+        "the lock file the creation took stands, unheld"
+    );
+    assert_eq!(
+        rundir::classify_run_dir(&husk.public()),
+        RunDirClass::Husk,
+        "a directory with a plan and no log is a husk"
+    );
+
+    let (report, seen) = fixture.run_census_observed();
+    assert_eq!(only(&report).outcome, RunDirOutcome::ReclaimedBothHalves);
+    assert!(!exists(&husk.private()), "the private half is gone");
+    assert!(
+        !exists(&husk.public()),
+        "the public half is gone, the plan and the released lock with it"
+    );
+    let order: Vec<EffectSiteId> = seen
+        .coverage()
+        .iter()
+        .filter(|seen| seen.phase == HookPhase::After)
+        .map(|seen| seen.site)
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
+            EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+        ],
+        "the census removes the private half through the proof-token funnel, then the public \
+         directory"
+    );
+    assert!(
+        fixture.run_census().entries().is_empty(),
+        "and the next census finds no run directory"
+    );
 }
 
 /// A runs directory that exists and cannot be enumerated **refuses**.

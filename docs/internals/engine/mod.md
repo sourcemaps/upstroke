@@ -6,6 +6,100 @@ The code is the authority for what it does; this file is the whole of its prose,
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
 
+## `#![deny(clippy::disallowed_methods)]`
+
+**This file allows nothing, and that is what it is for.** Everything written
+in it -- a private `fn`, an inline `mod x { .. }` at any depth -- is visible to
+every module under `engine::topology`, because a topology module descends from
+it, and nothing classifies it: `src/engine/mod.rs` is in neither
+`CLASSIFIED_MODULES` nor `effects/wrappers.toml`, and the classification domain
+reads `pub`, `pub(crate)` and `pub(super)` functions, which would not see a
+private item here anyway. So an allow of a governed lint on this file is an
+exemption for anything anyone places in it, reachable from the topology.
+
+That is not hypothetical. From #306 (`94c21c45`, `PR7-WRAPPERS-EMPTY-DOMAIN`)
+until 2026-09-20 this file carried `#![allow(clippy::disallowed_methods)]`, a
+reviewed row of `effects/allowlist.toml`'s legacy section, so that its six
+entry points could call `coordinator::run_harness_inner_on` and
+`resume::resume_harness_inner_on`, effectful wrappers that change denied by
+path. A lint level is scoped by the module tree, so the allow reached every
+child declared below that wrote no attribute of its own, and the placement
+scan could not see it, because `governed_allows` records what a file writes.
+`src/engine/topology.rs` was fenced in the same commit; the third review of
+#306 (`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) walked through
+[`assembly`](assembly.md), an unfenced sibling, and round 3 fenced the five of
+them; and the fourth review (`PR306-FACADE-INLINE-ESCAPE`) then walked through
+what no fence on a child can reach -- an attribute-free inline module written
+in this file, and a function placed directly in it, each calling
+`std::fs::write`, each referenced from the production body of `park_question`
+in [`topology::integrate`](topology/integrate.md), each with clippy at exit 0
+and the suite green.
+
+The row carried its own end state: "its entry points move into the allowed
+legacy modules they call, at which point this file calls nothing denied." That
+is what happened. `run`, `run_with`, `run_harness` and their two seams are
+defined in [`coordinator`](coordinator.md), `resume`, `resume_with`,
+`resume_harness` and theirs in [`resume`](resume.md) -- both rows of the legacy
+section already, both classified -- and this file re-exports the six public
+names, so every public path is what it was. The allow, its row and its entry in
+`FROZEN_LEGACY_ALLOWLIST` are gone, and this file carries the fence its
+children carry instead: every governed lint stated at file level, so that
+its level is stated here rather than left to the crate root and the command
+line.
+
+**The three lints are stated at three levels, and the split is measured, not
+chosen.** `disallowed_methods` is `deny`: [`attempt`](attempt.md),
+[`coordinator`](coordinator.md) and [`resume`](resume.md) allow it at file
+level in production code, so a `forbid` here is `E0453` in every build.
+`disallowed_types` is `forbid` in the production build only,
+`#![cfg_attr(not(test), forbid(clippy::disallowed_types))]`: the one
+allowance of it below this file is `src/engine/tests.rs`, a whole-file test
+module, so the lib target every clippy leg checks can forbid it while the lib
+test target, the only build that module exists in, keeps `-D warnings`' level.
+`disallowed_macros` is `forbid` outright: nothing below allows it. Until
+2026-09-23 all three were one `deny` attribute, excused wholesale by the
+children's allowance of one of them, and #318 executed the reason that is not
+enough: a `macro_rules!` in `attempt.rs` -- which states nothing for the
+other two lints and inherited this file's `deny` of both -- emitting a
+`#[allow(clippy::disallowed_macros)]` function that calls `eprintln!` and a
+`#[allow(clippy::disallowed_types)]` function returning a
+`std::process::Command`, both called from the production body of
+`prepared_pin_ref` in [`topology::integrate`](topology/integrate.md), passed
+clippy over all targets and the whole effects suite, and ran
+(`~/orch-pr10/repair-318-r2-evidence/witnesses-prefix/PW2-engine-*`). With
+the split above, the same patch is two `E0453`s at the generated attributes,
+the `forbid` quoted from this file (`controls-final/PX2-engine-clippy.log`).
+`disallowed_methods` stays a `deny`, and a `deny` is a level the same
+macro lowers in a child that states nothing for it; today no child of this
+file leaves it unstated -- `attempt.rs`, `coordinator.rs` and `resume.rs`
+allow it at file level, recorded production allowances, and every other
+child forbids it -- so what the `deny` leaves open is
+`PR7-WRAPPERS-EMPTY-DOMAIN`'s class, a `deny` excused by production
+allowances, not this change's.
+`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone`
+names this file the day the conditional `forbid` of `disallowed_types` or
+the unconditional `forbid` of `disallowed_macros` goes back to `deny`.
+
+**And it holds no code.** Its leading attributes, `mod x;` declarations and
+`use` re-exports are all this file may contain. The same guard refuses
+anything else, however it is spelled -- an inline module, a function, a
+constant, a macro definition or invocation, `include!`, an attribute on a
+declaration -- because an allow does not have to be written in the text it
+takes effect in: the review of `409a6138` (`PR309-FACADE-EXPANSION-ESCAPE`)
+brought an allowed inline module in here through `include!` and again through
+a macro that substitutes `mod` and `allow`, with every reading of this file's
+text green. A file that holds no code cannot hide any. Something that needs a
+home goes in a module this one declares.
+
+`effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
+refuses an allow written anywhere in this file again, in any form, refuses a
+missing deny, and compiles both of the review's routes under this file's own
+leading attributes, read from it, where each is a build error;
+`effects::tests::every_inline_module_under_the_engine_facade_is_walked_and_answered_for`
+derives every inline module the source writes under this file, at every depth;
+and the two #306
+guards still hold the topology root and every out-of-line child.
+
 ## Module
 
 Sequential execution engine (DESIGN.md §14) and the verification ladder it
@@ -63,93 +157,42 @@ here. `the_engine_facade_exposes_exactly_the_items_the_packet_enumerates`
 now forbids `pub mod ` in this file, so the next attempt has to be
 deliberate.
 
+## `pub use coordinator::{run, run_harness, run_with};`
+
+The v0.1 conductor's three public run entry points, and `pub use resume::{..}`
+below is the same for the three that resume.
+
+**Re-exported, not defined here, and the difference is the point.** A `pub use`
+is not a call. The entry points reach `coordinator::run_harness_inner_on` and
+`resume::resume_harness_inner_on`, which are denied by path, and a module that
+calls a denied path needs an allow; a module that re-exports one does not. So
+the six live in the two conductor modules they drive, which carry recorded
+allows and are classified, and this file -- which a topology module descends
+from, see the section above -- calls nothing at all.
+
+**The public paths are unchanged**: `upstroke::engine::run`, `::run_with`,
+`::run_harness`, `::resume`, `::resume_with` and `::resume_harness` are the
+paths `decisions.phase_zero_modules.modules["src/engine/mod.rs"]` froze, with
+the signatures they had; the bodies moved unchanged but for the path to the
+conductor, which lost its module prefix.
+`engine::tests::the_engine_facade_exposes_exactly_the_items_the_packet_enumerates`
+holds that the names re-exported from the two conductor modules are exactly
+those six, that each module's own top-level `pub fn`s are exactly the ones
+re-exported from it, and that the explicit-`Runner` seams are not among them;
+`every_public_write_coordinator_entry_point_establishes_containment` drives all
+six through these paths.
+
+**They are denied by path like the conductors they wrap.** Each reaches its
+conductor without leaving its file, so `effects/wrappers.toml` classifies it
+`effectful` and `clippy.toml` denies it, and a denial binds a DefId rather
+than a spelling: a call to `engine::run` is refused as
+`upstroke::engine::coordinator::run`. The callers are `src/main.rs`,
+`engine::tests` and `runner::container::resolve::tests`, each under its own
+recorded allow of `clippy::disallowed_methods`. A topology module calling the
+legacy conductor through the facade is a build error now; until 2026-09-20 it
+was not.
+
 ## `pub use crate::agent::{AdapterSource, BuiltinAdapters};`
 
 Re-exported so `engine::AdapterSource` still resolves for callers that
 reasonably think of it as the engine's seam.
-
-## `fn run_harness_on(`
-
-The same run, on an explicit [`Runner`].
-
-The boundary is a parameter rather than a `Harness` field because it is not
-an injectable stand-in for a collaborator: it is where every process of
-this run executes, and DESIGN.md:612 makes it a configured choice —
-"`[runner]` config selects `host` or `container`". PR6 passes the container
-runner here; PR4 passes [`HostRunner`] and nothing else.
-
-**Private, and it has to be.** `decisions.phase_zero_modules.visibility` is
-"pub(super) only where a sibling or tests reference an item; **no new pub
-or pub(crate)**; public paths unchanged", and the module's own entry
-enumerates the facade without it. The reason is not bookkeeping: this
-function drives the *schema-1..3* coordinator, and `invariants[22]` is
-"schema-1..3 runs are host-only and no run changes its boundary or image
-between epochs". A `pub` here lets a downstream crate execute a legacy run
-off-host, with no `RunnerPolicy` to record it and no refusal — and lets the
-same run come back on `HostRunner` at the next resume. Private is what
-makes that unreachable rather than merely undocumented.
-
-### Errors
-
-Whatever the run refuses or fails on.
-
-## `run_contained(opts, harness, runner, || {`
-
-`NoHooks` is what production passes the process funnel, and the
-containment step is threaded the same way: the observer exists so the
-step has a drivable failure path (`runner::host::contain_write_command`),
-and production arms nothing.
-
-## `fn run_contained(`
-
-The same run, over the containment step it must perform **first**.
-
-Every public entry point above reaches the coordinator through here, so
-this one call is what makes `run`, `run_with` and `run_harness` write
-commands in INV-18's sense: "on Windows every host child is a member of the
-coordinator's ambient kill-on-close Job Object from creation", and
-`expected_failures_refusals[1]`, "ambient job cannot be created or joined
-(Windows) → write command refuses at startup with a diagnostic". A
-downstream crate calling `engine::run_with` is a coordinator exactly as the
-CLI is; before this it established nothing, so a kill between
-`CreateProcessW` and private-job assignment left the suspended stub alive
-and a real ambient failure could not produce the required refusal.
-
-`contain` is a parameter for the same reason `src/main.rs`'s `dispatch`
-takes its join: no machine here can make the real one fail, and the
-*ordering* between containment and the first thing the coordinator does is
-then a testable fact rather than a written-down one
-(`a_facade_run_refuses_before_any_effect_when_containment_fails`). It is
-not a hole in the guarantee: `Contained` has a private field, so the only
-closure that can return one is one that establishes containment.
-
-## `pub fn resume_harness(`
-
-§15: replay, verify the run branch still matches the record, re-probe, and
-continue — parked questions intact.
-
-Every refusal below exists because continuing would produce a *wrong*
-result rather than merely an awkward one, and each says which of the four
-things moved — the run, the plan, the config, or the branch — because that
-is what decides what the operator does next.
-
-Note what is *not* a refusal: gates that resolve differently today. Those
-are taken from the record and run, so there is nothing to refuse — the
-difference is a warning about an edit that does not apply here. A refusal is
-for the cases where continuing would be wrong, and continuing under the
-gates this run has been using all along is exactly right.
-
-## `fn resume_harness_on(`
-
-The same resume, on an explicit [`Runner`]. See [`run_harness_on`],
-including why this is private.
-
-### Errors
-
-Whatever the resume refuses or fails on.
-
-## `fn resume_contained(`
-
-The same resume, over the containment step it must perform first. See
-[`run_contained`]: a resume drives a run, so it is a write command, and the
-three public resume entry points reach the coordinator only through here.

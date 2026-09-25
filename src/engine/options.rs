@@ -1,5 +1,11 @@
 //! Extended notes: `docs/internals/engine/options.md`
 
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 

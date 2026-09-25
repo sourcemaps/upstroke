@@ -59,11 +59,11 @@ so nothing after the resume can present one.
 
 ### What this slice does *not* do
 
-**Step (b) is "terminal finalization then refuse continuation", and PR7
-implements the refusal only.** `RunDir.WriteReport` carries `fault_row:
-t_finalize`, which is not one of this slice's eleven rows; a lane that
-finalized here would write an out-of-row effect with no fault coverage.
-[`refuse_if_finished`] is the refusal, and it is the whole of PR7's (b).
+**Step (b) is "terminal finalization then refuse continuation".** PR7
+implemented the refusal only — `RunDir.WriteReport` carries `fault_row:
+t_finalize`, which was not one of that slice's rows — and PR10 implemented
+the finalization: [`finalize_if_finished`] finalizes a Complete or Halted
+run (`finalize.md`) and only then refuses continuation.
 
 Step (f) is `checkpoint_refusals` territory for the same reason: "an
 intermediate build refuses, before any append, any operation whose terminals
@@ -111,7 +111,7 @@ append, and every bound on it is a separate clause:
   promotion, cleanup, admission or report, and before any recovery event —
   that is, before every durable thing a resume derives from the record. A
   ref creation is such a thing, so it is not exempt.
-* **After (b).** [`refuse_if_finished`] refuses a Complete or Halted run,
+* **After (b).** [`finalize_if_finished`] refuses a Complete or Halted run,
   and publishing a finished run's integration ref is continuing it.
 * **After (c).** The repository is touched only once the recorded Runner has
   been rebuilt by inspection and its probes have answered, so a resume that
@@ -211,6 +211,14 @@ never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
 The committed first line, **without** its newline — the bytes
 `committed.json.run_started_sha256` names.
 
+## `impl RootDerived` › `#[allow(dead_code)]` (trailing)
+
+never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
+## `impl RootDerived` › `#[allow(dead_code)]` (trailing)
+
+never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
 ## `impl RootDerived` › `pub fn derive(`
 
 Step (a0) against this binary's reader ceiling.
@@ -229,10 +237,6 @@ that is not a `run_started`, a recorded locator of any shape
 other than `<root>/runs/<run_id>`, or an explicit
 `--private-root` naming a different root.
 [`UpstrokeError::Io`] when the log cannot be read.
-
-## `impl RootDerived` › `#[allow(dead_code)]` (trailing)
-
-never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
 
 ## `impl RootDerived` › `pub(crate) fn derive_with(`
 
@@ -299,10 +303,6 @@ The authorized private root R — never today's default.
 The reader the header selected. Always
 [`ReaderSelection::Topology`] for a value that exists.
 
-## `impl RootDerived` › `#[allow(dead_code)]` (trailing)
-
-never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
-
 ## `impl RootDerived` › `pub fn first_line(&self) -> &[u8] {`
 
 The committed first line's bytes, without the commit marker.
@@ -331,6 +331,34 @@ and names a directory the run does not own, and a locator of
 No `..`, no `.`, no prefix trickery: every component is checked,
 because the whole value of this refusal is that the two trailing
 components are the only thing below the root.
+
+## `{`
+
+**`T-CAND-OBJ`'s other refusal**, and it belongs here for the same reason:
+`refusal_condition` is "pin symbolic or an unexpected ref under the run
+namespace", and a refusal after an append is not a refusal before one.
+
+`refuse_unexpected_refs` and `expected_refs` were both written, correct,
+and called only from their own tests — `expected_refs` derives the
+entitlement from the fold precisely so a ref with no durable record behind
+it is what fails, and nothing derived it. Round 3 reached this twice
+(`consumer`, Sol).
+
+**The citation matters and the obvious one is wrong.**
+`expected_failures_refusals[2]` naming "unexpected refs under the run
+namespace" is **`pr_sequence[6]`'s** contract, not this slice's — PR7's
+`[2]` is "empty-diff and unresolved-index attempt failures". What binds
+here is `transaction_fault_matrix[4].refusal_condition`, and PR7 owns that
+row.
+
+## `ensure_recorded_integration_ref(&certified, seams.refs, context.hooks)?;`
+
+T-RUNSTART's P7/P8 repair for a run that has not published, the
+published-run check for one that has, before the first append. The module
+comment argues each bound; the one that is not merely tidy is the prepared
+publication, whose ref is still at the recorded base until `finish_integration`
+swaps it — "present == base continue" would adopt it under that transaction,
+so the step is skipped for a `Prepared` transaction and for no other.
 
 ## `pub mod root` › `fn normalize(path: &Path) -> PathBuf {`
 
@@ -383,6 +411,10 @@ process, or while a surviving reaper's shared cleanup hold (R28)
 is observed. The value is consumed either way, because a
 refusal here ends the command.
 
+## `impl LocksHeld` › `pub fn root(&self) -> &RootDerived {`
+
+What (a0) derived.
+
 ## `impl LocksHeld` › `pub fn cleanup_scope(&self) -> crate::rundir::CleanupScope {`
 
 The run lock's cleanup scope, for the thread that drives the recovery
@@ -396,10 +428,6 @@ reviewers held no lease — the cover review of `8a5f59e8` measured a real
 reaper at `ReaperStarted` with the run's hold absent
 (`PR8-R4-CLEANUP-LEASE`). [`run_recovery_order`] enters it for its own
 duration, and `TopologyRun::step` enters one per step.
-
-## `impl LocksHeld` › `pub fn root(&self) -> &RootDerived {`
-
-What (a0) derived.
 
 ## `impl LocksHeld` › `pub fn into_guards(self) -> (RunLock, WorktreeLock, RootDerived) {`
 
@@ -484,13 +512,13 @@ give — at the bottom of the chain the parts are the append
 handle and the two locks, and a borrowed lock is a lock this
 process is about to drop.
 
-## `impl RecordsVerified` › `pub fn owner(&self) -> &OwnerRecord {`
-
-The verified owner record.
-
 ## `impl RecordsVerified` › `#[allow(dead_code)]` (trailing)
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
+## `impl RecordsVerified` › `pub fn owner(&self) -> &OwnerRecord {`
+
+The verified owner record.
 
 ## `impl RecordsVerified` › `pub fn commit(&self) -> &CommitRecord {`
 
@@ -635,13 +663,13 @@ For a recovery step that needs what the fold does not keep — the
 rather than parsing the log again is what keeps the barrier the
 one production parse.
 
-## `impl BarrierHeld` › `pub fn bytes(&self) -> &[u8] {`
-
-The proven bytes.
-
 ## `impl BarrierHeld` › `#[allow(dead_code)]` (trailing)
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
+
+## `impl BarrierHeld` › `pub fn bytes(&self) -> &[u8] {`
+
+The proven bytes.
 
 ## `impl BarrierHeld` › `pub fn stable_prefix_barrier(&self) -> StablePrefixBarrier {`
 
@@ -656,6 +684,14 @@ fold it was built from.
 Split out rather than exposed as two `&mut` accessors because a
 recovery emitter needs both at once and Rust's borrow checker
 would otherwise force one of them through a clone.
+
+## `pub(in crate::engine::topology::recover) fn writer(`
+
+The append handle, the fold and the event list together, because the one
+`emit` funnel keeps all three in step: what recovery appends is read back
+by the loop it hands the `RunHandle` to (the authorized head after a
+publication recovery completed, for one), so the list a resume was
+derived from is extended by every append the resume itself makes.
 
 ## `pub mod chain` › `pub mod censused {`
 
@@ -1238,13 +1274,31 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (a) the census, under the barrier and never before it.
 
-## `refuse_if_finished(&censused)?;`
+## `let censused = finalize_if_finished(censused, seams.manager, hooks)?;`
 
-(b) Complete or Halted: finalize then refuse. PR7 refuses.
+(b) Complete or Halted: finalize, then refuse.
 
 ## `let rebuilt = RunnerRebuilt::rebuild(censused, seams.today, Some(seams.runtime))?;`
 
 (c) the recorded Runner by inspection, then its probes.
+
+## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
+
+A `Prepared` transaction owns the ref: `finish_integration` compares it
+against the authorization and swaps it, so the startup check would only
+adopt what that step is about to move. Under any other prefix — no
+transaction, or a verification whose interrupted settlement moves no
+ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
+integration state".
+
+## `let mut reservations = Reservations::new();`
+
+The append-error protocol's two ledgers. The recovery order takes no
+provisional reservation and registers no invocation of its own — (c)'s
+probes are the Runner's and are reclaimed there — so on this path both are
+empty and the protocol cancels nothing. They exist here rather than inside
+`emit` because "nothing was held" has to be an observation the ledgers
+make, not an assumption the emitter is written around.
 
 ## `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
@@ -1262,6 +1316,37 @@ refuses, untouched. The reviews of `3414dc58` found this step deleting every
 pin it did not recognise, the still-Prepared transaction's and a
 substituted one included.
 
+## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+
+T-PROPOSAL residue and the pins the log accounts for: staging worktrees
+no live transaction owns are reclaimed with force, a resolved sequence's
+pin is pruned at the proposal it recorded, the open transaction's pin is
+checked against its record and kept, and exactly the provisional orphan
+`prepared/<next_seq>` is reclaimed. Before the namespace check, so that
+check refuses whatever the log does not account for — untouched.
+
+## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
+
+The run's own integration ref sits under this namespace and is never
+unexpected; `expected_refs` leaves it out because it enumerates
+candidate refs, so the recovery names it here.
+
+## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
+
+The open transaction's pin is expected: it keeps the proposal
+reachable while the transaction resolves, verifying or prepared.
+
+## `pub fn run_recovery_order(` › `if !publication_pending {`
+
+The P7/P8 integration-ref repair is for a run killed at run-start, and
+the published-run check for every later one. A run with a prepared
+publication is past both: the ref is the transaction's to move, so the
+step is skipped and `finish_integration` owns the ref.
+
+## `let interrupted = settle_interrupted(&mut certified, &mut context)?;`
+
+(d), (e) — recovery events, every one of them before (h).
+
 ## `finish_integration(&mut certified, seams.manager, &mut context)?;`
 
 (f) the integration half: resolve the one transaction the proven prefix
@@ -1272,47 +1357,6 @@ now the barrier of (a1) has proven the `merge_prepared` line durable; a
 pin pruned and its staging reclaimed, and the candidate re-verifies under a
 new sequence. It runs at (F) beside [`finish_promotions`]: both complete what
 the run authorized, after (d) and (e).
-
-## `{`
-
-**`T-CAND-OBJ`'s other refusal**, and it belongs here for the same reason:
-`refusal_condition` is "pin symbolic or an unexpected ref under the run
-namespace", and a refusal after an append is not a refusal before one.
-
-`refuse_unexpected_refs` and `expected_refs` were both written, correct,
-and called only from their own tests — `expected_refs` derives the
-entitlement from the fold precisely so a ref with no durable record behind
-it is what fails, and nothing derived it. Round 3 reached this twice
-(`consumer`, Sol).
-
-**The citation matters and the obvious one is wrong.**
-`expected_failures_refusals[2]` naming "unexpected refs under the run
-namespace" is **`pr_sequence[6]`'s** contract, not this slice's — PR7's
-`[2]` is "empty-diff and unresolved-index attempt failures". What binds
-here is `transaction_fault_matrix[4].refusal_condition`, and PR7 owns that
-row.
-
-## `ensure_recorded_integration_ref(&certified, seams.refs, hooks)?;`
-
-T-RUNSTART's P7/P8 repair for a run that has not published, the
-published-run check for one that has, before the first append. The module
-comment argues each bound; the one that is not merely tidy is the prepared
-publication, whose ref is still at the recorded base until `finish_integration`
-swaps it — "present == base continue" would adopt it under that transaction,
-so the step is skipped for a `Prepared` transaction and for no other.
-
-## `let mut reservations = Reservations::new();`
-
-The append-error protocol's two ledgers. The recovery order takes no
-provisional reservation and registers no invocation of its own — (c)'s
-probes are the Runner's and are reclaimed there — so on this path both are
-empty and the protocol cancels nothing. They exist here rather than inside
-`emit` because "nothing was held" has to be an observation the ledgers
-make, not an assumption the emitter is written around.
-
-## `let interrupted = settle_interrupted(&mut certified, &mut context)?;`
-
-(d), (e) — recovery events, every one of them before (h).
 
 ## `let finished = finish_promotions(&mut certified, seams.manager, &mut context)?;`
 
@@ -1351,39 +1395,56 @@ run before (h): `run_resumed` consumes the witness this step reads.
 
 (h) — and the witness is consumed here.
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {`
+## `pub fn finalize_if_finished(`
 
 ---------------------------------------------------------------------------
-Step (b) — the refusal, and only the refusal
+Step (b) — terminal finalization, then the refusal
 ---------------------------------------------------------------------------
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {`
+## `pub fn finalize_if_finished(`
 
 Step (b): "if the fold outcome is Complete or Halted: terminal finalization
-then refuse continuation" — **PR7 implements the refusal**.
-
-`RunDir.WriteReport` carries `fault_row: t_finalize`, which is not one of
-this slice's eleven rows, so a lane that finalized here would write an
-out-of-row effect with no fault coverage in this slice. The finalization is
-therefore deferred and this is the half that is in range:
-`refusal_condition`'s "continuation of Complete or Halted after
-finalization".
+then refuse continuation". PR7 implemented the refusal; PR10 the
+finalization. A Complete or Halted run found on disk is finalized through
+`finalize::finalize` — the report regenerated when missing or stale (its
+stored digest not the digest of its own bytes, or its outcome or runner
+not the derived report's: `TopologyReport::is_fresh_against`), the cleanup
+steps run in their fixed order — then the run lock is released through
+the hooked funnel (`Lock.Release`, the last cell of the ST-18 matrix), and
+then, and only then, continuation is refused with what the finalization
+did in the message (`finalize::refuse_continuation`) — the registrations it
+passed over among it, when there were any. Repeated resumes converge:
+each finds the report current and nothing left to prune (ST-18,
+`resume_finalizes_halted_then_refuses`).
 
 Read from the barrier-proven fold and nowhere else — that is what O18's
 "before any promotion, cleanup, admission, or report" buys, and a (b) that
 consulted a fold built anywhere else would be deciding a run's outcome from
-bytes nobody proved.
+bytes nobody proved. The finalization's effects are the first fold-derived
+effects of the resume, and they come after the barrier for the same reason.
 
 ### Errors
 
 [`UpstrokeError::Refused`] when the proven prefix ends in `run_finished`
-with [`RunOutcome::Complete`] or [`RunOutcome::Halted`].
+with [`RunOutcome::Complete`] or [`RunOutcome::Halted`], after the
+finalization; whatever the finalization itself fails at, before.
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {` › `RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),`
+## `pub fn finalize_if_finished(` › `RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(censused),`
 
 Parked and BudgetExceeded are resumable outcomes: the fold's own
 guard lets `run_resumed` through for exactly these two, which is what
-makes "raise the ceiling and resume" the response to a budget stop.
+makes "raise the ceiling and resume" the response to a budget stop. Their
+finalization already ran in the incarnation that ended them, and a resume
+recreates the execution root it pruned (record §3 R7).
+
+## `pub fn finalize_if_finished(` › `let (_log, _fold, records) = censused.into_barrier().into_l…`
+
+Finalization is the last effect of a finished run, and the run
+lock's release is its last site: released here through the
+hooked funnel (`Lock.Release`), so a fault at either phase of it
+is a cell of the finalization matrix, and not left to the
+guard's drop, which no hook sees. The worktree lease goes with
+it.
 
 ## `pub fn finish_integration(`
 
@@ -1423,6 +1484,34 @@ same place the live append would have been.
 A refusal (a third SHA on the CAS, a symbolic or checked-out ref, a pin at
 another SHA), the append-error protocol's report, or a Git error.
 
+## `fn reclaim_snapshot_residue(`
+
+Reclaim every verification snapshot, with force, once every terminal a
+snapshot could belong to is durable: the attempts settled at (d), and the
+integration transaction resolved just above.
+
+The forced removals a resume makes — here, the interrupted verification's
+staging above, and the stale staging in `reclaim_stale_residue` — run
+through the plain funnel, which refuses a registration of the repository's
+store that names no checkout (`WorkspaceManager::WriterProof::Unknown`): a
+conductor killed inside an add leaves a child the cleanup lease does not
+cover, so what a resume finds in the store proves nothing about whether
+that add is still writing, and the refusal PR #151 measured the need for
+stands here. Terminal finalization, where a durable `run_finished` proves
+every add of the run passed, passes such a registration over instead
+(`finalize::scrub_slots`).
+
+`C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
+live path removes snapshots only after its terminal, so a kill between the
+terminal and the removal — or during the judgement itself, whose terminal
+this step has now appended — leaves exactly this residue, and nothing
+still running can own a snapshot when a fresh process reaches here.
+
+## `struct PinnedSequence {`
+
+A stale-clean verification the log started: its sequence, the pin the
+record names, and the proposal that pin was created at.
+
 ## `fn pinned_sequences(`
 
 The pins the log accounts for: every stale-clean
@@ -1431,6 +1520,12 @@ the proposal it was created at. A fast or already-present sequence pins
 nothing. This is the record every pin decision below is made against —
 authority comes from the record, never from what a ref happens to name when
 it is read.
+
+## `fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {`
+
+Every `prepared/<seq>` the log accounts for, from the proven prefix's
+`merge_verification_started` records with a stale-clean basis. A fast or
+already-present sequence pins nothing and is not here.
 
 ## `fn reclaim_stale_residue(`
 
@@ -1562,6 +1657,53 @@ settle path and the recovery on resume — so what differs between them is the
 journal and not the steps. `TopologyRun::with_journal` is the driver's half of
 the same idea; this is the recovery's.
 
+## `fn emit(`
+
+`coordinator_integration.emit`, for one recovery event.
+
+**One line of body, and that is the point.** Every recovery event — (d)'s
+`attempt_interrupted`, (e)'s `generation_closed`, (h)'s `run_resumed` — is an
+`Event.Append`, and `append_error_protocol` applies to `Event.Append` without
+exception: poison the fold, `Reservations::cancel_any`,
+`InvocationLedger::cancel_all_running`, no retry and no report from memory,
+then reopen through `Event.OpenLog`, establish the stable-prefix barrier, and
+end naming the run id, the event kind and **whether the proven prefix
+contains the line** — present, absent, or undetermined.
+
+[`super::emit::emit`] is those five obligations and the six steps above them.
+This function is the call, and `dispatch.rs` states why it is only the call:
+"a module that held the log would hold the append-error protocol with it …
+and there would be two implementations of it, which is the duplication class
+this crate has already paid for three times". [`super::create`] keeps one of
+its own on purpose — `Event.AppendFirst` has to answer *absent first line* as
+one of three creator dispositions rather than as a barrier failure — and the
+recovery order has no such difference to justify a third.
+
+The two shapes an open-coded version got wrong, recorded because they are
+what a reader would otherwise reintroduce:
+
+* a `FoldError` is a **refusal**, not [`UpstrokeError::EventLog`]. Nothing
+  was written, so an error naming the log file as an I/O path says the wrong
+  thing about what happened.
+* a funnel `Err` **before the append was entered** — a poisoned handle, a
+  legacy handle, a site that is not this line's — must not poison the fold.
+  `emit` decides that from `EventLog::poisoned_at()` on both sides of the
+  call rather than from the error value, so "entered" is decidable and a
+  wrong-site refusal leaves the fold usable.
+
+### Errors
+
+[`UpstrokeError::Refused`] for a transition the checked fold rejects — before
+any write — and for an append that was entered and returned an error, in
+which case the protocol has already run and the message carries its report.
+[`UpstrokeError::Io`] or [`UpstrokeError::EventLog`] for a refusal the funnel
+raised before entry.
+
+## `fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {` › `Ok(())`
+
+A fresh process holds no provisional reservation; a recovery
+publication converts nothing.
+
 ## `pub fn ensure_recorded_integration_ref(`
 
 ---------------------------------------------------------------------------
@@ -1679,11 +1821,15 @@ Where the protocol's reopen reports a torn-tail normalization.
 `recovery_order` (d), and `T-ATTEMPT`'s resume action: an attempt whose
 coordinator died is not retried in place, it is settled `interrupted` and
 its generation closed, so the next dispatch opens a fresh generation at the
-task's base.
+task's base — and "the task worktree scrubbed with force", which is the
+same resume action's next clause: the closed generation owns its worktree
+and intent (R9) and a Closed generation owns nothing, so both are reclaimed
+once the close is durable ([`reclaim_closed_generations`], after (e)).
 
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
 
 ## `pub fn close_retained_idle(`
 
@@ -1695,9 +1841,41 @@ not that incarnation: `T-RESUME`'s authoritative state says "retained_session
 authority already invalid for the new incarnation", so the generation closes
 rather than being resumed into.
 
+**And its worktree and intent are reclaimed with the close.** PR #249's
+crash review planted a retained repair generation's real worktree, resumed,
+ran the replacement generation to a merge, resumed again, and found the
+closed generation's checkout and durable intent still there: nothing
+reclaimed a generation (e) had closed, so every retained generation a dead
+incarnation left accumulated for the life of the run. `cleanup` allows a
+task worktree to be scrubbed once "the generation is Closed", R9 owns it by
+generation, and the same omission sat in (d). The first repair scrubbed
+after each append, and the adequacy review then stopped a recovery between
+that append and its scrub: the next recovery found the generation already
+`Closed`, neither (d) nor (e) selected it, and the leak was back. So the
+reclaim is no longer the closing step's own: [`reclaim_closed_generations`]
+runs once after (e) over the durable state — every `Closed` generation whose
+intent the execution root still carries — whichever incarnation appended the
+close. The live retry close (`RetryOutcome::Close`, `WorktreeMissing`) scrubs
+the closed generation's worktree and intent after its append since PR10
+(`G4B-O3`), as does every closed settlement and run-end closure; this
+sweep is what reclaims a close a killed incarnation appended but never
+scrubbed.
+
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
+
+## `fn reclaim_closed_generations(`
+
+Scrub the worktree and intent of every closed generation the execution root
+still carries, from the durable state: the fold's `Closed` generations
+against `intents()`, not a list of what this recovery closed. The scrub is
+`dispatch::scrub`, forced and idempotent. A generation whose intent is gone
+is not touched, so a resume with nothing to reclaim executes no
+`Worktree.Remove`; a generation closed by a recovery that died before its
+scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
+alike. Task slots only: staging and snapshot residue have their own steps.
 
 ## `pub fn run_resumed(`
 
@@ -1864,48 +2042,6 @@ The epoch this resume opened. `run_resumed` increments it.
 
 Whether the previous epoch's budget stop is gone.
 
-## `fn emit(`
-
-`coordinator_integration.emit`, for one recovery event.
-
-**One line of body, and that is the point.** Every recovery event — (d)'s
-`attempt_interrupted`, (e)'s `generation_closed`, (h)'s `run_resumed` — is an
-`Event.Append`, and `append_error_protocol` applies to `Event.Append` without
-exception: poison the fold, `Reservations::cancel_any`,
-`InvocationLedger::cancel_all_running`, no retry and no report from memory,
-then reopen through `Event.OpenLog`, establish the stable-prefix barrier, and
-end naming the run id, the event kind and **whether the proven prefix
-contains the line** — present, absent, or undetermined.
-
-[`super::emit::emit`] is those five obligations and the six steps above them.
-This function is the call, and `dispatch.rs` states why it is only the call:
-"a module that held the log would hold the append-error protocol with it …
-and there would be two implementations of it, which is the duplication class
-this crate has already paid for three times". [`super::create`] keeps one of
-its own on purpose — `Event.AppendFirst` has to answer *absent first line* as
-one of three creator dispositions rather than as a barrier failure — and the
-recovery order has no such difference to justify a third.
-
-The two shapes an open-coded version got wrong, recorded because they are
-what a reader would otherwise reintroduce:
-
-* a `FoldError` is a **refusal**, not [`UpstrokeError::EventLog`]. Nothing
-  was written, so an error naming the log file as an I/O path says the wrong
-  thing about what happened.
-* a funnel `Err` **before the append was entered** — a poisoned handle, a
-  legacy handle, a site that is not this line's — must not poison the fold.
-  `emit` decides that from `EventLog::poisoned_at()` on both sides of the
-  call rather than from the error value, so "entered" is decidable and a
-  wrong-site refusal leaves the fold usable.
-
-### Errors
-
-[`UpstrokeError::Refused`] for a transition the checked fold rejects — before
-any write — and for an append that was entered and returned an error, in
-which case the protocol has already run and the message carries its report.
-[`UpstrokeError::Io`] or [`UpstrokeError::EventLog`] for a refusal the funnel
-raised before entry.
-
 ## `let records = certified.rebuilt().censused().barrier().records();`
 
 Built before the mutable borrow of the chain below it, and from the
@@ -1971,26 +2107,29 @@ layer for a value no path below this one reads.
 
 ### Errors
 
-[`UpstrokeError::Refused`] for a generation whose lease is an inherited
-lineage — a repair, whose resume action is to re-materialize its source
-candidate, and whose source the fold does not retain. `checkpoint_refusals`
-gives repair execution to PR8, so this build refuses rather than
-reconstructing a materialization it cannot prove. **The arm is unreachable
-in this slice and both walls are measured** by
-`a_repair_generation_cannot_reach_step_g_in_this_slice`: the fold refuses an
-inherited lease on an ordinary task at the barrier's checked replay, and
-`TaskRegistry::originals_with_agents` gives every entry `lineage: None`, so
-there is no task the lease would be legal on. That test fails the day a
-slice admits repairs, which is when this arm becomes reachable. Also
-refused when a generation holding its lease has no recorded region, which
-is a fold that disagrees with itself rather than a state to guess at.
-Otherwise the containment refusals or a Git error from
-[`resume_open_no_attempt`].
+**(g) materializes nothing (`R6`).** A repair generation is verified or
+recreated at its base exactly like an ordinary one; its source is read from
+its own `task_dispatched` (`dispatched_source`) so the loop's continuation
+can re-materialize it once. Materializing here too would run the pick twice
+when the continuation runs, or leave a worktree whose materialization the
+loop could not tell from the kill's. Three of the states a kill leaves
+between `task_dispatched` and `attempt_started` — no worktree, a worktree
+with the pick's residue, a completed pick (the shape a kill after the index
+publish leaves too) — are each driven through this step and the
+continuation by
+`a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {`
+### Errors
+
+[`UpstrokeError::Refused`] when a repair generation's `task_dispatched`
+names no source candidate: the log disagrees with the registry and nothing
+is recreated from a guess. Otherwise the containment refusals or a Git
+error from [`verify_or_recreate`].
+
+## `fn open_no_attempt(`
 
 Every `OpenNoAttempt` generation the proven prefix records, with what a
-rebuild of it needs.
+rebuild of it needs — for a repair, the source its dispatch recorded.
 
 Sibling of [`retained_idle`] and [`in_flight`], and deliberately shaped like
 them: one enumerator per generation class, so "which class does this step
@@ -1998,12 +2137,16 @@ act on" is a property of the function the step calls rather than of a
 predicate the step re-derives. Two rules that can disagree is the shape this
 slice has paid for repeatedly.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `let Some(open) = fold.open_no_attempt(key) else {`
+## `fn open_no_attempt(` › `let Some(open) = fold.open_no_attempt(key) else {`
 
 The class question is the fold's, through `open_no_attempt`. The
 repair refusal below is recovery's own policy and stays here.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `source: None,`
+## `fn open_no_attempt(` › `let source = match generation.lease {`
+
+A repair's source is read from its own `task_dispatched` — the log, not
+the registry — so what (g) hands the loop is what the interrupted dispatch
+recorded, and a dispatch that names none refuses.
 
 `None` is not a guess. An ordinary generation has no
 materialization to reproduce, and the repair case returned
@@ -2032,80 +2175,3 @@ recording `LineageHeld` where an ordinary generation records
 ## `fn retained_idle(fold: &TopologyFold) -> Vec<(TaskKey, GenerationId, LeaseDisposition)> {`
 
 Every `(key, generation)` settled holding a session.
-
-## `fn outcome_name(outcome: &RunOutcome) -> &'static str {`
-
-The outcome as `run_finished` writes it.
-
-## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
-
-A `Prepared` transaction owns the ref: `finish_integration` compares it
-against the authorization and swaps it, so the startup check would only
-adopt what that step is about to move. Under any other prefix — no
-transaction, or a verification whose interrupted settlement moves no
-ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
-integration state".
-
-## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
-
-T-PROPOSAL residue and the pins the log accounts for: staging worktrees
-no live transaction owns are reclaimed with force, a resolved sequence's
-pin is pruned at the proposal it recorded, the open transaction's pin is
-checked against its record and kept, and exactly the provisional orphan
-`prepared/<next_seq>` is reclaimed. Before the namespace check, so that
-check refuses whatever the log does not account for — untouched.
-
-## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
-
-The run's own integration ref sits under this namespace and is never
-unexpected; `expected_refs` leaves it out because it enumerates
-candidate refs, so the recovery names it here.
-
-## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
-
-The open transaction's pin is expected: it keeps the proposal
-reachable while the transaction resolves, verifying or prepared.
-
-## `pub fn run_recovery_order(` › `if !publication_pending {`
-
-The P7/P8 integration-ref repair is for a run killed at run-start, and
-the published-run check for every later one. A run with a prepared
-publication is past both: the ref is the transaction's to move, so the
-step is skipped and `finish_integration` owns the ref.
-
-## `fn reclaim_snapshot_residue(`
-
-Reclaim every verification snapshot, with force, once every terminal a
-snapshot could belong to is durable: the attempts settled at (d), and the
-integration transaction resolved just above.
-
-`C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
-live path removes snapshots only after its terminal, so a kill between the
-terminal and the removal — or during the judgement itself, whose terminal
-this step has now appended — leaves exactly this residue, and nothing
-still running can own a snapshot when a fresh process reaches here.
-
-## `struct PinnedSequence {`
-
-A stale-clean verification the log started: its sequence, the pin the
-record names, and the proposal that pin was created at.
-
-## `fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {`
-
-Every `prepared/<seq>` the log accounts for, from the proven prefix's
-`merge_verification_started` records with a stale-clean basis. A fast or
-already-present sequence pins nothing and is not here.
-
-## `fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {` › `Ok(())`
-
-A fresh process holds no provisional reservation; a recovery
-publication converts nothing.
-
-## `pub(in crate::engine::topology::recover) fn writer(`
-
-The append handle, the fold and the event list together, because the one
-`emit` funnel keeps all three in step: what recovery appends is read back
-by the loop it hands the `RunHandle` to (the authorized head after a
-publication recovery completed, for one), so the list a resume was
-derived from is extended by every append the resume itself makes.
-

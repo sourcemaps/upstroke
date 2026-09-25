@@ -681,8 +681,18 @@ impl RungBinding {
         *self == Self::from_frozen(rung, effort)
     }
 
-    pub fn matches_override(&self, binding: &BindingOverride) -> bool {
-        self.agent == binding.agent && self.model == binding.model && self.effort == binding.effort
+    pub fn from_override(binding: &BindingOverride, tier: Tier) -> Self {
+        Self {
+            tier,
+            agent: binding.agent.clone(),
+            model: binding.model.clone(),
+            pinned: true,
+            effort: binding.effort,
+        }
+    }
+
+    pub fn matches_override(&self, binding: &BindingOverride, tier: Tier) -> bool {
+        *self == Self::from_override(binding, tier)
     }
 }
 
@@ -940,12 +950,14 @@ pub enum UnavailableOutcome {
     Parked { question: FrozenQuestion },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeVerificationUnavailable {
     pub sequence: SequenceId,
     pub cause: UnavailableCause,
     pub outcome: UnavailableOutcome,
+    #[serde(deserialize_with = "strict::list")]
+    pub reviews: Vec<ReviewRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1411,6 +1423,8 @@ impl TopologyEvent {
 mod tests {
     use std::time::Duration;
 
+    use crate::events::EffectiveAttribution;
+
     use super::*;
     use crate::events::{FailureRecord, PoolSnapshot, ReviewPassOutcome};
     use crate::gates::ShellKind;
@@ -1792,6 +1806,20 @@ mod tests {
         }
     }
 
+    fn unavailable_reviews() -> Vec<ReviewRecord> {
+        vec![ReviewRecord {
+            pass: "integration".to_owned(),
+            agent: "codex".to_owned(),
+            model: "gpt-5.6-sol".to_owned(),
+            adapter: Some("codex".to_owned()),
+            preflight_cli_version: Some("1.7.2".to_owned()),
+            effort: Some(Effort::Max),
+            pool: Some("codex-plus".to_owned()),
+            cost_usd: Some(2.5),
+            outcome: ReviewPassOutcome::Unavailable,
+        }]
+    }
+
     fn merge_prepared_fast() -> MergePrepared {
         let candidate = candidate_ref();
         MergePrepared {
@@ -1947,6 +1975,7 @@ mod tests {
                         kind: InfrastructureKind::ReviewerTimeout,
                     },
                     outcome: UnavailableOutcome::Deferred { defers: 2 },
+                    reviews: unavailable_reviews(),
                 },
             },
             TopologyEventBody::MergeVerificationInterrupted {
@@ -2047,6 +2076,8 @@ mod tests {
                     question: QuestionId::from("q-design-0001"),
                     context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                     answer: "rescope".to_owned(),
+                    attribution: None,
+                    citation: None,
                 },
             },
         ]
@@ -2140,6 +2171,46 @@ mod tests {
                 body.is_transaction(),
                 "{} accepted/refused an unknown field against its class",
                 body.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_answered_transaction_refuses_an_attribution_key() {
+        let canonical = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        serde_json::from_value::<TopologyEvent>(canonical.clone())
+            .expect("the canonical question_answered decodes before anything is added");
+
+        for (key, value) in [
+            ("attribution", serde_json::Value::from("design_defect")),
+            ("attribution", serde_json::Value::from("discovered_hole")),
+            ("citation", serde_json::Value::from("§5 objective 2")),
+        ] {
+            let mut on_the_payload = canonical.clone();
+            on_the_payload["data"][key] = value.clone();
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_payload)
+                .expect_err("the transaction takes no attribution");
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "unknown field `{key}`, expected one of `key`, `question`, `answer`, `via`"
+                ),
+                "on the payload"
+            );
+
+            let mut on_the_answer = canonical.clone();
+            on_the_answer["data"]["answer"][key] = value;
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_answer)
+                .expect_err("the answer takes no attribution either");
+            assert_eq!(
+                refused.to_string(),
+                format!("unknown field `{key}`, expected `option_index` or `binding_override`"),
+                "on the answer"
             );
         }
     }
@@ -2256,7 +2327,7 @@ mod tests {
             }
         }
         assert_eq!(
-            visited, 130,
+            visited, 131,
             "the corpus covers a different number of object boundaries than it did"
         );
         assert_eq!(
@@ -2375,7 +2446,7 @@ mod tests {
             }
         }
         assert_eq!(
-            deletions, 376,
+            deletions, 377,
             "the corpus requires a different number of fields than it did"
         );
     }
@@ -3329,6 +3400,7 @@ mod tests {
                     outcome: UnavailableOutcome::Parked {
                         question: frozen_question("q-verify-0001", task_key(2)),
                     },
+                    reviews: unavailable_reviews(),
                 },
             },
             TopologyEventBody::GenerationClosed {
@@ -3549,6 +3621,7 @@ mod tests {
                     sequence: SequenceId(6),
                     cause: cause.clone(),
                     outcome: outcome.clone(),
+                    reviews: unavailable_reviews(),
                 };
                 let human = matches!(cause, UnavailableCause::HumanRequired { .. });
                 let parked = matches!(outcome, UnavailableOutcome::Parked { .. });
@@ -3789,18 +3862,25 @@ mod tests {
             model: "gpt-5.6-sol".to_owned(),
             effort: Effort::XHigh,
         };
-        assert!(frozen.matches_override(&binding));
-        let mut other_tier = frozen.clone();
-        other_tier.tier = Tier::Frontier;
-        assert!(other_tier.matches_override(&binding));
-        for pinned in [true, false] {
-            let mut either = frozen.clone();
-            either.pinned = pinned;
-            assert!(
-                either.matches_override(&binding),
-                "an override was refused for a pin it does not record ({pinned})"
-            );
-        }
+        let floor = Tier::Mid;
+        let authorized = RungBinding::from_override(&binding, floor);
+        assert_eq!(
+            authorized,
+            RungBinding {
+                tier: floor,
+                agent: "codex".to_owned(),
+                model: "gpt-5.6-sol".to_owned(),
+                pinned: true,
+                effort: Effort::XHigh,
+            },
+            "errata E2: agent, model and effort come from the payload, the tier from the ladder's \
+             frozen floor, and the pin from the fact that a human named it"
+        );
+        assert!(authorized.matches_override(&binding, floor));
+        assert!(
+            frozen.matches_override(&binding, floor),
+            "the fixture's frozen rung is exactly the binding this override authorizes at mid"
+        );
         for (name, move_field) in [
             (
                 "agent",
@@ -3808,14 +3888,21 @@ mod tests {
             ),
             ("model", |b: &mut RungBinding| b.model = "gpt-4".to_owned()),
             ("effort", |b: &mut RungBinding| b.effort = Effort::Medium),
+            ("tier", |b: &mut RungBinding| b.tier = Tier::Frontier),
+            ("pinned", |b: &mut RungBinding| b.pinned = false),
         ] {
-            let mut moved = frozen.clone();
+            let mut moved = authorized.clone();
             move_field(&mut moved);
             assert!(
-                !moved.matches_override(&binding),
-                "moving {name} still matched the override"
+                !moved.matches_override(&binding, floor),
+                "moving {name} still matched the override: E2 binds all five fields, and tier and \
+                 pin were the two the shipped half-rule left unbound"
             );
         }
+        assert!(
+            !authorized.matches_override(&binding, Tier::Frontier),
+            "one payload authorizes different bindings on ladders with different floors"
+        );
     }
 
     #[test]
@@ -4182,6 +4269,10 @@ mod tests {
                     "sequence": 6,
                     "cause": {"cause": "infrastructure", "kind": {"kind": "reviewer_timeout"}},
                     "outcome": {"outcome": "deferred", "defers": 2},
+                    "reviews": legacy(
+                        serde_json::to_value(unavailable_reviews())
+                            .expect("legacy review records"),
+                    ),
                 }),
             ),
             envelope(
@@ -4315,11 +4406,123 @@ mod tests {
                         question: QuestionId::from("q-design-0001"),
                         context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                         answer: "rescope".to_owned(),
+                        attribution: None,
+                        citation: None,
                     })
                     .expect("legacy design defect"),
                 ),
             ),
         ]
+    }
+
+    struct AttributedDesignDefect {
+        body: TopologyEventBody,
+        payload: serde_json::Value,
+        reads_as: EffectiveAttribution<'static>,
+    }
+
+    fn attributed_design_defects() -> Vec<AttributedDesignDefect> {
+        let ts = "2026-08-17T03:04:05.678Z";
+        let envelope = |data: serde_json::Value| serde_json::json!({"ts": ts, "event": "design_defect", "data": data});
+        vec![
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::discovered(
+                        QuestionId::from("q-design-0002"),
+                        "  the plan says nothing about Ünicode cursors  ".to_owned(),
+                        "opaque cursors".to_owned(),
+                    ),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0002",
+                    "context": "  the plan says nothing about Ünicode cursors  ",
+                    "answer": "opaque cursors",
+                    "attribution": "discovered_hole",
+                })),
+                reads_as: EffectiveAttribution::Discovered,
+            },
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::convicted(
+                        QuestionId::from("q-design-0003"),
+                        "  the plan contradicts itself about Ünicode paths  ".to_owned(),
+                        "rescope".to_owned(),
+                        "design checklist item 2: path encoding is settled before execution"
+                            .to_owned(),
+                    )
+                    .expect("a cited conviction"),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0003",
+                    "context": "  the plan contradicts itself about Ünicode paths  ",
+                    "answer": "rescope",
+                    "attribution": "design_defect",
+                    "citation": "design checklist item 2: path encoding is settled before execution",
+                })),
+                reads_as: EffectiveAttribution::Convicted {
+                    citation: "design checklist item 2: path encoding is settled before execution",
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn an_attributed_design_defect_serializes_to_its_independently_written_payload() {
+        for fixture in attributed_design_defects() {
+            assert_eq!(
+                payload_of(&fixture.body),
+                fixture.payload,
+                "{:?} does not serialize to its independently written payload",
+                fixture.reads_as
+            );
+        }
+    }
+
+    #[test]
+    fn an_attributed_design_defect_reads_through_the_informational_path() {
+        let question_answered = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        assert_eq!(TOPOLOGY_EVENT_KINDS.len(), 24);
+        assert_eq!(TOPOLOGY_TRANSACTION_KINDS, 21);
+
+        for fixture in attributed_design_defects() {
+            let decoded: TopologyEvent = serde_json::from_value(fixture.payload.clone())
+                .unwrap_or_else(|error| panic!("{error} in {}", fixture.payload));
+            assert_eq!(decoded.body, fixture.body);
+            assert_eq!(decoded.body.kind(), "design_defect");
+            assert!(
+                !decoded.body.is_transaction(),
+                "the attribution rides an informational record"
+            );
+            let TopologyEventBody::DesignDefect { data } = &decoded.body else {
+                panic!("not a design_defect: {}", decoded.body.kind());
+            };
+            assert_eq!(data.effective_attribution(), fixture.reads_as);
+
+            let mut widened = fixture.payload.clone();
+            widened["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let decoded: TopologyEvent = serde_json::from_value(widened)
+                .expect("an informational record with an extra column costs nothing to ignore");
+            assert_eq!(
+                decoded.body, fixture.body,
+                "the column is ignored, not kept"
+            );
+
+            let mut transaction = question_answered.clone();
+            transaction["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let refused = serde_json::from_value::<TopologyEvent>(transaction)
+                .expect_err("the same column on a transaction is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .starts_with("unknown field `Ünknown Column  `"),
+                "{refused}"
+            );
+        }
     }
 
     #[test]
@@ -4330,6 +4533,19 @@ mod tests {
             canonical.len(),
             TOPOLOGY_EVENT_KINDS.len(),
             "the canonical corpus does not cover the whole vocabulary"
+        );
+        let pre_taxonomy = canonical
+            .iter()
+            .find(|value| value["event"] == "design_defect")
+            .expect("the corpus has a design_defect payload");
+        assert_eq!(
+            pre_taxonomy["data"],
+            serde_json::json!({
+                "question": "q-design-0001",
+                "context": "  the plan contradicts itself about Ünicode paths  ",
+                "answer": "rescope"
+            }),
+            "the canonical design_defect keeps its pre-taxonomy three-field payload"
         );
         for (body, expected) in events.iter().zip(&canonical) {
             assert_eq!(

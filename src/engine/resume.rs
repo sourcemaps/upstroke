@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::agent::proc::NoHooks;
+use crate::agent::{AdapterSource, BuiltinAdapters};
 use crate::capacity;
 use crate::config;
 use crate::error::UpstrokeError;
@@ -17,6 +19,7 @@ use crate::ir::{Answer, Plan, QuestionId, ResolvedEffortPolicy};
 use crate::ladder::FailureKind;
 use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::Runner;
+use crate::runner::host::{Contained, HostRunner, contain_write_command};
 use crate::util;
 use crate::workspace::Workspace;
 
@@ -29,6 +32,44 @@ use super::preflight::{
 use super::report::{RunReport, last_reason};
 use crate::topology::effects::EventSite;
 
+pub fn resume(opts: &ResumeOptions) -> Result<RunReport, UpstrokeError> {
+    resume_with(opts, &BuiltinAdapters)
+}
+
+pub fn resume_with(
+    opts: &ResumeOptions,
+    adapters: &dyn AdapterSource,
+) -> Result<RunReport, UpstrokeError> {
+    resume_harness(opts, &Harness::new(adapters))
+}
+
+pub fn resume_harness(
+    opts: &ResumeOptions,
+    harness: &Harness<'_>,
+) -> Result<RunReport, UpstrokeError> {
+    resume_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
+}
+
+pub(super) fn resume_harness_on(
+    opts: &ResumeOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+) -> Result<RunReport, UpstrokeError> {
+    resume_contained(opts, harness, runner, || {
+        contain_write_command(&mut NoHooks)
+    })
+}
+
+pub(super) fn resume_contained(
+    opts: &ResumeOptions,
+    harness: &Harness<'_>,
+    runner: &dyn Runner,
+    contain: impl FnOnce() -> Result<Contained, UpstrokeError>,
+) -> Result<RunReport, UpstrokeError> {
+    let contained = contain()?;
+    resume_harness_inner_on(opts, harness, runner, &contained).map(|(report, _)| report)
+}
+
 #[cfg(test)]
 pub(super) fn resume_harness_inner(
     opts: &ResumeOptions,
@@ -38,7 +79,7 @@ pub(super) fn resume_harness_inner(
     resume_harness_inner_on(
         opts,
         harness,
-        &crate::runner::host::HostRunner::new(),
+        &crate::runner::host::HostRunner::for_legacy_workspace(),
         &contained,
     )
 }
@@ -586,6 +627,8 @@ pub(super) fn resume_harness_inner_on(
                 question,
                 context,
                 answer,
+                attribution: None,
+                citation: None,
             },
         })?;
     }

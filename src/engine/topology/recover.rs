@@ -20,9 +20,10 @@ use crate::topology::registry::TaskKey;
 use crate::workspace_manager::WorkspaceManager;
 
 use super::create::{IntegrationRefs, ensure_integration_ref};
-use super::dispatch::{OpenGeneration, Reuse, resume_open_no_attempt, task_slot};
+use super::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
 use super::emit::{EmitState, RunIdentity};
 use super::identity::{InvocationLedger, Reservations};
+use super::run::dispatched_source;
 use super::seams::{TimeSource, TopologyHooks};
 
 pub use chain::{
@@ -949,7 +950,7 @@ pub fn run_recovery_order(
         hooks,
     )?;
 
-    refuse_if_finished(&censused)?;
+    let censused = finalize_if_finished(censused, seams.manager, hooks)?;
     steps.push(RecoveryStep::B);
 
     let rebuilt = RunnerRebuilt::rebuild(censused, seams.today, Some(seams.runtime))?;
@@ -975,6 +976,17 @@ pub fn run_recovery_order(
         invocations: &mut invocations,
         warnings,
     };
+
+    if !execution_root_present(seams.manager)? {
+        seams
+            .manager
+            .create_execution_root(context.hooks.effects())?;
+        context.warnings.push(
+            "the execution root was pruned when the run last ended and has been recreated for \
+             this resume"
+                .to_owned(),
+        );
+    }
 
     let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;
 
@@ -1007,6 +1019,7 @@ pub fn run_recovery_order(
     let interrupted = settle_interrupted(&mut certified, &mut context)?;
     steps.push(RecoveryStep::D);
     let retained_closed = close_retained_idle(&mut certified, &mut context)?;
+    reclaim_closed_generations(&certified, seams.manager, context.hooks)?;
     steps.push(RecoveryStep::E);
 
     finish_integration(&mut certified, seams.manager, &mut context)?;
@@ -1032,22 +1045,51 @@ pub fn run_recovery_order(
     ))
 }
 
-pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {
-    let Some(outcome) = censused.barrier().fold().finished() else {
-        return Ok(());
+pub fn finalize_if_finished(
+    censused: ResumeCensused,
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<ResumeCensused, UpstrokeError> {
+    let Some(outcome) = censused.barrier().fold().finished().cloned() else {
+        return Ok(censused);
     };
     match outcome {
-        RunOutcome::Complete | RunOutcome::Halted => Err(UpstrokeError::Refused {
-            message: format!(
-                "this run already finished as `{}`, and a finished run does not continue. \
-                 Recovery step (b) finalizes such a run and then refuses continuation; this \
-                 build performs the refusal and leaves finalization to the slice that owns \
-                 `RunDir.WriteReport`'s fault row, so nothing was written and nothing was \
-                 deleted.",
-                outcome_name(outcome)
-            ),
+        RunOutcome::Complete | RunOutcome::Halted => {
+            let finalized = {
+                let barrier = censused.barrier();
+                let root = barrier.records().locks().root();
+                super::finalize::finalize(
+                    &super::finalize::Finalize {
+                        manager,
+                        public: root.public_dir(),
+                        private: root.private_dir(),
+                        run_id: root.run_id(),
+                        fold: barrier.fold(),
+                        events: barrier.events(),
+                    },
+                    hooks,
+                )?
+            };
+            let (_log, _fold, records) = censused.into_barrier().into_log_fold_and_records();
+            let (run_lock, _worktree_lock, root) = records.into_locks().into_guards();
+            run_lock.release(hooks.rundir());
+            Err(super::finalize::refuse_continuation(
+                root.run_id(),
+                &finalized,
+            ))
+        }
+        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(censused),
+    }
+}
+
+fn execution_root_present(manager: &WorkspaceManager) -> Result<bool, UpstrokeError> {
+    match std::fs::symlink_metadata(manager.execution_root()) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(UpstrokeError::Io {
+            path: manager.execution_root().to_path_buf(),
+            source,
         }),
-        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),
     }
 }
 
@@ -1400,6 +1442,30 @@ pub fn close_retained_idle(
     Ok(closed)
 }
 
+fn reclaim_closed_generations(
+    certified: &PreflightCertified,
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<usize, UpstrokeError> {
+    let fold = fold_of(certified);
+    let intents = manager.intents()?;
+    let mut reclaimed = 0;
+    for key in task_keys(fold) {
+        let Some(task) = fold.task(key) else { continue };
+        for generation in &task.generations {
+            if generation.class != GenerationClass::Closed {
+                continue;
+            }
+            let slot = task_slot(key, generation.id);
+            if intents.contains(&slot) {
+                crate::engine::topology::dispatch::scrub(manager, hooks, &slot)?;
+                reclaimed += 1;
+            }
+        }
+    }
+    Ok(reclaimed)
+}
+
 pub fn run_resumed(
     mut certified: PreflightCertified,
     context: &mut EmitContext<'_>,
@@ -1553,14 +1619,17 @@ pub fn recreate_open_no_attempt(
     hooks: &mut dyn TopologyHooks,
 ) -> Result<Vec<(TaskKey, GenerationId, Reuse)>, UpstrokeError> {
     let mut rebuilt = Vec::new();
-    for open in open_no_attempt(fold_of(certified))? {
-        let reuse = resume_open_no_attempt(manager, hooks, &open)?;
+    for open in open_no_attempt(fold_of(certified), events_of(certified))? {
+        let reuse = verify_or_recreate(manager, hooks, &open, &open.quiescence())?;
         rebuilt.push((open.key, open.generation, reuse));
     }
     Ok(rebuilt)
 }
 
-fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {
+fn open_no_attempt(
+    fold: &TopologyFold,
+    events: &[TopologyEvent],
+) -> Result<Vec<OpenGeneration>, UpstrokeError> {
     let mut found = Vec::new();
     for key in task_keys(fold) {
         let Some(task) = fold.task(key) else { continue };
@@ -1568,23 +1637,18 @@ fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeE
             continue;
         };
         for generation in task.generations.iter().filter(|held| held.id == open) {
-            if let GenerationLease::InheritedLineage { root } = generation.lease {
-                return Err(UpstrokeError::Refused {
-                    message: format!(
-                        "task {} generation {} is a repair executing inside lineage {}'s lease, \
-                         and its resume action is to re-materialize the candidate it was \
-                         dispatched from, which the fold does not record; repair execution is \
-                         not implemented by this build",
-                        key.0, generation.id.0, root.0
-                    ),
-                });
-            }
+            let source = match generation.lease {
+                GenerationLease::Own => None,
+                GenerationLease::InheritedLineage { .. } => {
+                    Some(dispatched_source(events, key, generation.id)?)
+                }
+            };
             found.push(OpenGeneration {
                 key,
                 generation: generation.id,
                 base: generation.base_sha.clone(),
                 slot: task_slot(key, generation.id),
-                source: None,
+                source,
             });
         }
     }
@@ -1630,15 +1694,6 @@ fn retained_idle(fold: &TopologyFold) -> Vec<(TaskKey, GenerationId, LeaseDispos
         }
     }
     found
-}
-
-fn outcome_name(outcome: &RunOutcome) -> &'static str {
-    match outcome {
-        RunOutcome::Complete => "complete",
-        RunOutcome::Parked => "parked",
-        RunOutcome::Halted => "halted",
-        RunOutcome::BudgetExceeded => "budget_exceeded",
-    }
 }
 
 #[cfg(test)]

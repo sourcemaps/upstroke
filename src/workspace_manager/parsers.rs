@@ -32,7 +32,7 @@
 // governed primitive, so all three are DENIED and this module takes no
 // `effects/allowlist.toml` row: a row records an allowance, and this module
 // takes none.
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
@@ -56,7 +56,7 @@ use super::worktree::{OpenRecord, WorktreeRecord};
 /// tab stays part of it too. A wider trim here binds a registration to a
 /// checkout that Git does not read from it, and the checkout is what recovery
 /// acts on.
-fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
+pub(super) fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
     while let [rest @ .., b' ' | b'\t' | b'\r' | b'\n'] = bytes {
         bytes = rest;
     }
@@ -103,15 +103,41 @@ fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
 /// [`UpstrokeError::Git`] naming the registration and the row of the table it
 /// fell into. Every refusing row has the same action, refuse before mutation,
 /// so the message is the distinction and one variant carries it.
+/// The refusal of the table's zero-length row, worded once for the two
+/// readers that meet it: the binding of a registration about to be acted on
+/// ([`registration_checkout`]) and the removal's scan of the store
+/// (`WorkspaceManager::revalidate_removal_proving`), whose plain form refuses
+/// it and whose proving form passes it over.
+pub(super) fn empty_gitdir_refusal(admin: &Path) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "worktree registration {} has an empty gitdir",
+            admin.display()
+        ),
+    }
+}
+
+/// The refusal of the table's absent row for the one absent shape that is a
+/// registration at all: `locked` beside no `gitdir`, the state an add killed
+/// between its first two writes leaves, which `git worktree prune` skips for
+/// the lock and `git worktree list` skips for the missing path. Read by the
+/// removal's scan of the store alone (`revalidate_removal_proving`), whose
+/// plain form refuses it as it refuses the zero-length row and whose proving
+/// form passes it over; an entry with neither file is what `prune` removes
+/// and binds nothing, so the scan skips it without a word.
+pub(super) fn missing_gitdir_refusal(admin: &Path) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "worktree registration {} is locked and has no gitdir",
+            admin.display()
+        ),
+    }
+}
+
 pub(super) fn registration_checkout(admin: &Path, bytes: &[u8]) -> Result<PathBuf, UpstrokeError> {
     let bytes = trim_gitdir(bytes);
     if bytes.is_empty() {
-        return Err(UpstrokeError::Git {
-            message: format!(
-                "worktree registration {} has an empty gitdir",
-                admin.display()
-            ),
-        });
+        return Err(empty_gitdir_refusal(admin));
     }
     let recorded = match decode_path(bytes) {
         Ok(recorded) => recorded,
@@ -234,7 +260,7 @@ fn resolve_relative(admin: &Path, relative: &Path) -> Option<PathBuf> {
 /// stop being UTF-8. Git for Windows writes UTF-8, so the failing arm is for
 /// hostile or corrupt bytes, and it refuses.
 #[cfg(unix)]
-fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
+pub(super) fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
     use std::os::unix::ffi::OsStringExt as _;
     // The one copy in this module: the borrowed bytes becoming the owned path.
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
@@ -247,7 +273,7 @@ fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
 /// compares a spelling with its own normalisation, and the normalisation is
 /// spelled with the platform's separator; so is the recorded path, then.
 #[cfg(not(unix))]
-fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
+pub(super) fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
     std::str::from_utf8(bytes)
         .map(|text| PathBuf::from(text.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
@@ -368,6 +394,44 @@ pub(super) fn changed_path_records(bytes: &[u8]) -> Result<Vec<GitPath>, NameSta
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// The path field of every record in `git ls-files --stage -z` or
+/// `--resolve-undo -z` bytes: `<mode> <object> <stage>\t<path>\0`, the path
+/// taken as the bytes after the record's first tab.
+///
+/// A record without a tab is not a stage record and yields nothing; a path
+/// is returned as bytes because two of the three readers only compare it with
+/// a name, and the one that decodes it says how ([`decode_index_path`]).
+pub(super) fn stage_record_paths(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let tab = record.iter().position(|byte| *byte == b'\t')?;
+            record.get(tab + 1..)
+        })
+        .collect()
+}
+
+/// Every record of `git ls-files --others -z` bytes: a path per record and
+/// nothing else, so each record is the path.
+pub(super) fn plain_record_paths(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect()
+}
+
+/// An index path as [`stage_record_paths`] returned it, decoded under the
+/// rule [`changed_path_records`] applies to a diff's: UTF-8 and one normalised
+/// repository path, or the reason it is neither.
+pub(super) fn decode_index_path(record: &[u8]) -> Result<String, String> {
+    match std::str::from_utf8(record) {
+        Ok(decoded) if is_normalised_repository_path(decoded) => Ok(decoded.to_owned()),
+        Ok(_) => Err("not a normalised repository path".to_owned()),
+        Err(error) => Err(format!("not UTF-8 from byte {}", error.valid_up_to())),
+    }
 }
 
 /// Turn `git diff --name-status -M -z` bytes into a [`PathSet`].
@@ -775,6 +839,43 @@ mod tests {
         let decoded = registration_checkout(&admin(), b"/tmp/non-utf8-\xff/.git\n")
             .expect("every byte string is a Unix path");
         assert_eq!(decoded.as_os_str().as_bytes(), b"/tmp/non-utf8-\xff");
+    }
+
+    #[test]
+    fn stage_records_yield_the_path_after_the_tab_and_plain_records_yield_themselves() {
+        let stage = b"100644 8a205e8dc3e7c7914d69c3e900f2e944d77bb100 1\tc.txt\0\
+100644 7a85ea4df37734c24dc10ccd171c24e536735fa4 2\tc.txt\0\
+100644 02e8acdcc44da4d68465994d590e44bcab3296b2 0\tdir/a\tb.txt\0";
+        assert_eq!(
+            stage_record_paths(stage),
+            vec![&b"c.txt"[..], b"c.txt", b"dir/a\tb.txt"],
+            "the path is everything after the record's first tab, a tab of its own included"
+        );
+        assert_eq!(
+            stage_record_paths(b"not a stage record\0\0"),
+            Vec::<&[u8]>::new(),
+            "a record without a tab is not a stage record, and an empty one is nothing"
+        );
+        assert_eq!(stage_record_paths(b""), Vec::<&[u8]>::new());
+        assert_eq!(
+            plain_record_paths(b".upstroke-resolved\0.upstroke-resolved/data.txt\0"),
+            vec![&b".upstroke-resolved"[..], b".upstroke-resolved/data.txt"]
+        );
+        assert_eq!(plain_record_paths(b"\0"), Vec::<&[u8]>::new());
+
+        assert_eq!(decode_index_path(b"dir/c.txt").as_deref(), Ok("dir/c.txt"));
+        assert_eq!(
+            decode_index_path(b"dir/../c.txt"),
+            Err("not a normalised repository path".to_owned())
+        );
+        assert_eq!(
+            decode_index_path(b"caf\xc3\xa9.txt").as_deref(),
+            Ok("caf\u{e9}.txt")
+        );
+        assert_eq!(
+            decode_index_path(b"caf\xe9.txt"),
+            Err("not UTF-8 from byte 3".to_owned())
+        );
     }
 
     #[test]

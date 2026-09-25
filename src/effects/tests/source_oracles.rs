@@ -1,6 +1,6 @@
 //! Extended notes: `docs/internals/effects/tests/source_oracles.md`
 
-#![deny(
+#![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
@@ -18,8 +18,9 @@ pub(super) mod oracles {
         crate_roots, is_the_literal_mod_tests_form, repo_root, scanned_sources,
     };
     use crate::effects::{
-        TOPOLOGY_MODULES, blank_comments, blank_comments_and_strings, externally_reachable_fns,
-        production_code, production_region,
+        CLASSIFIED_MODULES, RUSTC_WHITESPACE, TOPOLOGY_MODULES, blank_comments,
+        blank_comments_and_strings, externally_reachable_fns, production_code, production_region,
+        reachable_fn_multiplicity,
     };
 
     fn declared_production_children(
@@ -640,6 +641,10 @@ pub(super) mod oracles {
             "pub fn free() {}\n",
             "pub(crate) fn crate_visible() {}\n",
             "pub(super) fn super_visible() {}\n",
+            "pub(in crate::engine) fn path_visible() {}\n",
+            "pub (in crate::engine) async fn spaced_path_visible() {}\n",
+            "pub(in crate::engine) extern \"Rust\" fn abi_visible() {}\n",
+            "pub unsafe extern \"C\" fn unsafe_abi_visible() {}\n",
             "fn private() {}\n",
             "pub const fn constant() -> u8 { 1 }\n",
             "pub unsafe fn unsafely() {}\n",
@@ -647,28 +652,99 @@ pub(super) mod oracles {
             "impl Trait for Thing { fn through_the_trait(&self) {} }\n",
             "pub trait Public { fn declared(&self) -> u8; fn defaulted(&self) -> u8 { 1 } }\n",
             "trait Private { fn private_default(&self) -> u8 { 1 } }\n",
+            "impl Trait for [u8; 4] { fn through_an_array_impl(&self) {} }\n",
+            "pub trait Wide { fn default_returning_an_array(&self) -> [u8; 4] { [0; 4] } }\n",
+            "pub fn /* between */ after_a_comment() {}\n",
+            "pub fn\n    after_a_line_break() {}\n",
+            "pub fn r#raw_identifier() {}\n",
+            "pub fn \u{fc}n\u{ef}_non_ascii() {}\n",
+            "impl<T> Glued<T>for Thing<T> { fn after_a_glued_for(&self) {} }\n",
+            "impl::path::Trait for Thing { fn after_a_glued_impl(&self) {} }\n",
+            "impl Trait for&'static str { fn for_a_reference(&self) {} }\n",
+            "impl<F: for<'a> Fn(&'a u8)> Holder<F> { fn behind_a_bound(&self) {} }\n",
+            "macro_rules! named { ($name:ident) => { pub fn $name() {} }; }\n",
             "#[cfg(test)]\nmod tests { pub fn in_the_test_region() {} }\n",
         );
         let found = externally_reachable_fns(source);
         assert_eq!(
             found,
             vec![
+                "abi_visible".to_owned(),
+                "after_a_comment".to_owned(),
+                "after_a_glued_for".to_owned(),
+                "after_a_glued_impl".to_owned(),
+                "after_a_line_break".to_owned(),
+                "behind_a_bound".to_owned(),
                 "constant".to_owned(),
                 "crate_visible".to_owned(),
+                "default_returning_an_array".to_owned(),
                 "defaulted".to_owned(),
+                "for_a_reference".to_owned(),
                 "free".to_owned(),
                 "inherent".to_owned(),
+                "path_visible".to_owned(),
+                "raw_identifier".to_owned(),
+                "spaced_path_visible".to_owned(),
                 "super_visible".to_owned(),
+                "through_an_array_impl".to_owned(),
                 "through_the_trait".to_owned(),
+                "unsafe_abi_visible".to_owned(),
                 "unsafely".to_owned(),
+                "\u{fc}n\u{ef}_non_ascii".to_owned(),
             ],
             "the parser's answer moved"
+        );
+        assert!(
+            !found.iter().any(|name| name.contains('$')),
+            "a macro's metavariable is not a name; what expansion names is outside this reading \
+             (`PR7-WRAPPERS-EMPTY-DOMAIN`), and it must not look as if it were inside"
         );
         assert!(!found.contains(&"private".to_owned()));
         assert!(!found.contains(&"hidden".to_owned()));
         assert!(!found.contains(&"in_the_test_region".to_owned()));
         assert!(!found.contains(&"declared".to_owned()));
         assert!(!found.contains(&"private_default".to_owned()));
+
+        for separator in RUSTC_WHITESPACE {
+            let written = format!(
+                "#[rustfmt::skip]\npub(crate) fn{separator}sep_free() {{}}\n\
+                 pub trait{separator}SepTrait {{ fn sep_defaulted(&self) -> u8 {{ 1 }} }}\n\
+                 impl{separator}SepTrait{separator}for{separator}Thing {{ fn sep_through(&self) {{}} }}\n"
+            );
+            assert_eq!(
+                externally_reachable_fns(&written),
+                vec![
+                    "sep_defaulted".to_owned(),
+                    "sep_free".to_owned(),
+                    "sep_through".to_owned(),
+                ],
+                "U+{:04X} separates tokens for rustc, and written after `fn`, `trait`, `impl` and \
+                 around `for` it hid a name from the classification domain (the review of \
+                 84123789 executed `fn`, U+200E, the name, in `src/engine/coordinator.rs`): \
+                 {written:?}",
+                u32::from(separator)
+            );
+            assert_eq!(
+                reachable_fn_multiplicity(&written)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("sep_defaulted".to_owned(), 1),
+                    ("sep_free".to_owned(), 1),
+                    ("sep_through".to_owned(), 1),
+                ],
+                "U+{:04X}: a name the domain holds has to be one the count holds, once",
+                u32::from(separator)
+            );
+            let unread = format!("fn{separator}on_text_no_tokenizer_touched() {{}}");
+            assert_eq!(
+                crate::effects::declared_fns(&unread),
+                vec![(0, "on_text_no_tokenizer_touched")],
+                "U+{:04X}: the name reader names the one definition itself, so it reads the \
+                 separator on text no tokenizer has rewritten",
+                u32::from(separator)
+            );
+        }
 
         let exploit = concat!(
             "pub trait ContainerHooks {\n",
@@ -679,6 +755,104 @@ pub(super) mod oracles {
         assert!(
             externally_reachable_fns(exploit).contains(&"remove_without_a_site".to_owned()),
             "the effect a default trait body performs is invisible to the domain again"
+        );
+    }
+
+    pub(in crate::effects::tests) fn the_domain_reaches_past_a_configured_item() {
+        // The shape `PR7-WRAPPERS-EMPTY-DOMAIN` measured in six classified
+        // modules: a `#[cfg(test)] use` among the imports at the top of the
+        // file, and every production `pub fn` below it. A region that cuts the
+        // file at its first `#[cfg(test)]` derives nothing from such a file,
+        // and an empty derived set compares equal to an empty record -- so the
+        // classification census passes over a module it never read.
+        let source = concat!(
+            "use std::path::Path;\n",
+            "#[cfg(test)]\n",
+            "use std::collections::BTreeSet;\n",
+            "pub(super) fn below_the_cut(path: &Path) -> bool { path.exists() }\n",
+            "impl Display for Thing { fn fmt(&self, f: &mut Formatter<'_>) -> Result { Ok(()) } }\n",
+            "#[cfg(test)]\n",
+            "pub fn test_only_item() {}\n",
+            "#[cfg(test)]\n",
+            "impl Thing { pub(crate) fn at(path: &Path) -> Self { Self } }\n",
+            "#[cfg(test)]\n",
+            "mod tests { pub fn in_the_test_region() {} }\n",
+        );
+        let found = externally_reachable_fns(source);
+        assert_eq!(
+            found,
+            vec!["below_the_cut".to_owned(), "fmt".to_owned()],
+            "a `#[cfg(test)]` item above a production `pub fn` takes it out of the \
+             classification domain (`PR7-WRAPPERS-EMPTY-DOMAIN`); derived: {found:?}"
+        );
+        for excluded in ["test_only_item", "at", "in_the_test_region"] {
+            assert!(
+                !found.contains(&excluded.to_owned()),
+                "`{excluded}` is a test-only item and is in the domain"
+            );
+        }
+    }
+
+    pub(in crate::effects::tests) fn every_classified_module_that_declares_a_visible_fn_has_a_domain()
+     {
+        // The six modules `PR7-WRAPPERS-EMPTY-DOMAIN` measured, pinned by name:
+        // each cuts at a `#[cfg(test)] use` in its imports and each carried an
+        // all-empty record in `effects/wrappers.toml` that the census accepted.
+        const CUT_AT_A_USE: [&str; 6] = [
+            "src/agent/claude.rs",
+            "src/agent/codex.rs",
+            "src/agent/copilot.rs",
+            "src/engine/attempt.rs",
+            "src/engine/coordinator.rs",
+            "src/engine/resume.rs",
+        ];
+        for path in CUT_AT_A_USE {
+            let source = fs::read_to_string(repo_root().join(path)).expect("a classified module");
+            assert!(
+                !externally_reachable_fns(&source).is_empty(),
+                "{path}: the classification domain is empty, so its record in \
+                 effects/wrappers.toml is checked against nothing (`PR7-WRAPPERS-EMPTY-DOMAIN`)"
+            );
+        }
+
+        // The general form: a classified module whose production code declares
+        // a `pub`-visible `fn` derives at least that one. Lexical and
+        // sufficient, not a second parser: any of these three spellings in the
+        // blanked production code is a visible fn whatever else the file holds.
+        let mut with_a_visible_fn = 0_usize;
+        for path in CLASSIFIED_MODULES {
+            let source = fs::read_to_string(repo_root().join(path)).expect("a classified module");
+            let code = production_code(&source);
+            let declares_visible_fn = ["pub fn ", "pub(crate) fn ", "pub(super) fn "]
+                .iter()
+                .any(|spelling| code.contains(spelling));
+            if declares_visible_fn {
+                with_a_visible_fn += 1;
+                assert!(
+                    !externally_reachable_fns(&source).is_empty(),
+                    "{path}: the production code declares a visible fn and the \
+                     classification domain is empty"
+                );
+            }
+        }
+        assert!(
+            with_a_visible_fn > 40,
+            "only {with_a_visible_fn} classified modules declare a visible fn; the scan is \
+             not reading the tree"
+        );
+
+        // The one classified module whose empty record is legitimate: it
+        // declares constants and no `fn` at all, in any region.
+        let names = fs::read_to_string(repo_root().join("src/rundir/names.rs"))
+            .expect("src/rundir/names.rs");
+        assert!(
+            !production_code(&names).contains("fn "),
+            "src/rundir/names.rs declares a fn now; its all-empty record is no longer \
+             legitimately empty"
+        );
+        assert!(
+            externally_reachable_fns(&names).is_empty(),
+            "src/rundir/names.rs derives a name and records none"
         );
     }
 
@@ -854,6 +1028,31 @@ pub(super) mod oracles {
             (
                 "an escape beside it",
                 "const P: (char, char) = ('\\u{7f}','{');\n",
+                "{",
+            ),
+            (
+                "a Unicode escape as long as its underscores make it",
+                "const P: (char, char) = ('\\u{7b____________________}','{');\n",
+                "{",
+            ),
+            (
+                "a Unicode escape of six digits",
+                "const P: (char, char) = ('\\u{00_00_7b}','{');\n",
+                "{",
+            ),
+            (
+                "a byte escape",
+                "const P: (u8, char) = (b'\\x7b','{');\n",
+                "{",
+            ),
+            (
+                "an escaped quote",
+                "const P: (char, char) = ('\\'','{');\n",
+                "{",
+            ),
+            (
+                "an escaped backslash",
+                "const P: (char, char) = ('\\\\','{');\n",
                 "{",
             ),
         ] {

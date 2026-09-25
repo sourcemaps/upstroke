@@ -305,6 +305,76 @@ fn reported_spend_replays_integration_verification_records() {
 }
 
 #[test]
+fn reported_spend_replays_an_unavailable_terminals_reviews_against_the_candidate_it_verified() {
+    let unavailable = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(sequence),
+                cause: crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                reviews,
+            },
+        })
+    };
+    let started_at = |sequence: u32, key: TaskKey| {
+        ev(TopologyEventBody::MergeVerificationStarted {
+            data: crate::topology::events::MergeVerificationStarted {
+                sequence: crate::topology::events::SequenceId(sequence),
+                candidate: candidate_of(key, 0),
+                basis: crate::topology::events::VerificationBasis::StaleClean {
+                    prepared_ref: GitRef(format!("refs/upstroke/select/prepared/{sequence}")),
+                },
+                expected_head: sha("head"),
+                proposed_sha: sha("proposal"),
+            },
+        })
+    };
+
+    let paired = Spend::replay(&[
+        started_at(1, ALEPH),
+        unavailable(1, vec![review_costing(Some(2.5)), review_costing(None)]),
+    ]);
+    assert!(
+        (paired.run_usd() - 2.5).abs() < f64::EPSILON,
+        "the terminal's reviews reach the run total: {}",
+        paired.run_usd()
+    );
+    assert!(
+        (paired.task_usd(ALEPH) - 2.5).abs() < f64::EPSILON,
+        "and the task the started event named: {}",
+        paired.task_usd(ALEPH)
+    );
+    assert!(paired.task_usd(BET).abs() < f64::EPSILON);
+
+    let unpaired = Spend::replay(&[unavailable(1, vec![review_costing(Some(2.5))])]);
+    assert!(
+        (unpaired.run_usd() - 2.5).abs() < f64::EPSILON,
+        "a terminal the slice gives no start for still charges the run, because losing the cost \
+         is the overspend this replay exists to prevent: {}",
+        unpaired.run_usd()
+    );
+    for key in [ALEPH, BET, GIMEL] {
+        assert!(
+            unpaired.task_usd(key).abs() < f64::EPSILON,
+            "and it is attributed to no task, because nothing in the slice names one"
+        );
+    }
+
+    let crossed = Spend::replay(&[
+        started_at(1, ALEPH),
+        unavailable(2, vec![review_costing(Some(2.5))]),
+    ]);
+    assert!(
+        (crossed.run_usd() - 2.5).abs() < f64::EPSILON,
+        "a terminal whose sequence is not the open one is not attributed to that candidate: {}",
+        crossed.run_usd()
+    );
+    assert!(crossed.task_usd(ALEPH).abs() < f64::EPSILON);
+}
+
+#[test]
 fn reported_spend_replays_both_record_carrying_events() {
     let mut fold = started();
     let mut log = Vec::new();
@@ -495,7 +565,7 @@ fn a_run_with_no_admissible_work_never_asks_the_ceiling() {
 }
 
 #[test]
-fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
+fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {
     let fold = started();
     assert!(
         fold.structurally_admissible() && fold.ready(ALEPH),
@@ -583,8 +653,12 @@ fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
         step,
         Step::Closure(DerivedOutcome::Ending(RunOutcome::Complete))
     );
-    let error = checkpoint(step).expect_err("this build does not end a run");
-    assert!(format!("{error}").contains("does not end a run"), "{error}");
+    assert_eq!(
+        checkpoint(step).expect("run-end closure crosses the checkpoint since PR10"),
+        Admitted::Closure(DerivedOutcome::Ending(RunOutcome::Complete)),
+        "the closure carries the outcome the fold derived across to the acting half, which \
+         re-derives it after closing whatever is open (`closure::confirm_derived`)"
+    );
 }
 
 #[test]
@@ -639,7 +713,7 @@ fn the_checkpoint_admits_every_branch_this_build_implements() {
 }
 
 #[test]
-fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
+fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {
     let every: Vec<Step> = vec![
         Step::Poisoned,
         budget_exceeded(
@@ -667,12 +741,15 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
         Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
+            continuing: false,
         },
         Step::Backoff,
         Step::HardBlock {
             questions: vec![question_for(ALEPH).id],
         },
         Step::Closure(DerivedOutcome::Ending(RunOutcome::Complete)),
+        Step::NotStarted,
+        Step::Finished(RunOutcome::Complete),
     ];
 
     let mut names = Vec::new();
@@ -687,6 +764,8 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
             Step::Backoff => "Backoff",
             Step::HardBlock { .. } => "HardBlock",
             Step::Closure(_) => "Closure",
+            Step::NotStarted => "NotStarted",
+            Step::Finished(_) => "Finished",
         });
     }
     let mut distinct = names.clone();
@@ -706,15 +785,17 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
 
     assert_eq!(
         crossed.len(),
-        6,
+        8,
         "the admitted count moved: {:?}",
         crossed.iter().map(|(_, n)| *n).collect::<Vec<_>>()
     );
     assert_eq!(
         refused,
-        vec!["Poisoned", "RepairDispatch", "Closure"],
-        "the set that does not cross the checkpoint changed: `checkpoint_refusals` has PR8 \
-         refuse repair dispatch and run-end closure, and `Poisoned` is the absence of a branch"
+        vec!["Poisoned", "NotStarted", "Finished"],
+        "the set that does not cross the checkpoint changed: run-end closure crosses since \
+         PR10 (`checkpoint_refusals` names no terminal this build does not implement), \
+         `Poisoned` is the absence of a branch, an unstarted fold admits nothing, and a \
+         finished run is refused continuation after its finalization"
     );
 }
 
@@ -922,6 +1003,8 @@ fn arm_label(step: &Step) -> &'static str {
         Step::Backoff => "Backoff",
         Step::HardBlock { .. } => "HardBlock",
         Step::Closure(_) => "Closure",
+        Step::NotStarted => "NotStarted",
+        Step::Finished(_) => "Finished",
     }
 }
 
@@ -935,7 +1018,13 @@ const OFFERS_WORK: &[&str] = &[
     "HardBlock",
 ];
 
-const OFFERS_NO_WORK: &[&str] = &["Poisoned", "BudgetExceeded", "Closure"];
+const OFFERS_NO_WORK: &[&str] = &[
+    "Poisoned",
+    "BudgetExceeded",
+    "Closure",
+    "NotStarted",
+    "Finished",
+];
 
 #[test]
 fn every_label_the_arm_classifier_returns_is_classified() {
@@ -992,7 +1081,13 @@ fn every_label_the_arm_classifier_returns_is_classified() {
     );
     assert_eq!(
         OFFERS_NO_WORK,
-        ["Poisoned", "BudgetExceeded", "Closure"],
+        [
+            "Poisoned",
+            "BudgetExceeded",
+            "Closure",
+            "NotStarted",
+            "Finished"
+        ],
         "the not-work list is pinned by name: without that, moving a work label into it \
          satisfies the equality below and drops that arm from the ending witness's coverage \
          requirement, which is the one way a seventh arm can still be added and left undriven"
@@ -1228,10 +1323,17 @@ fn an_unstarted_run_selects_nothing() {
     let fold = TopologyFold::new(inputs());
     assert_eq!(
         select(&fold, &Ceiling::unlimited(), &no_spend()),
-        Step::Closure(DerivedOutcome::NotEnding)
+        Step::NotStarted,
+        "a fold with no `run_started` has nothing to close and no outcome to derive, so it is \
+         not a closure; before PR10 it selected `Closure(NotEnding)` and the checkpoint's \
+         refusal of every closure hid the difference"
     );
-    checkpoint(select(&fold, &Ceiling::unlimited(), &no_spend()))
+    let error = checkpoint(select(&fold, &Ceiling::unlimited(), &no_spend()))
         .expect_err("nothing is admitted from a run that has not started");
+    assert!(
+        format!("{error}").contains("has not started"),
+        "the refusal says why: {error}"
+    );
 }
 
 #[test]
@@ -1321,7 +1423,7 @@ fn register_runnable_repair(fold: &mut TopologyFold) {
 }
 
 #[test]
-fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {
+fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {
     let mut fold = started();
     register_runnable_repair(&mut fold);
     let repair = TaskKey(3);
@@ -1338,8 +1440,18 @@ fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_
         Step::RepairDispatch {
             key: repair,
             generation: GenerationId(0),
+            continuing: false,
         },
         "the selector names the repair dispatch as its own step rather than an ordinary one"
+    );
+    assert_eq!(
+        checkpoint(step).expect("this build dispatches a repair"),
+        Admitted::RepairDispatch {
+            key: repair,
+            generation: GenerationId(0),
+            continuing: false,
+        },
+        "and the checkpoint admits it: `T-REPAIR-DISPATCH` is this build's row"
     );
 
     let mut spend = Spend::new();
@@ -1348,24 +1460,49 @@ fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_
         run_usd: Some(1.0),
         task_usd: None,
     };
+    let Step::BudgetExceeded(exceeded) = select(&fold, &breached, &spend) else {
+        panic!(
+            "`loop`: a ready task's branch is `ceiling check, provisional dispatch reservation, \
+             dispatch`, and a repair is a ready task — a breached ceiling appends \
+             `budget_exceeded` before any effect instead of dispatching"
+        );
+    };
     assert_eq!(
-        select(&fold, &breached, &spend),
+        exceeded.key,
+        Some(repair),
+        "the breach names the repair the ceiling refused to spend on"
+    );
+    assert_eq!(exceeded.budget, BudgetKind::Run);
+
+    let dispatched = dispatch_repair(&fold, repair);
+    apply(&mut fold, &dispatched);
+    assert_eq!(
+        select(&fold, &Ceiling::unlimited(), &no_spend()),
         Step::RepairDispatch {
             key: repair,
             generation: GenerationId(0),
+            continuing: true,
         },
-        "a breached ceiling would append `budget_exceeded` for a dispatch that is refused \
-         before any append"
+        "a repair generation opened and not yet attempted is continued, not re-dispatched"
     );
+}
 
-    let error = checkpoint(step).expect_err("this build does not dispatch a repair");
-    let message = format!("{error}");
-    assert!(
-        message.contains("Repair-origin") && message.contains("PR9"),
-        "the refusal names the operation and the slice that owns it: {message}"
-    );
-    assert!(
-        message.contains("Nothing was appended"),
-        "the refusal says the run is untouched: {message}"
-    );
+fn dispatch_repair(fold: &TopologyFold, key: TaskKey) -> crate::topology::events::TopologyEvent {
+    use crate::topology::events::{LeaseGrant, TaskDispatched};
+    let root = fold
+        .registry()
+        .and_then(|registry| registry.get(key))
+        .and_then(|entry| entry.lineage)
+        .map(|lineage| lineage.root)
+        .expect("the repair descends from a lineage");
+    ev(TopologyEventBody::TaskDispatched {
+        data: TaskDispatched {
+            key,
+            generation: GenerationId(0),
+            base_sha: sha("moved-head"),
+            worktree_path: format!("/private/workspaces/tasks/k{}-g0", key.0),
+            lease: LeaseGrant::InheritedLineage { root },
+            source_candidate: Some(candidate_of(root, 0)),
+        },
+    })
 }

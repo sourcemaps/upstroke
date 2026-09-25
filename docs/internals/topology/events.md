@@ -704,8 +704,11 @@ One rung's binding as an attempt actually used it.
 
 Comparable against both authorities: the frozen rung the registry holds,
 and an override a human named. The override records no tier — the option
-list it chose from is agents, not tiers — which is why the two comparisons
-are two methods rather than one equality.
+list it chose from is agents, not tiers — so the tier it binds at is
+supplied by the caller: the repair ladder's frozen floor (E2 as the errata
+read it), and the binding is pinned, a person having named it. The two
+comparisons are two methods because the two authorities carry different
+fields, not because either compares fewer than all five.
 
 ## `pub struct RungBinding` › `pub pinned: bool,`
 
@@ -726,15 +729,21 @@ This binding as the frozen ladder would produce it.
 
 Whether this binding is the one the frozen rung names.
 
-## `impl RungBinding` › `pub fn matches_override(&self, binding: &BindingOverride) -> bool {`
+## `impl RungBinding` › `pub fn from_override(binding: &BindingOverride, tier: Tier) -> Self {`
 
-Whether this binding is the one an override names.
+This binding as a validated override produces it at `tier`: the
+override's agent, model and effort, `pinned: true`. There is one
+construction, so the validator, the reader that plans an attempt and the
+attempt that records it cannot disagree about what an override binds.
 
-Tier and pin are not compared: an override chooses an agent from a
-frozen option list, so the tier it lands on is whatever that agent is
-bound at, and a human-named binding has no plan pin behind it at all.
-[`BindingOverride`] records neither, and comparing a field the authority
-does not carry would refuse every valid override.
+## `impl RungBinding` › `pub fn matches_override(&self, binding: &BindingOverride, tier: Tier) -> bool {`
+
+Whether this binding is the one an override names at `tier`: all five
+fields, through [`Self::from_override`]. The earlier reading skipped tier
+and pin, which let a recorded attempt claim any tier and either
+provenance under a valid override; the errata's E2 fixes the tier at the
+repair ladder's floor and the pin at `true`, so both are compared like
+the rest.
 
 ## `pub enum Materialization {`
 
@@ -1097,6 +1106,34 @@ queued but ineligible.
 
 `merge_verification_unavailable`.
 
+## `pub struct MergeVerificationUnavailable` › `pub reviews: Vec<ReviewRecord>,`
+
+The review passes this verification paid for before it ended. DESIGN §26
+has all four terminal shapes carrying their usage and cost, and this is the
+one that had nowhere to put it: a park or an infrastructure deferral can
+follow a review that returned a verdict and a bill, and the live account
+charges it as each pass completes. Without the record on the wire a replay
+restored a total without it, and the incarnation after a restart admitted
+integration a ceiling had already refused — the direction is overspending,
+and it compounds once per restart (`PR8-R2-SPEND-REPLAY`).
+
+Only review passes are here, because only review passes cost money: gates
+run locally and their verdicts are evidence rather than spend, and
+`merge_verification_interrupted` stays the unknown-spend terminal §26's
+crash table makes it. The list is what the verification charged, not what it
+judged — a pass that returned unavailable and billed for the tokens it spent
+is in it, and a judgement that never came back does not empty it, because
+`IntegrationCx::verify` carries out what its account was charged rather than
+what a `Judgement` survived to report.
+
+The field is required on the wire, like every other schema-4 payload field
+(`every_required_payload_field_is_refused_when_it_is_absent`). Schema 4 is
+pre-release — no `0.2.0` exists and a run reaches this vocabulary only by
+choosing it — so there is no schema-4 log under a compatibility promise for
+a default to protect. A log written before the field is refused at parse
+rather than folded to a total it cannot account for, which is the safe
+direction for a ceiling.
+
 ## `pub enum UnavailableDefect {`
 
 How an unavailability record disagrees with itself.
@@ -1380,7 +1417,17 @@ Informational: a pool reported itself empty.
 
 ## `pub enum TopologyEventBody` › `DesignDefect {`
 
-Informational: a question routed to the designer rather than execution.
+Informational: a question that reached a person, with its answer and its
+attribution — `discovered_hole` by default, `design_defect` only by
+citation — the record the 2026-09-01 decision attributes
+(`reviews/2026-09-14-o3-attribution-record.md`). The payload is the shared
+`events::DesignDefect`, read without `strict::field`, so its two optional
+columns, or a column this binary does not know, decode through the
+informational-tolerance path below; the same columns on the
+`question_answered` transaction are refused by construction. The topology
+has no production emitter of the record yet: the writer that adds one
+constructs it through `DesignDefect::discovered` by default and
+`::convicted` when the answer file carries a citation.
 
 ## `pub const TOPOLOGY_EVENT_KINDS: [&str; 24] = [`
 
@@ -1405,7 +1452,9 @@ Whether a fold applies this event, as opposed to merely recording it.
 The distinction the unknown-field rule turns on: a transaction carrying
 a field this binary does not understand is one it cannot claim to have
 applied, while an informational record with an extra column costs
-nothing to ignore.
+nothing to ignore. The `attribution` and `citation` columns of
+`design_defect` are exactly such columns: an older binary ignores them, this
+one reads them, and neither refuses the record.
 
 ## `impl TopologyEventBody` › `pub fn key(&self) -> Option<TaskKey> {`
 
@@ -1522,6 +1571,14 @@ not a refusal — it cannot be written.
 ------------------------------------------------------------------
 Unknown fields (deny_unknown_fields on transactions only)
 ------------------------------------------------------------------
+
+## `mod tests` › `fn a_question_answered_transaction_refuses_an_attribution_key() {`
+
+The contract's "never the `question_answered` transaction, whose unknown
+fields are refused by construction", executed: `attribution` and `citation`
+added to the canonical payload, and inside its `answer`, are refused with
+serde's own unknown-field text, which the test pins so a change to either
+`deny_unknown_fields` fails it.
 
 ## `mod tests` › `fn object_paths(value: &serde_json::Value, at: Vec<String>, found: &mut Vec<Vec<String>>) {`
 
@@ -2165,14 +2222,16 @@ must not match the other — in *both* directions, which one fixture at
 
 ## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `let binding = BindingOverride {`
 
-The override comparison ignores tier and nothing else: the option
-list an override chooses from is agents, not tiers.
+The override comparison compares all five fields. The override records
+no tier, so the tier is the caller's — the repair ladder's frozen floor
+(E2 as the errata read it) — and a binding one tier off in either
+direction is refused like a moved agent, model or effort.
 
-## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `for pinned in [true, false] {`
+## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `pinned: false,`
 
-The pin is ignored for the same reason the tier is, and for both of
-its values: `BindingOverride` records neither, so comparing either
-would refuse a validated one-off binding rather than check it.
+The pin is compared too: a validated one-off binding is pinned, a person
+having named it, so a recording that claims `pinned: false` under an
+override is refused.
 
 ## `mod tests` › `fn a_topology_run_record_projects_to_the_registry_derivation_intact() {`
 
@@ -2239,6 +2298,26 @@ respelled. A1 embeds those types; it does not declare or freeze their
 shape, and their keys are already pinned by the schema-1..3 suite that
 reads them. What is written out by hand here is exactly what schema 4
 froze, which is exactly what this slice owns.
+
+## `mod tests` › `fn attributed_design_defects() -> Vec<AttributedDesignDefect> {`
+
+The decoder fixture the 2026-09-01 decision asked for, beside the corpus and
+not in it: a discovery and a cited conviction, each built through its
+constructor and paired with an independently written payload — a literal,
+where the corpus's own `design_defect` entry serialises the struct — and
+with what it must read as.
+
+## `mod tests` › `fn an_attributed_design_defect_serializes_to_its_independently_written_payload() {`
+
+Each attributed body serialises to exactly its literal.
+
+## `mod tests` › `fn an_attributed_design_defect_reads_through_the_informational_path() {`
+
+Each literal decodes to its body, informational and `design_defect`, and
+reads as `Discovered` or `Convicted`; with an unknown column added it still
+decodes, while the same column on the canonical `question_answered` is
+refused. The 24-and-21 counts are asserted in passing; the corpus keeps its
+pre-taxonomy entry.
 
 ## `fn every_event_decodes_from_its_independently_written_payload() {` › `for (body, canonical) in every_kind().iter().zip(canonical_events()) {`
 

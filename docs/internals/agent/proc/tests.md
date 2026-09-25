@@ -185,6 +185,79 @@ timing-out fixture in this suite is `sleep 30`, which writes nothing
 before it is killed — so discarding the whole transcript on timeout was
 a no-op on every fixture that reaches the branch.
 
+## `fn terminate_fault_helper() {`
+
+The child of the `Process.Terminate` fault witnesses: publishes its pid (and, on Windows, its
+creation time, which `ambient::process_alive` needs to tell a reused pid from this process) and
+then outlives the three-second timeout the witness supervises it under, so the funnel's
+termination is what ends it.
+
+## `struct TerminateFaultAt {`
+
+The production adapter (`runner::HarnessHooks`) with an error return armed at one phase of
+`Process.Terminate`: the harness records the phase first, as the funnel's own call does, so the
+observation export names this test as an execution of the coordinate, and the armed phase then
+answers `Injection::Error`.
+
+## `fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(`
+
+G5's clause 2 found both phases of `Process.Terminate` observed under the production adapter and
+faulted by no committed test. This drives each: a supervised child outlives its timeout, the
+termination funnel returns the injected error at the phase, and what the fault leaves is read
+against the residue authority rather than restated. The process does not outlive the faulted
+termination on either phase (the funnel settles it on the error path as it does on the ordinary
+one). The fate the failure carries — which the runner hands its caller, and on which the caller
+decides whether the invocation's process may still run (`engine::topology::run`'s verification
+settles an outage only on `Gone` or `NeverStarted`) — is the authority's
+rows: before the primitive, R22 still accounts for the handle, so the fate is `Unresolved`; after
+it, the row holds nothing, so the fate is `Gone`. The tabled action is then the next command
+through the same adapter, which runs to its own exit.
+
+The scratch directory the helper publishes its identity into is a `rundir::scratch_tree` guard, so it
+is reclaimed when the witness unwinds as well as when it returns. A reclaim that fails on the return
+fails the test naming the directory; one that fails while the test is already unwinding is reported
+on stderr beside the failure that unwound it, never as a second panic (#292's review round 5,
+finding 3: the directory was removed by a last statement whose error was discarded, and a failing
+assertion skipped it).
+
+## `struct SpawnAfterThenTerminateAfterFault {`
+
+The production adapter with an error return at the after phase of both process sites, and every
+`child_created` callback recorded with the child's identity (on Windows its creation time, which
+`ambient::process_alive` needs).
+
+## `fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {`
+
+`kill_tree` stores `Gone` as soon as its primitive completes, before its after phase is consulted
+(#292's fate fix). The timeout witnesses above reach `kill_tree` only on Windows: on Unix a timeout
+terminates through `terminate_supervised`, which stores the fate itself, so a `kill_tree` that
+stored it only on Windows kept the Linux suite green (#292's round-1 fix-check lens, finding 3).
+This reaches `kill_tree` on Linux and Windows through the path that calls it when the spawn's after
+phase fails: the child is created (recorded once), the spawn's after phase returns the injected error,
+the cleanup termination runs its before phase and its primitive, and its after phase returns the
+second error. The failure is the spawn's error with the termination's beside it, the child is gone
+when the funnel returns, and the fate is `Gone`. Its scratch directory is the same kind of guard as
+the witness above.
+
+Not on macOS. On every Unix that error path drops the Supervisor before it calls `kill_tree`, and
+the drop's `finish` has the reaper kill the group and wait until it holds no non-zombie member, so
+the leader, this process's unreaped child, is a zombie when the primitive signals its group. On
+macOS that signal failed with `EPERM` (#292's CI, `test (macos-latest)`, job 104258732193:
+"terminating the agent process group did not establish it gone: the group signal failed (Operation
+not permitted (os error 1))"); `signal_group_kill` treats only `ESRCH` as gone, so the primitive
+fails before the fate store this witness is about and the fate stays `Unresolved`. That answer is
+the primitive's, not the store's: `PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`, deferred,
+whose repair runs this witness on macOS again. The direct witness below guards the store on every
+Unix.
+
+## `fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {`
+
+`kill_tree` called directly on a live process group of its own, on every Unix host, with an error
+answered at `Process.Terminate`'s after phase: the primitive kills the group and reaps its leader,
+the error returned is the after phase's, the leader is gone, and the fate is `Gone`. The group is
+live when it is signalled, so the macOS answer above does not arise. With the store made
+Windows-only, the fate stays `Unresolved` and this fails.
+
 ## `fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {`
 
 The reaper knows the group **before** the parent registers it, because
@@ -1161,8 +1234,20 @@ still be useless.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `let silent = scratch.join("never");`
 
-Two bounds against one silent producer: each wait ends at the value
-its caller passed, and the longer bound spends longer.
+One bound against one silent producer, on the wall clock: the wait
+reports the bound its caller passed and does not end before it -- a
+lower bound, which a loaded runner cannot fail. Then two bounds, 120 ms
+and 480 ms, through `await_signal_by` on a clock the test drives, sixty
+milliseconds a reading: the wait reads the clock once for its deadline
+and once per poll, so the first ends at its third reading and the second
+at its ninth, which is the deadline being the caller's bound and nothing
+else -- a bound of the wait's own, whatever its value, would end both at
+the same reading. The oracle before this one compared the two waits'
+wall-clock durations and required the longer bound to have spent longer,
+which a stall of the first wait past their difference of 360 ms fails: CI's
+Windows guest measured the 120 ms wait at 558.8 ms against the 480 ms
+wait's 485.5 ms (`PR320-R4-WAIT-ORDER-READ-FROM-THE-WALL`). A reading count
+has no stall in it.
 
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer` › `const GENEROUS: Duration = Duration::from_secs(30);`
 

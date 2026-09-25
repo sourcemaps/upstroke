@@ -8,7 +8,7 @@ item before `›`, find that item first, then the following fragment within it.
 
 ## Module
 
-The **source oracles**: the twelve checks that hold this crate's own lexical
+The **source oracles**: the sixteen checks that hold this crate's own lexical
 instruments against the tree they read.
 
 Four instruments, and every whole-tree census in this repository is built on
@@ -37,7 +37,7 @@ none of them, and it defines no region of its own — which is what
 
 **No name here is a test name.** The twelve `#[test]` wrappers stay in
 `super` under the harness names the contract, CI and `reviews/FINDINGS.md`
-know, and the twelve functions below are deliberately named otherwise — so
+know, and the sixteen functions below are deliberately named otherwise — so
 every name `--list` reports for this file is one of those wrappers and
 nothing nests under `effects::tests::source_oracles`. `effects/wrappers.toml` names
 `no_topology_module_calls_a_funnel_in_production` and `reviews/FINDINGS.md`
@@ -65,7 +65,7 @@ file that writes the declaration. The derivation deliberately does not close
 over the file graph, so `super` being a test module itself does not make
 this one. No skip is derived and no file leaves any census. That matters
 more here than anywhere else in this directory:
-`the_whole_file_modules_are_read_from_the_declarations` is one of the twelve
+`the_whole_file_modules_are_read_from_the_declarations` is one of the sixteen
 bodies below, and a declaration written the other way would make this file a
 member of the very set it is itself asserting the membership of.
 
@@ -777,11 +777,47 @@ reconciliation table exists for, one level down.
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `assert!(!found.contains(&"private".to_owned()));`
 
-Eight shapes accepted, five refused, and the five are refused for five
-different reasons: private, private-in-an-inherent-impl, test region, a
+Twenty-two shapes accepted, six refused, and five of the six are refused for
+five different reasons: private, private-in-an-inherent-impl, test region, a
 trait method DECLARATION (no body to classify — its implementations are
 reached by the `impl … for …` shape), and a default body in a trait that
 is not itself visible.
+
+Six of the twenty-two were outside the domain, or in it under another name,
+until round 3 of #309. A method of `impl Trait for [u8; 4]` and a public
+trait's default body returning `[u8; 4]`: `find_header_brace` stopped at the
+`;` inside the brackets, so the impl gave no span and the body was taken for a
+declaration. A name after a comment, after a line break, a non-ASCII name and
+a raw identifier: `declared_fns` read `fn`, one space and ASCII, so the first
+three were unread and `r#raw_identifier` was `r`. The sixth refusal is the one
+that must stay one: a macro's `fn $name` is not a name
+(`docs/internals/effects.md` has each measurement: no name moved at that head).
+
+Four of the twenty-two are round 4's, and they are about a keyword that
+touches what follows it, which rustc allows wherever the next token is not
+part of a word: `impl<T> Glued<T>for Thing<T>`, `impl::path::Trait for Thing`
+and `impl Trait for&'static str` are trait impls, and until then the `impl`
+reader wanted a separator or `<` after `impl` and the `for` reader a separator
+on each side, so their methods were outside the domain. The fourth is the
+price, pinned so that it is a decision: `impl<F: for<'a> Fn(&'a u8)> Holder<F>`
+is an inherent impl whose header holds the word `for`, it reads as a trait
+impl, and its private `behind_a_bound` is in the domain. That costs a row and
+fails closed; telling a bound's `for` from the impl's cannot be done by the
+next token (`impl Tr for <X as Y>::Out` is a trait impl), and the tree holds
+no such header -- no name moved.
+
+## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `for separator in RUSTC_WHITESPACE {`
+
+The eleven separators rustc reads, each written after `fn`, after `trait`,
+after `impl` and on both sides of `for`: the free function, the default body
+and the trait impl's method are all in the domain, each counted once. Before
+round 4 of #309 the name reader read nine of the eleven (not U+200E, not
+U+200F) and the `trait`, `impl` and `for` readers read exactly one, U+0020;
+they read a keyword as a whole word now and ask nothing of what follows it.
+The last assertion hands the name reader a text no tokenizer has rewritten,
+because through `externally_reachable_fns` the tokenizer has already written
+the six separators a library predicate can miss as spaces, and a reader that
+went back to `char::is_whitespace` would pass every other row.
 
 ## `pub(in crate::effects::tests) fn the_reachable_fn_parser_finds_every_shape() {` › `let exploit = concat!(`
 
@@ -791,6 +827,35 @@ public trait that reaches an effect. The parser used to answer
 below was outside the classification domain of a CLASSIFIED module, and
 clippy, all 79 effects tests and all 38 container tests passed with it in
 the tree. It is in the domain now, which means somebody has to classify it.
+
+## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_domain_reaches_past_a_configured_item() {`
+
+The shape `PR7-WRAPPERS-EMPTY-DOMAIN` measured in six classified modules: a
+`#[cfg(test)] use` among the imports, every production `pub fn` below it.
+Under the truncating region the fixture derived nothing, and an empty derived
+set is equal to an empty record, so `reachable_fns_are_classified` passed
+over a module it had not read. The fixture also carries the three test-only
+shapes `production_code` must still remove -- a configured `pub fn`, a
+configured `impl` block (the `src/agent/bin.rs` shape) and a configured
+`mod` -- so the repair is pinned from both sides: the production `pub(super)
+fn` and the trait-impl `fmt` are derived, the three test-only names are not.
+Fails at the head before the repair with `derived: []`.
+
+## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn every_classified_module_that_declares_a_visible_fn_has_a_domain() {`
+
+The same defect on the tree rather than on a fixture, in three parts. The
+six modules the finding measured are pinned by name, so the empty-domain
+shape cannot return silently in the files it was found in. Then every entry
+of `CLASSIFIED_MODULES` whose production code spells `pub fn `,
+`pub(crate) fn ` or `pub(super) fn ` must derive at least one name -- a
+lexical sufficient condition, deliberately not a second parser: any of those
+three spellings in the blanked production code is a visible fn whatever
+else the file holds, and the count of such modules is asserted above forty
+so the scan cannot pass by finding nothing. Last, `src/rundir/names.rs`, the
+one classified module whose record is all-empty legitimately: it declares
+constants and no `fn` at all, and both halves of that are asserted, so a fn
+added there without a row fails here before it fails the classification
+census with a less specific message.
 
 ## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_comment_blanker_models_raw_strings() {`
 
@@ -1210,7 +1275,7 @@ or a string literal rather than code —
 
 So the claim that holds is "drops no occurrence that is **code**". The
 string-literal drop is the in-domain one: `Command::new(` is a needle of
-`runner::tests::every_production_process_start_is_classified`, `src/effects.rs`
+`runner::contract::tests::every_production_process_start_is_classified`, `src/effects.rs`
 is in that census's domain, and its row there was deleted by the same commit
 — which is the counterexample to the sentence twenty lines above it.
 
@@ -1260,7 +1325,7 @@ carried a hazard the other two did not:
 They were measured against each other rather than assumed: a `run_with_\
 timeout` planted at the **last line** of `src/agent/claude.rs` — a file the
 `effects.rs` region truncates to its first 66 of 1064 lines — is **seen** by
-`runner::tests::every_production_process_start_is_classified`, because that
+`runner::contract::tests::every_production_process_start_is_classified`, because that
 census used the second implementation. Two censuses in one crate, both
 answering "every production X is classified", over two different domains.
 
@@ -1271,8 +1336,11 @@ count at the bottom now pins. Every whole-tree census that asks a
 [`crate::effects::production_code`]: the whole file, comments and string
 literals blanked, every `#[cfg(test)]` **item** removed rather than the file
 truncated at the first one. It is a fourth semantics and deliberately not a
-fourth `production_region`: truncation is right for a *domain* question and
-wrong for a prohibition, and the two names say which is which.
+fourth `production_region`. The claim that truncation is right for a *domain*
+question did not survive `PR7-WRAPPERS-EMPTY-DOMAIN`: a cut at a
+`#[cfg(test)] use` among the imports empties the domain, so
+`externally_reachable_fns` reads this region too, and `production_region`
+remains for the censuses that pin its cut point by name.
 `events::log::tests::production_region` survives because two censuses in that
 file ask about one named file each and assert their own strip removed
 something before counting.

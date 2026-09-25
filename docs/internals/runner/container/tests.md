@@ -91,6 +91,12 @@ A create spec that asks for `image_id`.
 
 A whole plan, plus a fake runtime already holding the recorded image.
 
+## `impl Fixture` › `fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {`
+
+The same fixture in a root the caller owns. The mount-fault witnesses build it inside a
+`rundir::scratch_tree` tree they hold, so the root is reclaimed however the witness ends. `new`'s
+pid-named root, which nothing removes, is the tree's older allocator and is left as it was.
+
 ## `fn skipped(reason: &str) {`
 
 What a Docker-gated test does when there is no runtime.
@@ -518,6 +524,34 @@ Before: nothing is written.
 ## `fn a_hook_armed_at_a_phase_fails_the_funnel_at_that_phase()` › `let mut hooks = fixture.hooks();`
 
 After: the record is on disk and the call still fails.
+
+## `struct ContainerFaultAt {`
+
+The production adapter (`HarnessHooks`, recording the fixture's trace) with an error return armed
+at one `(site, phase)`. The harness records the phase first, as the funnel's own call does, so the
+observation export names the test as an execution of the coordinate; `RecordingHooks` arms the
+same error and records into no harness, which is why the fault witnesses below do not use it.
+
+## `fn a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(`
+
+G5's clause 2 found both phases of `Container.MountGitView` observed under the production adapter
+and faulted by no committed test, and no stranded view planted (R19, "the disposable Git view
+lives and dies with its invocation"). This faults each phase inside a real `launch` against the
+fake runtime: the launch returns the injected error with R26's intent written and synced and
+nothing created, and the view is left exactly where the residue authority's rows put R19 — absent
+before the mount, mounted after it. The tabled recovery is the next write command's startup
+census (`T-CONTAINER`: "remove Git view -> remove intent"), here a fresh run whose census finds the
+intent of a run whose owner is not running and reclaims it through the funnels; the view's absence
+and the intent's are read after it, and a second census over the converged state reclaims nothing.
+No event log is involved at this level, so nothing replays here; the same coordinates in a run
+with a log, resumed and replayed twice, are
+`engine::topology::recover::tests::a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume`.
+
+The fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds, so
+its private root is reclaimed when the witness returns and when it unwinds, under that guard's
+policy: a failed reclaim fails the test naming the root, and on an unwind it is reported without a
+second panic. The census removes only what the launch left; before #292's review round 6 nothing
+removed the root.
 
 ## `fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {`
 
@@ -1136,7 +1170,7 @@ host runner.
 Every container effect in the tree goes through the funnel.
 
 The census beside the denylist, in the idiom of
-`runner::tests::every_production_process_start_is_classified`. Module
+`runner::contract::tests::every_production_process_start_is_classified`. Module
 privacy cannot make a bypass a compile error from inside this subtree — an
 item private to `runner::container` is visible to every module a lane adds
 beside this one — so the enforcement is the clippy denylist (a build error)

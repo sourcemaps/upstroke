@@ -123,6 +123,41 @@ Fixture hostility as distinct-value counts, not as a comment.
 One variable, one entry: a duplicated key is an environment
 whose meaning depends on which end the child's runtime reads.
 
+## `fn every_composed_environment_disables_replacement_objects() {`
+
+Every role composes the replacement isolation, from any base and under
+any overlay (PR #130, pass 3's P1).
+
+`HostRunner::run` clears the ambient environment and installs exactly
+what `compose` returns, so a pair that is not composed there reaches no
+child. The base carries a value of its own and one of the two overlays
+restates the key, because the pair is upserted *after* the overlay
+precisely so that neither can decide it: an exact snapshot is measured
+against the objects the repository holds (`design/15`, "What an exact
+snapshot is exact against"), and that is not a property an adapter gets
+a vote on.
+
+Witnessed failing with the upsert removed from `compose`
+(`Some("whatever-the-operator-exported")` -- the base's own value
+surviving, since this key is deliberately not a reserved one that gets
+stripped) and with it moved above the overlay loop (`Some("0")`).
+
+## `fn the_v1_conductors_environment_composes_no_replacement_isolation() {`
+
+The other half of the pair above: the v0.1 conductor's environment adds
+nothing, so a gate over a v0.1 checkout reads the graph that checkout
+was written from (PR #271, round 1's regression finding).
+
+The base carries a value of its own and the assertion is that it
+*survives* — an exemption that stripped the key would be a third graph,
+not the producer's. The last line pins the connection to production:
+`HostRunner::for_legacy_workspace`, which `engine::run` and
+`engine::resume` install, is an environment reading `AsReplaced`.
+
+Witnessed failing with the `ObjectGraph::Recorded` condition removed from
+`compose` (`Some("1")` for every role and both name rules), which is the
+head this repair was written against.
+
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 
 "set but empty" and "unset" are different environments, and CLIs
@@ -1333,7 +1368,7 @@ five:
   value: `ShellKind::spec` and `bin::Invocation::spec` are the only two
   spec constructors this crate has and both write `env: Vec::new()`,
   and no call site adds an overlay entry (asserted by
-  `runner::tests::every_production_command_spec_payload_is_classified`);
+  `runner::contract::tests::every_production_command_spec_payload_is_classified`);
 * **timeout** — each role's own production default, five distinct
   values.
 
@@ -1472,7 +1507,7 @@ constants, five distinct values, none of them this fixture's.
 Field 7: the overlay. Empty everywhere, because that is production's
 only value — both spec constructors write `env: Vec::new()` and no
 call site adds an entry
-(`runner::tests::every_production_command_spec_payload_is_classified`
+(`runner::contract::tests::every_production_command_spec_payload_is_classified`
 is the tripwire for a call site that starts to). Stated as an
 assertion rather than left to silence: the day production carries an
 overlay, this row has to become a varying dimension like the four
@@ -1636,7 +1671,7 @@ containment *operation* ran for this role's child. A funnel that fired
 the hooks for a probe while skipping the operation would pass the first
 and fail the third.
 
-`runner::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
+`runner::contract::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
 does **not** discharge this: counting that two roles fall outside the
 site's declared context proves the mismatch exists; it does not prove
 the hooks execute on those roles. A counted admission is not runtime
@@ -2365,7 +2400,7 @@ reintroduce: a resolution remembered anywhere — a `OnceLock`, a field, a
 process-wide cache — hands the first boundary's answer to the second,
 and a value that is correct on first use and wrong on the second is
 invisible to any test that constructs one runner.
-`agent::built_program_tests` holds that for the adapters; this holds it
+`agent::adapter::built_program_tests` holds that for the adapters; this holds it
 for the boundary, with real spawns.
 
 Both orders, because "the first caller wins" is a property of order, and
@@ -2681,10 +2716,20 @@ in every observation except how many times the filesystem was asked, and
 that observation belongs to a fixture that would have to drive a whole
 engine run against a moving filesystem.
 
-The expectation is written out — two construction sites, both in
-`src/engine/mod.rs`, being `run_harness` and `resume_harness` — rather
-than counted from the tree, because a count read from the tree grows
-with it.
+The expectation is written out — two construction sites, `run_harness` in
+`src/engine/coordinator.rs` and `resume_harness` in `src/engine/resume.rs` —
+rather than counted from the tree, because a count read from the tree grows
+with it. Until 2026-09-20 both were in `src/engine/mod.rs`: the facade's entry
+points moved into the conductor modules they drive so that the facade calls
+nothing denied and carries no allow (`PR306-FACADE-INLINE-ESCAPE`), the facade
+re-exports them, and the two constructions moved with them, one per file. The
+census still counts two in the engine and none anywhere else.
+
+`CONSTRUCTORS` is why the census survived `HostRunner::for_legacy_workspace`
+(PR #271): a second constructor is a second spelling of the same thing this
+counts, and one that the census did not know would have read as *no* runner
+in the file that constructs it rather than as a second one. Both spellings are
+counted and both appear in the control.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `const SITES: [(&str, usize); 6] = [`
 
@@ -2693,11 +2738,12 @@ and how many times in each file.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `assert_eq!(`
 
-The injected control contains comments, literals, a typed test function and one later production construction. It must add exactly one count alone and when appended to each of the six source files.
+The injected control contains comments, literals, a typed test function and one later production construction per constructor spelling. It must add exactly `CONSTRUCTORS.len()` counts alone and when appended to each of the six source files.
 
-## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
+## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let conductors = [`
 
-And the two are the run and the resume facade, each of which then
+And the two are the run and the resume entry point the facade re-exports,
+each read from the conductor module that defines it, and each of which then
 borrows that one runner for pre-flight and every attempt.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {`
@@ -2706,7 +2752,7 @@ borrows that one runner for pre-flight and every attempt.
 each of the three agent CLIs runs by bare name exactly as it runs by
 path.
 
-The equivalence `agent::built_program_tests::the_host_runner_executes_a_
+The equivalence `agent::adapter::built_program_tests::the_host_runner_executes_a_
 bare_program_name_as_it_executes_the_resolved_path` claims, over the
 installation shape that one cannot express. That row uses `git` — a
 native `.exe`, which `CreateProcessW` reaches from a bare name whether or
@@ -2748,7 +2794,7 @@ difference in output can only be a difference in which file ran.
 
 The three names `bin::Invocation::named` ships, written here rather
 than read from the adapters' private `CLI` constants;
-`agent::built_program_tests::an_adapters_program_is_the_boundarys_…`
+`agent::adapter::built_program_tests::an_adapters_program_is_the_boundarys_…`
 is what ties each adapter to its own name.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {` › `let mut contents: Vec<String> = std::fs::read_dir(&bin)`
@@ -2946,8 +2992,11 @@ integer size, and shrinking an empty pipe needs no extra privilege.
 ## `const CONTROL: &str = r##"`
 
 STRIP-CONTROL goes through the same whole-file blanker and counter as
-production. Its only production construction follows a test-only item,
-so truncating at the first #[cfg(test)] also fails this control.
+production. Its production constructions — one per spelling in
+`CONSTRUCTORS` — follow a test-only item, so truncating at the first
+#[cfg(test)] also fails this control, and each spelling is written into a
+comment, a string literal, a raw literal, a byte literal and a test item
+so that no spelling is counted from prose.
 
 ## `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
 

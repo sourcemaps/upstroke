@@ -192,11 +192,18 @@ omission this module exists because of.
 
 **Another slice's, by contract.** Distinct from
 [`Self::RefusedByCheckpoint`], and the distinction is not pedantry:
-`checkpoint_refusals` authorises this build to refuse exactly two things
-— "integration and run end beyond refusal" — and a third refusal wearing
-that name would be a build refusing something the packet never let it
-refuse. It is not [`Self::NotYetImplemented`] either, because that is
-debt this slice owes and this is not.
+`checkpoint_refusals` authorises this build to refuse exactly one thing
+— run end beyond refusal — and a second refusal wearing that name would
+be a build refusing something the packet never let it refuse. It is not
+[`Self::NotYetImplemented`] either, because that is debt this slice owes
+and this is not.
+
+**No arm returns it today.** `IngestAnswers` carried it while answers
+were PR9's; PR9 ingests every origin's answer, so that arm is
+`Performed` and `every_branch_states_what_this_build_does_with_it`
+asserts the set of `NotThisSlice` branches empty. The variant stays,
+`#[allow(dead_code)]`, for the next branch that sits on a slice
+boundary.
 
 ## `pub enum Disposition` › `slice: &'static str,`
 
@@ -254,17 +261,20 @@ A short name for the branch, for a refusal message and a test.
 What this build does with it, and — for anything but `Performed` — the
 reason belongs in the arm, not in prose somewhere else.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::RefusedByCheckpoint,`
+## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::Performed,`
 
-`checkpoint_refusals`: "an intermediate build refuses, before any
-append, any operation whose terminals it does not implement". Run end
-beyond refusal is PR10's, and it is made unrepresentable rather than
-remembered — `Admitted` carries six of `Step`'s nine variants, so no
-value reaching the acting half can name a closure. The other two that
-do not cross are `RepairDispatch`, which is PR8's own checkpoint
-refusal and belongs to the ready-dispatch branch rather than to a
-branch of its own, and `Poisoned`, which is not a branch this build
-declines but the absence of one.
+Performed since PR10. `checkpoint_refusals` — "an intermediate build refuses,
+before any append, any operation whose terminals it does not implement" —
+named run end beyond refusal as PR9's one refusal, and `Admitted` carried no
+value that could name a closure. It carries one now: `Admitted::Closure`
+crosses the checkpoint and [`TopologyRun::close_run`] performs the closure
+procedure at `max_parallel = 1` (`closure.md`), appends `run_finished`, and
+finalizes (`finalize.md`). What does not cross is `Poisoned` (the absence of
+a branch), `NotStarted` (an unstarted fold admits nothing) and `Finished` (a
+finished run is refused continuation after its finalization). The
+concurrent half of closure — in-flight cancellation, the budget drain,
+promotion and publication completion inside closure — is refused by
+`closure::refuse_unclosable` naming PR11.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
 
@@ -315,21 +325,25 @@ questions". The channel decision is `interaction::answers_for`'s;
 this branch asks whatever source it is handed. An answer to a
 **verification-park** question is ingested here — PR8's
 `question_answered`, which the fold routes to `AwaitingMerge` for an
-answer and to a failed lineage for a decline — and an answer to a
-repair-admission or attempt park is refused, because ingesting those
-is PR9's. The `QuestionOrigin` the fold recorded is what tells the two
-apart, so the refusal is a statement about the question's kind rather
-than about the answer.
+answer and to a failed lineage for a decline — and, since PR9, an
+answer to a repair-admission or attempt park too. Every origin goes
+through `answer_for`: for a `HumanBinding` admission the answer must
+name a frozen option and carries the one-off binding derived from it
+(E2), any other origin records its option index, and a decline halts
+or not by the run's seam. The `QuestionOrigin` the fold recorded
+decides whether an override is derived, not whether the answer is
+ingested.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::NotThisSlice {`
+## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::Performed,`
 
-**Refused by contract, not by omission.** `pr_sequence[8]` does
-not contain the word "answer"; PR8 still refuses
-"repair-admission answers before any append"; and PR9 owns
-`question_answered`, `T-ANSWER`, and "AwaitingInput -> Pending
-via validated answer". PR7's `replay_recovery` never names
-`T-ANSWER`. Same shape as `Integration` and `Closure`, whose
-terminals arrive in PR8 and PR10.
+**Performed since PR9**, which owns `question_answered`, `T-ANSWER`
+and "AwaitingInput (limit | human_binding) -> Pending via validated
+answer". Two readers of one path: `step` polls every open question
+through the non-blocking `AnswerSource::poll` before it selects, so an
+answer left in the run directory while the engine was away is ingested
+ahead of any other branch; the hard block resolves (blocking) when
+nothing else can move. Both go through `answer_for` and
+`ingest_answer`, so what an answer means is decided once.
 
 ## `impl LoopBranch` › `pub const fn of(step: &Step) -> Option<Self> {`
 
@@ -349,8 +363,11 @@ cannot be read as "no further transition, therefore end the run".
 
 A repair dispatch is the ready-dispatch branch reaching a Repair-origin
 task: `eligibility_order` names "new ordinary dispatch" and no branch
-for repairs, so the step maps to that branch and the checkpoint refuses
-it there.
+for repairs, so the step maps to that branch, and the branch performs
+it. `dispatch_kind` derives `Repair { root, source }` from the registry
+entry's lineage and the `merge_rejected` that registered it, `dispatch`
+materializes the source in the same call, and `attempt_started` records
+what the materialization observed.
 
 ## `pub const fn of(step: &Step) -> Option<Self>` › `Step::BudgetExceeded(_) => None,`
 
@@ -401,9 +418,11 @@ first, so the integration diff is not asked it.
 
 The ceiling's ledger, charged before the terminal is appended, exactly as
 an attempt's reviews are charged in `settle`; `Spend::replay` rebuilds it
-from the terminal's record. An unavailable terminal carries no review
-record, so a review that ended in a park or an outage is charged live and
-not on replay.
+from the terminal's record. All three record-carrying terminals do carry
+one: `merge_prepared` and `merge_rejected` inside their verification
+record, and `merge_verification_unavailable` in its own `reviews`, so a
+review that ended in a park or an outage is charged live *and* on replay
+(`PR8-R2-SPEND-REPLAY`).
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) => match error.fate {`
 
@@ -794,16 +813,33 @@ One verification-park question ingested: `question_answered` is
 durable, and the candidate is back in the queue (`declined` false) or
 its lineage has failed (`declined` true).
 
-## `pub enum Progress` › `Blocked {`
+## `pub enum Progress` › `Finished {`
 
-Nothing could run and the run is blocked on open questions.
+The run ended: closure appended `run_finished` and terminal finalization
+ran. Replaces `Blocked`, which PR9 returned when nobody answered the hard
+block: since PR10 the hard block falls through to closure (record §3 R2), so
+an unanswered question ends the run Parked rather than leaving it neither
+running nor ended.
 
-The hard-block rule applied and nobody answered. Not a terminal: an
-answer arriving later un-blocks the run, and that is PR9's to ingest.
+A further `step` is refused — `Step::Finished` does not cross the
+checkpoint — with the outcome in the message.
 
-## `pub enum Progress` › `questions: usize,`
+## `pub enum Progress` › `outcome: RunOutcome,`
 
-How many questions are open.
+The outcome `run_finished` recorded.
+
+## `pub enum Progress` › `closed: usize,`
+
+How many open generations closure closed `RunEnding` on the way.
+
+## `pub enum Progress` › `report_written: bool,`
+
+Whether finalization wrote `report.json`, or found the file current by
+digest.
+
+## `pub enum Progress` › `execution_root_removed: bool,`
+
+Whether the emptied execution root was pruned (R18).
 
 ## `pub enum Progress` › `Waited {`
 
@@ -822,10 +858,10 @@ Which wait it was.
 A ceiling refused the next spawn and `budget_exceeded` is durable.
 
 `loop`: a breach "appends `budget_exceeded` before any effect and
-**proceeds to closure**" — and closure is one of the two terminals this
-build refuses, so the next iteration ends the command. The append and
-the refusal are deliberately two iterations: the record of the breach is
-durable either way, which is what makes the refusal diagnosable.
+**proceeds to closure**" — the next iteration selects `Closure` and
+[`TopologyRun::close_run`] ends the run `BudgetExceeded`. The append and
+the closure are deliberately two iterations: the record of the breach is
+durable either way, which is what makes a closure that fails diagnosable.
 
 ## `pub struct TopologyRun {`
 
@@ -1006,6 +1042,12 @@ value nothing has acted on, so `checkpoint_refusals`' "before any
 append" holds by construction rather than by this function remembering
 to check early enough.
 
+**Answers first.** Before selecting, `ingest_answers` polls every open
+question through the non-blocking half of the answer source; the first
+answer found is ingested and the step ends there (`Progress::Answered`),
+so an answer a person left while the engine was away moves the run
+before any other branch spends anything.
+
 **Every step runs inside the run lock's cleanup scope.** A Unix reaper
 reads its cleanup-lease paths from the thread-local scope when it is
 spawned, and a reaper spawned with none active holds no lease: the next
@@ -1088,7 +1130,12 @@ the one an operator needs.
 
 ## `impl TopologyRun` › `fn hard_block(`
 
-The hard-block branch: **apply the hard-block rules.**
+The hard-block branch: **apply the hard-block rules.** When no question
+resolves to an answer — an unattended source, or a person who left the
+prompt unanswered — the branch falls through to [`TopologyRun::close_run`]
+(record §3 R2): with nothing runnable, no backoff pending and only open
+questions in the way, the run's derived outcome is Parked, and Parked is a
+terminal a resume reopens with `run_resumed`. PR9 returned `Blocked` here.
 
 `loop`: "else apply the hard-block rules (attached-terminal prompt or
 `wait_on_block` for open questions)". Which of the two applies is
@@ -1099,31 +1146,31 @@ Deciding it here rather than in the engine keeps that distinction where
 the channels live." This branch asks the source it is handed and does
 not know which channel it got.
 
-### What it does with an answer, and why that is a refusal
+### What it does with an answer
 
-Nothing, yet. **Ingesting an answer is PR9's.** `pr_sequence[8]` does
-not contain the word *answer*; `pr_sequence[9]` (PR8) still lists
-"repair-admission answers refused before any append"; and
-`pr_sequence[10]` (PR9) owns `question_answered`, `T-ANSWER`, and
-"AwaitingInput (limit | human_binding) -> Pending via validated
-answer". PR7's `replay_recovery` does not name `T-ANSWER` at all.
+Ingests it. Each open question is resolved in id order and the first
+answer goes through `answer_for` and `ingest_answer`: `question_answered`
+is appended and the fold routes it — `AwaitingMerge` for a verification
+park, `Pending` for an admission (a `HumanBinding` one carrying the
+override the answer derived), a failed lineage for a decline, halting
+per the run's `halts_run` seam. `Answer::Unanswered` is not an answer:
+it is the detached case reporting that nobody was there, and the run
+stays blocked, which is exactly what the rule prescribes. The
+non-blocking half of the same path is `ingest_answers`, which `step`
+runs before it selects.
 
-So an answer that arrives is refused **before any append**, which is
-`checkpoint_refusals`' own shape: "an intermediate build refuses, before
-any append, any operation whose terminals it does not implement".
-`Answer::Unanswered` is not an answer and is not refused — it is the
-detached case reporting that nobody was there, and the run stays
-blocked, which is exactly what the rule prescribes.
-
-## `impl TopologyRun` › `fn open_question(&self, id: &QuestionId) -> Result<Question, UpstrokeError> {`
+## `impl TopologyRun` › `fn open_question(&self, id: &QuestionId) -> Result<OpenAsked, UpstrokeError> {`
 
 One open question, in the shape [`crate::interaction::AnswerSource`]
-reads.
+reads, with what `answer_for` needs beside it.
 
 The fold froze the id, kind, context and options when the settlement
 parked; `affected_tasks` is the display id the registry holds for the
 key it froze. Nothing is re-decided — `T-FAILED` is explicit that a
-question is rematerialized from the event and "never re-decided".
+question is rematerialized from the event and "never re-decided". The
+rest of `OpenAsked` is what the fold kept with the question: the key,
+the `QuestionOrigin`, and for a `HumanBinding` admission the authorized
+agents its options index into.
 
 ## `impl TopologyRun` › `fn continue_open(`
 
@@ -1141,10 +1188,22 @@ design was waiting for: recovery step (g) recreated these worktrees and
 nothing then started an attempt in them, so the run stalled with the
 pipeline entitlement held by a generation no branch could select.
 
-## `impl TopologyRun` › `source: None,`
+## `impl TopologyRun` › `source: match &kind {`
 
-Repairs are PR9's; a repair generation is refused by recovery
-before the loop ever sees one.
+A repair's source is the candidate its own `task_dispatched` recorded
+(`dispatched_source`), never re-derived from the registry: the
+continuation re-materializes exactly what the interrupted dispatch
+materialized.
+
+**For a repair the continuation is where the materialization happens
+again (`R6`).** Recovery (g) verifies or recreates the worktree at its
+base and materializes nothing, so a repair worktree is at its base when
+the loop reaches it — recreated there, or verified there still holding
+the index a completed pick left — and `resume_open_no_attempt` runs the
+pick once, afresh in either case: the materialization funnel restores the
+base's tree before it picks, because a second pick onto the merged index
+is not a no-op and applies the hunk again (the record's §12, finding 3,
+measured it). Its observation is what `attempt_started` records.
 
 ## `impl TopologyRun` › `fn retry_ready(`
 
@@ -1158,6 +1217,12 @@ every step of it — the reservation before the verify, because
 selection decision and its first append" and the verify is already past
 the decision; then `Worktree.Verify` for a worktree that is present,
 quiescent and still holding the retained tree.
+
+A retained repair generation retries in place like any other and
+records `Materialization::Retained` rather than materializing again: the
+worktree it re-enters is the one the previous attempt left, pick
+included (`ST-15`, repair). The materialization funnel clears the pick's
+state files for exactly this verification's sake.
 
 **`Quiescence::HoldsTree`, not `AtBase`.** A retained generation's whole
 point is that the worktree carries the previous attempt's cumulative
@@ -1260,6 +1325,25 @@ The ladder's cheap rungs, before the expensive ones. `judge` starts
 from this rather than from `None`, so a worker that died or produced
 no diff never reaches a gate or a frontier reviewer.
 
+## `impl TopologyRun` › `fn close_run(`
+
+Run-end closure, the acting half of `closure.md`: the ending outcome is
+read first (`closure::ending_outcome`), the shapes this build cannot close
+are refused (`closure::refuse_unclosable`, naming PR11), every closable
+generation is closed `RunEnding { outcome }` with its close appended and
+its slot scrubbed after the append, a provisional reservation still held
+is cancelled with a warning, the derivation is confirmed against the
+closed fold, `run_finished` is appended, and terminal finalization runs
+(`finalize::finalize`). The `Progress::Finished` it returns carries what
+finalization did.
+
+A kill or an append error inside the sequence leaves a prefix the next
+process's recovery completes: a `generation_closed` without its
+`run_finished` is a closed generation the sweep reclaims and a closure the
+next loop repeats; a torn `run_finished` is truncated by the next open and
+appended again (ST-17, `kill_inside_closure_recovers`,
+`append_error_inside_closure_ends_command_and_resume_completes_closure`).
+
 ## `impl TopologyRun` › `fn settle(`
 
 The branch's last clause: **settle the attempt.**
@@ -1281,6 +1365,20 @@ and a terminal failure settle directly; an outage defers from
 its question through [`Self::park_question`] before the settlement that
 records it. Two of those were refusals until the readers they needed
 existed, and both refusals are gone with their causes.
+
+### A closed settlement scrubs its slot
+
+Every `Closed` transition — retry, escalation, deferral, park, terminal
+failure — closes the generation in the fold, and R9's lifecycle says of a
+closed generation "pruned (forced); intent removed". Since PR10 the slot is
+scrubbed right after the `attempt_finished` append, as the retry path's
+`Close` arm and run-end closure already did for the closes they make.
+Before that every closed settlement other than a promotion left its
+worktree and intent for the next resume's sweep, and the ledger at Parked
+found the execution root not removed (record §6). The order is the durable
+close first, then the scrub: a kill between the two leaves a closed
+generation whose residue recovery reclaims, never a scrubbed generation
+the fold still holds open.
 
 ## `impl TopologyRun` › `feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,`
 
@@ -1326,10 +1424,17 @@ on would send an operator looking for a run that did not happen.
 
 ## `impl TopologyRun` › `resumable: plan.session_resume && assessed.outcome.session_id.is_some(),`
 
-Both halves, as `LadderState::resumable` documents: the
-agent's CLI advertises `session_resume` and this attempt
-actually returned a session to resume. Either alone closes
-the generation and retries from a fresh one.
+Three conjuncts: the two `LadderState::resumable` documents —
+the agent's CLI advertises `session_resume` and this attempt
+actually returned a session to resume — and, since this slice,
+`capture.unresolved.is_empty()`: a refused capture (an unmerged
+entry undeclared, a manifest that does not parse, a path
+declared both ways or in another case) carries the base's tree
+and the attempt it fails is not resumed, so a refused manifest
+is corrected in a fresh generation, not in place (`design/26`
+§26.4). Any one false closes the generation and retries from a
+fresh one. (Until PR #249's sixth repair round this paragraph
+named the first two only.)
 
 ## `impl TopologyRun` › `let question = match next {`
 
@@ -1468,7 +1573,9 @@ The question a parked attempt raises.
 
 Every word of it comes from the legacy authorities:
 `coordinator::question_context` for the prose the human reads and
-`coordinator::question_options` for what they can answer. The driver
+`coordinator::topology_question_options` for what they can answer — the
+schema-4 list, which does not promise that typed text reaches the agent,
+because `question_answered` carries no field for it. The driver
 supplies only what the frozen registry knows — the display id, the
 title, the acceptance list — and what this branch knows about the
 attempt.
@@ -1579,11 +1686,17 @@ The frozen ladder's shape, as `next_step` reads it.
 
 Every field from a record the run already froze: the entry's own ladder
 for the allowance and the rung count, and `run_started(4).limits` for the
-deferral ceiling. None of it is re-derived.
+deferral ceiling. None of it is re-derived. With a validated override the
+rung count is one: E2 binds every later attempt to the override, so there
+is no rung above it to escalate onto.
 
 ## `impl TopologyRun` › `fn dispatch_request(`
 
-What a first ordinary dispatch of `key` asks for.
+What a first dispatch of `key` asks for, ordinary or repair.
+`dispatch_kind` decides which: an entry with a lineage is a repair,
+dispatched inside its root's lineage lease from the candidate the
+latest `merge_rejected` registering it names (`rejected_source`), which
+R11 keeps reachable for as long as the run can resume.
 
 Every field is read from the run's own record, its log or the frozen
 registry, never invented: the base is the run's current authorized
@@ -1663,21 +1776,30 @@ The ceiling's ledger, charged before the terminal is
 appended, as an attempt's reviews are charged in `settle`:
 `Spend::replay` rebuilds it from the terminal's record.
 
-## `fn hard_block(` › `if origin != QuestionOrigin::VerificationPark {`
+## `impl TopologyRun` › `fn answer_for(`
 
-A verification park is PR8's to ingest; a repair-admission or an
-attempt park is PR9's, and `checkpoint_refusals` has this build
-refuse those answers before any append.
+One reading of an answer, for every origin. A decline becomes
+`Declined { decline_halts_run }` from the run's seam. For a
+`HumanBinding` admission the answer must be one of the frozen options
+(`chosen_index`, exact text), the option indexes the authorized agents
+the fold kept beside the question, and the override is
+`repair::one_off_binding`, derived once, here, at ingest (`R2`): the
+repair ladder's frozen floor, pinned, the catalogue's lowest model for
+that agent at or above the floor, the policy's effort for it. Text that
+names no option is refused before anything is appended. Any other
+origin records the chosen option index (0 for free text) and no
+override.
 
-## `impl TopologyRun {` › `fn ingest_verification_answer(`
+## `impl TopologyRun` › `fn ingest_answer(`
 
-Ingest an answer to a verification-park question: append
-`question_answered`, which the fold routes to `AwaitingMerge` (the
-candidate re-verifies under a new sequence) or, for a decline, to a
-failed lineage with its queue position consumed and its lease released,
-halting per `decline_halts_run`.
+Append `question_answered` for whichever origin `answer_for` read, and
+report `Answered { declined }`. The fold does the routing: `AwaitingMerge`
+for a verification park (the candidate re-verifies under a new
+sequence), `Pending` for an admission, a failed lineage for a decline
+with its queue position consumed and its lease released, halting per
+`decline_halts_run`.
 
-## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request) {`
+## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request, &mut charged) {`
 
 The reviews are charged as each pass completes, inside `judge` (`SpendAccount`
 below), and **not** from the judgement returned here: a judgement that fails
@@ -1686,15 +1808,75 @@ after a paid pass carries no reviews, and the Git-error arm settles the sequence
 another sequence in the same incarnation against a total that pass is missing
 from.
 
+`charged` is why that same failure no longer loses the record as well as the
+judgement. The account fills it as it charges, so it holds every pass the
+verification paid for whether or not a `Judgement` came back, and each
+[`Verified::Unavailable`] arm carries it to the terminal. The list is the
+account's, not the judgement's, which is the only reading under which the
+unjudged arm has anything to record.
+
 ## `struct SpendAccount<'a> {`
 
 The run's live account: each completed integration review is charged to the
 run's `Spend` as it returns, so the ceiling the next selection is admitted
-against has already paid for it.
+against has already paid for it. It also keeps the record it charged, in
+`charged`, because the terminal that ends this verification has to carry the
+same passes: without them a restart replayed a total without whatever a park or
+an infrastructure deferral had already paid for, and the incarnation after the
+restart admitted an integration the one before it refused
+(`PR8-R2-SPEND-REPLAY`).
 
-The replay of this path is a separate and deferred matter. A verification that
-reaches `merge_verification_unavailable` carries no review record in the frozen
-terminal, so a restart restores a total without it — `PR8-R2-SPEND-REPLAY`,
-which needs a wire-vocabulary change this slice may not make. That gap is about
-a restart; this account is about one incarnation, and holding the cost inside
-it needs no vocabulary at all.
+The seam takes the whole `ReviewRecord` rather than its cost for that reason,
+and the charge happens where the record is built, before the ledger and
+snapshot steps that can fail — so nothing is charged that is not also
+retained, and nothing is retained that is not also charged.
+
+## `struct OpenAsked {`
+
+An open question as the loop reads it: the `Question` the answer source
+sees, and beside it the key, the `QuestionOrigin` and — for a
+`HumanBinding` admission — the authorized agents the fold froze, which
+the chosen option indexes.
+
+## `fn chosen_index(options: &[String], text: &str) -> Option<u32> {`
+
+The option an answer's text names, by exact text. A one-off binding
+activates only through an option the spawn froze, so anything else is
+`None` and refused; for other origins `None` records index 0.
+
+## `impl TopologyRun` › `fn ingest_answers(`
+
+The non-blocking half of answer ingestion: every open question polled in
+id order while the run is not ending, the first answer ingested through
+`answer_for` and `ingest_answer`. `Ok(None)` when nothing has been
+answered, and the step goes on to select.
+
+## `impl TopologyRun` › `fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {`
+
+What a same-generation retry records as its materialization: `Retained`
+for a lineage member (the worktree keeps the pick the first attempt ran
+on), `None` for an ordinary task. The fold requires the field present
+exactly for lineage members.
+
+## `impl TopologyRun` › `fn dispatch_kind(&self, key: TaskKey) -> Result<DispatchKind, UpstrokeError> {`
+
+Ordinary or repair, from the frozen registry entry: an entry with no
+lineage dispatches on its predicted region; one with a lineage is a
+repair, executed inside the root's lineage lease from the candidate
+`rejected_source` reads.
+
+## `fn rejected_source(events: &[TopologyEvent], key: TaskKey) -> Result<CandidateRef, UpstrokeError> {`
+
+The candidate a repair is materialized from: the latest `merge_rejected`
+whose spawn registered `key`. Read from the log rather than kept on the
+fold (a Class A reading: the fold's tables stay as PR8 froze them), and
+refused when no rejection registered the key, since a repair with no
+recorded source has nothing to run against.
+
+## `pub(super) fn dispatched_source(`
+
+The source a specific generation of a repair was dispatched with: its
+own `task_dispatched`'s `source_candidate`. Recovery (g) and the
+continuation both read this, so what is re-materialized is what the
+interrupted dispatch materialized. Refused when the generation has no
+dispatch or its dispatch names no source.

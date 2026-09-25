@@ -210,56 +210,65 @@ not — there is no epsilon in which the two agree.
 The ceiling is consulted only inside an admitting branch: a run with
 nothing to spawn never records a refusal of a spawn.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {`
 
 -----------------------------------------------------------------------
 checkpoint_refusals
 -----------------------------------------------------------------------
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {`
 
-The checkpoint refusal, in the three shapes `checkpoint_refusals` and
-`loop` give it.
+The checkpoint, in the three shapes `checkpoint_refusals` and `loop`
+give it — and since PR10 none of the three is a refusal.
 
 A budget breach with structurally admissible work appends
-`budget_exceeded` **before any spawn**; integration and run end are
-refused **before any start append**.
+`budget_exceeded` **before any spawn**; an integration crosses carrying
+the candidate the queue chose (PR8); run-end closure crosses carrying the
+outcome the fold derived (PR10). What the checkpoint still refuses is
+`NotStarted`, `Finished` and `Poisoned`, none of which is a branch.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {` › `let fold = started();`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let fold = started();`
 
 (1) A breach with work to do. `select` is a pure function — it
 performs no effect and appends nothing — so "before any spawn" is
 structural, and what the loop is handed is the event itself.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {` › `assert_eq!(`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `assert_eq!(`
 
 It is not a start, so the checkpoint admits it, and the fold takes
 it — after which the run is ending.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {` › `let mut fold = started();`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let mut fold = started();`
 
-(2) An eligible integration is refused before the
-`merge_verification_started` that would start one.
+(2) An eligible integration crosses the checkpoint carrying the candidate
+the queue chose — since PR8 moved integration across; the ceiling is
+checked before it, so a breach records the stop instead.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {` › `let mut spend = Spend::new();`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let mut spend = Spend::new();`
 
 The ceiling is checked *inside* the integration branch and before
 it, so a breach with an eligible integration records the stop rather
 than the refusal.
 
-## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {` › `let fold = all_failed();`
+## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let fold = all_failed();`
 
-(3) Run-end closure is refused before `run_finished`.
+(3) Run-end closure crosses the checkpoint carrying the derived
+outcome; `close_run` re-derives it after closing whatever is open, so
+the value here is what the acting half starts from and not what it
+records.
 
 ## `fn the_checkpoint_admits_every_branch_this_build_implements() {`
 
 Every branch an intermediate build *is* entitled to perform survives
 the checkpoint unchanged.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {`
 
 **Which of `Step`'s variants cross the checkpoint, counted rather than
-asserted in prose.**
+asserted in prose.** Eight cross and three do not since PR10 added
+`Closure` to the crossing side and `NotStarted` and `Finished` to the
+refused one beside `Poisoned`; the history below is why the count is a
+test.
 
 `Admitted`'s doc said "[`Step`] has seven variants and this has five.
 The two that are missing…" for as long as `Step` had **eight** and three
@@ -273,12 +282,12 @@ The `match` below has **no wildcard arm**, so adding a variant to `Step`
 stops this file compiling until someone says which side it falls on.
 That is the part a count in a doc comment cannot do.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {` › `let mut names = Vec::new();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {` › `let mut names = Vec::new();`
 
 Exhaustive by construction: no `_` arm, so a ninth variant is a
 compile error here rather than a silently untested branch.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {` › `let mut distinct = names.clone();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {` › `let mut distinct = names.clone();`
 
 On a COPY: `names` must stay in the list's order, because it is
 zipped with it below. Sorting it in place paired every step with
@@ -451,7 +460,7 @@ The property is "an ending run proceeds to closure". What was asserted
 before `PR7-R3-LOOP-001` was "an *idle* ending run does":
 `a_run_with_no_admissible_work_never_asks_the_ceiling` drives an
 `all_failed()` fold, where **nothing else is live**, and
-`a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused`
+`a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint`
 asserts the closure on the same shape. That is the scoping gap round 3
 harvested.
 
@@ -616,6 +625,22 @@ rejection's — carries them, so a replay charges the same total.
 Any registered entry will do: `Spend::replay` reads the record's
 reviews and never the spawn it registers.
 
+## `fn reported_spend_replays_an_unavailable_terminals_reviews_against_the_candidate_it_verified() {`
+
+`Spend::replay`'s third review-carrying terminal, over the three shapes
+the pairing can take. Paired with the start of its own sequence, the
+reviews reach the run and the candidate's task. With no start in the
+slice, the run is charged and no task is — the only wrong answer that
+matters is losing the cost, since that is the overspend the whole path
+exists to prevent. With a start of another sequence, the terminal is not
+attributed to that candidate, so a mispairing cannot silently bill the
+wrong task.
+
+The middle two cases are unreachable through a resume: the fold refuses
+an unavailable record that is not the open transaction's. They are here
+because `replay` is `pub` over an arbitrary slice, and because the
+failure direction has to be the safe one wherever it is called from.
+
 ## `fn register_runnable_repair(fold: &mut TopologyFold) {`
 
 Reject the queued candidate of `GIMEL` on a conflict, registering a
@@ -624,7 +649,16 @@ registry, and the state `select` offers `RepairDispatch` from.
 
 Every other task is settled so the repair is the first ready key.
 
-## `fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {` › `let mut spend = Spend::new();`
+## `fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {`
 
-The ceiling is not consulted for a step the checkpoint refuses: a
-`budget_exceeded` is an append, and the refusal is before any.
+A runnable repair is selected as `RepairDispatch`, crosses the checkpoint
+as `Admitted::RepairDispatch`, and is bound by the ceiling like any
+dispatch: a breach names the repair's key, and after the dispatch the
+same generation is offered again as a continuation. PR8's refusal of
+this step, and the "not consulted" ceiling that went with it, are gone
+with `T-REPAIR-DISPATCH`.
+
+## `fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {` › `let mut spend = Spend::new();`
+
+The ceiling is consulted for a repair dispatch as for any other; a repair
+spends like any attempt.

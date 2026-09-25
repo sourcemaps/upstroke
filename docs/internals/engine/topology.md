@@ -76,6 +76,58 @@ fact — the production binary does not drive schema 4 yet.
 production callers and the allow stops being true rather than stops being
 convenient.
 
+## `#![forbid(`
+
+**The topology subtree's effect denials, restated at its root rather than
+inherited from the crate's defaults.** From #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`)
+until 2026-09-20 the parent, `src/engine/mod.rs`, carried
+`#![allow(clippy::disallowed_methods)]` as a row of `effects/allowlist.toml`'s
+legacy section, because the v0.1 conductor's entry points it called are denied
+effectful wrappers. A lint level is scoped by the module tree, not the file:
+without this line that allow would have reached all forty files under
+`engine::topology`, none of which writes an attribute of its own, and the
+placement scan
+(`every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist`) would
+never see it, because it records what a file writes. This `deny` overrides
+the inherited level for the whole subtree. It changes nothing on its own --
+the three lints were already errors under `-D warnings` -- and it is the
+whole difference between "topology is denied" and "topology is exempt" under
+an allow written above it: it had to land in the same commit as the parent's
+allow, never separately, and it outlives that allow for the same reason.
+Deny-at-module is the established form (`connect/render.rs`,
+`status/render.rs`, `util/terminal.rs`, `validate/graph.rs`,
+`validate/render.rs`), and a `deny` needs no allowlist row, since the scan
+records only `allow` and `expect`. An attribute somebody can delete is a
+weaker guarantee than the absence of an allow was, so
+`effects::tests::the_topology_root_re_denies_every_lint_the_engine_facade_allows`
+holds it: it reads both files and refuses a missing or narrowed deny, and it
+compiles the shape -- an ancestor with the allow #306 wrote, this deny, a child
+reaching one denied primitive per lint -- against the real denylist, beside the
+same shape without the deny, in which the child's reach into a denied wrapper
+goes unrefused.
+
+**This deny fences this subtree and nothing else.** The third review of #306
+(`PR306-FACADE-ALLOW-ESCAPES-TO-SIBLINGS`) put a `pub(super) fn` calling
+`std::fs::write` in `src/engine/assembly.rs`, referenced it from a production
+body of [`integrate`](topology/integrate.md), and clippy and the suite stayed
+green: the facade's other children inherited its allow exactly as this one
+would have. Since round 3 the five of them that write no allow of their own --
+`assembly`, `classify`, `options`, `preflight`, `report` -- carry this same
+attribute, and
+`effects::tests::every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits`
+walks every module the facade declares, so the boundary is held as a whole
+rather than one root at a time.
+
+**No fence on a child reaches what the parent itself holds.** The fourth
+review of #306 (`PR306-FACADE-INLINE-ESCAPE`) went round all six: an
+attribute-free inline module written in the facade, and a function placed
+directly in it, each under the facade's allow, each visible from here, neither
+classified. That is closed at the parent, by the parent allowing nothing:
+since 2026-09-20 the facade's entry points live in `coordinator` and `resume`,
+the facade re-exports them and denies these same three lints, and
+`effects::tests::the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`
+holds that of every module this subtree descends from.
+
 ## `pub mod preflight;`
 
 The schema-4 attempt-plan assembler, which lives engine-side.
