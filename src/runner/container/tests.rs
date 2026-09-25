@@ -4664,7 +4664,6 @@ fn windows_a_view_whose_remover_stalls_delete_pending_converges_once_the_stall_e
             !path.exists(),
             "[{tag}] the view is gone once the stall ends"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 }
 

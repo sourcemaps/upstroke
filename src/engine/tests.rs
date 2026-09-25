@@ -795,12 +795,16 @@ fn no_pools() -> PathBuf {
         .clone()
 }
 
+/// The run's private half: a **sibling** of the repository, as the design keeps
+/// the two apart, and a fixed name rather than `<repo>-home`.
+///
+/// The repository is a child of its own guarded tree ([`temp_engine_repo`]), so
+/// a sibling of it is inside that tree and no second fixture can collide on the
+/// name. Four characters rather than nine matter because this segment is in the
+/// deepest path the suite builds and Windows refuses a `$GIT_DIR` past 220
+/// characters; `rundir::scratch_tree`'s `NAME_ENTROPY` records the whole budget.
 fn private_root_for(repo: &Path) -> PathBuf {
-    let name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "run".to_owned());
-    repo.with_file_name(format!("{name}-home"))
+    repo.with_file_name("home")
 }
 
 fn resume_options(repo: &Path, run_id: &str) -> ResumeOptions {

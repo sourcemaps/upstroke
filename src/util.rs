@@ -745,10 +745,10 @@ mod tests {
         let root = tree.path();
         std::fs::write(root.join("record"), b"{}\n").expect("a changed directory");
 
-        windows_fsync_dir(&root, WINDOWS_DIRECTORY_ACCESS)
+        windows_fsync_dir(root, WINDOWS_DIRECTORY_ACCESS)
             .expect("the production mask must flush a directory");
 
-        let read_only = windows_fsync_dir(&root, windows_sys::Win32::Foundation::GENERIC_READ);
+        let read_only = windows_fsync_dir(root, windows_sys::Win32::Foundation::GENERIC_READ);
         let refusal = read_only
             .expect_err("a read-only handle must not be able to flush; the mask is over-asking");
         assert_eq!(

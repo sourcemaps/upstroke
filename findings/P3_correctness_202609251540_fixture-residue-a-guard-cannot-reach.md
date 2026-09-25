@@ -24,10 +24,10 @@ Counted from the surviving names of that run, `ls` of the fresh `TMPDIR` after
 
 | what survives | how many | why its `Drop` does not run |
 |---|---|---|
-| `upstroke-scratch-neutral-gitconfig-*` | 15 | one per **child process**. `workspace_manager::fixture::neutral_git_config` acquires a tree in a `OnceLock`; the kill children re-exec this test binary and die by `std::process::abort()`, which runs no destructor |
+| `upstroke-neutral-gitconfig-*` | 15 | one per **child process**. `workspace_manager::fixture::neutral_git_config` acquires a tree in a `OnceLock`; the kill children re-exec this test binary and die by `std::process::abort()`, which runs no destructor |
 | `upstroke-pr4-kill-helper-*` | 4 | `runner::host::tests::spawn_funnel_kill_helper` ends at `std::process::exit(0)` on its startup-point branch, before its own removal and past every `Drop` |
-| `upstroke-scratch-engine-nopools-*` | 3 | one per child process, same `OnceLock` shape as the first row |
-| `upstroke-scratch-{route-hermetic,review-plan,review-nopools,config-tests,config-nopools,config-hermetic}-*` | 6 | one each, in the **parent**: a `static`'s destructor is never run at process exit, which is Rust's documented behaviour and not a defect of these fixtures |
+| `upstroke-engine-nopools-*` | 3 | one per child process, same `OnceLock` shape as the first row |
+| `upstroke-{route-hermetic,review-plan,review-nopools,config-tests,config-nopools,config-hermetic}-*` | 6 | one each, in the **parent**: a `static`'s destructor is never run at process exit, which is Rust's documented behaviour and not a defect of these fixtures |
 | the sixth `config` root | 1 | as above |
 
 So the residue is 19 roots belonging to processes that end without unwinding and 7 belonging to
@@ -41,14 +41,14 @@ child: `engine::topology::scaffold::kill_child_and_adopt_in_a_scratch_tree` hand
 inside a tree whose guard does run. Applying it to the seven `kill_child_and_adopt` call sites and
 to `spawn_funnel_kill_helper` would close 19 of the 29.
 
-It was **not** applied here, and the reason is measurable rather than a preference: nesting a
-child's temporary directory one level deeper is what turned #292's Windows CI leg red. Git for
-Windows refuses `git worktree add` when the administrative `.git` path exceeds 220 characters
-(`'$GIT_DIR' too big`), the kill children build worktrees, and
-`temp_dir()/upstroke-scratch-<tag>-<ulid>/` adds about 45 characters to every path beneath it on a
-runner whose `TEMP` is already long. The five sites that do nest are in `master` and green, so one
-level is evidently survivable; adding seven more is a change whose cost is paid on a leg this
-session cannot run. **The owner should rule on it rather than an implementer assuming it.**
+It was **not** applied here, and the reason is measured rather than a preference: nesting a child's
+temporary directory one level deeper spends the Windows path budget twice. Git for Windows dies
+with `fatal: '$GIT_DIR' too big` when `$GIT_DIR` exceeds `PATH_MAX - 40`, which is 220 characters,
+and the five sites that already nest are the deepest chains the suite builds — measured at 198
+characters at this head, against 246 before the root name was shortened, on a `TMPDIR` head the
+same length as the CI guest's. Each extra nested root costs another `upstroke-<tag>-<10>` segment.
+Adding seven more such chains is a change whose cost is paid on a leg this session cannot run.
+**The owner should rule on it rather than an implementer assuming it.**
 
 The seven `static` roots are a different question and probably not worth a change: one directory
 per process, created once, is the price of a fixture every test in a module reads, and the
