@@ -445,7 +445,8 @@ fn a_malformed_entry_is_refused_even_for_a_site_this_run_does_not_want() {
 /// scratch test on the guest, which asserted `is_err()` and passed.
 #[test]
 fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
-    let root = scratch("already-gone");
+    let tree = scratch("already-gone");
+    let root = tree.path();
     fs::create_dir_all(&root).expect("fixture root");
     let absent = root.join("no-such-tree");
     assert!(!absent.exists(), "the fixture must not create it");
@@ -6424,7 +6425,8 @@ fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges()
 #[test]
 fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
     use std::os::unix::ffi::OsStringExt as _;
-    let root = scratch("byte-named-repository");
+    let tree = scratch("byte-named-repository");
+    let root = tree.path();
     let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
     match fs::create_dir_all(&repo) {
         Ok(()) => {}
@@ -7667,7 +7669,8 @@ fn base_without_replacement_isolation() -> HostEnvironment {
 /// This is the half that depends on no list of names: an eighteenth mechanism
 /// costs this panic rather than a silent pass.
 fn assert_a_role_process_sees_replacements(tag: &str) {
-    let root = scratch(&format!("role-replacement-live-{tag}"));
+    let tree = scratch(&format!("role-replacement-live-{tag}"));
+    let root = tree.path();
     let repo = root.join("repo");
     create_dir(&repo);
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -8232,7 +8235,8 @@ fn probe_outcome(status: std::process::ExitStatus) -> String {
 /// is witnessed doing the work.
 #[test]
 fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
-    let root = scratch("replacement-controls");
+    let tree = scratch("replacement-controls");
+    let root = tree.path();
     let rows = hostile_replacement_environments(&root);
     assert_eq!(
         rows.len(),
@@ -8310,7 +8314,8 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
 /// and this is the measurement rather than the argument.
 #[test]
 fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
-    let root = scratch("git-config-redirect");
+    let tree = scratch("git-config-redirect");
+    let root = tree.path();
     let repo = root.join("repo");
     create_dir(&repo);
     // Neutralised, because `GIT_TEMPLATE_DIR` writes into a repository at
@@ -10729,7 +10734,8 @@ fn a_kill_at_id_unread_leaves_a_gc_owned_object_nothing_adopts() {
 /// observe it is from outside.
 #[test]
 fn a_kill_at_id_unread_aborts_before_the_id_is_recorded() {
-    let record = scratch("id-unread-kill").join("record");
+    let tree = scratch("id-unread-kill");
+    let record = tree.path().join("record");
     let helper = Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",

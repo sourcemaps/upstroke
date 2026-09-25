@@ -11,6 +11,7 @@ use std::sync::Arc;
 use super::*;
 use crate::gates::ShellKind;
 use crate::rundir::RunPaths;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
@@ -215,6 +216,10 @@ impl ContainerRuntime for Runtime {
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return.
+    _tree: ScratchTree,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -229,7 +234,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, exit_on_start: bool) -> Self {
-        let root = repo::scratch(tag);
+        let tree = repo::scratch(tag);
+        let root = tree.path().to_path_buf();
         let repo_dir = root.join("repo");
         let (head, _) = repo::repository(&repo_dir);
         let private_root = root.join("private");
@@ -268,6 +274,7 @@ impl Fixture {
             },
             runtime: Runtime::new(trace.clone(), exit_on_start),
             trace,
+            _tree: tree,
             root,
             repo: repo_dir,
             private_root,
@@ -3617,7 +3624,8 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-env");
+    let tree = repo::scratch("real-env");
+    let root = tree.path();
     let run_id = gated_run("env");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
@@ -3733,7 +3741,8 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-ro");
+    let tree = repo::scratch("real-ro");
+    let root = tree.path();
     let run_id = gated_run("readonly");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
@@ -3832,7 +3841,8 @@ fn real_docker_confines_a_gate_to_its_mount() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-confine");
+    let tree = repo::scratch("real-confine");
+    let root = tree.path();
     let run_id = gated_run("confine");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
@@ -3939,7 +3949,8 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-outside");
+    let tree = repo::scratch("real-outside");
+    let root = tree.path();
     let run_id = gated_run("outside");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
@@ -4049,7 +4060,8 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-daemonspec");
+    let tree = repo::scratch("real-daemonspec");
+    let root = tree.path();
     let run_id = gated_run("daemonspec");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
@@ -4220,7 +4232,8 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-shadow");
+    let tree = repo::scratch("real-shadow");
+    let root = tree.path();
     let run_id = gated_run("shadow");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
@@ -4361,7 +4374,8 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-gitview");
+    let tree = repo::scratch("real-gitview");
+    let root = tree.path();
     let run_id = gated_run("gitview");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
@@ -4467,7 +4481,8 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-parity");
+    let tree = repo::scratch("real-parity");
+    let root = tree.path();
     let run_id = gated_run("parity");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
@@ -4543,7 +4558,8 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
          would be vacuous: {declared}"
     );
 
-    let root = repo::scratch("real-credenv");
+    let tree = repo::scratch("real-credenv");
+    let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
     let identity = real_identity(&root, &repo_dir, gated_run("credenv"));
@@ -4641,7 +4657,8 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = repo::scratch("real-descendant");
+    let tree = repo::scratch("real-descendant");
+    let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
     let identity = real_identity(&root, &repo_dir, gated_run("descendant"));

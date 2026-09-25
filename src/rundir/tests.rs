@@ -25,6 +25,7 @@ use super::*;
 // assertion changes and no body moves; these two lines are the whole of what the
 // extraction owes this file.
 use super::classify::*;
+use super::scratch_tree::ScratchTree;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
@@ -33,18 +34,60 @@ use crate::agent::proc::test_support::readiness;
 #[cfg(unix)]
 use crate::workspace_manager::fixture::{rest_within, say_on_stderr};
 
-/// A scratch tree for one test.
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
 ///
 /// `pub(crate)` for the sibling suite in `discovery.rs`: the fixtures live here
 /// because this file carries the funnel allowance that `std::fs::create_dir_all`
 /// and `std::fs::write` need, and `discovery.rs` denies all three governed
-/// lints and takes no allowlist row. What crosses the boundary is a built
+/// lints and takes no allowlist row. What crosses the boundary is a guarded
 /// directory, never a primitive.
-pub(crate) fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-rundir-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+///
+/// # What this replaces, and why none of it is left
+///
+/// The helper here built `temp_dir()/upstroke-rundir-<tag>-<pid>`, opened with
+/// `let _ = fs::remove_dir_all(&dir)` and then created the root over whatever
+/// survived. Four defects in five lines, and [`scratch_tree::acquire`] closes
+/// all four at once:
+///
+/// * the recursive deletion ran **before** any ownership claim, on a name
+///   another holder could be using, so it deleted that holder's content
+///   (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). `acquire` never deletes: an
+///   occupied root and an undecidable one are both refusals;
+/// * the deletion's result was discarded, so a removal that failed left the
+///   test running against a fixture that was not fresh and said nothing.
+///   Nothing is discarded here — acquisition returns a refusal and this
+///   function panics on it, and the reclaim's result is matched by
+///   `ScratchTree`'s `Drop`;
+/// * the name was keyed on the process id, and Windows recycles pids, so a
+///   "fresh" fixture could be another process's leftovers. The ULID in
+///   `acquire`'s name is not something a recycled pid can supply; and
+/// * the root was returned as a bare `PathBuf` that nothing ever reclaimed
+///   (`PR7-SCRATCH-FIXTURE-LEAK`, measured at roughly 45.7 million leaked
+///   inodes on the build box). The guard reclaims on the normal return and on
+///   an unwind alike.
+///
+/// # Bind the return value to a live local
+///
+/// [`scratch_tree::ScratchTree`] is an RAII guard. `let tree = scratch("x");`
+/// keeps the tree for the rest of the scope; `let _ = scratch("x");` drops the
+/// guard at the end of that statement and deletes the fixture before the
+/// test's first assertion. Bind it, then take `tree.path()`.
+///
+/// # Panics
+///
+/// If the root cannot be acquired. A refusal is not recoverable here: the
+/// caller asked for a tree it owns, and nothing this helper could do next
+/// would give it one without deleting somebody else's.
+pub(crate) fn scratch(tag: &str) -> scratch_tree::ScratchTree {
+    let parent = std::env::temp_dir();
+    match scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 /// Make `<repo>/.upstroke/runs/<run_id>` a husk: a directory whose log holds no
@@ -170,7 +213,8 @@ fn ensuring_existing_run_directories_preserves_resume_contents() {
 fn agent_authored_files_land_outside_the_workspace() {
     // The whole point of the split: a reviewer with read access to the
     // repo has no path to the implementer's transcript.
-    let root = scratch("split");
+    let tree = scratch("split");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
 
@@ -215,7 +259,8 @@ fn the_private_fallback_is_never_the_workspace() {
 
 #[test]
 fn runs_list_chronologically_and_resolve_by_prefix() {
-    let root = scratch("discover");
+    let tree = scratch("discover");
+    let root = tree.path();
     let repo = root.join("repo");
     for id in ["01AAA", "01BBB", "01BCC"] {
         commit_run(&repo, id);
@@ -238,14 +283,16 @@ fn runs_list_chronologically_and_resolve_by_prefix() {
 
 #[test]
 fn an_empty_repo_names_where_it_looked() {
-    let root = scratch("norun");
+    let tree = scratch("norun");
+    let root = tree.path();
     let err = resolve_run_id(&root.join("repo"), "01A").expect_err("nothing to resume");
     assert!(err.to_string().contains("no runs found"), "got: {err}");
 }
 
 #[test]
 fn questions_resolve_to_their_run_by_prefix() {
-    let root = scratch("questions");
+    let tree = scratch("questions");
+    let root = tree.path();
     let repo = root.join("repo");
     for (run, question) in [
         ("01AAA", "q-ONE"),
@@ -278,7 +325,8 @@ fn questions_resolve_to_their_run_by_prefix() {
 
 #[test]
 fn a_run_can_only_be_held_once_at_a_time() {
-    let root = scratch("lock");
+    let tree = scratch("lock");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
 
@@ -317,7 +365,8 @@ fn a_run_can_only_be_held_once_at_a_time() {
 #[cfg(unix)]
 #[test]
 fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
-    let root = scratch("orderedhandoff");
+    let tree = scratch("orderedhandoff");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("first acquire");
@@ -340,7 +389,8 @@ fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
 #[cfg(unix)]
 #[test]
 fn cleanup_lease_failure_closes_primary_before_releasing_claim() {
-    let root = scratch("cleanupfailurehandoff");
+    let tree = scratch("cleanupfailurehandoff");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("primary acquired");
@@ -378,7 +428,8 @@ fn the_lock_answers_at_once_rather_than_waiting_to_be_sure() {
     //
     // The grace existed to disbelieve a `fork` window. The primitive now
     // rules that out outright, so there is nothing left to wait for.
-    let root = scratch("prompt");
+    let tree = scratch("prompt");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
@@ -426,7 +477,8 @@ fn a_fork_cannot_keep_a_released_run_locked() {
     // Against `flock` this test fails outright: the probe below sees the
     // lock held by the sleeping child. `fcntl` locks are not inherited, so
     // releasing really releases.
-    let root = scratch("forkwindow");
+    let tree = scratch("forkwindow");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
 
@@ -476,7 +528,8 @@ fn worktree_lock_child_holds_run_a() {
 
 #[test]
 fn two_run_ids_cannot_drive_one_worktree_concurrently() {
-    let root = scratch("two-runs-one-worktree");
+    let tree = scratch("two-runs-one-worktree");
+    let root = tree.path();
     let repo = root.join("repo");
     let git_dir = root.join("git-dir");
     fs::create_dir_all(&git_dir).expect("worktree git dir");
@@ -778,7 +831,8 @@ fn a_second_process_is_refused_the_run_lock() {
     // Two engines are two processes, and `fcntl` locks are per-process —
     // which is exactly why this has to be tested across a real process
     // boundary rather than against a second `acquire` here.
-    let root = scratch("twoprocs");
+    let tree = scratch("twoprocs");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
 
@@ -842,7 +896,8 @@ fn a_holder_never_opens_its_own_lock_file() {
     // `is_running` answers from `claims` before it would open anything,
     // which is what makes that unreachable. This test is here because the
     // rule is invisible in the code that depends on it.
-    let root = scratch("selfclose");
+    let tree = scratch("selfclose");
+    let root = tree.path();
     let paths = paths_in(&root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
@@ -889,7 +944,8 @@ fn an_exact_match_resolves_to_the_name_on_disk() {
     // directory that actually exists: on a case-sensitive filesystem the
     // uppercased input names nothing, and every caller joins this id onto
     // a path.
-    let root = scratch("ondisk");
+    let tree = scratch("ondisk");
+    let root = tree.path();
     let repo = root.join("repo");
     commit_run(&repo, "01AbCd");
 
@@ -1206,7 +1262,8 @@ fn shapes() -> Vec<DirShape> {
 
 #[test]
 fn every_publication_prefix_classifies_as_the_packet_names_it() {
-    let root = scratch("shapes");
+    let tree = scratch("shapes");
+    let root = tree.path();
     let mut committed = 0usize;
     let mut husks = 0usize;
     let mut indeterminate = 0usize;
@@ -1274,7 +1331,8 @@ fn every_publication_prefix_classifies_as_the_packet_names_it() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_event_log_is_a_husk_however_valid_its_target() {
-    let root = scratch("symlinked-log");
+    let tree = scratch("symlinked-log");
+    let root = tree.path();
     let bytes = format!("{}\n", committed_line("01LINK", 3));
 
     // The premise, stated rather than assumed: these exact bytes under this
@@ -1308,7 +1366,8 @@ fn a_symlinked_event_log_is_a_husk_however_valid_its_target() {
 
 #[test]
 fn a_missing_directory_and_a_missing_log_are_both_husks() {
-    let root = scratch("absent");
+    let tree = scratch("absent");
+    let root = tree.path();
     assert_eq!(classify_run_dir(&root.join("nothing")), RunDirClass::Husk);
     let bare = root.join("bare");
     fs::create_dir_all(&bare).expect("bare");
@@ -1354,7 +1413,8 @@ fn committed_line_of_exactly(run_id: &str, total: usize) -> Vec<u8> {
 /// `reviews/FINDINGS.md`.
 #[test]
 fn classification_does_not_depend_on_the_probe_window() {
-    let root = scratch("window");
+    let tree = scratch("window");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     let mut lengths = std::collections::BTreeSet::new();
     for (label, total) in [
@@ -1393,7 +1453,8 @@ fn classification_does_not_depend_on_the_probe_window() {
 /// The two files differ in exactly one byte's presence.
 #[test]
 fn a_complete_first_line_with_no_terminator_is_a_husk_at_every_length() {
-    let root = scratch("unterminated");
+    let tree = scratch("unterminated");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     for (label, total) in [
         ("inside the window", 4096),
@@ -1438,7 +1499,8 @@ fn a_complete_first_line_with_no_terminator_is_a_husk_at_every_length() {
 /// This asserts the bytes rather than the verdict, on both paths.
 #[test]
 fn the_probe_returns_the_lines_exact_bytes_on_both_paths() {
-    let root = scratch("exact");
+    let tree = scratch("exact");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     for (label, total) in [("window path", 4096), ("scan path", window + 7)] {
         let line = committed_line_of_exactly("01EXACT", total);
@@ -2204,7 +2266,8 @@ fn the_proof_kinds_are_the_retain_kinds_the_classifier_does_not_add() {
 /// reintroduce.
 #[test]
 fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
-    let root = scratch("budget");
+    let tree = scratch("budget");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     let line = committed_line_of_exactly("01BUDGET", window + 4096);
     let path = root.join("long").join(EVENT_LOG);
@@ -2256,7 +2319,8 @@ fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
 /// (`SWEEP-CLASSIFY-009`).
 #[test]
 fn a_log_with_no_newline_at_all_is_a_husk_however_long_it_is() {
-    let root = scratch("no-newline");
+    let tree = scratch("no-newline");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     // Valid JSON, so the answer cannot come from the parse.
     let head = committed_line_of_exactly("01NONL", 4096);
@@ -2398,7 +2462,8 @@ fn classification_must_answer(public: &Path, probe: bool, never_returned: &str) 
 fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
     use std::os::unix::fs::FileTypeExt as _;
 
-    let root = scratch("fifo");
+    let tree = scratch("fifo");
+    let root = tree.path();
     let public = root.join("run");
     fs::create_dir_all(&public).expect("public");
     let log = public.join(EVENT_LOG);
@@ -2471,7 +2536,8 @@ fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
 #[cfg(unix)]
 #[test]
 fn a_run_directory_whose_log_never_ends_is_still_classified() {
-    let root = scratch("endless");
+    let tree = scratch("endless");
+    let root = tree.path();
     let public = root.join("run");
     fs::create_dir_all(&public).expect("public");
     assert!(
@@ -2505,8 +2571,13 @@ fn a_run_directory_whose_log_never_ends_is_still_classified() {
 /// A repository holding one committed run, one husk older than it and one
 /// husk newer than it — so a reader that returned husks would be caught
 /// whichever end of the sort it went wrong at.
-fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
-    let repo = scratch(tag).join("repo");
+///
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the tree before the caller's first
+/// assertion. The caller binds it to `_tree` for its own scope.
+fn repo_with_a_committed_run_between_two_husks(tag: &str) -> (ScratchTree, PathBuf) {
+    let tree = scratch(tag);
+    let repo = tree.path().join("repo");
     fs::create_dir_all(runs_root(&repo).join("01AAAHUSK")).expect("older husk");
     write(
         &public_dir(&repo, "01AAAHUSK").join(PLAN),
@@ -2518,7 +2589,7 @@ fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
         &public_dir(&repo, "01ZZZHUSK").join(MARKER),
         &any_marker_bytes(),
     );
-    repo
+    (tree, repo)
 }
 
 /// Every reader **in this module**, crossed with every husk **shape** —
@@ -2547,7 +2618,7 @@ fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
 /// question id being searched for, so `find_question` would return it.
 #[test]
 fn every_reader_returns_committed_directories_only() {
-    let repo = repo_with_a_committed_run_between_two_husks("readers");
+    let (_tree, repo) = repo_with_a_committed_run_between_two_husks("readers");
     // The third shape: a marker that is present and unparseable. Not a
     // fifth reader — the four this module owns are all here already, and
     // the fifth, `status`, is pinned in `status.rs` — a third *shape*.
@@ -2600,7 +2671,8 @@ fn a_committed_run_is_never_excluded_because_of_a_marker() {
     // without a committed run_started **and never hide one because of a
     // marker**". Both marker shapes, and with a newer husk present so the
     // committed run has to win `latest_run` on its merits.
-    let repo = scratch("markedcommitted").join("repo");
+    let tree = scratch("markedcommitted");
+    let repo = tree.path().join("repo");
     commit_run(&repo, "01AAAMARKED");
     commit_run(&repo, "01BBBSTAGED");
     write(
@@ -2634,7 +2706,7 @@ fn latest_run_skips_a_husk_that_would_otherwise_shadow_it() {
     // The named change: "legacy husks that today shadow latest_run are no
     // longer listed". Asserted from the shadowing direction, because that
     // is the operator-visible symptom.
-    let repo = repo_with_a_committed_run_between_two_husks("shadow");
+    let (_tree, repo) = repo_with_a_committed_run_between_two_husks("shadow");
     assert_eq!(latest_run(&repo).as_deref(), Some("01BBBRUN"));
     assert!(
         run_dir_names(&repo)
@@ -2655,6 +2727,11 @@ const BOUND_INCARNATION: &str = "01INCARNATION00000000000000";
 /// owner record published, and no commit record. The one shape the proof
 /// is supposed to accept.
 struct BoundHusk {
+    /// The guard over the root [`BoundHusk::new`] acquired, kept for the
+    /// husk's whole life so the tree is reclaimed when the husk drops --
+    /// on a panicking assertion as much as on a normal return. `None` when
+    /// the caller supplied a root it guards itself ([`BoundHusk::at`]).
+    _tree: Option<ScratchTree>,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -2667,7 +2744,10 @@ struct BoundHusk {
 
 impl BoundHusk {
     fn new(tag: &str) -> Self {
-        Self::at(scratch(tag))
+        let tree = scratch(tag);
+        let mut husk = Self::at(tree.path().to_path_buf());
+        husk._tree = Some(tree);
+        husk
     }
 
     /// The same husk, under a root the caller already owns.
@@ -2706,6 +2786,9 @@ impl BoundHusk {
             runner: policy,
         };
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             root,
             repo,
             private_root,
@@ -3606,7 +3689,8 @@ fn a_public_husk_removal_that_fails_partway_leaves_the_marker_that_locates_it() 
 /// platforms.
 #[test]
 fn probe_a_staged_marker_only_public_husk_is_removed() {
-    let root = scratch("probe-stagedonly");
+    let tree = scratch("probe-stagedonly");
+    let root = tree.path();
 
     let public = root.join("runs").join("01STAGEDONLY");
     fs::create_dir_all(&public).expect("public directory");
@@ -3639,7 +3723,8 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
 /// because none of them ever looked at what was on disk at a phase.
 #[test]
 fn p0_creates_the_public_directory_and_nothing_private() {
-    let root = scratch("p0-only");
+    let tree = scratch("p0-only");
+    let root = tree.path();
     let paths = paths_in(&root, "01P0ONLY");
     let public = paths.public.clone();
     let private = paths.private.clone();
@@ -3668,7 +3753,8 @@ fn p0_creates_the_public_directory_and_nothing_private() {
 /// exist before `owner.json` is even staged — changed nothing observable.
 #[test]
 fn the_owner_record_is_the_first_content_of_a_private_half() {
-    let root = scratch("owner-first");
+    let tree = scratch("owner-first");
+    let root = tree.path();
     let private = root.join("private").join("runs").join("01OWNERFIRST");
     let owner = OwnerRecord {
         run_id: "01OWNERFIRST".to_owned(),
@@ -3800,7 +3886,8 @@ fn commit_record_of(husk: &BoundHusk) -> CommitRecord {
 /// file held something else would fail here rather than agree with itself.
 #[test]
 fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_directory() {
-    let root = scratch("durability");
+    let tree = scratch("durability");
+    let root = tree.path();
     let public = root.join("public");
     let private = root.join("private");
     create_dir(&public).expect("public");
@@ -4029,7 +4116,8 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
 /// by the record and publishes.
 #[test]
 fn a_report_whose_staged_file_will_not_sync_is_not_published() {
-    let root = scratch("report-stage-sync-fault");
+    let tree = scratch("report-stage-sync-fault");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -4091,7 +4179,8 @@ fn a_report_whose_staged_file_will_not_sync_is_not_published() {
 #[test]
 fn a_private_report_is_staged_at_its_mode_before_any_byte_is_written() {
     use std::os::unix::fs::PermissionsExt as _;
-    let root = scratch("report-staged-mode");
+    let tree = scratch("report-staged-mode");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -4379,7 +4468,8 @@ fn a_kill_between_stage_and_rename_leaves_only_the_tmp() {
     // A real process death, not an early return: the claim is what a
     // coordinator that runs *no* cleanup leaves on disk, and the funnel's
     // kill aborts rather than unwinding for exactly that reason.
-    let root = scratch("killpublish");
+    let tree = scratch("killpublish");
+    let root = tree.path();
     for (which, staged, published) in [
         ("marker", MARKER_STAGED, MARKER),
         ("owner", OWNER_RECORD_STAGED, OWNER_RECORD),
@@ -4433,7 +4523,8 @@ fn a_kill_between_stage_and_rename_leaves_only_the_tmp() {
 /// (`MetadataExt::file_index` is behind `windows_by_handle`).
 #[test]
 fn publication_replaces_the_name_rather_than_writing_through_it() {
-    let root = scratch("publishrename");
+    let tree = scratch("publishrename");
+    let root = tree.path();
     for (which, staged_name, published_name) in [
         ("marker", MARKER_STAGED, MARKER),
         ("owner", OWNER_RECORD_STAGED, OWNER_RECORD),
@@ -4523,7 +4614,8 @@ fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released() {
     // settling groups is the one that died before its log committed, and
     // `list_runs` no longer returns it — so a lease that scanned the
     // readers' view would leave exactly this hold unobserved.
-    let root = scratch("r28witness");
+    let tree = scratch("r28witness");
+    let root = tree.path();
     let repo = root.join("repo");
     let git_dir = root.join("git-dir");
     fs::create_dir_all(&git_dir).expect("git dir");
@@ -4630,7 +4722,8 @@ fn inherited_hold_child() {
 #[cfg(unix)]
 #[test]
 fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
-    let root = scratch("childlease");
+    let tree = scratch("childlease");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000000");
     fs::create_dir_all(&public).expect("the run's public directory");
     assert!(
@@ -4935,7 +5028,8 @@ unsafe fn identity_answered_by(
 fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-unspawned");
+    let tree = scratch("childlease-unspawned");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000001");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -4978,7 +5072,8 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
 fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-number-reused");
+    let tree = scratch("childlease-number-reused");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000006");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5040,7 +5135,8 @@ fn a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_iden
     use std::os::fd::AsRawFd as _;
     use std::sync::mpsc;
 
-    let root = scratch("descriptor-scan-closed-in-window");
+    let tree = scratch("descriptor-scan-closed-in-window");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let (number_sender, number_receiver) = mpsc::channel();
@@ -5106,7 +5202,8 @@ fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descrip
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-sibling-copy");
+    let tree = scratch("childlease-sibling-copy");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000003");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5167,7 +5264,8 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-past-bound");
+    let tree = scratch("childlease-past-bound");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000005");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5490,7 +5588,8 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-sentinel");
+    let tree = scratch("childlease-sentinel");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000004");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -7130,7 +7229,8 @@ fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch(tag);
+    let tree = scratch(tag);
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -9435,7 +9535,8 @@ fn a_sentinel_eof_read_within_the_bound_on_a_real_socket_is_accepted() {
 fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("descriptor-scan-lookup-fails");
+    let tree = scratch("descriptor-scan-lookup-fails");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let number = held.as_raw_fd();
@@ -9496,7 +9597,8 @@ fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of
 fn a_failed_identity_call_is_read_at_the_call_ebadf_as_absence_and_any_other_errno_as_the_error() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("descriptor-identity-call-fails");
+    let tree = scratch("descriptor-identity-call-fails");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let number = held.as_raw_fd();
@@ -10791,7 +10893,8 @@ fn a_lease_wait_whose_every_rest_is_refused() {
     use crate::workspace_manager::fixture::ParkedFork;
 
     const BOUND: Duration = Duration::from_millis(100);
-    let root = scratch("lease-wait-rests-refused");
+    let tree = scratch("lease-wait-rests-refused");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01LEASEWAITRESTS0000000000");
     fs::create_dir_all(&public).expect("the run's public directory");
     let parked = ParkedFork::holding_the_lease_of(&public);
@@ -10839,7 +10942,8 @@ fn a_lease_wait_whose_every_rest_is_refused() {
 #[cfg(target_os = "linux")]
 fn a_readiness_wait_whose_every_rest_is_refused() {
     const BOUND: Duration = Duration::from_millis(100);
-    let root = scratch("readiness-rests-refused");
+    let tree = scratch("readiness-rests-refused");
+    let root = tree.path();
     let signal = root.join("never-published");
     let producer = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([
@@ -11096,7 +11200,8 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
     const HIGH: libc::c_int = 128;
-    let root = scratch("childlease-high-descriptor");
+    let tree = scratch("childlease-high-descriptor");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000009");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -11225,7 +11330,8 @@ fn a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcin
 fn a_range_close_that_answers_success_without_closing_is_found_out_before_the_child_is_announced() {
     use crate::workspace_manager::fixture::ParkedFork;
 
-    let root = scratch("childlease-range-close-lies");
+    let tree = scratch("childlease-range-close-lies");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000B");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (_sentinel, _observer) = sentinel_pair();
@@ -11281,7 +11387,8 @@ fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: l
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-close-fails");
+    let tree = scratch("childlease-close-fails");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000A");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, _observer) =
@@ -11331,7 +11438,8 @@ fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: l
 #[cfg(unix)]
 #[test]
 fn a_hold_over_an_absent_run_directory_is_an_io_error_naming_the_lease() {
-    let root = scratch("childlease-absent");
+    let tree = scratch("childlease-absent");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000002");
     let mut command = std::process::Command::new("git");
     let error = hold_cleanup_lease_for_child(&mut command, &public)
@@ -11588,7 +11696,8 @@ fn this_crates_rlib(deps: &Path) -> PathBuf {
 }
 
 fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, String) {
-    let dir = scratch(&format!("compile-{tag}"));
+    let tree = scratch(&format!("compile-{tag}"));
+    let dir = tree.path();
     let file = dir.join("fixture.rs");
     fs::write(&file, source).expect("fixture source");
     let deps = std::env::current_exe()
@@ -11674,7 +11783,8 @@ fn the_repo_key_is_the_construction_the_packet_states() {
     // bytes))". The expected value is computed from that sentence here,
     // and for a fixed path it is a literal computed outside this program
     // entirely — a function may not be its own oracle.
-    let dir = scratch("repokey").join("git-dir");
+    let tree = scratch("repokey");
+    let dir = tree.path().join("git-dir");
     fs::create_dir_all(&dir).expect("git dir");
     let canonical = fs::canonicalize(&dir).expect("canonical");
     let mut bytes = b"upstroke-repo-key-v1".to_vec();
@@ -11720,7 +11830,8 @@ fn every_worktree_of_one_repository_has_one_repo_key() {
     // the **common** git dir. A linked worktree's own git dir is
     // `<common>/worktrees/<name>`, and this proves the derivation against
     // a real one rather than against the rule that produced it.
-    let root = scratch("worktreekey");
+    let tree = scratch("worktreekey");
+    let root = tree.path();
     let main = root.join("main");
     fs::create_dir_all(&main).expect("main");
     git(&main, &["init", "-q", "-b", "main"]);
@@ -11890,7 +12001,8 @@ fn what_the_funnels_write_is_what_the_packet_says_they_write() {
     // The other direction: the bytes on disk, compared against the
     // independently written payloads above rather than against whatever
     // this build happens to serialize.
-    let root = scratch("wire");
+    let tree = scratch("wire");
+    let root = tree.path();
     let dir = root.join("half");
     fs::create_dir_all(&dir).expect("dir");
     let marker: CreatingMarker =
@@ -12026,7 +12138,8 @@ fn the_commit_records_digest_is_over_the_exact_line_bytes() {
 /// exactly like a correct one.
 #[test]
 fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion() {
-    let root = scratch("answer-residue");
+    let tree = scratch("answer-residue");
+    let root = tree.path();
     let answers = root.join("answers");
     create_dir(&answers).expect("answers");
 
@@ -12098,7 +12211,8 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
 /// removed as the writer's own).
 #[test]
 fn report_staging_leaves_whatever_is_at_the_old_fixed_name_as_found() {
-    let root = scratch("report-stage-old-name");
+    let tree = scratch("report-stage-old-name");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public directory");
     let private = root.join("private");
@@ -12175,7 +12289,8 @@ fn report_staging_leaves_whatever_is_at_the_old_fixed_name_as_found() {
 /// inside a directory it makes for itself and touches nothing else.
 #[test]
 fn legacy_report_preserves_unowned_staging_name() {
-    let root = scratch("report-unowned-staging-name");
+    let tree = scratch("report-unowned-staging-name");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12220,7 +12335,8 @@ fn legacy_report_preserves_unowned_staging_name() {
 /// owns, and the proof here is the record, never the name).
 #[test]
 fn legacy_report_preserves_unowned_staging_directory() {
-    let root = scratch("report-unowned-staging-directory");
+    let tree = scratch("report-unowned-staging-directory");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12328,7 +12444,8 @@ fn legacy_report_preserves_unowned_staging_directory() {
 /// round-10 fix-check and crash lenses, P2).
 #[test]
 fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
-    let root = scratch("report-dead-writer");
+    let tree = scratch("report-dead-writer");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12475,7 +12592,8 @@ fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
 /// round 3 found in the gate's corrected witness.
 #[test]
 fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
-    let root = scratch("report-power-loss-reclaim");
+    let tree = scratch("report-power-loss-reclaim");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12584,7 +12702,8 @@ fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
 /// taken ahead of the removal, or the barrier confined to one arm.
 #[test]
 fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_removed() {
-    let root = scratch("report-refused-public-barrier");
+    let tree = scratch("report-refused-public-barrier");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12779,7 +12898,8 @@ fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_remove
 /// private half, and its directory barrier precedes the creation.
 #[test]
 fn a_report_staging_directory_is_recorded_before_it_is_made() {
-    let root = scratch("report-staging-recorded-first");
+    let tree = scratch("report-staging-recorded-first");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12853,7 +12973,8 @@ fn a_report_staging_record_failure_stops_before_directory_creation() {
         ("file", "the staged record's file barrier"),
         ("directory", "the private directory's barrier"),
     ] {
-        let root = scratch(&format!("report-staging-record-{tag}-fault"));
+        let tree = scratch(&format!("report-staging-record-{tag}-fault"));
+        let root = tree.path();
         let public = root.join("public");
         create_dir(&public).expect("public");
         let private = root.join("private");
@@ -12929,7 +13050,8 @@ fn is_staged_report(path: &Path, public: &Path) -> bool {
 /// is satisfied by any serializer at all.
 #[test]
 fn the_payload_writers_keep_their_exact_legacy_bytes() {
-    let root = scratch("golden-bytes");
+    let tree = scratch("golden-bytes");
+    let root = tree.path();
     let public = root.join("public");
     let questions = public.join("questions");
     create_dir(&questions).expect("questions");
@@ -13024,7 +13146,8 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
 #[test]
 fn rewriting_report_preserves_its_group() {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let root = scratch("report-group");
+    let tree = scratch("report-group");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -13209,7 +13332,8 @@ fn a_husk_id_reports_as_one_of_the_three_things_it_can_be() {
 
 #[test]
 fn an_ambiguous_husk_prefix_is_not_reported_as_one_husk() {
-    let repo = scratch("ambiguoushusk").join("repo");
+    let tree = scratch("ambiguoushusk");
+    let repo = tree.path().join("repo");
     for husk in ["01HUSKA", "01HUSKB"] {
         fs::create_dir_all(runs_root(&repo).join(husk)).expect("husk");
     }

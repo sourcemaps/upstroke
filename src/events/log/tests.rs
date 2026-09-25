@@ -7,7 +7,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::premove::PremoveEventLog;
@@ -20,6 +19,7 @@ use crate::ir::{
     Artifact, ArtifactId, Effort, Plan, PlanSource, QuestionId, ResolvedEffortPolicy, TaskId,
 };
 use crate::review::ReviewPlan;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::topology::events::{
     CommitSha, DeferWaitElapsed4, GitRef, IncarnationId, RunStarted4, RunnerContract, RunnerKind,
     RunnerPolicy, TopologyEvent, TopologyEventBody, TopologyLimits,
@@ -28,21 +28,67 @@ use crate::topology::paths::{PathGrammar, PathPolicy, PathPolicyVersion};
 use crate::topology::schema::TOPOLOGY_SCHEMA;
 use crate::util::{DurabilityLedger, DurableStep};
 
-static SCRATCH: AtomicU32 = AtomicU32::new(0);
-
-fn scratch(tag: &str) -> PathBuf {
-    let n = SCRATCH.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-event-funnel-{tag}-{}-{n}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-event-funnel-<tag>-<pid>-<n>`
+/// from a process-wide counter, pre-cleaned it with a discarded
+/// `remove_dir_all` before it had any claim on the name, and returned a root
+/// nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). The counter made two *concurrent* tags
+/// distinct and did nothing about a second process, or a second run of this
+/// one under a recycled pid, which starts its counter at zero again.
+/// `acquire` refuses an occupied root rather than emptying it, keys on a ULID
+/// no recycled pid can supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
-fn log_path(tag: &str) -> PathBuf {
-    scratch(tag).join("events.jsonl")
+/// A log path, and the guard over the tree it is under.
+///
+/// The two travel together because they have to: a `log_path(..)` that
+/// returned the `PathBuf` alone would drop its guard at the end of the
+/// calling statement and reclaim the directory the path names. `Deref` is
+/// what lets the call sites go on reading `&path`, `path.display()` and
+/// `path.parent()` unchanged.
+struct LogFixture {
+    /// Never read. It is here to be dropped at the end of the caller's
+    /// scope, which is what reclaims the tree.
+    _tree: ScratchTree,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for LogFixture {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// `Deref` alone does not reach a generic `P: AsRef<Path>` parameter -- a
+/// deref coercion applies at a coercion site and `fs::write(&path, ..)`
+/// infers `P` from the argument instead -- so the fixture answers for both.
+impl AsRef<Path> for LogFixture {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn log_path(tag: &str) -> LogFixture {
+    let tree = scratch(tag);
+    let path = tree.path().join("events.jsonl");
+    LogFixture { _tree: tree, path }
 }
 
 fn event_log_message(error: &UpstrokeError) -> &str {
@@ -446,7 +492,8 @@ fn every_event_site_is_classified_and_the_funnel_accepts_exactly_its_own() {
         "four roles, and a site that acquired a fifth has to be argued about"
     );
 
-    let dir = scratch("partition");
+    let tree = scratch("partition");
+    let dir = tree.path();
     for (site, role) in SITE_ROLES {
         let path = dir.join(format!("{}.jsonl", site.name()));
         let mut warnings = Vec::new();
@@ -684,10 +731,10 @@ fn the_grid_varies_shape_and_tail_length_and_tail_content_independently() {
 #[test]
 fn the_legacy_open_is_byte_identical_to_the_pre_move_writer() {
     for (name, seed) in open_grid() {
-        let moved_dir = scratch("identity-moved");
-        let premove_dir = scratch("identity-premove");
-        let moved = moved_dir.join("events.jsonl");
-        let premove = premove_dir.join("events.jsonl");
+        let moved_tree = scratch("identity-moved");
+        let premove_tree = scratch("identity-premove");
+        let moved = moved_tree.path().join("events.jsonl");
+        let premove = premove_tree.path().join("events.jsonl");
         if let Some(seed) = &seed {
             fs::write(&moved, seed).expect("seed");
             fs::write(&premove, seed).expect("seed");
@@ -752,10 +799,10 @@ fn the_legacy_append_is_byte_identical_to_the_pre_move_writer() {
         "the lossy fixture must actually be lossy, or it witnesses nothing"
     );
     for (name, seed) in open_grid() {
-        let moved_dir = scratch("append-moved");
-        let premove_dir = scratch("append-premove");
-        let moved = moved_dir.join("events.jsonl");
-        let premove = premove_dir.join("events.jsonl");
+        let moved_tree = scratch("append-moved");
+        let premove_tree = scratch("append-premove");
+        let moved = moved_tree.path().join("events.jsonl");
+        let premove = premove_tree.path().join("events.jsonl");
         if let Some(seed) = &seed {
             fs::write(&moved, seed).expect("seed");
             fs::write(&premove, seed).expect("seed");
@@ -850,8 +897,10 @@ fn a_legacy_open_that_fails_fails_the_way_the_pre_move_writer_did() {
     let mut failed = 0_usize;
     let mut unexercisable = Vec::new();
     for (name, build) in cases {
-        let moved = build(&scratch("open-fail-moved"));
-        let premove = build(&scratch("open-fail-premove"));
+        let moved_tree = scratch("open-fail-moved");
+        let premove_tree = scratch("open-fail-premove");
+        let moved = build(moved_tree.path());
+        let premove = build(premove_tree.path());
 
         let mut moved_warnings = Vec::new();
         let mut premove_warnings = Vec::new();
@@ -1184,7 +1233,8 @@ fn a_real_write_failure_is_attempted_once_poisons_the_handle_and_is_not_retried(
         Path::new("/dev/full").exists(),
         "this host has no always-failing device, so nothing here is measured"
     );
-    let dir = scratch("real-enospc");
+    let tree = scratch("real-enospc");
+    let dir = tree.path();
     let path = dir.join("events.jsonl");
     std::os::unix::fs::symlink("/dev/full", &path).expect("symlink");
 
@@ -2359,7 +2409,9 @@ fn every_barrier_step_is_reachable_and_named() {
         );
     }
 
-    let missing = scratch("barrier-open-fails")
+    let tree = scratch("barrier-open-fails");
+    let missing = tree
+        .path()
         .join("no-such-directory")
         .join("events.jsonl");
     let mut warnings = Vec::new();
@@ -2372,7 +2424,7 @@ fn digest_of(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn seeded_prefix(tag: &str) -> (PathBuf, Vec<u8>, Vec<TopologyEvent>) {
+fn seeded_prefix(tag: &str) -> (LogFixture, Vec<u8>, Vec<TopologyEvent>) {
     let path = log_path(tag);
     let mut warnings = Vec::new();
     let mut log = EventLog::open(EventSite::OpenLog, &path, &mut warnings).expect("open");
@@ -2390,7 +2442,7 @@ fn after_append_events(before: &[TopologyEvent]) -> Vec<TopologyEvent> {
     events
 }
 
-fn replayable_prefix(tag: &str) -> (PathBuf, Vec<u8>) {
+fn replayable_prefix(tag: &str) -> (LogFixture, Vec<u8>) {
     let mut started = run_started_event();
     let TopologyEventBody::RunStarted { data } = &mut started.body else {
         panic!("`run_started_event` builds a `run_started`");
@@ -3116,7 +3168,8 @@ fn every_declared_build_refusal_fails_for_the_reason_it_declares() {
         "this harness compiles its fixtures at edition 2024 and the crate no longer is"
     );
 
-    let dir = scratch("build-refusal");
+    let tree = scratch("build-refusal");
+    let dir = tree.path();
 
     let (control_ok, control_stderr) = typecheck(
         &dir,

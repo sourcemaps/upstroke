@@ -31,6 +31,7 @@ use crate::ir::{
 };
 use crate::review;
 use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::CommandSpec;
 use crate::topology::effects::EventSite;
 use crate::workspace::Workspace;
@@ -683,10 +684,44 @@ fn mutate_index_after_candidate_capture(
     })
 }
 
-fn temp_engine_repo(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-engine-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create repo dir");
+/// A scratch tree this test owns, without a repository in it, guarded by the
+/// token that authorises its deletion.
+///
+/// **Bind the guard to a live local**: `let _ = temp_engine_scratch("x")`
+/// drops it at the end of that statement and deletes the fixture.
+fn temp_engine_scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
+}
+
+/// A git repository in a scratch tree this test owns, guarded by the token
+/// that authorises the tree's deletion.
+///
+/// The helper here built `temp_dir()/upstroke-engine-<tag>-<pid>` and
+/// pre-cleaned it with a discarded `remove_dir_all` before it had any claim on
+/// the name, then returned a root nothing reclaimed
+/// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+/// `acquire` refuses an occupied root rather than emptying it, keys on a ULID
+/// no recycled pid can supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = temp_engine_repo("x")` drops
+/// it at the end of that statement and deletes the repository.
+fn temp_engine_repo(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let dir = tree.path();
     git_in(&dir, &["init", "-q", "-b", "main"]);
     git_in(&dir, &["config", "user.email", "test@upstroke.local"]);
     git_in(&dir, &["config", "user.name", "upstroke tests"]);
@@ -699,7 +734,7 @@ fn temp_engine_repo(tag: &str) -> PathBuf {
     .expect("plan");
     git_in(&dir, &["add", "-A"]);
     git_in(&dir, &["commit", "-q", "-m", "seed"]);
-    dir
+    tree
 }
 
 fn seed(repo: &Path, plan: &str, config: Option<&str>) {
@@ -811,7 +846,8 @@ fn fail_the_third_legacy_append() -> Box<dyn crate::events::log::EventHooks> {
 
 #[test]
 fn a_returned_legacy_append_error_stops_the_run() {
-    let repo = temp_engine_repo("legacy-append-error");
+    let tree = temp_engine_repo("legacy-append-error");
+    let repo = tree.path();
     let mut opts = options(&repo);
     opts.log_hooks = Some(fail_the_third_legacy_append);
     let source = fake(Effect::EditFile);
@@ -831,7 +867,8 @@ fn a_returned_legacy_append_error_stops_the_run() {
 
 #[test]
 fn a_returned_legacy_append_error_still_leaves_the_partial_report() {
-    let repo = temp_engine_repo("legacy-append-partial");
+    let tree = temp_engine_repo("legacy-append-partial");
+    let repo = tree.path();
     let mut opts = options(&repo);
     opts.log_hooks = Some(fail_the_third_legacy_append);
     let source = fake(Effect::EditFile);
@@ -873,7 +910,8 @@ fn a_returned_legacy_append_error_still_leaves_the_partial_report() {
 
 #[test]
 fn happy_path_commits_one_commit_per_task() {
-    let repo = temp_engine_repo("happy");
+    let tree = temp_engine_repo("happy");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run succeeds");
 
@@ -915,7 +953,8 @@ fn happy_path_commits_one_commit_per_task() {
 
 #[test]
 fn gates_review_and_commit_use_one_frozen_candidate_tree() {
-    let repo = temp_engine_repo("one-frozen-candidate");
+    let tree = temp_engine_repo("one-frozen-candidate");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1000,7 +1039,8 @@ fn gates_review_and_commit_use_one_frozen_candidate_tree() {
 
 #[test]
 fn an_oversized_review_diff_is_settled_once_before_the_task_parks() {
-    let repo = temp_engine_repo("oversizedreviewsettlement");
+    let tree = temp_engine_repo("oversizedreviewsettlement");
+    let repo = tree.path();
     seed(
         &repo,
         "## Generate the large fixture\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1097,7 +1137,8 @@ fn an_oversized_review_diff_is_settled_once_before_the_task_parks() {
 
 #[test]
 fn opaque_review_input_has_distinct_failure_and_remediation() {
-    let repo = temp_engine_repo("opaquereviewsettlement");
+    let tree = temp_engine_repo("opaquereviewsettlement");
+    let repo = tree.path();
     seed(
         &repo,
         "## Generate an opaque artifact\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1125,7 +1166,8 @@ fn opaque_review_input_has_distinct_failure_and_remediation() {
 
 #[test]
 fn opaque_test_task_parks_before_test_provenance_retry() {
-    let repo = temp_engine_repo("opaquetestprovenance");
+    let tree = temp_engine_repo("opaquetestprovenance");
+    let repo = tree.path();
     seed(
         &repo,
         "## Add the regression\n<!-- upstroke: id=t1 kind=test depends= -->\n",
@@ -1161,7 +1203,8 @@ fn opaque_test_task_parks_before_test_provenance_retry() {
 
 #[test]
 fn failed_parking_payload_still_settles_and_cleans_the_attempt() {
-    let repo = temp_engine_repo("oversizedreviewquestionwrite");
+    let tree = temp_engine_repo("oversizedreviewquestionwrite");
+    let repo = tree.path();
     seed(
         &repo,
         "## Generate the large fixture\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1223,7 +1266,8 @@ fn failed_parking_payload_still_settles_and_cleans_the_attempt() {
 
 #[test]
 fn dirty_tree_is_refused() {
-    let repo = temp_engine_repo("dirty");
+    let tree = temp_engine_repo("dirty");
+    let repo = tree.path();
     fs::write(repo.join("stray.txt"), "uncommitted\n").expect("stray");
     let source = fake(Effect::EditFile);
     let err = run_with(&options(&repo), &source).expect_err("must refuse");
@@ -1234,7 +1278,8 @@ fn dirty_tree_is_refused() {
 
 #[test]
 fn sparse_checkout_preflight_refusal_leaves_worktree_clean() {
-    let repo = temp_engine_repo("sparse-worker-preflight");
+    let tree = temp_engine_repo("sparse-worker-preflight");
+    let repo = tree.path();
     git_in(&repo, &["update-index", "--skip-worktree", "README.md"]);
     let source = fake(Effect::EditFile);
 
@@ -1274,7 +1319,8 @@ fn sparse_checkout_preflight_refusal_leaves_worktree_clean() {
 
 #[test]
 fn passing_configured_gates_commit_and_are_reported() {
-    let repo = temp_engine_repo("gatepass");
+    let tree = temp_engine_repo("gatepass");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1293,7 +1339,8 @@ fn passing_configured_gates_commit_and_are_reported() {
 
 #[test]
 fn ignored_worker_input_cannot_make_a_gate_pass() {
-    let repo = temp_engine_repo("ignored-gate-input");
+    let tree = temp_engine_repo("ignored-gate-input");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1324,7 +1371,8 @@ fn ignored_worker_input_cannot_make_a_gate_pass() {
 
 #[test]
 fn unresolvable_gate_refuses_at_preflight() {
-    let repo = temp_engine_repo("gateresolve");
+    let tree = temp_engine_repo("gateresolve");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1342,7 +1390,8 @@ fn unresolvable_gate_refuses_at_preflight() {
 
 #[test]
 fn test_task_without_test_code_fails_provenance() {
-    let repo = temp_engine_repo("provenance");
+    let tree = temp_engine_repo("provenance");
+    let repo = tree.path();
     seed(
         &repo,
         "## Test the widget\n<!-- upstroke: id=tt depends= -->\nAdd coverage.\n",
@@ -1363,7 +1412,8 @@ fn test_task_without_test_code_fails_provenance() {
 
 #[test]
 fn test_task_adding_real_tests_passes_provenance() {
-    let repo = temp_engine_repo("provenance-ok");
+    let tree = temp_engine_repo("provenance-ok");
+    let repo = tree.path();
     seed(
         &repo,
         "## Test the widget\n<!-- upstroke: id=tt depends= -->\n",
@@ -1378,7 +1428,8 @@ fn test_task_adding_real_tests_passes_provenance() {
 
 #[test]
 fn gate_residue_is_scrubbed_not_committed() {
-    let repo = temp_engine_repo("residue");
+    let tree = temp_engine_repo("residue");
+    let repo = tree.path();
 
     seed(
         &repo,
@@ -1402,7 +1453,8 @@ fn gate_residue_is_scrubbed_not_committed() {
 
 #[test]
 fn the_reviewer_is_read_only_and_bound_to_the_review_tier() {
-    let repo = temp_engine_repo("reviewbinding");
+    let tree = temp_engine_repo("reviewbinding");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let settings = paths_of(&repo, &report.run_id).settings();
@@ -1435,7 +1487,8 @@ fn the_reviewer_is_read_only_and_bound_to_the_review_tier() {
 
 #[test]
 fn review_can_be_switched_off_explicitly() {
-    let repo = temp_engine_repo("noreview");
+    let tree = temp_engine_repo("noreview");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -1454,7 +1507,8 @@ fn review_can_be_switched_off_explicitly() {
 
 #[test]
 fn reviewer_spend_is_attributed_separately() {
-    let repo = temp_engine_repo("reviewcost");
+    let tree = temp_engine_repo("reviewcost");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let t1 = task(&report, "t1");
@@ -1487,7 +1541,8 @@ fn cross_vendor_opts(repo: &Path) -> RunOptions {
 
 #[test]
 fn a_second_opinion_runs_a_second_family_and_leaves_the_primary_alone() {
-    let repo = temp_engine_repo("secondopinion");
+    let tree = temp_engine_repo("secondopinion");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1518,7 +1573,8 @@ fn a_second_opinion_runs_a_second_family_and_leaves_the_primary_alone() {
 
 #[test]
 fn a_second_opinion_that_fails_fails_the_attempt() {
-    let repo = temp_engine_repo("secondopinionfail");
+    let tree = temp_engine_repo("secondopinionfail");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1547,7 +1603,8 @@ fn a_second_opinion_that_fails_fails_the_attempt() {
 
 #[test]
 fn a_failing_first_pass_never_spends_the_second_reviewer() {
-    let repo = temp_engine_repo("shortcircuit");
+    let tree = temp_engine_repo("shortcircuit");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -1569,7 +1626,8 @@ fn a_failing_first_pass_never_spends_the_second_reviewer() {
 
 #[test]
 fn a_frontier_task_is_not_reviewed_by_the_model_that_wrote_it() {
-    let repo = temp_engine_repo("selfreview");
+    let tree = temp_engine_repo("selfreview");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
 
     let source = cross_vendor(
@@ -1587,7 +1645,8 @@ fn a_frontier_task_is_not_reviewed_by_the_model_that_wrote_it() {
 
 #[test]
 fn a_lower_rung_keeps_the_frontier_reviewer() {
-    let repo = temp_engine_repo("noneedtorebind");
+    let tree = temp_engine_repo("noneedtorebind");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -1607,7 +1666,8 @@ fn a_lower_rung_keeps_the_frontier_reviewer() {
 
 #[test]
 fn a_configured_second_opinion_with_no_second_family_refuses_before_spending() {
-    let repo = temp_engine_repo("nosecondfamily");
+    let tree = temp_engine_repo("nosecondfamily");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
     let error = run_with(&cross_vendor_opts(&repo), &source)
@@ -1627,7 +1687,8 @@ fn a_configured_second_opinion_with_no_second_family_refuses_before_spending() {
 
 #[test]
 fn without_a_second_vendor_self_review_warns_rather_than_refusing() {
-    let repo = temp_engine_repo("selfreviewwarn");
+    let tree = temp_engine_repo("selfreviewwarn");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
     let report = run_with(&cross_vendor_opts(&repo), &source).expect("run still works");
@@ -1646,7 +1707,8 @@ fn without_a_second_vendor_self_review_warns_rather_than_refusing() {
 
 #[test]
 fn an_unprobeable_cross_family_reviewer_downgrades_instead_of_halting() {
-    let repo = temp_engine_repo("brokencopilot");
+    let tree = temp_engine_repo("brokencopilot");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(FRONTIER_ONLY_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -1682,7 +1744,8 @@ fn an_unprobeable_cross_family_reviewer_downgrades_instead_of_halting() {
 
 #[test]
 fn the_same_broken_reviewer_is_fatal_when_the_config_asked_for_it() {
-    let repo = temp_engine_repo("brokenrequired");
+    let tree = temp_engine_repo("brokenrequired");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -1695,7 +1758,8 @@ fn the_same_broken_reviewer_is_fatal_when_the_config_asked_for_it() {
 
 #[test]
 fn a_resume_keeps_the_reviewers_the_run_started_with() {
-    let repo = temp_engine_repo("resumereviewers");
+    let tree = temp_engine_repo("resumereviewers");
+    let repo = tree.path();
     seed(
         &repo,
         "## Rotate the signing key\n\
@@ -1778,7 +1842,7 @@ fn resume_runs_with_the_effort_policy_the_run_recorded_not_todays_config() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                         [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("resumeeffort", original);
+    let (_tree, repo, run_id) = parked_run_with_config("resumeeffort", original);
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -1830,7 +1894,7 @@ fn resume_runs_with_the_effort_policy_the_run_recorded_not_todays_config() {
 fn resume_restores_the_recorded_worker_binding_before_preflight() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
-    let (repo, run_id) = parked_run_with_config("resumebinding", original);
+    let (_tree, repo, run_id) = parked_run_with_config("resumebinding", original);
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -1874,7 +1938,7 @@ fn the_resume_that_rederives_an_old_logs_effort_records_it_for_the_next_one() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                         [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("oldlogeffort", original);
+    let (_tree, repo, run_id) = parked_run_with_config("oldlogeffort", original);
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_one(&paths, &["effort_policy"]);
 
@@ -1982,7 +2046,7 @@ fn the_resume_that_rederives_an_old_logs_effort_records_it_for_the_next_one() {
 fn the_resume_that_rederives_an_old_review_plan_records_it_for_the_next_one() {
     let original = "[interaction]\nmode = \"never\"\n\n\
                         [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
-    let (repo, run_id) = parked_run_with_config("oldlogreviews", original);
+    let (_tree, repo, run_id) = parked_run_with_config("oldlogreviews", original);
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_run_started_field(&paths, "reviews");
@@ -2044,7 +2108,7 @@ fn the_resume_that_rederives_an_old_review_plan_records_it_for_the_next_one() {
 
 #[test]
 fn a_schema_two_resume_records_the_complete_review_barrier_before_work() {
-    let (repo, run_id) = parked_run("schema2reviewbarrier");
+    let (_tree, repo, run_id) = parked_run("schema2reviewbarrier");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     fs::write(
@@ -2119,7 +2183,8 @@ fn a_schema_two_resume_records_the_complete_review_barrier_before_work() {
 
 #[test]
 fn max_parallel_above_one_refuses_before_the_run_touches_the_workspace() {
-    let repo = temp_engine_repo("maxparallelrefusal");
+    let tree = temp_engine_repo("maxparallelrefusal");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2168,7 +2233,8 @@ fn worktree_lock_path(repo: &Path) -> PathBuf {
 
 #[test]
 fn a_refused_ceiling_beats_the_lease_rather_than_racing_it() {
-    let repo = temp_engine_repo("ceilingbeforelease");
+    let tree = temp_engine_repo("ceilingbeforelease");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2227,7 +2293,7 @@ fn a_refused_ceiling_beats_the_lease_rather_than_racing_it() {
 
 #[test]
 fn a_refused_ceiling_beats_both_locks_on_resume() {
-    let (repo, run_id) = parked_run("resumeceilingbeforelocks");
+    let (_tree, repo, run_id) = parked_run("resumeceilingbeforelocks");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     fs::write(
@@ -2281,7 +2347,8 @@ fn config_with_repairs(repairs: u32) -> String {
 
 #[test]
 fn the_analysis_adopted_under_the_lease_is_the_one_its_own_bytes_were_validated_from() {
-    let repo = temp_engine_repo("confirmunderlease");
+    let tree = temp_engine_repo("confirmunderlease");
+    let repo = tree.path();
     let config = repo.join("upstroke.toml");
     let mut opts = options(&repo);
     opts.config_path = Some(config.clone());
@@ -2326,7 +2393,8 @@ fn the_analysis_adopted_under_the_lease_is_the_one_its_own_bytes_were_validated_
 
 #[test]
 fn the_gate_derivation_is_taken_under_the_lease_not_carried_over_it() {
-    let repo = temp_engine_repo("gatesunderlease");
+    let tree = temp_engine_repo("gatesunderlease");
+    let repo = tree.path();
     let mut opts = options(&repo);
     opts.config_path = Some(repo.join("upstroke.toml"));
     fs::write(opts.config_path.as_ref().expect("config path"), "").expect("an empty config");
@@ -2472,7 +2540,7 @@ fn legacy_resume_pair(tag: &str, fixture: LegacyFixture) -> Vec<LegacyArm> {
         ("control", LEGACY_RESUME_NO_LIMITS),
         ("limits", LEGACY_RESUME_LIMITS),
     ] {
-        let (repo, run_id) = parked_run(&format!("legacylimits-{tag}-{arm}"));
+        let (_tree, repo, run_id) = parked_run(&format!("legacylimits-{tag}-{arm}"));
         let paths = paths_of(&repo, &run_id);
         rewrite_run_started_as_schema_two(&paths);
         if matches!(fixture, LegacyFixture::InterruptedAttempt) {
@@ -2588,7 +2656,7 @@ fn a_legacy_resume_is_not_reinterpreted_by_the_new_engine_limits() {
 
 #[test]
 fn schema_two_review_markers_upgrade_independently_of_timeout() {
-    let (repo, run_id) = parked_run("schema2reviewmarkers");
+    let (_tree, repo, run_id) = parked_run("schema2reviewmarkers");
     let paths = paths_of(&repo, &run_id);
     let recorded_timeout = events::recorded_reviews(&events_of(&repo, &run_id))
         .and_then(|plan| plan.pass_timeout_secs)
@@ -2629,7 +2697,7 @@ fn schema_two_review_markers_upgrade_independently_of_timeout() {
 
 #[test]
 fn schema_two_inconsistent_review_identity_is_refused_before_upgrade_and_spend() {
-    let (repo, run_id) = parked_run("schema2badreviewidentity");
+    let (_tree, repo, run_id) = parked_run("schema2badreviewidentity");
     let paths = paths_of(&repo, &run_id);
     let text = fs::read_to_string(paths.events()).expect("log");
     let mut rewritten = false;
@@ -2707,7 +2775,7 @@ fn a_resume_whose_effort_policy_did_not_move_says_nothing_about_it() {
     let config = "[interaction]\nmode = \"never\"\n\n\
                       [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
                       [routing.effort]\nimplementation = \"xhigh\"\nreview = \"max\"\n";
-    let (repo, run_id) = parked_run_with_config("effortunmoved", config);
+    let (_tree, repo, run_id) = parked_run_with_config("effortunmoved", config);
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(
@@ -2722,7 +2790,8 @@ fn a_resume_whose_effort_policy_did_not_move_says_nothing_about_it() {
 
 #[test]
 fn a_log_written_before_step_9_still_gets_reviewed_on_resume() {
-    let repo = temp_engine_repo("oldlogresume");
+    let tree = temp_engine_repo("oldlogresume");
+    let repo = tree.path();
     seed(
         &repo,
         "## Rotate the signing key\n\
@@ -2757,7 +2826,8 @@ fn a_log_written_before_step_9_still_gets_reviewed_on_resume() {
 
 #[test]
 fn an_unavailable_reviewer_is_recorded_as_such_not_as_a_rejection() {
-    let repo = temp_engine_repo("outagerecord");
+    let tree = temp_engine_repo("outagerecord");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2781,7 +2851,8 @@ fn an_unavailable_reviewer_is_recorded_as_such_not_as_a_rejection() {
 
 #[test]
 fn second_reviewer_spawn_failure_settles_worker_and_first_review_evidence() {
-    let repo = temp_engine_repo("secondreviewerspawnsettlement");
+    let tree = temp_engine_repo("secondreviewerspawnsettlement");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2836,7 +2907,8 @@ fn second_reviewer_spawn_failure_settles_worker_and_first_review_evidence() {
 
 #[test]
 fn a_total_missing_an_unreported_reviewer_is_marked_rather_than_implied() {
-    let repo = temp_engine_repo("partialcost");
+    let tree = temp_engine_repo("partialcost");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = FakeSource {
         adapter: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
@@ -2862,7 +2934,8 @@ fn a_total_missing_an_unreported_reviewer_is_marked_rather_than_implied() {
 
 #[test]
 fn every_model_that_judged_a_task_is_listed_beside_the_cost_of_all_of_them() {
-    let repo = temp_engine_repo("reviewtrail");
+    let tree = temp_engine_repo("reviewtrail");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -2889,7 +2962,8 @@ fn every_model_that_judged_a_task_is_listed_beside_the_cost_of_all_of_them() {
 
 #[test]
 fn each_pass_writes_its_own_verdict_transcript() {
-    let repo = temp_engine_repo("passtranscripts");
+    let tree = temp_engine_repo("passtranscripts");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let source = cross_vendor(
         vec![Effect::EditFile],
@@ -2907,7 +2981,8 @@ fn each_pass_writes_its_own_verdict_transcript() {
 
 #[test]
 fn the_run_record_survives_completion() {
-    let repo = temp_engine_repo("record");
+    let tree = temp_engine_repo("record");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let report_path = repo
@@ -2932,7 +3007,8 @@ fn the_run_record_survives_completion() {
 
 #[test]
 fn forward_dependencies_run_in_topo_order_not_plan_order() {
-    let repo = temp_engine_repo("topo");
+    let tree = temp_engine_repo("topo");
+    let repo = tree.path();
     seed(
         &repo,
         "## Second by dependency\n<!-- upstroke: id=late depends=early -->\n\n\
@@ -3083,8 +3159,8 @@ fn prompt_names_the_allowed_gate_commands() {
 
 #[test]
 fn prompt_wires_artifacts_to_real_files() {
-    let run_dir = std::env::temp_dir().join(format!("upstroke-artifact-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&run_dir);
+    let tree = temp_engine_scratch("artifact");
+    let run_dir = tree.path();
     fs::create_dir_all(run_dir.join("artifacts")).expect("run dir");
     let mut task = Task {
         id: TaskId::from("t1"),
@@ -3141,7 +3217,8 @@ fn prompt_wires_artifacts_to_real_files() {
 
 #[test]
 fn a_gate_failure_recovers_on_the_same_rung_via_session_resume() {
-    let repo = temp_engine_repo("resume");
+    let tree = temp_engine_repo("resume");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3191,7 +3268,8 @@ fn a_gate_failure_recovers_on_the_same_rung_via_session_resume() {
 
 #[test]
 fn exhausting_a_rung_escalates_with_a_fresh_session_and_the_history() {
-    let repo = temp_engine_repo("escalate");
+    let tree = temp_engine_repo("escalate");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3237,7 +3315,8 @@ fn exhausting_a_rung_escalates_with_a_fresh_session_and_the_history() {
 
 #[test]
 fn a_parked_question_does_not_stop_the_runnable_frontier() {
-    let repo = temp_engine_repo("park");
+    let tree = temp_engine_repo("park");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3286,7 +3365,8 @@ fn a_parked_question_does_not_stop_the_runnable_frontier() {
 
 #[test]
 fn answering_the_question_retries_the_task_with_the_operators_words() {
-    let repo = temp_engine_repo("answered");
+    let tree = temp_engine_repo("answered");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3372,7 +3452,8 @@ fn assert_unclassified_on_disk(line: &serde_json::Value) {
 
 #[test]
 fn the_legacy_ingest_writes_an_unclassified_design_defect() {
-    let repo = temp_engine_repo("legacydefectbytes");
+    let tree = temp_engine_repo("legacydefectbytes");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3405,7 +3486,8 @@ fn the_legacy_ingest_writes_an_unclassified_design_defect() {
 
 #[test]
 fn the_resume_repair_writes_an_unclassified_design_defect() {
-    let repo = temp_engine_repo("legacydefectresume");
+    let tree = temp_engine_repo("legacydefectresume");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3447,7 +3529,8 @@ fn the_resume_repair_writes_an_unclassified_design_defect() {
 
 #[test]
 fn declining_fails_the_task_and_halt_is_the_default() {
-    let repo = temp_engine_repo("declined");
+    let tree = temp_engine_repo("declined");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3487,7 +3570,8 @@ fn resume_repairs_every_decline_settlement_crash_prefix() {
         ("answered", "question_answered"),
         ("defect", "design_defect"),
     ] {
-        let repo = temp_engine_repo(&format!("declineprefix-{tag}"));
+        let tree = temp_engine_repo(&format!("declineprefix-{tag}"));
+        let repo = tree.path();
         seed(
             &repo,
             "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3560,7 +3644,8 @@ fn resume_repairs_every_decline_settlement_crash_prefix() {
 
 #[test]
 fn schema_two_decline_prefix_preserves_or_refuses_unknown_halt_policy() {
-    let repo = temp_engine_repo("legacydeclinepolicy");
+    let tree = temp_engine_repo("legacydeclinepolicy");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3603,7 +3688,8 @@ fn schema_two_decline_prefix_preserves_or_refuses_unknown_halt_policy() {
 
 #[test]
 fn on_task_failure_continue_keeps_independent_work_moving() {
-    let repo = temp_engine_repo("continue");
+    let tree = temp_engine_repo("continue");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3645,7 +3731,8 @@ fn on_task_failure_continue_keeps_independent_work_moving() {
 
 #[test]
 fn a_rate_limit_defers_without_spending_an_attempt() {
-    let repo = temp_engine_repo("ratelimit");
+    let tree = temp_engine_repo("ratelimit");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3692,7 +3779,8 @@ fn a_rate_limit_defers_without_spending_an_attempt() {
 
 #[test]
 fn a_pool_that_never_returns_ends_at_the_human_rung() {
-    let repo = temp_engine_repo("ratelimit-forever");
+    let tree = temp_engine_repo("ratelimit-forever");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3734,7 +3822,8 @@ fn a_pool_that_never_returns_ends_at_the_human_rung() {
 
 #[test]
 fn an_unavailable_reviewer_defers_the_task_instead_of_escalating_it() {
-    let repo = temp_engine_repo("reviewdown");
+    let tree = temp_engine_repo("reviewdown");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3773,7 +3862,8 @@ fn an_unavailable_reviewer_defers_the_task_instead_of_escalating_it() {
 
 #[test]
 fn a_reviewer_asking_for_a_human_parks_without_spending_the_chain() {
-    let repo = temp_engine_repo("needshuman");
+    let tree = temp_engine_repo("needshuman");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3816,7 +3906,8 @@ fn a_reviewer_asking_for_a_human_parks_without_spending_the_chain() {
 
 #[test]
 fn a_worker_can_stop_and_ask_rather_than_guess() {
-    let repo = temp_engine_repo("workerasks");
+    let tree = temp_engine_repo("workerasks");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3885,7 +3976,8 @@ fn a_worker_can_stop_and_ask_rather_than_guess() {
 
 #[test]
 fn ci_mode_parks_rather_than_failing_and_says_so() {
-    let repo = temp_engine_repo("ci");
+    let tree = temp_engine_repo("ci");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -3923,7 +4015,8 @@ fn ci_mode_parks_rather_than_failing_and_says_so() {
 
 #[test]
 fn an_unanswerable_question_is_never_asked_twice() {
-    let repo = temp_engine_repo("noloop");
+    let tree = temp_engine_repo("noloop");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -3976,7 +4069,8 @@ impl AnswerSource for CountingAnswers {
 
 #[test]
 fn agent_errors_and_empty_diffs_carry_feedback_the_retry_can_use() {
-    let repo = temp_engine_repo("feedback");
+    let tree = temp_engine_repo("feedback");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4000,7 +4094,8 @@ fn agent_errors_and_empty_diffs_carry_feedback_the_retry_can_use() {
 
 #[test]
 fn an_unparseable_reviewer_fails_after_one_reask() {
-    let repo = temp_engine_repo("reviewprose");
+    let tree = temp_engine_repo("reviewprose");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4037,7 +4132,8 @@ fn an_unparseable_reviewer_fails_after_one_reask() {
 
 #[test]
 fn gate_logs_are_named_by_the_collision_free_stem() {
-    let repo = temp_engine_repo("gatelogs");
+    let tree = temp_engine_repo("gatelogs");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4141,7 +4237,8 @@ fn raw_object_after(line: &str, key: &str) -> Option<String> {
 
 #[test]
 fn the_legacy_wire_and_report_carry_no_feedback_on_the_attempt_record() {
-    let repo = temp_engine_repo("legacy-no-detail");
+    let tree = temp_engine_repo("legacy-no-detail");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4457,7 +4554,8 @@ fn an_outage_is_never_reclassified_as_a_question() {
 
 #[test]
 fn a_halted_run_stops_asking_and_keeps_naming_the_real_cause() {
-    let repo = temp_engine_repo("haltpark");
+    let tree = temp_engine_repo("haltpark");
+    let repo = tree.path();
     seed(
         &repo,
         "## Asks a question\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -4685,7 +4783,8 @@ fn live_state_equals_replayed_state_across_every_ladder_path() {
         answers,
     } in scenarios
     {
-        let repo = temp_engine_repo(&format!("replay-{name}"));
+        let tree = temp_engine_repo(&format!("replay-{name}"));
+        let repo = tree.path();
         seed(
             &repo,
             plan.unwrap_or(
@@ -4732,7 +4831,8 @@ fn live_state_equals_replayed_state_across_every_ladder_path() {
 
 #[test]
 fn an_aborting_error_still_leaves_a_replayable_log() {
-    let repo = temp_engine_repo("abortlog");
+    let tree = temp_engine_repo("abortlog");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4800,7 +4900,8 @@ fn task_report_costing(worker: Option<f64>, review: Option<f64>) -> TaskReport {
 
 #[test]
 fn a_live_run_reads_as_running_rather_than_halted() {
-    let repo = temp_engine_repo("livestatus");
+    let tree = temp_engine_repo("livestatus");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -4856,7 +4957,8 @@ fn a_live_run_reads_as_running_rather_than_halted() {
 
 #[test]
 fn a_truncated_run_resumes_without_spending_the_interrupted_attempt() {
-    let repo = temp_engine_repo("resumetrunc");
+    let tree = temp_engine_repo("resumetrunc");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -4935,7 +5037,8 @@ fn a_truncated_run_resumes_without_spending_the_interrupted_attempt() {
 
 #[test]
 fn killing_a_run_mid_attempt_leaves_a_resumable_record() {
-    let repo = temp_engine_repo("crashkill");
+    let tree = temp_engine_repo("crashkill");
+    let repo = tree.path();
     seed(
         &repo,
         "## First\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5058,8 +5161,12 @@ fn crash_child_dies_inside_an_attempt() {
 const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
      cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
 
-fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
-    let repo = temp_engine_repo(tag);
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the repository before the caller's
+/// first assertion.
+fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> (ScratchTree, PathBuf) {
+    let tree = temp_engine_repo(tag);
+    let repo = tree.path().to_path_buf();
     crate::workspace_manager::fixture::pin_replacement_refs_in(&repo);
     seed(&repo, plan, Some(config));
 
@@ -5089,7 +5196,7 @@ fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
         git_in(&repo, &["status", "--porcelain"]).trim().is_empty(),
         "the fixture left the worktree dirty"
     );
-    repo
+    (tree, repo)
 }
 
 #[test]
@@ -5112,7 +5219,7 @@ fn v1_object_graph_helper() {
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-object-graph");
 
-    let repo = replaced_probe_repo(
+    let (_tree, repo) = replaced_probe_repo(
         "v1graphrun",
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
         &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATE}"),
@@ -5124,7 +5231,7 @@ fn v1_object_graph_helper() {
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
     assert!(committed(&report, "t1"), "{report:?}");
 
-    let repo = replaced_probe_repo(
+    let (_tree, repo) = replaced_probe_repo(
         "v1graphresume",
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
         &format!(
@@ -5167,7 +5274,8 @@ fn v1_object_graph_helper() {
 
 #[test]
 fn a_parked_run_is_answered_out_of_band_and_resumed() {
-    let repo = temp_engine_repo("answerresume");
+    let tree = temp_engine_repo("answerresume");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5232,7 +5340,8 @@ fn a_parked_run_is_answered_out_of_band_and_resumed() {
 
 #[test]
 fn an_answer_arriving_mid_run_unparks_without_a_hard_block() {
-    let repo = temp_engine_repo("midrun");
+    let tree = temp_engine_repo("midrun");
+    let repo = tree.path().to_path_buf();
     seed(
         &repo,
         "## Asks a question\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5287,7 +5396,8 @@ impl AnswerSource for AnsweringViaFile {
 
 #[test]
 fn blocking_propagates_transitively_and_against_plan_order() {
-    let repo = temp_engine_repo("blocked");
+    let tree = temp_engine_repo("blocked");
+    let repo = tree.path();
     seed(
         &repo,
         "## Last\n<!-- upstroke: id=late kind=implement depends=mid -->\n\n\
@@ -5319,7 +5429,8 @@ fn blocking_propagates_transitively_and_against_plan_order() {
 
 #[test]
 fn answering_a_blocker_releases_the_chain_behind_it() {
-    let repo = temp_engine_repo("unblock");
+    let tree = temp_engine_repo("unblock");
+    let repo = tree.path();
     seed(
         &repo,
         "## Last\n<!-- upstroke: id=late kind=implement depends=mid -->\n\n\
@@ -5354,7 +5465,8 @@ fn answering_a_blocker_releases_the_chain_behind_it() {
 
 #[test]
 fn an_exhausted_pool_and_a_silent_operator_still_terminate() {
-    let repo = temp_engine_repo("terminate");
+    let tree = temp_engine_repo("terminate");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -5415,12 +5527,16 @@ fn resume_err(repo: &Path, run_id: &str) -> String {
 const PARKED_RUN_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\
          [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
 
-fn parked_run(tag: &str) -> (PathBuf, String) {
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the repository before the caller's
+/// first assertion.
+fn parked_run(tag: &str) -> (ScratchTree, PathBuf, String) {
     parked_run_with_config(tag, PARKED_RUN_CONFIG)
 }
 
-fn parked_run_with_config(tag: &str, config: &str) -> (PathBuf, String) {
-    let repo = temp_engine_repo(tag);
+fn parked_run_with_config(tag: &str, config: &str) -> (ScratchTree, PathBuf, String) {
+    let tree = temp_engine_repo(tag);
+    let repo = tree.path().to_path_buf();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -5431,12 +5547,12 @@ fn parked_run_with_config(tag: &str, config: &str) -> (PathBuf, String) {
     let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Parked);
-    (repo, report.run_id)
+    (tree, repo, report.run_id)
 }
 
 #[test]
 fn resume_refuses_schema_two_failed_attempt_without_recorded_decision() {
-    let (repo, run_id) = parked_run("legacyfailedprefix");
+    let (_tree, repo, run_id) = parked_run("legacyfailedprefix");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_event_field(&paths, "attempt_finished", "parking");
@@ -5458,7 +5574,7 @@ fn resume_refuses_schema_two_failed_attempt_without_recorded_decision() {
 
 #[test]
 fn resume_refuses_when_the_branch_moved_under_it() {
-    let (repo, run_id) = parked_run("headmoved");
+    let (_tree, repo, run_id) = parked_run("headmoved");
     fs::write(repo.join("someone-else.txt"), "a hand-made commit\n").expect("file");
     git_in(&repo, &["add", "-A"]);
     git_in(&repo, &["commit", "-q", "-m", "not the engine's work"]);
@@ -5473,7 +5589,7 @@ fn resume_refuses_when_the_branch_moved_under_it() {
 
 #[test]
 fn resume_refuses_when_the_frozen_plan_changed() {
-    let (repo, run_id) = parked_run("planmoved");
+    let (_tree, repo, run_id) = parked_run("planmoved");
     fs::write(
         repo.join("plan.md"),
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\nNow with a body.\n",
@@ -5493,7 +5609,7 @@ fn resume_refuses_when_the_frozen_plan_changed() {
 
 #[test]
 fn status_export_and_resume_refuse_mutated_normalized_plan_bytes() {
-    let (repo, run_id) = parked_run("normalized-plan-tamper");
+    let (_tree, repo, run_id) = parked_run("normalized-plan-tamper");
     let plan_path = paths_of(&repo, &run_id).plan_json();
     let mut plan: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&plan_path).expect("frozen plan"))
@@ -5536,7 +5652,7 @@ fn status_export_and_resume_refuse_mutated_normalized_plan_bytes() {
 
 #[test]
 fn resume_refuses_schema_two_spend_question_without_task_parked() {
-    let (repo, run_id) = parked_run("legacyspendprefix");
+    let (_tree, repo, run_id) = parked_run("legacyspendprefix");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     strip_event_field(&paths, "attempt_finished", "parking");
@@ -5590,7 +5706,7 @@ fn resume_refuses_schema_two_spend_question_without_task_parked() {
 
 #[test]
 fn legacy_status_still_refuses_a_mismatched_self_reported_plan_hash() {
-    let (repo, run_id) = parked_run("legacy-status-plan-hash");
+    let (_tree, repo, run_id) = parked_run("legacy-status-plan-hash");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     let plan_path = paths.plan_json();
@@ -5617,7 +5733,7 @@ fn legacy_status_still_refuses_a_mismatched_self_reported_plan_hash() {
 
 #[test]
 fn legacy_upgrade_never_blesses_a_modified_normalized_snapshot() {
-    let (repo, run_id) = parked_run("legacy-plan-upgrade-tamper");
+    let (_tree, repo, run_id) = parked_run("legacy-plan-upgrade-tamper");
     let paths = paths_of(&repo, &run_id);
     rewrite_run_started_as_schema_two(&paths);
     let plan_path = paths.plan_json();
@@ -5646,7 +5762,7 @@ fn legacy_upgrade_never_blesses_a_modified_normalized_snapshot() {
 
 #[test]
 fn resume_compares_canonical_source_semantics_to_the_recorded_plan_digest() {
-    let (repo, run_id) = parked_run("source-semantics-digest");
+    let (_tree, repo, run_id) = parked_run("source-semantics-digest");
     fs::write(
         repo.join("plan.md"),
         "## Changed semantics\n<!-- upstroke: id=t1 kind=implement depends= -->\nDifferent body.\n",
@@ -5677,7 +5793,7 @@ fn resume_compares_canonical_source_semantics_to_the_recorded_plan_digest() {
 
 #[test]
 fn resume_refuses_when_routing_moved_under_a_recorded_rung() {
-    let (repo, run_id) = parked_run("chainmoved");
+    let (_tree, repo, run_id) = parked_run("chainmoved");
     fs::write(
         repo.join("upstroke.toml"),
         "[interaction]\nmode = \"never\"\n\n\
@@ -5690,7 +5806,7 @@ fn resume_refuses_when_routing_moved_under_a_recorded_rung() {
     assert!(err.contains("`t1` ran on [small]"), "names the task: {err}");
 }
 
-fn parked_run_with_gate(tag: &str, cmd: &str) -> (PathBuf, String) {
+fn parked_run_with_gate(tag: &str, cmd: &str) -> (ScratchTree, PathBuf, String) {
     parked_run_with_config(tag, &gate_config(cmd))
 }
 
@@ -5716,7 +5832,7 @@ fn resume_answering(repo: &Path, run_id: &str, effect: Effect) -> RunReport {
 
 #[test]
 fn resume_runs_the_gates_the_run_recorded_not_todays() {
-    let (repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");
 
     fs::write(
         repo.join("upstroke.toml"),
@@ -5753,7 +5869,7 @@ fn resume_runs_the_gates_the_run_recorded_not_todays() {
 
 #[test]
 fn a_resume_with_a_gate_record_is_not_refused_over_todays_gates_section() {
-    let (repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");
     fs::write(
         repo.join("upstroke.toml"),
         format!(
@@ -5793,7 +5909,7 @@ fn a_resume_with_a_gate_record_is_not_refused_over_todays_gates_section() {
 
 #[test]
 fn a_resume_with_no_gate_record_refuses_the_gate_shapes_a_fresh_run_refuses() {
-    let (repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");
     let paths = paths_of(&repo, &run_id);
     strip_event_data_field(&paths, "run_started", "gate_cmds");
     let before = fs::read_to_string(paths.events()).expect("the log before");
@@ -5834,7 +5950,7 @@ fn a_resume_with_no_gate_record_refuses_the_gate_shapes_a_fresh_run_refuses() {
 
 #[test]
 fn the_report_labels_gates_from_the_record_not_todays_config() {
-    let (repo, run_id) = parked_run_with_gate("gatelabel", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gatelabel", "git --version");
 
     fs::write(repo.join("upstroke.toml"), PARKED_RUN_CONFIG).expect("edit config");
 
@@ -5852,7 +5968,7 @@ fn the_report_labels_gates_from_the_record_not_todays_config() {
 
 #[test]
 fn a_resume_whose_gates_did_not_move_says_nothing_about_them() {
-    let (repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(
@@ -5941,7 +6057,7 @@ fn a_gate_difference_is_described_without_inventing_edits() {
 
 #[test]
 fn a_log_that_predates_the_gate_record_rederives_and_says_what_it_can() {
-    let (repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     fs::write(
@@ -5969,7 +6085,7 @@ fn a_log_that_predates_the_gate_record_rederives_and_says_what_it_can() {
 
 #[test]
 fn the_resume_that_rederives_an_old_logs_gates_records_them_for_the_next_one() {
-    let (repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");
+    let (_tree, repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     let first = resume_answering(&repo, &run_id, Effect::NoEdit);
@@ -6023,7 +6139,7 @@ fn the_resume_that_rederives_an_old_logs_gates_records_them_for_the_next_one() {
 
 #[test]
 fn an_old_gateless_log_is_not_warned_at_about_nothing() {
-    let (repo, run_id) = parked_run("oldgatelessslog");
+    let (_tree, repo, run_id) = parked_run("oldgatelessslog");
     strip_run_started_field(&paths_of(&repo, &run_id), "gate_cmds");
 
     let resumed = resume_answering(&repo, &run_id, Effect::EditFile);
@@ -6036,7 +6152,7 @@ fn an_old_gateless_log_is_not_warned_at_about_nothing() {
 
 #[test]
 fn resume_refuses_when_the_run_branch_is_gone() {
-    let (repo, run_id) = parked_run("branchgone");
+    let (_tree, repo, run_id) = parked_run("branchgone");
     let branch = git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
         .trim()
         .to_owned();
@@ -6049,7 +6165,7 @@ fn resume_refuses_when_the_run_branch_is_gone() {
 
 #[test]
 fn resume_refuses_to_switch_over_uncommitted_work() {
-    let (repo, run_id) = parked_run("dirtyelsewhere");
+    let (_tree, repo, run_id) = parked_run("dirtyelsewhere");
     git_in(&repo, &["switch", "-q", "main"]);
     fs::write(
         repo.join("my-own-work.txt"),
@@ -6067,14 +6183,16 @@ fn resume_refuses_to_switch_over_uncommitted_work() {
 
 #[test]
 fn resume_refuses_a_run_that_already_finished_or_halted() {
-    let repo = temp_engine_repo("finished");
+    let tree = temp_engine_repo("finished");
+    let repo = tree.path();
     let complete = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &complete).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete);
     let err = resume_err(&repo, &report.run_id);
     assert!(err.contains("already completed"), "got: {err}");
 
-    let repo = temp_engine_repo("halted");
+    let tree = temp_engine_repo("halted");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6100,7 +6218,7 @@ fn resume_refuses_a_run_that_already_finished_or_halted() {
 
 #[test]
 fn resume_refuses_while_another_process_holds_the_run() {
-    let (repo, run_id) = parked_run("locked");
+    let (_tree, repo, run_id) = parked_run("locked");
     let paths = paths_of(&repo, &run_id);
     let _held = RunLock::acquire(&paths.public).expect("hold it");
 
@@ -6110,14 +6228,15 @@ fn resume_refuses_while_another_process_holds_the_run() {
 
 #[test]
 fn an_unknown_run_id_lists_what_is_there() {
-    let (repo, _) = parked_run("unknownid");
+    let (_tree, repo, _) = parked_run("unknownid");
     let err = resume_err(&repo, "01NOPE");
     assert!(err.contains("known runs"), "got: {err}");
 }
 
 #[test]
 fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
-    let repo = temp_engine_repo("statusledger");
+    let tree = temp_engine_repo("statusledger");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
 
@@ -6160,7 +6279,8 @@ fn status_reports_a_live_run_and_the_ledger_reads_from_the_log() {
 
 #[test]
 fn following_a_finished_run_replays_it_and_stops() {
-    let repo = temp_engine_repo("follow");
+    let tree = temp_engine_repo("follow");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
 
@@ -6187,7 +6307,8 @@ fn following_a_finished_run_replays_it_and_stops() {
 
 #[test]
 fn follow_ignores_a_terminal_marker_superseded_by_resume() {
-    let repo = temp_engine_repo("followresume");
+    let tree = temp_engine_repo("followresume");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let paths = paths_of(&repo, &report.run_id);
@@ -6289,7 +6410,8 @@ fn follow_waits_at_held_historical_terminal_until_resume_marker() {
         }
     }
 
-    let repo = temp_engine_repo("followheldterminal");
+    let tree = temp_engine_repo("followheldterminal");
+    let repo = tree.path();
     let report = run_with(&options(&repo), &fake(Effect::EditFile)).expect("run");
     let paths = paths_of(&repo, &report.run_id);
     let loaded = replay_of(&repo, &report.run_id);
@@ -6308,7 +6430,8 @@ fn follow_waits_at_held_historical_terminal_until_resume_marker() {
 
 #[test]
 fn transcripts_live_outside_the_workspace_and_survive_a_rollback() {
-    let repo = temp_engine_repo("private");
+    let tree = temp_engine_repo("private");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6533,7 +6656,8 @@ fn recreate_prepared_pin(repo: &Path, prepared: &events::PreparedCommit, target:
 
 #[test]
 fn resume_adopts_the_commit_it_made_but_never_recorded() {
-    let repo = temp_engine_repo("adoptcommit");
+    let tree = temp_engine_repo("adoptcommit");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6594,7 +6718,8 @@ fn resume_recovers_every_prepared_commit_ref_crash_prefix() {
         ("prepared-head-with-pin", false, true),
         ("prepared-head-no-pin", false, false),
     ] {
-        let repo = temp_engine_repo(tag);
+        let tree = temp_engine_repo(tag);
+        let repo = tree.path();
         seed(
             &repo,
             "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6648,7 +6773,8 @@ fn resume_recovers_every_prepared_commit_ref_crash_prefix() {
 
 #[test]
 fn resume_removes_a_pin_whose_successful_settlement_never_landed() {
-    let repo = temp_engine_repo("prepared-orphan");
+    let tree = temp_engine_repo("prepared-orphan");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6695,7 +6821,8 @@ fn resume_removes_a_pin_whose_successful_settlement_never_landed() {
 
 #[test]
 fn resume_refuses_a_substituted_prepared_pin_without_deleting_it() {
-    let repo = temp_engine_repo("prepared-pin-mismatch");
+    let tree = temp_engine_repo("prepared-pin-mismatch");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6730,7 +6857,8 @@ fn resume_refuses_a_substituted_prepared_pin_without_deleting_it() {
 
 #[test]
 fn resume_refuses_symbolic_run_ref_at_already_published_prepared_prefix() {
-    let repo = temp_engine_repo("prepared-symbolic-run-ref");
+    let tree = temp_engine_repo("prepared-symbolic-run-ref");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6790,7 +6918,8 @@ fn resume_refuses_symbolic_run_ref_at_already_published_prepared_prefix() {
 
 #[test]
 fn recovered_prepared_commit_precedes_unrelated_answer_defect_repair() {
-    let repo = temp_engine_repo("prepared-before-repair");
+    let tree = temp_engine_repo("prepared-before-repair");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6888,7 +7017,8 @@ fn recovered_prepared_commit_precedes_unrelated_answer_defect_repair() {
 
 #[test]
 fn resume_refuses_an_arbitrary_tree_with_the_same_parent_and_subject() {
-    let repo = temp_engine_repo("adoptforeign");
+    let tree = temp_engine_repo("adoptforeign");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6914,7 +7044,8 @@ fn resume_refuses_an_arbitrary_tree_with_the_same_parent_and_subject() {
 
 #[test]
 fn legacy_success_without_prepared_identity_is_never_adopted_by_subject() {
-    let repo = temp_engine_repo("legacy-subject");
+    let tree = temp_engine_repo("legacy-subject");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6939,7 +7070,8 @@ fn legacy_success_without_prepared_identity_is_never_adopted_by_subject() {
 
 #[test]
 fn resume_writes_where_the_run_recorded_not_where_defaults_point() {
-    let repo = temp_engine_repo("privatedir");
+    let tree = temp_engine_repo("privatedir");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -6976,7 +7108,8 @@ fn resume_writes_where_the_run_recorded_not_where_defaults_point() {
 
 #[test]
 fn resume_makes_a_stale_question_payload_agree_with_the_log() {
-    let repo = temp_engine_repo("stalepayload");
+    let tree = temp_engine_repo("stalepayload");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7083,7 +7216,8 @@ fn a_private_run_collision_refuses_before_early_error_cleanup() {
 
 #[test]
 fn a_run_that_never_started_leaves_no_directory_behind() {
-    let repo = temp_engine_repo("husk");
+    let tree = temp_engine_repo("husk");
+    let repo = tree.path();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7147,7 +7281,8 @@ impl AnswerSource for BacklogAnswers {
 
 #[test]
 fn a_typed_answer_survives_another_question_being_answered_at_the_same_time() {
-    let repo = temp_engine_repo("backlog");
+    let tree = temp_engine_repo("backlog");
+    let repo = tree.path().to_path_buf();
     seed(
         &repo,
         "## First\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7183,7 +7318,8 @@ fn a_typed_answer_survives_another_question_being_answered_at_the_same_time() {
 
 #[test]
 fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
-    let repo = temp_engine_repo("nullanswer");
+    let tree = temp_engine_repo("nullanswer");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7220,7 +7356,8 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
 
 #[test]
 fn a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring() {
-    let repo = temp_engine_repo("foreigncolumn");
+    let tree = temp_engine_repo("foreigncolumn");
+    let repo = tree.path();
     seed(
         &repo,
         "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7291,7 +7428,8 @@ impl Sleeper for LockReleasingSleeper {
 
 #[test]
 fn following_waits_out_a_silent_live_run_and_stops_once_it_dies() {
-    let repo = temp_engine_repo("followlive");
+    let tree = temp_engine_repo("followlive");
+    let repo = tree.path();
     let source = fake(Effect::EditFile);
     let report = run_with(&options(&repo), &source).expect("run");
     let paths = paths_of(&repo, &report.run_id);
@@ -7346,7 +7484,8 @@ fn budget_events(events: &[events::Event]) -> Vec<&events::BudgetExceeded> {
 
 #[test]
 fn a_run_budget_stops_the_run_exactly_once_and_survives_replay() {
-    let repo = temp_engine_repo("budgetstop");
+    let tree = temp_engine_repo("budgetstop");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7392,7 +7531,8 @@ fn a_run_budget_stops_the_run_exactly_once_and_survives_replay() {
 
 #[test]
 fn a_task_budget_also_ends_the_run_and_says_which_ceiling_it_was() {
-    let repo = temp_engine_repo("taskbudget");
+    let tree = temp_engine_repo("taskbudget");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7425,7 +7565,8 @@ fn a_task_budget_also_ends_the_run_and_says_which_ceiling_it_was() {
 
 #[test]
 fn resuming_with_a_higher_ceiling_continues_the_run_the_budget_stopped() {
-    let repo = temp_engine_repo("budgetresume");
+    let tree = temp_engine_repo("budgetresume");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7462,7 +7603,8 @@ fn resuming_with_a_higher_ceiling_continues_the_run_the_budget_stopped() {
 
 #[test]
 fn a_resume_that_does_not_raise_the_ceiling_stops_again_rather_than_running_past_it() {
-    let repo = temp_engine_repo("budgetresumelow");
+    let tree = temp_engine_repo("budgetresumelow");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -7494,7 +7636,8 @@ fn a_resume_that_does_not_raise_the_ceiling_stops_again_rather_than_running_past
 
 #[test]
 fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
-    let repo = temp_engine_repo("approvespend");
+    let tree = temp_engine_repo("approvespend");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7552,7 +7695,8 @@ fn a_frontier_escalation_over_the_threshold_parks_for_approval_then_runs_it() {
 
 #[test]
 fn a_declined_spend_approval_fails_the_task_through_the_halt_policy() {
-    let repo = temp_engine_repo("declinespend");
+    let tree = temp_engine_repo("declinespend");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7595,7 +7739,8 @@ fn a_declined_spend_approval_fails_the_task_through_the_halt_policy() {
 
 #[test]
 fn a_chain_that_starts_at_frontier_never_asks_to_approve_spend() {
-    let repo = temp_engine_repo("frontierstart");
+    let tree = temp_engine_repo("frontierstart");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7624,7 +7769,8 @@ fn a_chain_that_starts_at_frontier_never_asks_to_approve_spend() {
 
 #[test]
 fn attempts_are_attributed_to_the_pool_that_paid_them() {
-    let repo = temp_engine_repo("poolattrib");
+    let tree = temp_engine_repo("poolattrib");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7700,7 +7846,8 @@ fn attempts_are_attributed_to_the_pool_that_paid_them() {
 
 #[test]
 fn a_pinned_live_attempt_records_its_selection_origin() {
-    let repo = temp_engine_repo("pinorigin");
+    let tree = temp_engine_repo("pinorigin");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7727,7 +7874,8 @@ fn a_pinned_live_attempt_records_its_selection_origin() {
 
 #[test]
 fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
-    let repo = temp_engine_repo("poolexhausted");
+    let tree = temp_engine_repo("poolexhausted");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7778,7 +7926,8 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
 
 #[test]
 fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
-    let repo = temp_engine_repo("reviewerlimitretiresworker");
+    let tree = temp_engine_repo("reviewerlimitretiresworker");
+    let repo = tree.path();
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));
     let pools = pools_file(
         &repo,
@@ -7817,7 +7966,8 @@ fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
 
 #[test]
 fn the_budget_flag_is_validated_like_the_config_key() {
-    let repo = temp_engine_repo("budgetflag");
+    let tree = temp_engine_repo("budgetflag");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7841,7 +7991,8 @@ fn the_budget_flag_is_validated_like_the_config_key() {
 
 #[test]
 fn a_spend_approval_is_not_fed_back_to_the_agent_as_an_instruction() {
-    let repo = temp_engine_repo("approvalfeedback");
+    let tree = temp_engine_repo("approvalfeedback");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7886,7 +8037,8 @@ fn a_spend_approval_is_not_fed_back_to_the_agent_as_an_instruction() {
 
 #[test]
 fn picking_an_option_is_an_un_park_and_not_a_decision() {
-    let repo = temp_engine_repo("cannedoption");
+    let tree = temp_engine_repo("cannedoption");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7943,7 +8095,8 @@ fn picking_an_option_is_an_un_park_and_not_a_decision() {
 
 #[test]
 fn one_outage_records_one_signal_however_many_deferrals_it_causes() {
-    let repo = temp_engine_repo("onesignal");
+    let tree = temp_engine_repo("onesignal");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -7976,7 +8129,8 @@ fn one_outage_records_one_signal_however_many_deferrals_it_causes() {
 
 #[test]
 fn a_budget_stop_hands_back_a_clean_tree() {
-    let repo = temp_engine_repo("budgetdirty");
+    let tree = temp_engine_repo("budgetdirty");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8208,7 +8362,8 @@ fn a_report_for_a_dead_run_never_says_a_task_is_running() {
 
 #[test]
 fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
-    let repo = temp_engine_repo("resumewindow");
+    let tree = temp_engine_repo("resumewindow");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8239,7 +8394,8 @@ fn a_budget_stop_keeps_its_outcome_while_a_resume_holds_the_lock() {
 
 #[test]
 fn a_budget_stop_survives_a_git_that_cannot_clean_the_tree() {
-    let repo = temp_engine_repo("budgetjam");
+    let tree = temp_engine_repo("budgetjam");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8277,7 +8433,8 @@ fn a_budget_stop_survives_a_git_that_cannot_clean_the_tree() {
 
 #[test]
 fn a_budget_stop_survives_a_stale_decline_file() {
-    let repo = temp_engine_repo("budgetdecline");
+    let tree = temp_engine_repo("budgetdecline");
+    let repo = tree.path();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -8353,7 +8510,8 @@ fn program_stem(program: &str) -> String {
 
 #[test]
 fn the_legacy_engine_routes_every_process_through_the_runner() {
-    let repo = temp_engine_repo("routed");
+    let tree = temp_engine_repo("routed");
+    let repo = tree.path().to_path_buf();
     seed(
         &repo,
         "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
@@ -8514,7 +8672,8 @@ fn the_legacy_engine_routes_every_process_through_the_runner() {
 
 #[test]
 fn a_retried_attempt_with_two_passes_and_a_reask_assigns_every_identity_from_production() {
-    let repo = temp_engine_repo("identities");
+    let tree = temp_engine_repo("identities");
+    let repo = tree.path();
     seed(
         &repo,
         FRONTIER_AUTH_PLAN,
@@ -8608,7 +8767,8 @@ fn a_retried_attempt_with_two_passes_and_a_reask_assigns_every_identity_from_pro
 
 #[test]
 fn a_worker_that_cannot_be_spawned_returns_an_error_and_settles_nothing() {
-    let repo = temp_engine_repo("workerspawn");
+    let tree = temp_engine_repo("workerspawn");
+    let repo = tree.path().to_path_buf();
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -8846,7 +9006,8 @@ fn public_facade_entry_points() -> Vec<String> {
 
 #[test]
 fn every_public_write_coordinator_entry_point_establishes_containment() {
-    let repo = temp_engine_repo("containment-facade");
+    let tree = temp_engine_repo("containment-facade");
+    let repo = tree.path().to_path_buf();
     let mut run_opts = options(&repo);
     run_opts.plan_path = repo.join("absent-plan.md");
     let mut resume_opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
@@ -8908,7 +9069,8 @@ fn every_public_write_coordinator_entry_point_establishes_containment() {
 
 #[test]
 fn no_read_only_public_entry_point_establishes_containment() {
-    let repo = temp_engine_repo("containment-readonly");
+    let tree = temp_engine_repo("containment-readonly");
+    let repo = tree.path().to_path_buf();
     let scratch = private_root_for(&repo);
     fs::create_dir_all(&scratch).expect("scratch");
     let absent = repo.join("absent-plan.md");
@@ -8992,7 +9154,8 @@ fn no_read_only_public_entry_point_establishes_containment() {
 
 #[test]
 fn a_facade_run_refuses_before_any_effect_when_containment_fails() {
-    let repo = temp_engine_repo("containment-order");
+    let tree = temp_engine_repo("containment-order");
+    let repo = tree.path();
     let mut opts = options(&repo);
     opts.plan_path = repo.join("absent-plan.md");
     let source = source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]);
@@ -9038,7 +9201,8 @@ fn a_facade_run_refuses_before_any_effect_when_containment_fails() {
 
 #[test]
 fn a_facade_resume_refuses_before_any_effect_when_containment_fails() {
-    let repo = temp_engine_repo("containment-order-resume");
+    let tree = temp_engine_repo("containment-order-resume");
+    let repo = tree.path().to_path_buf();
     let mut opts = ResumeOptions::new("01ABSENTRUN".to_owned(), repo.clone());
     opts.pools_path = Some(no_pools());
     opts.private_root = Some(private_root_for(&repo));

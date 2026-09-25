@@ -120,14 +120,29 @@ fn describe(answer: &Answer) -> String {
 mod tests {
     use super::*;
     use crate::ir::{Question, QuestionKind, TaskId};
-    use std::path::PathBuf;
+    use crate::rundir::scratch_tree::ScratchTree;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("upstroke-answer-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        dir
+    /// A scratch tree for one test, guarded by the token that authorises
+    /// its deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-answer-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on
+    /// a ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it
+    /// at the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     fn seed(repo: &Path, run: &str, id: &str) {
@@ -157,7 +172,8 @@ mod tests {
 
     #[test]
     fn an_answer_lands_where_the_engine_will_find_it() {
-        let repo = scratch("basic").join("repo");
+        let tree = scratch("basic");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-01ABC");
 
         let recorded = answer(
@@ -184,7 +200,8 @@ mod tests {
 
     #[test]
     fn an_option_number_preserves_the_option_action() {
-        let repo = scratch("option").join("repo");
+        let tree = scratch("option");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
         let recorded = answer(&repo, "q-1", Reply::Option(2)).expect("answer");
         assert_eq!(recorded.answer, Answer::Declined);
@@ -200,7 +217,8 @@ mod tests {
 
     #[test]
     fn declining_is_expressible_and_distinct_from_answering() {
-        let repo = scratch("decline").join("repo");
+        let tree = scratch("decline");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
         let recorded = answer(&repo, "q-1", Reply::Decline).expect("decline");
         assert_eq!(recorded.answer, Answer::Declined);
@@ -208,7 +226,8 @@ mod tests {
 
     #[test]
     fn an_empty_answer_is_refused_rather_than_written() {
-        let repo = scratch("empty").join("repo");
+        let tree = scratch("empty");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
         let err = answer(&repo, "q-1", Reply::Text("   ".to_owned())).expect_err("refused");
         assert!(err.to_string().contains("--decline"), "got: {err}");
@@ -223,7 +242,8 @@ mod tests {
 
     #[test]
     fn a_question_is_answered_once() {
-        let repo = scratch("twice").join("repo");
+        let tree = scratch("twice");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
 
         let questions = rundir::public_dir(&repo, "01RUN").join("questions");
@@ -245,7 +265,8 @@ mod tests {
 
     #[test]
     fn an_unknown_question_says_where_it_looked() {
-        let repo = scratch("missing").join("repo");
+        let tree = scratch("missing");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
         let err = answer(&repo, "q-nope", Reply::Decline).expect_err("no such question");
         assert!(err.to_string().contains("no question"), "got: {err}");
@@ -253,7 +274,8 @@ mod tests {
 
     #[test]
     fn showing_a_question_renders_its_options() {
-        let repo = scratch("show").join("repo");
+        let tree = scratch("show");
+        let repo = tree.path().join("repo");
         seed(&repo, "01RUN", "q-1");
         let rendered = show(&repo, "q-1").expect("show");
         assert!(rendered.contains("1) retry on frontier"), "{rendered}");

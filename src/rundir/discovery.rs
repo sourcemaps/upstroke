@@ -1305,7 +1305,8 @@ mod tests {
         const SECOND: &str = "01M00000000000000000000001";
         const HUSK: &str = "01H00000000000000000000000";
 
-        let repo = scratch("resolveobserved").join("repo");
+        let tree = scratch("resolveobserved");
+        let repo = tree.path().join("repo");
         commit_run(&repo, FIRST);
         commit_run(&repo, SECOND);
         let husk = husk_run(&repo, HUSK);
@@ -1428,7 +1429,8 @@ mod tests {
         const READ: &str = "01Q00000000000000000000000";
         const UNREAD: &str = "01Q00000000000000000000001";
 
-        let repo = scratch("questionunread").join("repo");
+        let tree = scratch("questionunread");
+        let repo = tree.path().join("repo");
         for (run, question) in [(READ, "q-ONE"), (READ, "q-ONLY"), (UNREAD, "q-TWO")] {
             question_in(&repo, run, question);
         }

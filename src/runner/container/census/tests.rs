@@ -30,18 +30,33 @@ use crate::runner::container::{
     ContainerHooks, DisposableDirView, FakeRuntime, RecordingHooks, TERMINATION_OBSERVATIONS,
     write_intent,
 };
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::{AgentId, InvocationId, ProbeTarget};
 use crate::topology::effects::ContainerSite;
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-census-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("a scratch private root");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-census-<tag>-<pid>-<thread>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). A thread id distinguishes two fixtures inside
+/// one process and nothing else: a second process, or a second run of this one
+/// under a pid Windows recycled, reaches the same name. `acquire` refuses an
+/// occupied root rather than emptying it, keys on a ULID no recycled pid can
+/// supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 const REPO_KEY_A: &str = "0123456789abcdef";
@@ -312,6 +327,10 @@ fn resume(run_id: &str, incarnation: &str) -> CensusStart {
 }
 
 struct Harness {
+    /// The guard over the root [`Harness::new`] acquired, kept for the
+    /// harness's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return.
+    _tree: ScratchTree,
     root: PathBuf,
     trace: ContainerTrace,
     runtime: Arc<FakeRuntime>,
@@ -321,9 +340,11 @@ struct Harness {
 
 impl Harness {
     fn new(tag: &str) -> Self {
-        let root = scratch(tag);
+        let tree = scratch(tag);
+        let root = tree.path().to_path_buf();
         let trace = ContainerTrace::recording();
         Self {
+            _tree: tree,
             root,
             runtime: Arc::new(FakeRuntime::new(trace.clone())),
             liveness: RecordingLiveness::new(),
@@ -815,7 +836,8 @@ fn orphan_reclaimed_before_slot_reset() {
     assert_eq!(complete.report().reclaimed.len(), 1);
     assert_eq!(complete.private_root(), harness.root.as_path());
 
-    let root = scratch("blocks-admission");
+    let tree = scratch("blocks-admission");
+    let root = tree.path();
     let inner = Arc::new(FakeRuntime::new(ContainerTrace::off()));
     let stuck = seed(
         &root,
@@ -1045,7 +1067,8 @@ fn same_run_resume_reclaims_earlier_incarnation_orphan() {
 #[test]
 fn same_run_resume_censuses_recorded_root_after_default_changed() {
     let recorded = Harness::new("recorded-root");
-    let other_root = scratch("default-root-that-moved");
+    let tree = scratch("default-root-that-moved");
+    let other_root = tree.path();
     let dead = Owner::new(RUN_B, INC_1, REPO_KEY_A);
 
     let in_recorded = seed(
@@ -1186,7 +1209,8 @@ fn concurrent_reclaimers_converge() {
     let mut interleaved = 0_usize;
 
     for round in 0..ROUNDS {
-        let root = scratch(&format!("converge-{round}"));
+        let tree = scratch(&format!("converge-{round}"));
+        let root = tree.path().to_path_buf();
         let trace = ContainerTrace::off();
         let runtime = Arc::new(FakeRuntime::new(trace.clone()));
         let names: Vec<ContainerName> = (0..4)
@@ -1332,7 +1356,8 @@ fn a_reclaimer_suspended_mid_sequence_converges_with_one_that_finished() {
         }
     }
 
-    let root = scratch("suspended-reclaimer");
+    let tree = scratch("suspended-reclaimer");
+    let root = tree.path().to_path_buf();
     let runtime = Arc::new(FakeRuntime::new(ContainerTrace::off()));
     let dead = Owner::new(RUN_B, INC_1, REPO_KEY_A);
     let name = seed(
@@ -2543,7 +2568,8 @@ fn r26_is_released_in_four_outcomes_and_the_census_is_the_mechanism_for_no_run_f
 
 #[test]
 fn a_container_that_never_terminates_exhausts_the_bounded_observation_and_refuses() {
-    let root = scratch("never-terminates");
+    let tree = scratch("never-terminates");
+    let root = tree.path();
     let trace = ContainerTrace::recording();
     let inner = Arc::new(FakeRuntime::new(trace.clone()));
     let dead = Owner::new(RUN_B, INC_1, REPO_KEY_A);
@@ -2756,7 +2782,8 @@ fn real_docker_census_reclaims_a_dead_owner_and_spares_a_live_one() {
         return;
     };
 
-    let root = scratch("real-docker-census");
+    let tree = scratch("real-docker-census");
+    let root = tree.path().to_path_buf();
     let (live, dead) = real_docker_census_owners();
     let liveness = RecordingLiveness::new();
     liveness.set_live(&live.run_dir);
@@ -3390,7 +3417,8 @@ fn a_fresh_and_a_resuming_census_race_one_container_and_converge() {
     let dead = Owner::new(RUN_B, INC_1, REPO_KEY_A);
 
     for round in 0..ROUNDS {
-        let root = scratch(&format!("cross-role-race-{round}"));
+        let tree = scratch(&format!("cross-role-race-{round}"));
+        let root = tree.path().to_path_buf();
         let runtime = Arc::new(FakeRuntime::new(ContainerTrace::off()));
         let names: Vec<ContainerName> = (0..4)
             .map(|ordinal| {

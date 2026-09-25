@@ -30,20 +30,35 @@ use super::{
     write_intent,
 };
 use crate::error::UpstrokeError;
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::{AgentId, CommandSpec, InvocationId, ProbeTarget, host};
 use crate::topology::effects::{
     Adjacent, ContainerSite, DurableEvent, EffectSiteId, FaultRow, ResourceRow, SiteScope,
 };
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-container-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("a scratch private root");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-container-<tag>-<pid>-<thread>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). A thread id distinguishes two fixtures inside
+/// one process and nothing else: a second process, or a second run of this one
+/// under a pid Windows recycled, reaches the same name. `acquire` refuses an
+/// occupied root rather than emptying it, keys on a ULID no recycled pid can
+/// supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 type RacingObserver = Box<dyn FnMut(usize, RacingPause)>;
@@ -290,6 +305,11 @@ fn spec_for(
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return. `None` when the
+    /// caller supplied a root it guards itself ([`Fixture::at`]).
+    _tree: Option<ScratchTree>,
     root: PathBuf,
     trace: ContainerTrace,
     runtime: FakeRuntime,
@@ -299,42 +319,18 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
-        let root = scratch(tag);
-        let trace = ContainerTrace::recording();
-        let runtime = FakeRuntime::new(trace.clone());
-        runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
-        runtime.add_image(OTHER_IMAGE_ID, None);
-        runtime.tag(IMAGE_REFERENCE, IMAGE_ID);
-        let record = intent_for(run, incarnation, invocation);
-        let name = name_for(run, incarnation, invocation);
-        let spec = spec_for(&name, &record, &root, IMAGE_ID);
-        let view = GitViewRequest {
-            path: root.join("views").join(name.as_str()),
-            workspace: PathBuf::from("/srv/work/task"),
-            head: Some("0".repeat(40)),
-        };
-        Self {
-            plan: LaunchPlan {
-                private_root: root.clone(),
-                name,
-                invocation: invocation.clone(),
-                intent: record,
-                spec,
-                view,
-            },
-            view: DisposableDirView::new(trace.clone()),
-            runtime,
-            trace,
-            root,
-        }
+        let tree = scratch(tag);
+        let mut fixture = Self::at(tree.path().to_path_buf(), run, incarnation, invocation);
+        fixture._tree = Some(tree);
+        fixture
     }
 
     /// [`Fixture::new`], built in `root`, a directory the caller owns.
     ///
     /// For the witnesses that hold a `rundir::scratch_tree` guard over their
     /// fixture, so that the guard reclaims the fixture's private root however
-    /// the witness ends (#292's review round 6). [`Fixture::new`]'s pid-named
-    /// root is left as it was.
+    /// the witness ends (#292's review round 6). [`Fixture::new`] now holds a
+    /// guard of its own and reaches its root through this.
     fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
         let trace = ContainerTrace::recording();
         let runtime = FakeRuntime::new(trace.clone());
@@ -350,6 +346,9 @@ impl Fixture {
             head: Some("0".repeat(40)),
         };
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             plan: LaunchPlan {
                 private_root: root.clone(),
                 name,
@@ -435,7 +434,8 @@ fn a_pre_clean_of_a_strangers_name_refuses_before_it_reclaims_anything() {
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace.clone());
     let view = DisposableDirView::new(ContainerTrace::off());
-    let root = scratch("preclean-refusal");
+    let tree = scratch("preclean-refusal");
+    let root = tree.path();
     let theirs =
         ContainerName::new(STRANGERS, RUN, INCARNATION, &shell_probe()).expect("a container name");
 
@@ -728,8 +728,9 @@ fn owner_liveness_answers_one_bit_and_carries_no_incarnation() {
     assert!(!liveness.is_running(&live));
 
     let probe = super::runtime::LockProbe;
+    let liveness_root = scratch("liveness");
     assert!(
-        !probe.is_running(&scratch("liveness")),
+        !probe.is_running(liveness_root.path()),
         "a directory with no run.lock has no live owner"
     );
 }
@@ -1062,7 +1063,8 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
     let mut accepted = 0;
     let mut refused = 0;
     for (index, own_site) in ContainerSite::ALL.iter().copied().enumerate() {
-        let root = scratch(&format!("site-guard-{index}"));
+        let tree = scratch(&format!("site-guard-{index}"));
+        let root = tree.path();
         let trace = ContainerTrace::recording();
         let runtime = FakeRuntime::new(trace.clone());
         runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
@@ -1480,7 +1482,8 @@ fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {
 
 #[test]
 fn an_intent_record_with_an_unknown_field_is_refused() {
-    let root = scratch("unknown-field");
+    let tree = scratch("unknown-field");
+    let root = tree.path();
     let path = root.join("bad.intent");
     fs::write(
         &path,
@@ -1633,7 +1636,8 @@ fn a_hostile_name_component_is_refused_and_the_refusal_says_why() {
 
 #[test]
 fn probe_name_reuse_across_incarnations_never_collides() {
-    let root = scratch("probe-reuse");
+    let tree = scratch("probe-reuse");
+    let root = tree.path();
     let mut names = BTreeSet::new();
     let mut paths = BTreeSet::new();
     for incarnation in [INCARNATION_1, INCARNATION_2] {
@@ -2760,7 +2764,8 @@ fn the_namespace_scan_reads_every_record_and_skips_the_staged_half() {
 
 #[test]
 fn an_absent_containers_directory_is_an_empty_namespace() {
-    let root = scratch("empty-namespace");
+    let tree = scratch("empty-namespace");
+    let root = tree.path();
     assert!(!containers_dir(&root).exists());
     assert_eq!(list_intents(&root).expect("scanned"), Vec::new());
 }
@@ -3451,7 +3456,8 @@ fn real_docker_creates_from_an_id_reports_it_and_reclaims_idempotently() {
         Err(reason) => return no_image(&reason),
     };
 
-    let root = scratch("real-docker");
+    let tree = scratch("real-docker");
+    let root = tree.path().to_path_buf();
     let invocation = shell_probe();
     let record = intent_for(RUN_A, INCARNATION_1, &invocation);
     let name = name_for(RUN_A, INCARNATION_1, &invocation);
@@ -4144,7 +4150,8 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         return skipped(&reason);
     }
 
-    let root = scratch("local-failure-phrases");
+    let tree = scratch("local-failure-phrases");
+    let root = tree.path();
     let target = "upstroke-c";
     let phrases = [
         "no such container",
@@ -4340,7 +4347,8 @@ fn container_lock_probe_child_holds_the_run() {
 
 #[test]
 fn the_production_lock_probe_sees_a_lock_another_process_holds() {
-    let root = scratch("lock-probe-held");
+    let tree = scratch("lock-probe-held");
+    let root = tree.path();
     let paths =
         crate::rundir::RunPaths::with_private_root(&root, "01KZRN48A4ZK3AEDST3RJ8HMA4", &root);
     paths.create().expect("the run directories");
@@ -4461,7 +4469,8 @@ fn every_view_discard_removes_through_the_one_racing_removal() {
 fn discarding_a_role_view_twice_converges() {
     let trace = ContainerTrace::recording();
     let view: &dyn GitView = &super::view::RoleGitView::new(trace.clone());
-    let root = scratch("role-view-twice");
+    let tree = scratch("role-view-twice");
+    let root = tree.path();
     let path = root.join("views").join("upstroke-k-r-i-h");
     fs::create_dir_all(path.join("objects").join("pack")).expect("a view with depth");
     fs::write(path.join("HEAD"), b"0000\n").expect("a file in it");
@@ -4480,7 +4489,8 @@ fn a_role_view_that_cannot_be_removed_refuses_and_records_nothing() {
 
     let trace = ContainerTrace::recording();
     let view: &dyn GitView = &super::view::RoleGitView::new(trace.clone());
-    let root = scratch("role-view-protected");
+    let tree = scratch("role-view-protected");
+    let root = tree.path();
     let parent = root.join("views");
     let path = parent.join("upstroke-k-r-i-h");
     fs::create_dir_all(&path).expect("the view");
@@ -4621,7 +4631,8 @@ fn windows_a_view_whose_remover_stalls_delete_pending_converges_once_the_stall_e
         ),
     ];
     for (tag, view) in views {
-        let root = scratch(&format!("stalled-remover-{tag}"));
+        let tree = scratch(&format!("stalled-remover-{tag}"));
+        let root = tree.path();
         let path = root.join("views").join("upstroke-k-r-i-h");
         fs::create_dir_all(&path).expect("an orphan view, empty as the census seeds it");
         let pending = windows_posix_delete_pending(&path);

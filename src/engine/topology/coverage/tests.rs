@@ -156,7 +156,8 @@ fn sequential_histogram_path(observations: Option<&std::ffi::OsStr>) -> PathBuf 
 /// histogram refused the whole export).
 #[test]
 fn the_export_loader_passes_over_the_histogram_the_sampler_writes_beside_the_records() {
-    let dir = crate::workspace_manager::fixture::scratch("export-with-histogram");
+    let tree = crate::workspace_manager::fixture::scratch("export-with-histogram");
+    let dir = tree.path();
     let record = ObservationRecord {
         test: "a::test".to_owned(),
         ..ObservationRecord::default()
@@ -681,7 +682,8 @@ fn the_question_and_answer_funnels_execute_both_phases_under_the_production_adap
     use crate::topology::effects::AnswerSite;
     use crate::workspace_manager::fixture;
 
-    let root = fixture::scratch("st07-question-answer-funnels");
+    let tree = fixture::scratch("st07-question-answer-funnels");
+    let root = tree.path();
     let questions = root.join("questions");
     let answers = root.join("answers");
     fixture::create_dir(&questions);
@@ -910,7 +912,8 @@ fn every_error_return_point_of_the_event_funnels_fires_under_the_production_adap
     let points = event_points(InjectionMode::ErrorReturn);
     assert_eq!(points.len(), 12, "{points:?}");
     for (site, point) in points {
-        let dir = fixture::scratch(&format!("st07-event-error-{}-{point}", site.name()));
+        let tree = fixture::scratch(&format!("st07-event-error-{}-{point}", site.name()));
+        let dir = tree.path();
         let harness = shared_harness();
         harness
             .lock()
@@ -985,7 +988,8 @@ fn every_kill_point_of_the_event_funnels_kills_the_child_under_the_production_ad
     let points = event_points(InjectionMode::Kill);
     assert_eq!(points.len(), 9, "{points:?}");
     for (site, point) in points {
-        let dir = fixture::scratch(&format!("st07-event-kill-{}-{point}", site.name()));
+        let tree = fixture::scratch(&format!("st07-event-kill-{}-{point}", site.name()));
+        let dir = tree.path();
         let spec = format!("{}/{}", EffectSiteId::Event(site).name(), point.name());
         let status = fixture::run_kill_child(
             "engine::topology::coverage::tests::event_kill_child",
@@ -1049,7 +1053,8 @@ fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_pr
     let hooks = crate::runner::HarnessHooks::new(Arc::clone(&harness));
     let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks));
 
-    let dir = fixture::scratch("st07-process-phases");
+    let tree = fixture::scratch("st07-process-phases");
+    let dir = tree.path().to_path_buf();
     let ended = crate::runner::Runner::run(&runner, &trivial_request(&dir))
         .expect("the trivial command runs");
     assert!(
@@ -1150,7 +1155,8 @@ fn every_kill_point_of_the_process_funnel_kills_the_child_on_this_host() {
         .collect();
     assert_eq!(points.len(), 4, "{points:?}");
     for point in points {
-        let dir = fixture::scratch(&format!("st07-spawn-kill-{point}"));
+        let tree = fixture::scratch(&format!("st07-spawn-kill-{point}"));
+        let dir = tree.path();
         let spec = format!("{}/{}", site.name(), point.name());
         let status = fixture::run_kill_child(
             "engine::topology::coverage::tests::spawn_kill_child",
@@ -1217,7 +1223,8 @@ fn the_container_launch_funnels_execute_both_phases_under_the_production_adapter
     const IMAGE_ID: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    let root = fixture::scratch("st07-container-launch");
+    let tree = fixture::scratch("st07-container-launch");
+    let root = tree.path().to_path_buf();
     let trace = ContainerTrace::recording();
     let runtime = FakeRuntime::new(trace.clone());
     runtime.add_image(IMAGE_ID, None);

@@ -22,6 +22,7 @@ use super::{
     blank_comments_and_strings, governed_allows, legacy_growth, normalize_lint, production_region,
     topology_modules_among,
 };
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::topology::effects::{EffectSiteId, effect_sites, effect_sites_json};
 
 mod policy;
@@ -1655,7 +1656,8 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
             &|_| false,
         )
     }
-    let scratch = scratch_dir("activation");
+    let tree = scratch_dir("activation");
+    let scratch = tree.path();
     let fenced = |lint: &str, shape: &str| {
         format!(
             "#![cfg_attr(not(test), forbid({lint}))]\n{}",
@@ -1766,7 +1768,8 @@ const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
 
 #[test]
 fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
-    let scratch = scratch_dir("unrecorded");
+    let tree = scratch_dir("unrecorded");
+    let scratch = tree.path();
     for lint in USED_GOVERNED_LINTS {
         let bare = normalize_lint(lint).expect("a governed lint");
         let mut fenced = Vec::new();
@@ -2691,7 +2694,8 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
 
 #[test]
 fn every_denied_path_this_host_can_resolve_does_resolve() {
-    let scratch = scratch_dir("resolve");
+    let tree = scratch_dir("resolve");
+    let scratch = tree.path();
     let denied_text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
     let stripped = denied_text.replace(", allow-invalid = true", "");
     assert_ne!(stripped, denied_text, "no allow-invalid entry to strip");
@@ -2868,7 +2872,8 @@ fn every_platform_conditional_denial_names_something_real() {
 
 #[test]
 fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
-    let scratch = scratch_dir("denial");
+    let tree = scratch_dir("denial");
+    let scratch = tree.path();
 
     let (ok, diagnostics) = lint_fixture(&scratch, "control", DENIAL_CONTROL);
     assert!(
@@ -2993,7 +2998,8 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     }
     assert!(children > 30, "only {children} topology children scanned");
 
-    let scratch = scratch_dir("facade");
+    let tree = scratch_dir("facade");
+    let scratch = tree.path();
     fs::write(
         scratch.join("facade-child.rs"),
         "pub fn probe(p: &std::path::Path) -> bool {\n\
@@ -3354,7 +3360,8 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     // The review's witness, compiled: a sibling reaching `std::fs::write`, a
     // topology module carrying the root's deny and referencing the sibling,
     // and an ancestor allowing what this tree's facade allowed on #306.
-    let scratch = scratch_dir("siblings");
+    let tree = scratch_dir("siblings");
+    let scratch = tree.path();
     let fence = format!("#![deny({})]\n", GOVERNED.join(", "));
     fs::write(scratch.join("sibling-open.rs"), SIBLING).expect("the open sibling fixture");
     fs::write(
@@ -3560,7 +3567,8 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
          and item in it -- is whatever the crate root and the command line say"
     );
 
-    let scratch = scratch_dir("routes");
+    let tree = scratch_dir("routes");
+    let scratch = tree.path();
     let fence = format!("#![deny({})]\n", USED_GOVERNED_LINTS.join(", "));
     let header = leading_inner_attributes(&facade.source);
     assert!(
@@ -5020,11 +5028,27 @@ fn crate_under_test() -> (PathBuf, PathBuf) {
     (deps, rlib)
 }
 
-fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-effects-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-effects-<tag>-<pid>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an occupied root rather
+/// than emptying it, keys on a ULID no recycled pid can supply, and
+/// reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch_dir("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch_dir(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 #[test]
@@ -6400,7 +6424,8 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
         }
     }
 
-    let scratch = scratch_dir("inventory");
+    let tree = scratch_dir("inventory");
+    let scratch = tree.path();
     fs::write(
         scratch.join("Cargo.toml"),
         "[package]\n\
@@ -6424,7 +6449,7 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
     .expect("the fixture manifest");
 
     let inventory = crate_roots_of(&scratch).expect("cargo reads the fixture manifest");
-    assert_eq!(inventory.package_dir(), scratch.as_path());
+    assert_eq!(inventory.package_dir(), scratch);
     assert_eq!(
         inventory.roots().collect::<Vec<_>>(),
         vec![
@@ -7322,7 +7347,8 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
             &["feature=\"a\\\", b\""],
         ),
     ];
-    let scratch = scratch_dir("levels");
+    let tree = scratch_dir("levels");
+    let scratch = tree.path();
     let mut observed_shapes: BTreeSet<(bool, Vec<String>, bool)> = BTreeSet::new();
     for (lint, body) in GOVERNED {
         let bare = normalize_lint(lint).expect("a governed lint");

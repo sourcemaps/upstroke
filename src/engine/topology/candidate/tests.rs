@@ -54,6 +54,11 @@ fn drop_dir(path: &Path) {
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return. `None` when the
+    /// caller supplied a root it guards itself ([`Fixture::at`]).
+    _tree: Option<crate::rundir::scratch_tree::ScratchTree>,
     root: PathBuf,
     base: PathBuf,
     private: PathBuf,
@@ -109,6 +114,9 @@ impl Fixture {
             .expect("write-tree");
 
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             root,
             base,
             private,
@@ -120,7 +128,10 @@ impl Fixture {
     }
 
     fn new(tag: &str) -> Self {
-        Self::at(git_fixtures::scratch(&format!("cand-{tag}")))
+        let tree = git_fixtures::scratch(&format!("cand-{tag}"));
+        let mut fixture = Self::at(tree.path().to_path_buf());
+        fixture._tree = Some(tree);
+        fixture
     }
 
     fn judged(&self) -> JudgedTree {
