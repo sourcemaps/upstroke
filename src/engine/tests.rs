@@ -3113,7 +3113,8 @@ fn prompt_names_the_allowed_gate_commands() {
         artifacts_in: Vec::new(),
         artifacts_out: Vec::new(),
     };
-    let run_dir = std::env::temp_dir().join(format!("upstroke-prompt-{}", std::process::id()));
+    let tree = temp_engine_scratch("prompt");
+    let run_dir = tree.path();
     fs::create_dir_all(run_dir.join("artifacts")).expect("run dir");
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),

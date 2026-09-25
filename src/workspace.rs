@@ -1652,7 +1652,12 @@ mod tests {
     /// here would reclaim the repository before the caller's first assertion.
     fn temp_repo(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, PathBuf) {
         let tree = scratch(tag);
-        let dir = tree.path().to_path_buf();
+        // A CHILD of the tree, not the tree itself: a linked worktree is a
+        // sibling of its repository (`exclusions_work_in_a_linked_worktree`),
+        // and a repository that was the root would put that sibling outside
+        // every guard.
+        let dir = tree.path().join("repo");
+        fs::create_dir(&dir).expect("the repository, a child of the guarded tree");
         let run = |args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -2061,11 +2066,11 @@ mod tests {
     #[test]
     fn exclusions_work_in_a_linked_worktree() {
         let (_tree, repo) = temp_repo("worktree-main");
-        let linked = repo.parent().expect("parent").join(format!(
-            "upstroke-ws-worktree-linked-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&linked);
+        // A SIBLING of the repository and therefore inside the guarded tree,
+        // which reclaims it: `temp_dir()/upstroke-ws-worktree-linked-<pid>`
+        // was outside every guard and was pre-cleaned on the way in
+        // (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+        let linked = repo.with_file_name("worktree-linked");
         let out = Command::new("git")
             .arg("-C")
             .arg(&repo)

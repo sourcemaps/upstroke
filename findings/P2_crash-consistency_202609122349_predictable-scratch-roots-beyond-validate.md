@@ -113,3 +113,38 @@ site is already carried at `P1` by `PR64-CLEANUP-003-SCRATCH-PRECLEAN`, and the 
 `PR7-SCRATCH-FIXTURE-LEAK`; what this row adds is the extent, which is what a planner needs and
 neither of those carries. No new sighting is recorded here — `PR245`'s Windows measurement is the
 nearest thing to one, and it is that row's.
+
+---
+
+**2026-09-25: both P1s this row leans on are closed, and the extent is re-measured.** The pull
+request that closed `PR64-CLEANUP-003-SCRATCH-PRECLEAN` and `PR7-SCRATCH-FIXTURE-LEAK` did the
+per-file conversion this row asks for over the fixture **pre-cleans**, so the two sentences above
+that read "already carried at `P1`" no longer have a row to point at; the class this row names is
+what is left after them, and it is smaller.
+
+Re-run at `9d42322c24372033a145f7cf52d8fb65018ef74e` with this row's own two patterns, reimplemented from the definitions above
+(a `temp_dir()` naming statement — the line plus continuations to the terminating `;` — that names
+`std::process::id()` and does not name `ulid`; and a line matching
+`let _ = <path>remove_dir_all(`), over `git ls-files src` with comment-only lines skipped. The
+"before" column is the same script at `d724fb16`, not the `71d44285` figures above, so the two
+columns are comparable to each other and not to that table:
+
+| | `d724fb16` | this head |
+|---|---|---|
+| A: pid-derived temp paths, no ULID | 57 sites in 31 files | **18** sites in **12** files |
+| A2: of those, a scratch *root* | 46 sites in 24 files | **8** sites in **4** files |
+| B: discarded `remove_dir_all` results | 146 sites in 24 files | **107** sites in **14** files |
+
+**What B still counts, and why that is the honest residue rather than an oversight.**
+`src/runner/host/tests.rs` holds 47 of the 107 and is unchanged: its `scratch` is already
+ULID-named and pre-cleans nothing, so every one of its 47 is a **teardown** at the end of a test
+body, not the pre-clean-before-ownership sequence `PR64` described. The suggested order above put
+that file first on its B count; on the split this row itself draws — predictability versus a
+discarded result — it buys the least, because what is left there leaks only on the failing runs and
+cannot delete another holder's content. The pre-clean-then-create shape B's four-line refinement
+counted is **0** at this head, against 29 at `d724fb16` by the same script.
+
+**The allowlist cost this row predicted came due and was not paid.** "Repairing that helper — three
+lines — falsifies both, so the repair reaches an effect allowlist and stops being a delegated
+merge." It does, and the pull request left `effects/allowlist.toml` alone for exactly that reason;
+the stale clauses are filed as `PR321-ALLOWLIST-CLAUSES-DESCRIBE-THE-OLD-SCRATCH-SHAPE`.
