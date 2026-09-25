@@ -1707,9 +1707,8 @@ mod tests {
         let (_tree, repo) = temp_repo("open");
         assert!(Workspace::open(&repo).is_ok());
 
-        let plain = env::temp_dir().join(format!("upstroke-ws-plain-{}", std::process::id()));
-        fs::create_dir_all(&plain).expect("plain dir");
-        assert!(Workspace::open(&plain).is_err());
+        let plain_tree = scratch("ws-plain");
+        assert!(Workspace::open(plain_tree.path()).is_err());
     }
 
     #[test]

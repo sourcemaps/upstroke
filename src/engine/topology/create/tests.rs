@@ -539,6 +539,15 @@ fn ensure_integration_ref_refuses_a_null_base_whether_the_ref_is_absent_or_at_it
 }
 
 struct Fixture {
+    /// The guard over the root [`Fixture::new`] acquired, kept for the
+    /// fixture's whole life so the tree is reclaimed when it drops -- on a
+    /// panicking assertion as much as on a normal return. `None` when the
+    /// caller supplied a root it guards itself ([`Fixture::at`]).
+    ///
+    /// The root was `temp_dir()/upstroke-create-<tag>-<ulid>`, created and
+    /// never removed: `PR7-SCRATCH-FIXTURE-LEAK`, measured at 58 of these
+    /// surviving one green suite run.
+    _tree: Option<crate::rundir::scratch_tree::ScratchTree>,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -547,18 +556,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("upstroke-create-{tag}-{}", crate::ulid::ulid()));
-        let repo = root.join("repo");
-        let private_root = root.join("private");
-        create_private_dir(&repo, &mut NoRunDirHooks).expect("repo root");
-        create_private_dir(&private_root, &mut NoRunDirHooks).expect("private root");
-        Self {
-            repo,
-            private_root,
-            repo_key: RepoKey::v1(&root.join("git-dir")),
-            root,
-        }
+        let parent = std::env::temp_dir();
+        let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        };
+        let mut fixture = Self::at(tree.path());
+        fixture._tree = Some(tree);
+        fixture
     }
 
     fn at(root: &Path) -> Self {
@@ -567,6 +575,9 @@ impl Fixture {
         create_private_dir(&repo, &mut NoRunDirHooks).expect("repo root");
         create_private_dir(&private_root, &mut NoRunDirHooks).expect("private root");
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             repo,
             private_root,
             repo_key: RepoKey::v1(&root.join("git-dir")),

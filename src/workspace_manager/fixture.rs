@@ -1962,18 +1962,32 @@ pub(crate) const REPLACEMENT_CONTROLS_PINNED: &[&str] = &[
 /// claim about the rest of the run, and "this file is empty" is a fact.
 /// `/dev/null` is not portable to the Windows leg of the matrix.
 pub(crate) fn neutral_git_config() -> &'static Path {
-    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    /// The file and the tree it is in. Held in a `OnceLock` for the life of
+    /// the process, so the tree is not reclaimed while a child is still
+    /// reading the file -- and, being a `static`, it is one of the two
+    /// things in this suite whose `Drop` genuinely never runs (the other is
+    /// a process that aborts). The alternative is worse: a file per caller
+    /// in the shared temporary directory, which is what
+    /// `PR7-SCRATCH-FIXTURE-LEAK` measured at 15 surviving directories per
+    /// green suite run.
+    struct Neutral {
+        _tree: ScratchTree,
+        path: PathBuf,
+    }
+
+    static FILE: std::sync::OnceLock<Neutral> = std::sync::OnceLock::new();
     FILE.get_or_init(|| {
-        let path =
-            std::env::temp_dir().join(format!("upstroke-neutral-gitconfig-{}", std::process::id()));
+        let tree = scratch("neutral-gitconfig");
+        let path = tree.path().join("gitconfig");
         fs::write(&path, b"").unwrap_or_else(|error| {
             panic!(
                 "writing the neutral Git configuration {}: {error}",
                 path.display()
             )
         });
-        path
+        Neutral { _tree: tree, path }
     })
+    .path
     .as_path()
 }
 

@@ -1542,15 +1542,23 @@ const HANDOFF: &str = "fixture-root";
 
 pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
 
-pub(super) fn kill_dir(tag: &str) -> PathBuf {
-    static ORDINAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let ordinal = ORDINAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-topo-{tag}-{}-{ordinal}",
-        std::process::id()
-    ));
-    crate::workspace_manager::fixture::create_dir(&dir);
-    dir
+/// The handoff directory a kill child is pointed at, guarded.
+///
+/// It was `temp_dir()/upstroke-topo-<tag>-<pid>-<ordinal>`, created by the
+/// parent and removed by nobody (`PR7-SCRATCH-FIXTURE-LEAK`, measured at 8
+/// surviving directories per green suite run). This is the **parent's**
+/// directory and the parent returns normally, so its guard runs; the child's
+/// own fixture root is adopted and reclaimed separately
+/// (`workspace_manager::fixture::Fixture::adopt`).
+pub(super) fn kill_dir(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a handoff directory for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {

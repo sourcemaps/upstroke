@@ -1195,7 +1195,8 @@ const CHILD: &str = "engine::topology::attempt::tests::attempt_kill_child";
 
 #[test]
 fn kill_during_attempt_settles_interrupted_and_redispatches_new_generation() {
-    let dir = kill_dir("killattempt");
+    let tree = kill_dir("killattempt");
+    let dir = tree.path();
     let mut run = kill_child_and_adopt(CHILD, &dir, "in_attempt");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
@@ -1262,7 +1263,8 @@ fn kill_during_attempt_settles_interrupted_and_redispatches_new_generation() {
 
 #[test]
 fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them() {
-    let dir = kill_dir("killcapture");
+    let tree = kill_dir("killcapture");
+    let dir = tree.path();
     let mut run = kill_child_and_adopt(CHILD, &dir, "after_capture");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
@@ -1475,7 +1477,8 @@ fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settle
 
 #[test]
 fn kill_after_ephemeral_snapshot_commit_before_worktree_leaves_gc_owned_object() {
-    let dir = kill_dir("killephemeral");
+    let tree = kill_dir("killephemeral");
+    let dir = tree.path();
     let mut run = kill_child_and_adopt(CHILD, &dir, "after_snapshot_commit");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
@@ -1525,7 +1528,8 @@ fn kill_after_ephemeral_snapshot_commit_before_worktree_leaves_gc_owned_object()
 
 #[test]
 fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {
-    let dir = kill_dir("killidunread");
+    let tree = kill_dir("killidunread");
+    let dir = tree.path();
     let run = kill_child_and_adopt(CHILD, &dir, "id_unread");
 
     let orphans = unreachable_ephemeral_commits(&run.fixture.base);
@@ -1627,7 +1631,8 @@ fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leav
 
 #[test]
 fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {
-    let dir = kill_dir("killsnapshotadd");
+    let tree = kill_dir("killsnapshotadd");
+    let dir = tree.path();
     let mut run = kill_child_and_adopt(CHILD, &dir, "after_snapshot_add");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
@@ -1684,7 +1689,8 @@ fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {
 
 #[test]
 fn kill_during_retry_attempt_closes_generation() {
-    let dir = kill_dir("killretry");
+    let tree = kill_dir("killretry");
+    let dir = tree.path();
     let mut run = kill_child_and_adopt(CHILD, &dir, "retry");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();

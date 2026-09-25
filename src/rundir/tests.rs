@@ -79,15 +79,319 @@ use crate::workspace_manager::fixture::{rest_within, say_on_stderr};
 /// If the root cannot be acquired. A refusal is not recoverable here: the
 /// caller asked for a tree it owns, and nothing this helper could do next
 /// would give it one without deleting somebody else's.
-pub(crate) fn scratch(tag: &str) -> scratch_tree::ScratchTree {
+pub(crate) fn scratch(tag: &str) -> ScratchTree {
+    scratch_with(scratch_tree::acquire, tag)
+}
+
+/// [`scratch`] over an injectable acquisition.
+///
+/// The one thing a test cannot arrange for itself is a **refusal**, and a
+/// helper that answered a refusal with anything usable would make every
+/// fixture in this suite a gate that cannot fail. The seam exists for
+/// `a_refused_acquisition_panics_and_names_what_it_refused` and for nothing
+/// else; the suite reaches [`scratch`].
+fn scratch_with(acquire: Acquire, tag: &str) -> ScratchTree {
     let parent = std::env::temp_dir();
-    match scratch_tree::acquire(&parent, tag) {
+    match acquire(&parent, tag) {
         Ok(tree) => tree,
         Err(refusal) => panic!(
             "a scratch tree for `{tag}` under {}: {refusal:?}",
             parent.display()
         ),
     }
+}
+
+/// The shape of [`scratch_tree::acquire`], so a witness can supply a
+/// refusing one.
+type Acquire = fn(&Path, &str) -> Result<ScratchTree, scratch_tree::ScratchAcquireRefusal>;
+
+// =======================================================================
+// The scratch helper's own witnesses
+//
+// `PR64-CLEANUP-003-SCRATCH-PRECLEAN` and `PR7-SCRATCH-FIXTURE-LEAK` were
+// both defects of [`scratch`], not of the authority it now calls:
+// `scratch_tree`'s own suite already pins that an occupied root refuses and
+// keeps its bytes, that one tag twice draws two ULID-named roots, that an
+// undecidable answer refuses, and that a guard reclaims on an unwind. What
+// those tests cannot say is which of the two the *fixtures* reach. These
+// four do, one per defect, and each fails against the helper this replaced.
+// =======================================================================
+
+/// The exact root the helper this replaced would have built for `tag`.
+///
+/// Not a guess at its shape: `temp_dir()/upstroke-rundir-<tag>-<pid>` is
+/// what `d724fb16`'s five lines computed, and the witnesses below plant at
+/// this path so that the old body would have deleted what they planted.
+fn the_root_the_old_helper_would_have_taken(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("upstroke-rundir-{tag}-{}", std::process::id()))
+}
+
+/// A directory this test planted, with an owner that is not [`scratch`].
+///
+/// It exists so that the witnesses have something to lose. Its `Drop`
+/// restores any permission it changed and removes it, so a witness that
+/// fails still leaves nothing -- the defect it is testing for.
+struct PlantedRoot {
+    root: PathBuf,
+}
+
+impl PlantedRoot {
+    /// Create the root **exclusively**, so the witness refuses rather than
+    /// adopting a path some other holder is already using. The tag carries
+    /// a ULID for the same reason: two suites on one box can draw the same
+    /// pid, and a witness that raced one would be a flake.
+    fn at(root: PathBuf) -> Self {
+        fs::create_dir(&root).unwrap_or_else(|error| {
+            panic!(
+                "the witness must own the root it plants, and {} was not free: {error}",
+                root.display()
+            )
+        });
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for PlantedRoot {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o755));
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// **Defect 1, the helper finding's whole sequence.** A root another owner
+/// holds is not deleted, and the helper's own root is not one that owner's
+/// name could have predicted.
+///
+/// At `d724fb16` the helper opened with `let _ = fs::remove_dir_all(&dir)`
+/// on exactly this path, so the sentinel is gone before `scratch` returns
+/// and the returned root *is* the planted one. Both assertions fail there.
+#[test]
+fn the_scratch_helper_deletes_nothing_on_its_way_in() {
+    let tag = format!("preclean-{}", crate::ulid::ulid());
+    let planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
+    let sentinel = planted.path().join("another-holders-content");
+    fs::write(&sentinel, b"this is not the fixture's to delete").expect("the other holder's bytes");
+
+    let tree = scratch(&tag);
+
+    assert_eq!(
+        fs::read(&sentinel).expect("the other holder's content survives acquisition"),
+        b"this is not the fixture's to delete",
+        "the helper deleted a root it had no claim on"
+    );
+    assert_ne!(
+        tree.path(),
+        planted.path(),
+        "the helper's root is still one a tag and a pid predict, so another holder can be \
+         standing on it"
+    );
+}
+
+/// **Defect 2, the discarded cleanup result.** A removal the helper could
+/// not perform must not be swallowed into a fixture that is not fresh.
+///
+/// Unix-only because the failure has to be arranged: `0o500` on the planted
+/// root makes `remove_dir_all` fail with `EACCES` on the child it cannot
+/// unlink. At `d724fb16` `let _ =` discarded exactly that error and the
+/// following `create_dir_all` succeeded over the surviving directory, so
+/// the helper handed back a root still holding another holder's child and
+/// said nothing. Here the removal does not happen at all, so there is no
+/// result to discard: the root is a new one and it is empty.
+#[cfg(unix)]
+#[test]
+fn a_removal_the_helper_cannot_perform_never_becomes_a_fixture_that_is_not_fresh() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tag = format!("undeletable-{}", crate::ulid::ulid());
+    let planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
+    let child = planted.path().join("undeletable-child");
+    fs::create_dir(&child).expect("the child a failing removal leaves behind");
+    fs::set_permissions(planted.path(), fs::Permissions::from_mode(0o500))
+        .expect("a root whose children cannot be unlinked");
+
+    let tree = scratch(&tag);
+
+    let entries: Vec<PathBuf> = fs::read_dir(tree.path())
+        .expect("the fixture root is readable")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "a fresh fixture has nothing in it, and this one holds {entries:?} -- a removal that \
+         failed was discarded and the fixture is another holder's directory"
+    );
+    assert!(
+        child.is_dir(),
+        "the other holder's child was removed by a fixture with no claim on it"
+    );
+}
+
+/// **Defect 3, the recycled pid.** Two acquisitions for one tag, in one
+/// process and therefore under one pid, get distinct roots, and the second
+/// is empty.
+///
+/// This is the only form a single process can put the Windows symptom in:
+/// there, a *later* process drawing a recycled pid found the earlier one's
+/// fixture at the name it computed, and `emit/tests.rs`'s
+/// `assert!(bytes.is_empty(), "a fresh run has no prefix")` failed on
+/// content it had not written -- sixteen failures indistinguishable from a
+/// real defect. Same tag, same pid, one name: at `d724fb16` the second call
+/// returns the first call's path *and pre-cleans it*, so both assertions
+/// fail. The emptiness assertion here is the same assertion as
+/// `emit/tests.rs`'s, made where the name is chosen.
+#[test]
+fn one_tag_twice_in_one_process_is_two_roots_and_the_second_is_fresh() {
+    let tag = format!("recycled-{}", crate::ulid::ulid());
+
+    let first = scratch(&tag);
+    let written = first.path().join("events.jsonl");
+    fs::write(&written, b"the first fixture's bytes").expect("the first fixture writes");
+
+    let second = scratch(&tag);
+
+    assert_ne!(
+        first.path(),
+        second.path(),
+        "one tag and one pid gave one name, so a second process drawing this pid finds this \
+         fixture's content where it expects its own"
+    );
+    let bytes = fs::read(second.path().join("events.jsonl")).unwrap_or_default();
+    assert!(bytes.is_empty(), "a fresh run has no prefix");
+    assert_eq!(
+        fs::read(&written).expect("the first fixture's bytes survive the second acquisition"),
+        b"the first fixture's bytes",
+        "the second acquisition pre-cleaned the first's root"
+    );
+}
+
+/// **Defect 4, the tree nothing reclaimed.** The root is gone when the
+/// guard drops -- on the normal return, and on the unwind a failing
+/// assertion raises.
+///
+/// At `d724fb16` `scratch` returned a bare `PathBuf` and no path in the
+/// program removed it: both halves fail there. The unwinding half is the
+/// one that matters for the measurement in this row, because a suite leaks
+/// a directory per *failing* fixture and those are the runs a developer
+/// repeats.
+#[test]
+fn the_scratch_tree_is_reclaimed_on_both_exits() {
+    let normal = {
+        let tree = scratch("reclaimed-normally");
+        let path = tree.path().to_path_buf();
+        assert!(path.is_dir(), "the fixture exists while its guard is held");
+        path
+    };
+    assert!(
+        scratch_tree::proves_absent(&normal),
+        "the fixture survived its guard's normal drop: {}",
+        normal.display()
+    );
+
+    let unwinding = std::sync::Arc::new(std::sync::Mutex::new(PathBuf::new()));
+    let recorded = std::sync::Arc::clone(&unwinding);
+    let outcome = std::panic::catch_unwind(move || {
+        let tree = scratch("reclaimed-while-unwinding");
+        let mut slot = recorded.lock().unwrap_or_else(|held| held.into_inner());
+        slot.clone_from(&tree.path().to_path_buf());
+        drop(slot);
+        panic!("the assertion a fixture is abandoned by");
+    });
+    assert!(outcome.is_err(), "the witness has to actually unwind");
+    let path = unwinding
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    assert!(
+        path.as_os_str().is_empty() || scratch_tree::proves_absent(&path),
+        "the fixture survived an unwind, which is the run a leak is measured on: {}",
+        path.display()
+    );
+}
+
+/// A refusal is loud.
+///
+/// If `acquire` refused and [`scratch`] answered with anything a test could
+/// go on using, every fixture in this suite would become a gate that cannot
+/// fail: the test would run against a directory it does not own, or against
+/// none, and pass. `scratch_with` exists for this witness alone -- the
+/// suite reaches [`scratch`] -- and the assertion is on the panic's own
+/// message, so a refusal names the tag and the arm it refused on.
+#[test]
+fn a_refused_acquisition_panics_and_names_what_it_refused() {
+    fn always_occupied(
+        parent: &Path,
+        tag: &str,
+    ) -> Result<ScratchTree, scratch_tree::ScratchAcquireRefusal> {
+        Err(scratch_tree::ScratchAcquireRefusal::Occupied {
+            root: parent.join(tag),
+        })
+    }
+
+    let outcome =
+        std::panic::catch_unwind(|| scratch_with(always_occupied, "a-refusal-is-not-a-fixture"));
+    let payload = outcome.expect_err("a refused acquisition must not return a usable tree");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("a-refusal-is-not-a-fixture"),
+        "the panic must name the tag that could not be acquired: {message}"
+    );
+    assert!(
+        message.contains("Occupied"),
+        "and the refusal it got: {message}"
+    );
+}
+
+/// The residual this repair leaves, driven rather than argued.
+///
+/// A process that dies between `acquire`'s exclusive `fs::create_dir` and
+/// the token binding leaves a root of the acquired shape that no token
+/// binds. Nothing adopts it and nothing revisits it: the next acquisition
+/// draws a fresh ULID, so it never collides with the orphan and never
+/// cleans over it. That is the whole of the trade this design makes -- the
+/// helper this replaced leaked a root on *every* run and a later run with
+/// the same pid eventually cleaned over the wreckage; this leaks one root
+/// per crashed process and nothing in the tree ever removes it.
+///
+/// The witness plants a root of that shape by hand, because `acquire_named`
+/// is private to `scratch_tree` and rightly so, and then shows both halves:
+/// a later acquisition succeeds beside the orphan, and the orphan is still
+/// there afterwards.
+#[test]
+fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
+    let tag = format!("orphaned-{}", crate::ulid::ulid());
+    let orphan = PlantedRoot::at(std::env::temp_dir().join(format!(
+        "upstroke-scratch-{tag}-{}",
+        crate::ulid::ulid()
+    )));
+    fs::write(orphan.path().join("half-built"), b"a dead process's fixture")
+        .expect("what the dead process had written");
+
+    let tree = scratch(&tag);
+
+    assert_ne!(
+        tree.path(),
+        orphan.path(),
+        "a fresh ULID cannot draw the orphan's name"
+    );
+    assert!(
+        orphan.path().is_dir(),
+        "the orphan is the residual this design accepts, and a repair that removed it here \
+         would be pre-cleaning a root it has no claim on all over again"
+    );
 }
 
 /// Make `<repo>/.upstroke/runs/<run_id>` a husk: a directory whose log holds no
