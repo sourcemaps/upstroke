@@ -3367,7 +3367,7 @@ fn unix_reaper_kills_labeled_containers() {
             .args(["unix_reaper_container_helper", "--ignored", "--nocapture"])
             .env("UPSTROKE_REAPER_CONTAINERS", "1")
             .env("UPSTROKE_STUB", &named)
-            .env("UPSTROKE_STUB_DIR", &dir)
+            .env("UPSTROKE_STUB_DIR", dir)
             .env("UPSTROKE_ROOT", PRIVATE_ROOT)
             .env("UPSTROKE_INCARNATION", INCARNATION)
             .env("UPSTROKE_AGENT", &agent_path)
@@ -3401,7 +3401,7 @@ fn unix_reaper_kills_labeled_containers() {
                  settle path: {:?}",
                 std::fs::read_to_string(&log)
             );
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(dir);
             continue;
         }
 
@@ -3486,7 +3486,7 @@ fn unix_reaper_kills_labeled_containers() {
             let _ = libc::kill(agent_pid, libc::SIGKILL);
             let _ = libc::kill(-agent_pid, libc::SIGKILL);
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"

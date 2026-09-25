@@ -485,7 +485,7 @@ fn repair_materialization_reproduced_after_kill() {
         let dir = tree.path();
         let mut run = kill_child_and_adopt(
             "engine::topology::dispatch::tests::repair_kill_child",
-            &dir,
+            dir,
             site,
         );
         let repair = crate::topology::registry::TaskKey(2);

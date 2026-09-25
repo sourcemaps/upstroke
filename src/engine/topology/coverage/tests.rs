@@ -170,7 +170,7 @@ fn the_export_loader_passes_over_the_histogram_the_sampler_writes_beside_the_rec
         &sequential_histogram_path(Some(dir.as_os_str())),
         b"{\n  \"note\": \"not an observation record\",\n  \"sites\": []\n}\n",
     );
-    let loaded = load_observations(&dir).expect("the export loads with the histogram beside it");
+    let loaded = load_observations(dir).expect("the export loads with the histogram beside it");
     assert_eq!(
         loaded
             .iter()
@@ -920,7 +920,7 @@ fn every_error_return_point_of_the_event_funnels_fires_under_the_production_adap
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .arm(EffectSiteId::Event(site), point, InjectionMode::ErrorReturn)
             .expect("the site exposes the point in this mode");
-        let outcome = drive_event_funnel(site, point, &dir, &harness);
+        let outcome = drive_event_funnel(site, point, dir, &harness);
         assert!(
             outcome.is_err(),
             "`Event.{}`/{point}: the injected error was not returned",

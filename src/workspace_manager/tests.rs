@@ -447,7 +447,7 @@ fn a_malformed_entry_is_refused_even_for_a_site_this_run_does_not_want() {
 fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
     let tree = scratch("already-gone");
     let root = tree.path();
-    fs::create_dir_all(&root).expect("fixture root");
+    fs::create_dir_all(root).expect("fixture root");
     let absent = root.join("no-such-tree");
     assert!(!absent.exists(), "the fixture must not create it");
     assert!(
@@ -465,7 +465,7 @@ fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
     // Three had already accumulated from this test alone before it was
     // noticed -- the same leak recorded against `rundir.rs::scratch` in
     // `reviews/FINDINGS.md`, reintroduced by the test that reported it.
-    fs::remove_dir_all(&root).expect("this test cleans up after itself");
+    fs::remove_dir_all(root).expect("this test cleans up after itself");
 }
 
 /// Run `body`, returning its panic message if it panicked.
@@ -6437,7 +6437,7 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
                  cannot exist here, and neither can the shape this test guards against",
                 error.raw_os_error()
             );
-            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(root);
             return;
         }
         Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
@@ -6478,7 +6478,7 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
         ObjectResidue::None,
         "an absent target in a byte-named repository is unregistered, as at the merge base"
     );
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -7711,7 +7711,7 @@ fn assert_a_role_process_sees_replacements(tag: &str) {
          enumeration is missing a mechanism and closing it is the fix",
         ambient_replacement_controls()
     );
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 /// One `git` gate, run through the production runner in `workspace`.
@@ -8237,7 +8237,7 @@ fn probe_outcome(status: std::process::ExitStatus) -> String {
 fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
     let tree = scratch("replacement-controls");
     let root = tree.path();
-    let rows = hostile_replacement_environments(&root);
+    let rows = hostile_replacement_environments(root);
     assert_eq!(
         rows.len(),
         12,
@@ -8298,7 +8298,7 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
          measured nothing at all"
     );
 
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 /// `GIT_CONFIG` captures a fixture's own configuration write, and the
@@ -8397,7 +8397,7 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
         "the pin still reached the operator's file: {redirected}"
     );
 
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 /// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].

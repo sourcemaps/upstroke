@@ -521,7 +521,7 @@ fn agent_authored_files_land_outside_the_workspace() {
     // repo has no path to the implementer's transcript.
     let tree = scratch("split");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let repo = root.join("repo");
@@ -633,7 +633,7 @@ fn questions_resolve_to_their_run_by_prefix() {
 fn a_run_can_only_be_held_once_at_a_time() {
     let tree = scratch("lock");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     assert!(
@@ -673,7 +673,7 @@ fn a_run_can_only_be_held_once_at_a_time() {
 fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
     let tree = scratch("orderedhandoff");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("first acquire");
 
@@ -697,7 +697,7 @@ fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
 fn cleanup_lease_failure_closes_primary_before_releasing_claim() {
     let tree = scratch("cleanupfailurehandoff");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("primary acquired");
     let file = held._file.take();
@@ -736,7 +736,7 @@ fn the_lock_answers_at_once_rather_than_waiting_to_be_sure() {
     // rules that out outright, so there is nothing left to wait for.
     let tree = scratch("prompt");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
 
@@ -785,7 +785,7 @@ fn a_fork_cannot_keep_a_released_run_locked() {
     // releasing really releases.
     let tree = scratch("forkwindow");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let held = RunLock::acquire(&paths.public).expect("acquire");
@@ -1139,7 +1139,7 @@ fn a_second_process_is_refused_the_run_lock() {
     // boundary rather than against a second `acquire` here.
     let tree = scratch("twoprocs");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let exe = std::env::current_exe().expect("test binary");
@@ -1204,7 +1204,7 @@ fn a_holder_never_opens_its_own_lock_file() {
     // rule is invisible in the code that depends on it.
     let tree = scratch("selfclose");
     let root = tree.path();
-    let paths = paths_in(&root, "RUN1");
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
 
@@ -4031,7 +4031,7 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
 fn p0_creates_the_public_directory_and_nothing_private() {
     let tree = scratch("p0-only");
     let root = tree.path();
-    let paths = paths_in(&root, "01P0ONLY");
+    let paths = paths_in(root, "01P0ONLY");
     let public = paths.public.clone();
     let private = paths.private.clone();
 
@@ -12027,7 +12027,7 @@ fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, St
         .arg(format!("dependency={}", deps.display()))
         .args(["--error-format", "json"])
         .arg("--out-dir")
-        .arg(&dir)
+        .arg(dir)
         .arg(&file)
         .output()
         .expect("rustc runs; a missing rustc is a failure of this test, never a skip");

@@ -1269,8 +1269,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         let mut warnings = Vec::new();
         let error = crate::config::load_limits(
             Some(&dir.join("upstroke.toml")),
-            &dir,
-            Some(&empty_pools(&dir)),
+            dir,
+            Some(&empty_pools(dir)),
             limits,
             &mut warnings,
         )
@@ -1285,8 +1285,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");
         let config = crate::config::load_limits(
             Some(&dir.join("upstroke.toml")),
-            &dir,
-            Some(&empty_pools(&dir)),
+            dir,
+            Some(&empty_pools(dir)),
             limits,
             &mut warnings,
         )

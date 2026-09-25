@@ -705,9 +705,9 @@ mod tests {
         assert_ne!(detour, inner, "the fixture must differ as a string");
         assert!(same_path(&detour, &inner), "…and agree as a directory");
 
-        assert!(!same_path(&root, &inner), "a parent is not its child");
+        assert!(!same_path(root, &inner), "a parent is not its child");
         assert!(
-            !same_path(&root.join("absent"), &root),
+            !same_path(&root.join("absent"), root),
             "a path that does not resolve is not one that does"
         );
     }
@@ -727,9 +727,9 @@ mod tests {
 
         let staged = root.join("record.tmp");
         std::fs::write(&staged, b"{}\n").expect("stage");
-        fsync_dir(&root).expect("the barrier must run on this platform after a create");
+        fsync_dir(root).expect("the barrier must run on this platform after a create");
         std::fs::rename(&staged, root.join("record")).expect("publish");
-        fsync_dir(&root).expect("the barrier must run on this platform after a rename");
+        fsync_dir(root).expect("the barrier must run on this platform after a rename");
 
         let absent = fsync_dir(&root.join("absent"));
         assert!(

@@ -840,7 +840,7 @@ fn orphan_reclaimed_before_slot_reset() {
     let root = tree.path();
     let inner = Arc::new(FakeRuntime::new(ContainerTrace::off()));
     let stuck = seed(
-        &root,
+        root,
         &inner,
         &dead,
         &shell_probe(),
@@ -857,7 +857,7 @@ fn orphan_reclaimed_before_slot_reset() {
     let error = run_startup_census(
         &mut hooks,
         &Census {
-            private_root: &root,
+            private_root: root,
             start: &start,
             runtime: &wedged,
             liveness: &liveness,
@@ -875,7 +875,7 @@ fn orphan_reclaimed_before_slot_reset() {
         inner.container(stuck.as_str()).is_some(),
         "the container is still there, and nothing admitted over it"
     );
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1083,7 +1083,7 @@ fn same_run_resume_censuses_recorded_root_after_default_changed() {
     write_intent(
         &mut hooks,
         ContainerSite::WriteIntent,
-        &other_root,
+        other_root,
         &in_recorded,
         &dead.record(&shell_probe()),
     )
@@ -1096,7 +1096,7 @@ fn same_run_resume_censuses_recorded_root_after_default_changed() {
     assert_eq!(complete.report().reclaimed.len(), 1);
     assert!(!recorded.intent_exists(&in_recorded));
     assert!(
-        in_recorded.intent_path(&other_root).exists(),
+        in_recorded.intent_path(other_root).exists(),
         "the census reached into a root it was not given: different private roots are \
          disjoint worlds"
     );
@@ -1114,7 +1114,7 @@ fn same_run_resume_censuses_recorded_root_after_default_changed() {
             private_root_label(&recorded.root)
         )]
     );
-    let _ = fs::remove_dir_all(&other_root);
+    let _ = fs::remove_dir_all(other_root);
 }
 
 #[test]
@@ -2574,7 +2574,7 @@ fn a_container_that_never_terminates_exhausts_the_bounded_observation_and_refuse
     let inner = Arc::new(FakeRuntime::new(trace.clone()));
     let dead = Owner::new(RUN_B, INC_1, REPO_KEY_A);
     let name = seed(
-        &root,
+        root,
         &inner,
         &dead,
         &shell_probe(),
@@ -2591,7 +2591,7 @@ fn a_container_that_never_terminates_exhausts_the_bounded_observation_and_refuse
     let error = run_startup_census(
         &mut hooks,
         &Census {
-            private_root: &root,
+            private_root: root,
             start: &start,
             runtime: &wedged,
             liveness: &liveness,
@@ -2620,7 +2620,7 @@ fn a_container_that_never_terminates_exhausts_the_bounded_observation_and_refuse
         trace.rendered()
     );
     assert!(inner.container(name.as_str()).is_some());
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

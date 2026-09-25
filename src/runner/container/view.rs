@@ -1142,7 +1142,7 @@ mod split_index_tests {
                 "[{label}] the fixture staged nothing, so the comparison above is vacuous"
             );
 
-            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(root);
         }
     }
 }

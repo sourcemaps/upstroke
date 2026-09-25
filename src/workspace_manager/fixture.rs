@@ -2239,7 +2239,8 @@ pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
         &repo,
         &["for-each-ref", "--format=%(refname)", "refs/replace/"],
     );
-    let verdict = if found == format!("refs/replace/{recorded}") {
+    
+    if found == format!("refs/replace/{recorded}") {
         let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
         if read == "replacing" {
             ReplacementLiveness::Live
@@ -2248,8 +2249,7 @@ pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
         }
     } else {
         ReplacementLiveness::RefsElsewhere { found }
-    };
-    verdict
+    }
 }
 
 /// [`replacement_liveness`], as the precondition a witness states before it

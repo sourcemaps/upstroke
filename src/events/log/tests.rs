@@ -3169,7 +3169,7 @@ fn every_declared_build_refusal_fails_for_the_reason_it_declares() {
     let dir = tree.path();
 
     let (control_ok, control_stderr) = typecheck(
-        &dir,
+        dir,
         "control",
         "use std::path::Path;\n\
          use upstroke::events::{EventLog, LogTail, read_all};\n\
@@ -3207,7 +3207,7 @@ fn every_declared_build_refusal_fails_for_the_reason_it_declares() {
 
     for refusal in &refusals {
         let name = format!("refusal-{}", refusal.code);
-        let (compiled, stderr) = typecheck(&dir, &name, &refusal.body);
+        let (compiled, stderr) = typecheck(dir, &name, &refusal.body);
         assert!(
             !compiled,
             "docs/internals/events/log.md:{} declares `{}` and the fixture compiled",

@@ -3629,7 +3629,7 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
     let run_id = gated_run("env");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -3746,7 +3746,7 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
     let run_id = gated_run("readonly");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let _residue = LeaveNoResidue {
         docker: (*docker).clone(),
         private_root: identity.private_root.clone(),
@@ -3846,7 +3846,7 @@ fn real_docker_confines_a_gate_to_its_mount() {
     let run_id = gated_run("confine");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let paths = RunPaths::with_private_root(&repo_dir, run_id, &identity.private_root);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
@@ -3954,7 +3954,7 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
     let run_id = gated_run("outside");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4065,7 +4065,7 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
     let run_id = gated_run("daemonspec");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4237,7 +4237,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
     let run_id = gated_run("shadow");
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let mine = execution_root.join("tasks").join("kalpha-g0");
@@ -4380,7 +4380,7 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
     let repo_dir = root.join("repo");
     let (head, _) = repo::repository(&repo_dir);
     let planted = repo::engine_refs(&repo_dir, &head);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let execution_root =
         crate::workspace_manager::execution_root_of(&identity.private_root, repo_key(), run_id);
     let workspace = execution_root.join("tasks").join("kalpha-g0");
@@ -4486,7 +4486,7 @@ fn real_docker_adapter_parsing_matches_the_host_table() {
     let run_id = gated_run("parity");
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, run_id);
+    let identity = real_identity(root, &repo_dir, run_id);
     let workspace = root.join("parity-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -4562,7 +4562,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
     let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, gated_run("credenv"));
+    let identity = real_identity(root, &repo_dir, gated_run("credenv"));
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {
@@ -4661,7 +4661,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     let root = tree.path();
     let repo_dir = root.join("repo");
     repo::repository(&repo_dir);
-    let identity = real_identity(&root, &repo_dir, gated_run("descendant"));
+    let identity = real_identity(root, &repo_dir, gated_run("descendant"));
     let workspace = root.join("plain-workspace");
     std::fs::create_dir_all(&workspace).expect("a workspace");
     let _residue = LeaveNoResidue {

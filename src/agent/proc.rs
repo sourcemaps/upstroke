@@ -5750,11 +5750,11 @@ mod termination {
 
             reclaim_labeled_containers(&rendered);
 
-            let killed: std::collections::BTreeSet<String> = logged(&dir, "kill")
+            let killed: std::collections::BTreeSet<String> = logged(dir, "kill")
                 .into_iter()
                 .map(|line| line["kill ".len()..].to_owned())
                 .collect();
-            let removed: std::collections::BTreeSet<String> = logged(&dir, "rm")
+            let removed: std::collections::BTreeSet<String> = logged(dir, "rm")
                 .into_iter()
                 .map(|line| line["rm --force --volumes ".len()..].to_owned())
                 .collect();
@@ -5768,11 +5768,11 @@ mod termination {
             );
             assert_eq!(removed, expected, "kill and rm did not settle the same set");
             assert!(
-                logged(&dir, "ps").len() > ROUNDS,
+                logged(dir, "ps").len() > ROUNDS,
                 "{} listings for {ROUNDS} rounds plus the empty one that ends the loop",
-                logged(&dir, "ps").len()
+                logged(dir, "ps").len()
             );
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]
@@ -5805,11 +5805,11 @@ mod termination {
 
             reclaim_labeled_containers(&rendered);
 
-            let killed: std::collections::BTreeSet<String> = logged(&dir, "kill")
+            let killed: std::collections::BTreeSet<String> = logged(dir, "kill")
                 .into_iter()
                 .map(|line| line["kill ".len()..].to_owned())
                 .collect();
-            let removed: std::collections::BTreeSet<String> = logged(&dir, "rm")
+            let removed: std::collections::BTreeSet<String> = logged(dir, "rm")
                 .into_iter()
                 .map(|line| line["rm --force --volumes ".len()..].to_owned())
                 .collect();
@@ -5829,10 +5829,10 @@ mod termination {
                 "the stub still holds containers the reaper never removed"
             );
             assert!(
-                logged(&dir, "ps").len() >= 3,
+                logged(dir, "ps").len() >= 3,
                 "one listing cannot hold 130 ids"
             );
-            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]
@@ -5854,14 +5854,14 @@ mod termination {
             reclaim_labeled_containers(&rendered);
 
             assert_eq!(
-                logged(&dir, "ps").len(),
+                logged(dir, "ps").len(),
                 2,
                 "a repeated listing was acted on again: {:?}",
-                logged(&dir, "ps")
+                logged(dir, "ps")
             );
-            assert_eq!(logged(&dir, "kill").len(), 2, "{:?}", logged(&dir, "kill"));
-            assert_eq!(logged(&dir, "rm").len(), 2, "{:?}", logged(&dir, "rm"));
-            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(logged(dir, "kill").len(), 2, "{:?}", logged(dir, "kill"));
+            assert_eq!(logged(dir, "rm").len(), 2, "{:?}", logged(dir, "rm"));
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]

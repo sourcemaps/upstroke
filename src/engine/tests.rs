@@ -3119,7 +3119,7 @@ fn prompt_names_the_allowed_gate_commands() {
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &["cargo check --all-targets".to_owned()],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(prompt.contains("EXACTLY these commands"));
@@ -3131,7 +3131,7 @@ fn prompt_names_the_allowed_gate_commands() {
     let bare = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(!bare.contains("EXACTLY these commands"));
@@ -3159,7 +3159,7 @@ fn prompt_wires_artifacts_to_real_files() {
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(prompt.contains("did \n     not leave one") || prompt.contains("did not leave one"));
@@ -3169,14 +3169,14 @@ fn prompt_wires_artifacts_to_real_files() {
     );
 
     fs::write(
-        artifact_path(&run_dir, "api-contract"),
+        artifact_path(run_dir, "api-contract"),
         "cursor = base64(offset)",
     )
     .expect("artifact");
     let prompt = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(
@@ -3189,7 +3189,7 @@ fn prompt_wires_artifacts_to_real_files() {
     let bare = materialize_prompt(
         crate::engine::assembly::WorkerSubject::of(&task),
         &[],
-        &run_dir,
+        run_dir,
         None,
     );
     assert!(!bare.contains("artifact"));

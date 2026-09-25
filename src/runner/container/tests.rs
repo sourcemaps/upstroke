@@ -442,7 +442,7 @@ fn a_pre_clean_of_a_strangers_name_refuses_before_it_reclaims_anything() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::fake::preclean_names(&runtime, &view, &root, &[&theirs]);
+        super::fake::preclean_names(&runtime, &view, root, &[&theirs]);
     }))
     .expect_err("the pre-clean accepted a name built from another slot's repo key");
     std::panic::set_hook(hook);
@@ -1074,26 +1074,26 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             InvocationId::probe(ProbeTarget::Shell, ordinal).expect("a probe identity");
         let name = name_for(RUN_A, INCARNATION_1, &invocation);
         let record = intent_for(RUN_A, INCARNATION_1, &invocation);
-        let spec = spec_for(&name, &record, &root, IMAGE_ID);
+        let spec = spec_for(&name, &record, root, IMAGE_ID);
         let view_path = root.join("views").join(name.as_str());
         let request = GitViewRequest {
             path: view_path.clone(),
             workspace: PathBuf::from("/srv/work/task"),
             head: None,
         };
-        let intent_path = name.intent_path(&root);
-        let labels = record.labels(&root);
+        let intent_path = name.intent_path(root);
+        let labels = record.labels(root);
         let seed = |state: Liveness| {
             runtime.seed_container(name.as_str(), labels.clone(), IMAGE_ID, IMAGE_ID, state);
         };
         let proof = matches!(own_site, ContainerSite::Create | ContainerSite::Start).then(|| {
-            fs::create_dir_all(containers_dir(&root)).expect("the namespace");
+            fs::create_dir_all(containers_dir(root)).expect("the namespace");
             fs::write(
                 &intent_path,
                 serde_json::to_vec(&record).expect("a serializable record"),
             )
             .expect("the record this container's proof reads");
-            crate::runner::container::intent::IntentWritten::certify(&root, &name)
+            crate::runner::container::intent::IntentWritten::certify(root, &name)
                 .expect("the record is on disk, so it certifies")
         });
 
@@ -1108,14 +1108,14 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
                 fs::create_dir_all(&view_path).expect("a view there is to remove");
             }
             ContainerSite::RemoveIntent => {
-                fs::create_dir_all(containers_dir(&root)).expect("the namespace");
+                fs::create_dir_all(containers_dir(root)).expect("the namespace");
                 fs::write(&intent_path, b"{}").expect("a record there is to remove");
             }
         }
 
         let drive = |site: ContainerSite, hooks: &mut RecordingHooks| match own_site {
             ContainerSite::WriteIntent => {
-                write_intent(hooks, site, &root, &name, &record).map(|_| ())
+                write_intent(hooks, site, root, &name, &record).map(|_| ())
             }
             ContainerSite::Create => {
                 let proof = proof.as_ref().expect("the Create cell mints one");
@@ -1133,7 +1133,7 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             ContainerSite::Remove => remove_container(hooks, site, &runtime, &name).map(|_| ()),
 
             ContainerSite::UnmountGitView => unmount_git_view(hooks, site, &view, &view_path),
-            ContainerSite::RemoveIntent => remove_intent(hooks, site, &root, &name),
+            ContainerSite::RemoveIntent => remove_intent(hooks, site, root, &name),
         };
 
         for wrong in ContainerSite::ALL.iter().copied() {
@@ -1651,7 +1651,7 @@ fn probe_name_reuse_across_incarnations_never_collides() {
             );
             let name = name_for(RUN_A, incarnation, &invocation);
             names.insert(name.as_str().to_owned());
-            paths.insert(name.intent_path(&root));
+            paths.insert(name.intent_path(root));
         }
     }
     assert_eq!(
@@ -1668,14 +1668,14 @@ fn probe_name_reuse_across_incarnations_never_collides() {
             write_intent(
                 &mut hooks,
                 ContainerSite::WriteIntent,
-                &root,
+                root,
                 &name,
                 &intent_for(RUN_A, incarnation, &invocation),
             )
             .expect("written");
         }
     }
-    let found = list_intents(&root).expect("scanned");
+    let found = list_intents(root).expect("scanned");
     assert_eq!(found.len(), 4);
     let incarnations: BTreeSet<&str> = found
         .iter()
@@ -2766,8 +2766,8 @@ fn the_namespace_scan_reads_every_record_and_skips_the_staged_half() {
 fn an_absent_containers_directory_is_an_empty_namespace() {
     let tree = scratch("empty-namespace");
     let root = tree.path();
-    assert!(!containers_dir(&root).exists());
-    assert_eq!(list_intents(&root).expect("scanned"), Vec::new());
+    assert!(!containers_dir(root).exists());
+    assert_eq!(list_intents(root).expect("scanned"), Vec::new());
 }
 
 #[test]
@@ -4246,7 +4246,7 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         phrases.len() * 4,
         "every phrase was measured against every command"
     );
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4361,7 +4361,7 @@ fn the_production_lock_probe_sees_a_lock_another_process_holds() {
     let tree = scratch("lock-probe-held");
     let root = tree.path();
     let paths =
-        crate::rundir::RunPaths::with_private_root(&root, "01KZRN48A4ZK3AEDST3RJ8HMA4", &root);
+        crate::rundir::RunPaths::with_private_root(root, "01KZRN48A4ZK3AEDST3RJ8HMA4", root);
     paths.create().expect("the run directories");
     let ready = root.join("held");
     let probe = super::runtime::LockProbe;
@@ -4418,7 +4418,7 @@ fn the_production_lock_probe_sees_a_lock_another_process_holds() {
         );
         std::thread::yield_now();
     }
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4534,7 +4534,7 @@ fn a_role_view_that_cannot_be_removed_refuses_and_records_nothing() {
     );
 
     let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o755));
-    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(windows)]

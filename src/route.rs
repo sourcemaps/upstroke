@@ -278,7 +278,7 @@ mod tests {
         )
         .expect("empty pools file");
         let mut warnings = Vec::new();
-        let cfg = config::load(Some(&cfg_path), &dir, Some(&missing), &mut warnings).expect("load");
+        let cfg = config::load(Some(&cfg_path), dir, Some(&missing), &mut warnings).expect("load");
 
         let mut t = task(TaskKind::Fix);
         t.path_hints.push("src/auth/login.rs".to_owned());
@@ -321,7 +321,7 @@ mod tests {
         )
         .expect("empty pools file");
         let mut warnings = Vec::new();
-        let cfg = config::load(Some(&cfg_path), &dir, Some(&missing), &mut warnings).expect("load");
+        let cfg = config::load(Some(&cfg_path), dir, Some(&missing), &mut warnings).expect("load");
 
         let rc = resolve(&task(TaskKind::Design), &cfg);
         assert_eq!(rc.rungs[0].binding.model, "claude-opus-4-8");

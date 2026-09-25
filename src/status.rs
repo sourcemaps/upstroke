@@ -284,7 +284,7 @@ mod tests {
         let root = tree.path();
         let status = std::process::Command::new("git")
             .arg("-C")
-            .arg(&root)
+            .arg(root)
             .args(["init", "-q", "-b", "main"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -293,8 +293,8 @@ mod tests {
         assert!(status.success(), "git init");
 
         let husk = "01STATUSHUSK00000000000000";
-        std::fs::create_dir_all(rundir::public_dir(&root, husk)).expect("husk");
-        let Err(error) = load(&root, Some(husk)) else {
+        std::fs::create_dir_all(rundir::public_dir(root, husk)).expect("husk");
+        let Err(error) = load(root, Some(husk)) else {
             panic!("a husk is not a run and status must not load one");
         };
         let said = error.to_string();
