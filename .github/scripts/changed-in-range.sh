@@ -14,11 +14,11 @@
 #
 # THIS IS A SCRIPT AND NOT FOUR LINES OF WORKFLOW BECAUSE IT HAS TO BE TESTED, and because the
 # validator may not build it. Every external probe, file read and directory listing in
-# validate-pr-branch.sh goes through three audited helpers, and .github/scripts/test-pr-policy.sh
-# fails the build if anything below its AUDITED HELPERS END marker runs a command that is not a
-# shell builtin or redirects from a path -- so the validator cannot run `git` or open a blob, and
-# consumes these two files as LISTINGS through the same `read_file` it consumes the three finding
-# listings with. The precedent is .github/scripts/findings-in-range.sh, which exists for exactly
+# validate-pr-branch.sh goes through three audited helpers -- a rule .github/scripts/test-pr-policy.sh
+# lints the rest of that file for, best-effort, below its AUDITED HELPERS END marker, and a reviewer
+# holds it to -- so the validator takes no diff and opens no blob of its own, and consumes these
+# two files as LISTINGS through the same `read_file` it consumes the three finding listings with.
+# The precedent is .github/scripts/findings-in-range.sh, which exists for exactly
 # this reason: it was four lines of workflow, the fixtures could not reach it, and three wrong ways
 # of building the candidate set each survived a frontier review.
 #

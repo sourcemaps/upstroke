@@ -295,8 +295,9 @@
 #
 # NEITHER INPUT IS BUILT HERE. Nothing below the AUDITED HELPERS END marker may
 # run a command that is not a shell builtin or redirect from a path, so this
-# file cannot run `git diff` or read a blob, and .github/scripts/test-pr-policy.sh
-# fails the build if it tries. .github/scripts/changed-in-range.sh builds both,
+# file does not take a diff or read a blob, and .github/scripts/test-pr-policy.sh
+# lints for the mistakes that would, as a lint and not a proof: the guarantee is
+# the audited region, read whole. .github/scripts/changed-in-range.sh builds both,
 # the workflow calls it, the fixtures call it too, and they arrive here as
 # LISTINGS read through `read_file` exactly as the three finding listings are.
 # That is the precedent findings-in-range.sh set and the reason it exists.
@@ -511,12 +512,13 @@
 # only place this file runs git, `read_file` the only place it opens a file for
 # reading, `list_dir` the only place it enumerates a directory -- and `capture`
 # is the only place any of the three obtains a byte.
-# .github/scripts/test-pr-policy.sh FAILS THE BUILD if anything below the
-# AUDITED HELPERS END marker runs a command that is not a shell builtin or a
-# function defined in this file, or redirects from a path. That is a text scan
-# over one file and it bounds what is WRITTEN here rather than what bash can be
-# made to do; what it buys is that the reviewed surface is the audited region,
-# and the region is capped at a size that can be read in one sitting.
+# .github/scripts/test-pr-policy.sh LINTS everything below the AUDITED HELPERS
+# END marker for a command that is not a shell builtin or a function defined in
+# this file, a redirection from a path, and a backtick. It is a best-effort text
+# scan and not a proof: it is aimed at mistakes made in good faith, it has been
+# walked past by constructs nobody had listed, and the misses found so far are
+# listed and tested there. The guarantee is the audited region: a stated number
+# of lines, capped in that gate, which a reviewer reads whole.
 #
 # `git_probe`'s contract is the part that matters: the caller ENUMERATES the exit
 # statuses it is prepared to read as answers, and any other status refuses the
@@ -840,10 +842,10 @@ fail() {
 # only callers and have no other route to bytes at all. The block above is the
 # history each contract was written out of; this region is the code.
 #
-# .github/scripts/test-pr-policy.sh asserts over the rest of the file by shape:
-# below AUDITED HELPERS END nothing may run a command that is not a shell
-# builtin or a function defined here, and nothing may redirect from a path. Keep
-# this region readable in one sitting; that is the whole of its value.
+# .github/scripts/test-pr-policy.sh lints the rest of the file for that rule --
+# below AUDITED HELPERS END no command but a builtin or a function defined here,
+# and no redirection from a path -- as a lint and not a proof. This region is
+# the guarantee: capped in that gate, and read whole by a reviewer.
 
 # Where a private copy goes: this script's own directory, mode 700 from mktemp,
 # so a copy taken here cannot be replaced between the check and the parse --

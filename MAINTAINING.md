@@ -350,16 +350,28 @@ that held. Each of those four was a round's P1 on its own — a helper that chec
 reused the previous capture's bytes when its destination would not open, and one that took its names
 from a glob after a separate command's exit 0 read an unreadable directory as an empty one. Owning a
 file establishes nothing about reading it, and a successful producer establishes nothing about a
-successful read. `test-pr-policy.sh`
-holds the rest of the file to an **allowlist** — below the audited region a command may only be a
-shell builtin from a short list or a function the file defines, and nothing may redirect from a path
-— because five rounds of closing unsafe calls one at a time produced more of them each round, and
-the ban list that replaced those cases was itself walked past by an assignment prefix, a `command
---`, and a reader it did not name. That check is a text scan over one file: it bounds what is
-written in the validator, not what bash can be made to do, and what it buys is that **the reviewed
-surface is the audited region**, which the gate caps at 250 lines. It is a helper and not a
-guarantee: a command word written entirely inside quotes leaves nothing on the line for a text scan
-to read, and a command reached through an `eval` of a string it cannot see is outside any such scan.
+successful read. Below the audited region `test-pr-policy.sh` **lints** the rest of the file against
+an **allowlist** — a command may only be a shell builtin from a short list or a function the file
+defines, nothing may redirect from a path, and a backtick is refused — because five rounds of
+closing unsafe calls one at a time produced more of them each round, and the ban list that replaced
+those cases was itself walked past by an assignment prefix, a `command --`, and a reader it did not
+name. **That lint is best-effort and it is not a guarantee.** It is a text scan over one file, and a
+text scan cannot bound what a file does: it was walked past in three consecutive review rounds of
+#251, each time by a construct nobody had listed, the third a command substitution inside arithmetic
+that its arithmetic rule deleted before the command scan read it. It is aimed at mistakes made in
+good faith, such as git called directly or a file read with `<`, and not at an author set on getting
+past it, and some constructs written in good faith get past it too. The misses found so far are
+listed in the gate and tested there in both directions — the lint passes each, and bash run on each
+reaches git or lists a directory — and that list is what has been found, not all there is. **The
+guarantee that is real is the audited region: a stated number of lines, and a reviewer reads all of
+them.** The gate caps it at 250 lines, comments included. The cap bounds that reviewer's reading and
+nothing else, and it is fenced accordingly. It has moved once, from 200 to 250, in the #251 commit
+that also grew the code it admitted, so by that code's author; the raise is kept, with its reason
+stated beside the cap, because moving comments out would bring the region back under 200 with no
+code touched and restore the number without restoring the reading. **A pull request that raises the
+cap again states its reason in its body, is not the pull request that grows the region, and is not
+authored by whoever wrote the code the raise would admit.** No check enforces that fence; a raise is
+an edit to a gate script, which the first limb of step 7 keeps out of standing delegation.
 
 **A directory handed in as a listing is answered out of git's records, not out of the checkout.**
 The directory form locates the repository and the path within it and then reads `git ls-files -s`
