@@ -2883,6 +2883,14 @@ fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {
         "src/rundir.rs",
         "src/workspace_manager.rs",
     ];
+    const FORBIDDEN_IN_A_FUNNEL: [(&str, &str); 6] = [
+        ("src/runner/container.rs", "clippy::disallowed_macros"),
+        ("src/agent/proc.rs", "clippy::disallowed_macros"),
+        ("src/runner/host.rs", "clippy::disallowed_methods"),
+        ("src/runner/host.rs", "clippy::disallowed_macros"),
+        ("src/rundir.rs", "clippy::disallowed_macros"),
+        ("src/workspace_manager.rs", "clippy::disallowed_macros"),
+    ];
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let mut children: Vec<PathBuf> = Vec::new();
@@ -2987,22 +2995,33 @@ fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {
     for funnel in FUNNELS {
         let source = fs::read_to_string(root.join(funnel)).expect("a funnel module");
         for lint in GOVERNED {
+            let forbidden = FORBIDDEN_IN_A_FUNNEL.contains(&(funnel, lint));
+            let level = if forbidden { "forbid" } else { "allow" };
             assert_eq!(
                 stated_lint_level(&source, lint),
-                Some("allow"),
-                "the funnel `{funnel}` no longer allows `{lint}`"
+                Some(level),
+                "the funnel `{funnel}` no longer states `{level}` for `{lint}`"
             );
-            assert!(allowlist_records(funnel, lint));
+            assert_eq!(
+                allowlist_records(funnel, lint),
+                !forbidden,
+                "the allowlist row of `{funnel}` disagrees with its `{level}` of `{lint}`"
+            );
         }
     }
 
     let readiness = fs::read_to_string(root.join("src/agent/proc/test_support/readiness.rs"))
         .expect("the readiness child");
     for lint in GOVERNED {
+        let level = if lint == GOVERNED[0] {
+            "deny"
+        } else {
+            "forbid"
+        };
         assert_eq!(
             stated_lint_level(&readiness, lint),
-            Some("deny"),
-            "`readiness.rs` no longer denies `{lint}` at file scope"
+            Some(level),
+            "`readiness.rs` no longer states `{level}` for `{lint}` at file scope"
         );
     }
     assert!(allowlist_records(

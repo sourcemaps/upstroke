@@ -1246,7 +1246,7 @@ Every child module of a Process or Container funnel **states its own lint
 level**.
 
 `PR6-LANEF-004`, and it is the one finding of that slice whose repair is
-about the *next* lane rather than its own. `src/runner/container.rs` opens
+about the *next* lane rather than its own. `src/runner/container.rs` opened
 with `#![allow(clippy::disallowed_methods, disallowed_types,
 disallowed_macros)]` — an **inner** attribute — and a Rust lint level is
 scoped by the **module tree**, not by the file. So every out-of-line child of
@@ -1256,7 +1256,7 @@ it exists for: a `ContainerRuntime::start` planted in a child passed
 `cargo clippy --all-targets --all-features -- -D warnings`, measured twice.
 
 **The Process funnel is in the domain too, and was not when this was
-written.** `src/agent/proc.rs` carries the identical inner allow and had no
+written.** `src/agent/proc.rs` carried the identical inner allow and had no
 out-of-line child at all, so the census that closed the hole for one funnel
 left the other covered by nothing but the absence of a directory. It has one
 now — `src/agent/proc/test_support/readiness.rs` — and a census scoped to
@@ -1265,7 +1265,7 @@ silence. The domain below is derived from the funnel list rather than
 written out, so the next funnel to grow a child is covered by the same line.
 
 **The RunDir funnel is in the domain too, and W2 is when that stopped being
-optional.** `src/rundir.rs` carries the same inner allow of all three and has
+optional.** `src/rundir.rs` carried the same inner allow of all three and has
 had out-of-line children since W1 — `src/rundir/tests.rs` and
 `src/rundir/scratch_tree.rs` — which this census never visited, because
 deriving the domain from a funnel *list* only covers the funnels somebody put
@@ -1281,7 +1281,7 @@ classification matches the same bare `fn` name without reading the body. An
 effect lands with no site while every control stays green. The
 `src/rundir.rs` entry below is what closes it.
 **The schema-4 workspace funnel is in the domain too, and W2 is when that
-stopped being optional.** `src/workspace_manager.rs` carries the same inner
+stopped being optional.** `src/workspace_manager.rs` carried the same inner
 allow of all three and has had out-of-line children since W1 —
 `src/workspace_manager/tests.rs` and `src/workspace_manager/fixture.rs` —
 which this census never visited, because deriving the domain from a funnel
@@ -1344,6 +1344,26 @@ entry exists so that the next one would be.
 
 Every funnel named here has a directory today, and the assertions below
 require that rather than tolerating it, so no arm of the domain is inert.
+
+## `fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {` › `const FORBIDDEN_IN_A_FUNNEL: [(&str, &str); 6] = [`
+
+The six (funnel, lint) pairs a funnel **forbids** instead of allowing, and
+every pair not named here is one it allows. Since 2026-09-26 (PR #325) a
+funnel allows only what it uses: these six allowances were exercised by no
+call on any of the three CI targets -- measured by neutralising each lint's
+allowances tree-wide and running Clippy `-D warnings` over all targets on
+Linux, Windows and macOS -- so each was dropped from its attribute and from
+its `effects/allowlist.toml` row and fenced. `src/runner/container.rs`
+forbids outright, because nothing below it allows the lint; the other four
+forbid under `cfg_attr(not(test), ..)`, because the whole-file test child
+of each (`proc/tests.rs`, `host/tests.rs`, `rundir/tests.rs`,
+`workspace_manager/tests.rs`) still allows all three of its own, and a
+`forbid` above it would make that allow E0453 in the test build.
+
+Named as a table rather than derived from the allowlist, so that the source
+and the row are each compared with a third statement: a funnel that
+re-grew an allowance, dropped a fence, or had its row widened to match
+fails the assertion below whichever of the two moved.
 
 ## `fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {` › `let arm = walk(&directory);`
 
@@ -1412,10 +1432,36 @@ The funnels themselves are the files that legitimately carry the allow,
 and each is in the allowlist. Asserted here so "everything denies" cannot
 become true by a funnel quietly denying itself out of existence.
 
+**Exactly, per lint, since 2026-09-26.** This pinned `allow` for all three
+governed lints in all five funnels, because every funnel allowed all three
+when it was written. An allowance nothing uses is not one a funnel
+legitimately carries: it is an exception no call needs, which a new call
+of that kind in the funnel -- or in any child that states nothing -- would
+pass Clippy under without a reviewer seeing a new allowance. So each cell
+is now the funnel's exact production-build level: `allow` where the funnel
+uses the lint, with its row recording it, and `forbid` for the six pairs
+above, with its row **not** recording it. The row is compared for equality
+in both directions, so a row that keeps a lint its file forbids fails as
+surely as a file that allows a lint its row omits. What the pin still
+refuses is what it was for: a funnel that stops allowing a lint it uses
+fails here, whether or not its calls moved somewhere else.
+
 ## `fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {` › `let readiness = fs::read_to_string(root.join("src/agent/proc/test_support/readiness.rs"))`
 
-And `readiness.rs` **denies all three at file scope**. It
-allowed one of them until `standards/02_standards_automated_baseline.md`,
+And `readiness.rs` **denies `disallowed_methods` and forbids the other two
+at file scope**, each level pinned exactly. The file denied all three in one
+attribute until 2026-09-26 (PR #325), when the attribute split: `deny` is
+the one level its six per-site `#[expect(clippy::disallowed_methods)]`
+attributes can narrow, and `forbid` would make each of them E0453, while
+`disallowed_types` and `disallowed_macros` are lowered by nothing in the
+file, so `forbid` is the stronger fence at no cost -- no attribute below
+can reopen them, a macro-written or spelled-apart allow included. A pin of
+`deny | forbid` would pass the three rejoined in one `deny`, so each lint's
+level is named. `effects::tests::the_readiness_expectations_are_per_site_\
+and_both_records_say_so` pins the same three levels from its own end.
+
+The file allowed `disallowed_methods` until
+`standards/02_standards_automated_baseline.md`,
 and the allowance is six per-site `#[expect]` attributes now: narrower
 than the file-scope allow it replaces, and counted by the compiler in both
 directions under `-D warnings` — a seventh denied call is an error, and an
