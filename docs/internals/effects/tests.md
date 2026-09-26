@@ -1214,14 +1214,21 @@ nested `const _`, a named `const`, a `static` and a closure in one, an
 enum discriminant, a field's type, a return type, a parameter's type, a
 const-generic default, an attribute's value, production code beside a
 test item, an `impl` for a type named `r#fn`, an associated `const` after a
-bodiless declaration, and an `impl` after a `fn` written in a macro's
-parentheses, brackets or braces. Accepted: a function body, a method body, a trait's default
-body, a function inside a `const _`, headers holding a const block, an
-array, a `where` clause with a higher-ranked bound and an arrow,
-qualifiers and an ABI, raw and non-ASCII function names, a nested
-function, test-only items and modules, a keyword before a `!` outside a
-body, and unary `!`, `!=`, comments and strings that are not invocations
-at all.
+bodiless declaration, an `impl` after a `fn` written in a macro's
+parentheses, brackets or braces, an `impl`, a `trait`, an `enum` and a
+`struct` whose last generic parameter is test-only (which used to take the
+whole item out of the region), and production code after a generic test-only
+function and after an item a compound gate removes. Accepted: a function body,
+a method body, a trait's default body, a function inside a `const _`, headers
+holding a const block, an array, a `where` clause
+with a higher-ranked bound and an arrow, qualifiers and an ABI, raw and
+non-ASCII function names, a nested function, test-only items and modules,
+test-only functions with a comma in the header (two type parameters, a
+lifetime and a type, a two-argument return type, two `where` predicates, and
+this tree's `util::same_path` made generic), a `macro_rules!`, a
+`thread_local!` and a `const` initializer under a compound test-only gate, a
+keyword before a `!` outside a body, and unary `!`, `!=`, comments and
+strings that are not invocations at all.
 
 ## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {` › `assert_eq!(`
 

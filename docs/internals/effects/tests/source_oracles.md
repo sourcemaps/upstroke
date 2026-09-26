@@ -1232,21 +1232,29 @@ And a real attribute beside prose that quotes one is still found.
 
 ## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {`
 
-The region is a superset of [`production_region`]'s, file by file, over the
-tree — and keeps what the truncating region cannot: the code below the cut.
+The region keeps, file by file over the tree, everything [`production_region`]
+keeps other than test-only code, and keeps what the truncating region cannot:
+the code below the cut.
 
 ### What each assertion here is worth, because they are not worth the same
 
-The prefix comparison is a **consistency check on a construction, and it
-cannot fail.** [`production_code`] never writes below the index of its first
-`#[cfg(test)]` match, [`production_region`] cuts at exactly that index, and
-no token straddles a cut that lands on visible code — so the two sides are
-the same bytes of the same blanking, and no input separates them. It is kept
-because it would start failing if either function's cut point moved, which is
-a real regression; it is not the non-weakening proof, and this doc used to
-claim it was.
+Above the truncating cut, the whole file's region must equal the region of
+the text above the cut read alone. Until #325's fourth round it was compared
+with the truncating region itself, and that could not fail: [`production_code`]
+removed only what followed a `#[cfg(test)]`, and the cut was the first one.
+Since that round it also removes an element under any other gate that entails
+`test`, so above the cut it can remove what the truncating region keeps -- in
+`src/agent/proc.rs` and `src/agent/proc/ambient.rs`, their
+`cfg(all(unix, test))`, `cfg(all(target_os = "macos", test))` and
+`cfg(all(windows, test))` items. So three assertions replace the one: the
+two readings of the prefix agree, which fails if an element's end depends on
+text past the cut; the prefix differs from the truncating region only where
+this one blanks, which fails if it ever keeps code the truncating region does
+not; and the files where the two differ are exactly those two, named. The
+classification census holds the same two files' items against
+`effects/wrappers.toml` both ways.
 
-What carries the claim is the rest: `strictly_larger >= 8` and the
+What carries the superset claim is the rest: `strictly_larger >= 8` and the
 `src/engine/coordinator.rs` membership check (a strict gain somewhere, by
 name), and the sentinel block below, which is the one property the truncating
 region does not have and the one a desync destroys — an item appended *below*
@@ -1417,6 +1425,34 @@ the whole point of having removed the third `production_region`.
 Typed test wrappers must disappear without hiding later production.
 A return-type comma is not a field separator; a function-pointer field's
 comma still is. Incomplete items retain their bodies for the census.
+
+## `pub(in crate::effects::tests) fn a_test_only_element_is_removed_to_where_rustc_ends_it() {`
+
+[`production_code`] over each place a gate can stand, with the exact region
+that must remain, whitespace collapsed -- so a decision that moves an end by
+one byte, a stray `>`, `,` or `;`, fails here. Added in #325's fourth round
+with the reader it pins.
+
+The first table is items removed whole between two production functions,
+one of which spells a raw identifier (a `#` that opens no attribute): every
+header shape whose `,`, `<` or `>` the element rule used to stop at, every
+qualifier and item keyword [`item_end`] reads, the attributes stacked before
+the gate, and every gate spelling that entails `test`. The second is where
+the element sits and what is left: the only, last, middle and later generic
+parameter of each item that has a parameter list, a binder's, the first and
+later parameters of a closure, `let` and `if` statements, and the lists where
+`<`, `>` and `|` are operators -- a closure argument that compares, a
+struct-expression field that compares, an arm after a guarded or-pattern --
+which a reader that counted angle brackets there, or took any `|` for a
+closure's, would read past. Then malformed input, one row per give-up path and
+per member of each guard, each removing the attributes and nothing else. The
+third is gates that remove nothing: production gates, `cfg_attr`, an inner
+gate, a raw name, predicates that do not parse, another attribute whose
+arguments read like a gate.
+
+A compiled mutation matrix over the reader, one row per decision and per
+member of every alternation, ran against this table and the census fixtures
+(`~/findings-sweep/orch-p1/p1-six-modules-r4/mutations/`).
 
 ## `pub(in crate::effects::tests) fn a_configured_attribute_in_prose_is_inert() {`
 

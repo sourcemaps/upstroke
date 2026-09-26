@@ -1403,6 +1403,609 @@ pub(super) mod oracles {
         }
     }
 
+    pub(in crate::effects::tests) fn a_test_only_element_is_removed_to_where_rustc_ends_it() {
+        fn kept(source: &str) -> String {
+            let region = production_code(source);
+            assert_eq!(region.len(), source.len(), "{source:?}");
+            assert_eq!(
+                region.matches('\n').count(),
+                source.matches('\n').count(),
+                "{source:?}"
+            );
+            region.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        const BEFORE: &str = "fn kept_before() { let r#x = o!(); }\n";
+        const AFTER: &str = "fn kept_after() { n!(); }\n";
+        for (what, item) in [
+            (
+                "two type parameters",
+                "#[cfg(test)]\nfn t<A: Copy, B>(a: A, b: B) {\n    assert!(true);\n}\n",
+            ),
+            (
+                "a lifetime and a type",
+                "#[cfg(test)]\nfn t<'a, T>(x: &'a T) -> &'a T {\n    panic!()\n}\n",
+            ),
+            (
+                "a two-argument return type on a generic function",
+                "#[cfg(test)]\npub(crate) fn t<T>() -> Result<T, String> {\n    Err(format!(\"x\"))\n}\n",
+            ),
+            (
+                "a where clause of two predicates",
+                "#[cfg(test)]\nfn t<T>(x: T) where T: Copy, T: Clone {\n    assert!(true);\n}\n",
+            ),
+            (
+                "the tree's own `same_path`, made generic",
+                "#[cfg(test)]\npub(crate) fn same_path<L: AsRef<Path>, R: AsRef<Path>>(left: L, right: R) -> bool {\n    panic!()\n}\n",
+            ),
+            (
+                "a const block in the return type",
+                "#[cfg(test)]\nfn t() -> Foo<{ N > 1 }> {\n    m!();\n}\n",
+            ),
+            (
+                "an array in the return type",
+                "#[cfg(test)]\nfn t() -> [u8; 2] {\n    m!()\n}\n",
+            ),
+            (
+                "an arrow at the header's own level",
+                "#[cfg(test)]\nfn t() -> impl Fn() -> Result<u8, u8> {\n    m!()\n}\n",
+            ),
+            (
+                "a generic impl",
+                "#[cfg(test)]\nimpl<A, B> X<A, B> {\n    m!();\n    fn f() { m!(); }\n}\n",
+            ),
+            (
+                "a generic trait impl with a where clause",
+                "#[cfg(test)]\nimpl<T> Tr<T, u8> for W<T> where T: A, T: B {\n    fn f() { m!(); }\n}\n",
+            ),
+            (
+                "an unsafe generic impl",
+                "#[cfg(test)]\nunsafe impl<A, B> Send for X<A, B> {}\n",
+            ),
+            (
+                "a generic struct",
+                "#[cfg(test)]\nstruct S<A, B> {\n    a: A,\n    b: [u8; m!()],\n}\n",
+            ),
+            (
+                "a generic tuple struct with a where clause",
+                "#[cfg(test)]\nstruct S<A, B>(A, B) where A: Copy, B: Copy;\n",
+            ),
+            (
+                "a generic enum",
+                "#[cfg(test)]\nenum E<A, B> {\n    X(A),\n    Y(B) = m!(),\n}\n",
+            ),
+            (
+                "a generic union",
+                "#[cfg(test)]\nunion U<A: Copy, B: Copy> {\n    a: A,\n    b: B,\n}\n",
+            ),
+            (
+                "a generic trait with supertraits",
+                "#[cfg(test)]\ntrait T<A, B>: Into<(A, B)> + From<A, B> {\n    fn f(&self) { m!(); }\n}\n",
+            ),
+            (
+                "an unsafe generic trait",
+                "#[cfg(test)]\nunsafe trait T<A, B> {}\n",
+            ),
+            ("a type alias", "#[cfg(test)]\ntype M = HashMap<u8, u8>;\n"),
+            (
+                "a static of a generic type",
+                "#[cfg(test)]\nstatic S: Mutex<HashMap<u8, u8>> = m!();\n",
+            ),
+            (
+                "a static of an array type",
+                "#[cfg(test)]\nstatic S: [u8; 2] = [0; 2];\n",
+            ),
+            (
+                "a static whose initializer holds a block in a call",
+                "#[cfg(test)]\nstatic S: u8 = f({ g(); 1 });\n",
+            ),
+            (
+                "a const of a generic type",
+                "#[cfg(test)]\nconst C: HashMap<u8, u8> = m!();\n",
+            ),
+            (
+                "a const whose initializer compares",
+                "#[cfg(test)]\nconst C: bool = 1 < 2 && m!(a, b) > 0;\n",
+            ),
+            (
+                "a module-level `const _`",
+                "#[cfg(test)]\nconst _: () = {\n    m!();\n};\n",
+            ),
+            ("a const function", "#[cfg(test)]\nconst fn t<A, B>() {}\n"),
+            (
+                "a const foreign-ABI function",
+                "#[cfg(test)]\nconst extern \"C\" fn t<A, B>() {}\n",
+            ),
+            ("an async function", "#[cfg(test)]\nasync fn t<A, B>() {}\n"),
+            (
+                "an unsafe function",
+                "#[cfg(test)]\nunsafe fn t<A, B>() {}\n",
+            ),
+            (
+                "a foreign-ABI function",
+                "#[cfg(test)]\nextern \"C\" fn t<A, B>() {}\n",
+            ),
+            (
+                "every qualifier before `fn`",
+                "#[cfg(test)]\npub(in crate::a) const unsafe extern \"C\" fn t<A, B>() {\n    m!();\n}\n",
+            ),
+            (
+                "a raw function name",
+                "#[cfg(test)]\nfn r#match<A, B>() {\n    m!();\n}\n",
+            ),
+            (
+                "a non-ASCII function name",
+                "#[cfg(test)]\nfn \u{e9}<A, B>() {\n    m!();\n}\n",
+            ),
+            (
+                "attributes written before the gate",
+                "#[doc = concat!(\"a\", \"b\")]\n#[inline]\n#[cfg(test)]\n#[allow(dead_code)]\nfn t<A, B>() {}\n",
+            ),
+            (
+                "a macro definition",
+                "#[cfg(test)]\nmacro_rules! m {\n    () => {};\n}\n",
+            ),
+            (
+                "a macro definition in parentheses",
+                "#[cfg(test)]\nmacro_rules! m (\n    () => {}\n);\n",
+            ),
+            (
+                "a thread-local",
+                "#[cfg(test)]\nthread_local! {\n    static X: HashMap<u8, u8> = HashMap::new();\n}\n",
+            ),
+            (
+                "an extern block",
+                "#[cfg(test)]\nunsafe extern \"C\" {\n    safe fn f(a: u8, b: u8);\n}\n",
+            ),
+            (
+                "an inline module",
+                "#[cfg(test)]\npub(crate) mod tests {\n    m!();\n}\n",
+            ),
+            (
+                "a gate the predicate entails but does not spell alone",
+                "#[cfg(all(unix, test))]\nmacro_rules! m {\n    () => {};\n}\n",
+            ),
+            (
+                "a gate with a literal in its predicate",
+                "#[cfg(all(test, feature = \"a, b)\"))]\nthread_local! {\n    static X: u8 = 0;\n}\n",
+            ),
+            (
+                "a gate that negates its negation",
+                "#[cfg(not(not(test)))]\nconst C: u8 = m!();\n",
+            ),
+            (
+                "a trailing comma in the predicate's list",
+                "#[cfg(all(test,))]\nconst C: u8 = m!();\n",
+            ),
+            (
+                "a gate no build satisfies",
+                "#[cfg(any())]\nconst C: u8 = m!();\n",
+            ),
+            (
+                "a gate's tokens spaced and commented",
+                "# /* a */ [ cfg /* b */ ( all ( unix , // c\n test ) ) ]\nfn t<A, B>() { m!(); }\n",
+            ),
+            (
+                "a separator rustc reads as whitespace in the predicate",
+                "#[cfg(all(unix,\u{200e}test))]\nconst C: u8 = m!();\n",
+            ),
+        ] {
+            assert_eq!(
+                kept(&format!("{BEFORE}{item}{AFTER}")),
+                "fn kept_before() { let r#x = o!(); } fn kept_after() { n!(); }",
+                "{what}: {item:?}"
+            );
+        }
+
+        for (what, source, region) in [
+            (
+                "the only generic parameter of an impl",
+                "impl<#[cfg(test)] 'a> NoHooks {\n    pub fn kept(&self) { m!(); }\n}\n",
+                "impl< > NoHooks { pub fn kept(&self) { m!(); } }",
+            ),
+            (
+                "the last generic parameter, after a generic bound",
+                "impl<T: Into<u8>, #[cfg(test)] U: Into<(u8, u8)>> X<T> {\n    pub fn kept() { m!(); }\n}\n",
+                "impl<T: Into<u8>, > X<T> { pub fn kept() { m!(); } }",
+            ),
+            (
+                "a middle generic parameter",
+                "impl<'a, #[cfg(test)] 'b, T> X<'a, T> {\n    pub fn kept() {}\n}\n",
+                "impl<'a, T> X<'a, T> { pub fn kept() {} }",
+            ),
+            (
+                "a generic parameter after a closure-typed bound",
+                "impl<F: Fn(u8) -> u8, #[cfg(test)] U> X<F> {\n    pub fn kept() { m!(); }\n}\n",
+                "impl<F: Fn(u8) -> u8, > X<F> { pub fn kept() { m!(); } }",
+            ),
+            (
+                "a generic parameter bounded by a closure type",
+                "pub fn f<#[cfg(test)] F: Fn(u8) -> u8>() {\n    kept();\n}\n",
+                "pub fn f< >() { kept(); }",
+            ),
+            (
+                "the last generic parameter of a trait",
+                "pub trait T<#[cfg(test)] A> {\n    fn kept(&self) { m!(); }\n}\n",
+                "pub trait T< > { fn kept(&self) { m!(); } }",
+            ),
+            (
+                "a defaulted generic parameter of a struct",
+                "pub struct S<#[cfg(test)] A = Vec<u8>> {\n    pub kept: u8,\n}\n",
+                "pub struct S< > { pub kept: u8, }",
+            ),
+            (
+                "a const generic parameter with a block default",
+                "pub enum E<T, #[cfg(test)] const N: bool = { 1 > 0 }> {\n    Kept(T),\n}\n",
+                "pub enum E<T, > { Kept(T), }",
+            ),
+            (
+                "a later generic parameter of a function",
+                "fn f<T, #[cfg(test)] U>() {\n    kept();\n}\n",
+                "fn f<T, >() { kept(); }",
+            ),
+            (
+                "a later generic parameter of a struct",
+                "struct S<T, #[cfg(test)] U> {\n    kept: T,\n}\n",
+                "struct S<T, > { kept: T, }",
+            ),
+            (
+                "a later generic parameter of a union",
+                "union U<T: Copy, #[cfg(test)] V> {\n    kept: T,\n}\n",
+                "union U<T: Copy, > { kept: T, }",
+            ),
+            (
+                "a later generic parameter of a trait",
+                "trait Tr<T, #[cfg(test)] U> {\n    fn kept(&self) {}\n}\n",
+                "trait Tr<T, > { fn kept(&self) {} }",
+            ),
+            (
+                "a later generic parameter of a type alias",
+                "type A<T, #[cfg(test)] U> = Vec<T>;\n",
+                "type A<T, > = Vec<T>;",
+            ),
+            (
+                "a later generic parameter of a raw-named function",
+                "fn r#match<T, #[cfg(test)] U>() {\n    kept();\n}\n",
+                "fn r#match<T, >() { kept(); }",
+            ),
+            (
+                "a later generic parameter of a non-ASCII-named function",
+                "fn \u{e9}<T, #[cfg(test)] U>() {\n    kept();\n}\n",
+                "fn \u{e9}<T, >() { kept(); }",
+            ),
+            (
+                "a binder's parameter",
+                "pub fn f() where for<#[cfg(test)] 'a> &'a u8: Copy {\n    kept();\n}\n",
+                "pub fn f() where for< > &'a u8: Copy { kept(); }",
+            ),
+            (
+                "a binder's later parameter",
+                "pub fn f() where for<'a, #[cfg(test)] 'b> &'a u8: Copy {\n    kept();\n}\n",
+                "pub fn f() where for<'a, > &'a u8: Copy { kept(); }",
+            ),
+            (
+                "a generic parameter after an array in a bound",
+                "struct S<T: Into<[u8; 2]>, #[cfg(test)] U> {\n    kept: T,\n}\n",
+                "struct S<T: Into<[u8; 2]>, > { kept: T, }",
+            ),
+            (
+                "a generic parameter after a const default block",
+                "struct S<const N: usize = { 1 }, #[cfg(test)] U> {\n    kept: [u8; N],\n}\n",
+                "struct S<const N: usize = { 1 }, > { kept: [u8; N], }",
+            ),
+            (
+                "a generic parameter bounded by an array",
+                "struct S<#[cfg(test)] T: Into<[u8; 2]>> {\n    kept: u8,\n}\n",
+                "struct S< > { kept: u8, }",
+            ),
+            (
+                "an argument in a call inside a closure's body",
+                "const C: u8 = g(|a| f(a, #[cfg(test)] |x| x, kept!()));\n",
+                "const C: u8 = g(|a| f(a, kept!()));",
+            ),
+            (
+                "an element of an array inside a closure's body",
+                "const C: u8 = g(|a| [a, #[cfg(test)] |x| x, kept!()]);\n",
+                "const C: u8 = g(|a| [a, kept!()]);",
+            ),
+            (
+                "a field of a struct expression inside a closure's body",
+                "const C: u8 = g(|a| S { a, #[cfg(test)] b: |x| x, c: kept!() });\n",
+                "const C: u8 = g(|a| S { a, c: kept!() });",
+            ),
+            (
+                "a closure argument after a `|` a comparison follows",
+                "const C: bool = f(a | b > c, #[cfg(test)] |x| x, kept!());\n",
+                "const C: bool = f(a | b > c, kept!());",
+            ),
+            (
+                "the first parameter of a closure",
+                "fn f() {\n    let g = |#[cfg(test)] a: u8| {\n        kept()\n    };\n}\n",
+                "fn f() { let g = | | { kept() }; }",
+            ),
+            (
+                "a later parameter of a closure",
+                "fn f() {\n    let g = |a: Vec<u8>, #[cfg(test)] b: u8| kept(a);\n}\n",
+                "fn f() { let g = |a: Vec<u8>, | kept(a); }",
+            ),
+            (
+                "a closure parameter beside a comma",
+                "const C: u8 = f(|a, #[cfg(test)] b| a, kept!());\n",
+                "const C: u8 = f(|a, | a, kept!());",
+            ),
+            (
+                "a later parameter of a generic function",
+                "fn f<T>(a: u8, #[cfg(test)] b: u8) {\n    kept();\n}\n",
+                "fn f<T>(a: u8, ) { kept(); }",
+            ),
+            (
+                "a let statement with a generic type",
+                "fn f() {\n    #[cfg(test)]\n    let m: HashMap<u8, u8> = HashMap::new();\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "an if statement and its else chain",
+                "fn f() {\n    #[cfg(test)]\n    if a {\n        one();\n    } else if b {\n        two();\n    } else {\n        three();\n    }\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "an if statement that indexes in its condition",
+                "fn f() {\n    #[cfg(test)]\n    if a[0] {\n        one();\n    } else {\n        two();\n    }\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "an if statement with a turbofish in its condition",
+                "fn f() {\n    #[cfg(test)]\n    if g::<u8, u8>() {\n        one();\n    }\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "an inline const block",
+                "fn f() {\n    #[cfg(test)]\n    const {\n        assert!(true);\n    }\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "an unsafe block",
+                "fn f() {\n    #[cfg(test)]\n    unsafe {\n        g();\n    }\n    kept();\n}\n",
+                "fn f() { kept(); }",
+            ),
+            (
+                "a closure argument that compares",
+                "const _: () = {\n    f(#[cfg(test)] |a| a < 1, kept!());\n};\n",
+                "const _: () = { f( kept!()); };",
+            ),
+            (
+                "a field of a struct expression that compares",
+                "const C: S = S {\n    #[cfg(test)]\n    a: 1 < 2,\n    b: kept!(),\n};\n",
+                "const C: S = S { b: kept!(), };",
+            ),
+            (
+                "an argument after a comparison",
+                "const C: bool = f(a < b, #[cfg(test)] c, kept!());\n",
+                "const C: bool = f(a < b, kept!());",
+            ),
+            (
+                "a closure argument after a comparison",
+                "const C: u8 = f(a < b, #[cfg(test)] |x| x > 1, kept!());\n",
+                "const C: u8 = f(a < b, kept!());",
+            ),
+            (
+                "a closure argument after comparing a raw `for`",
+                "const C: u8 = f(r#for < a, #[cfg(test)] |x| x > 1, kept!());\n",
+                "const C: u8 = f(r#for < a, kept!());",
+            ),
+            (
+                "an or-pattern arm after a guarded or-pattern arm",
+                "const C: u8 = match x {\n    A | B if y < z => 1,\n    #[cfg(test)]\n    C | E => 3,\n    D => kept!(),\n};\n",
+                "const C: u8 = match x { A | B if y < z => 1, D => kept!(), };",
+            ),
+            (
+                "a block arm after an or-pattern",
+                "const C: u8 = match x {\n    A | B => 1,\n    #[cfg(test)]\n    C => { 2 }\n    D => kept!(),\n};\n",
+                "const C: u8 = match x { A | B => 1, D => kept!(), };",
+            ),
+            (
+                "a variant whose discriminant shifts",
+                "enum E {\n    #[cfg(test)]\n    A = 1 << 2,\n    B = kept!(),\n}\n",
+                "enum E { B = kept!(), }",
+            ),
+            (
+                "a tuple field of a function-pointer type",
+                "struct S(#[cfg(test)] unsafe fn(u8) -> u8, pub u16);\n",
+                "struct S( pub u16);",
+            ),
+            (
+                "a field whose type holds a `;`",
+                "struct S {\n    #[cfg(test)]\n    gone: [u8; 2],\n    kept: u8,\n}\n",
+                "struct S { kept: u8, }",
+            ),
+            (
+                "the last field, with no comma after it",
+                "struct S {\n    kept: u8,\n    #[cfg(test)]\n    gone: u8\n}\n",
+                "struct S { kept: u8, }",
+            ),
+            (
+                "an inner attribute before a test-only item",
+                "mod m {\n    #![allow(dead_code)]\n    #[cfg(test)]\n    fn gone() {}\n    fn kept() {}\n}\n",
+                "mod m { #![allow(dead_code)] fn kept() {} }",
+            ),
+            (
+                "an earlier item's attribute",
+                "#[inline]\nfn kept() {}\n#[cfg(test)]\nfn gone() {}\n",
+                "#[inline] fn kept() {}",
+            ),
+            (
+                "an attribute that does not close, then a gate",
+                "#[\nfn kept() {}\n#[cfg(test)]\nfn gone() {}\n",
+                "#[ fn kept() {}",
+            ),
+            (
+                "a `>` no `<` opened, in a header",
+                "#[cfg(test)] fn t() > u8 { m!(); }\n",
+                "fn t() > u8 { m!(); }",
+            ),
+            (
+                "a header its block closes before a body",
+                "mod m {\n    #[cfg(test)]\n    fn t()\n}\nconst K: u8 = { 1 };\n",
+                "mod m { fn t() } const K: u8 = { 1 };",
+            ),
+            (
+                "a header with an unclosed parameter list",
+                "fn kept() {}\n#[cfg(test)]\nfn t(\n",
+                "fn kept() {} fn t(",
+            ),
+            (
+                "an item with no `;` before the next function",
+                "#[cfg(test)]\nstatic S: u8 = 1\nfn kept() {}\nconst Y: u8 = 2;\n",
+                "static S: u8 = 1 fn kept() {} const Y: u8 = 2;",
+            ),
+            (
+                "an item its block closes before its `;`",
+                "mod m {\n    #[cfg(test)]\n    static S: u8 = 1\n}\nconst K: u8 = 2;\n",
+                "mod m { static S: u8 = 1 } const K: u8 = 2;",
+            ),
+            (
+                "an item with an unclosed initializer",
+                "fn kept() {}\n#[cfg(test)]\nstatic S: [u8; 1] = [0;\n",
+                "fn kept() {} static S: [u8; 1] = [0;",
+            ),
+            (
+                "a generic parameter a `)` ends",
+                "fn f<#[cfg(test)] T) > kept() {}\n",
+                "fn f< T) > kept() {}",
+            ),
+            (
+                "a generic parameter a `]` ends",
+                "fn f<#[cfg(test)] T] > kept() {}\n",
+                "fn f< T] > kept() {}",
+            ),
+            (
+                "a generic parameter a `}` ends",
+                "fn f<#[cfg(test)] T} > kept() {}\n",
+                "fn f< T} > kept() {}",
+            ),
+            (
+                "a generic parameter a `;` ends",
+                "fn f<#[cfg(test)] T; > kept() {}\n",
+                "fn f< T; > kept() {}",
+            ),
+            (
+                "a generic parameter the file ends",
+                "fn kept() {}\nfn f<#[cfg(test)] T\n",
+                "fn kept() {} fn f< T",
+            ),
+            (
+                "a header its parenthesis closes before a body",
+                "f(#[cfg(test)] fn t()) {}\n",
+                "f( fn t()) {}",
+            ),
+            (
+                "a header its bracket closes before a body",
+                "[#[cfg(test)] fn t()] {}\n",
+                "[ fn t()] {}",
+            ),
+            (
+                "a header with a `;` inside its angle brackets",
+                "#[cfg(test)] fn t<A; B>() {}\n",
+                "fn t<A; B>() {}",
+            ),
+            (
+                "an item its parenthesis closes before its `;`",
+                "f(#[cfg(test)] static S: u8 = 1); fn kept() {}\n",
+                "f( static S: u8 = 1); fn kept() {}",
+            ),
+            (
+                "an item its bracket closes before its `;`",
+                "[#[cfg(test)] static S: u8 = 1]; fn kept() {}\n",
+                "[ static S: u8 = 1]; fn kept() {}",
+            ),
+            (
+                "a generic parameter with an unclosed group",
+                "fn kept() {}\nfn f<#[cfg(test)] T: Fn(\n",
+                "fn kept() {} fn f< T: Fn(",
+            ),
+            (
+                "an if statement a `;` ends before any block",
+                "#[cfg(test)] if a; fn kept() { m!(); }\n",
+                "fn kept() { m!(); }",
+            ),
+            (
+                "an if statement its block closes",
+                "mod m {\n    #[cfg(test)]\n    if a\n}\nfn kept() { m!(); }\n",
+                "mod m { } fn kept() { m!(); }",
+            ),
+            (
+                "an if argument its parenthesis closes before a block",
+                "const C: u8 = f(#[cfg(test)] if a) { m!() };\nfn kept() {}\n",
+                "const C: u8 = f( ) { m!() }; fn kept() {}",
+            ),
+            (
+                "an if element its bracket closes before a block",
+                "const C: [u8; 1] = [#[cfg(test)] if a] { m!() };\nfn kept() {}\n",
+                "const C: [u8; 1] = [ ] { m!() }; fn kept() {}",
+            ),
+            (
+                "an element with an unclosed group",
+                "fn kept() {}\nconst C: u8 = f(#[cfg(test)] g(\n",
+                "fn kept() {} const C: u8 = f( g(",
+            ),
+        ] {
+            assert_eq!(kept(source), region, "{what}: {source:?}");
+        }
+
+        for (what, source) in [
+            (
+                "a production gate",
+                "#[cfg(not(test))]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "a gate some production build satisfies",
+                "#[cfg(any(unix, test))]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "a gate that compares `test`",
+                "#[cfg(test = \"x\")]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "a conditional attribute, which configures nothing out",
+                "#[cfg_attr(test, allow(dead_code))]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "a gate applied through `cfg_attr`, which this region does not read",
+                "#[cfg_attr(unix, cfg(test))]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "an inner gate, which this region does not read",
+                "mod kept {\n    #![cfg(test)]\n    fn kept() { m!(); }\n}\n",
+            ),
+            (
+                "a raw attribute name",
+                "#[r#cfg(test)]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "an unreadable predicate",
+                "#[cfg(test, unix)]\nfn kept() { m!(); }\n",
+            ),
+            (
+                "another attribute whose arguments read as a gate",
+                "#[my_attribute(test)]\nfn kept() { m!(); }\n",
+            ),
+            ("a gate with no predicate", "const C: u8 = f(#[cfg] a);\n"),
+            (
+                "a predicate with a doc comment in it, which reads as no gate",
+                "#[cfg(all(test /** d */))]\nfn kept() { m!(); }\n",
+            ),
+        ] {
+            assert_eq!(
+                kept(source),
+                blank_comments_and_strings(source)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                "{what}: {source:?}"
+            );
+        }
+    }
+
     pub(in crate::effects::tests) fn a_configured_attribute_in_prose_is_inert() {
         for prose in [
             "/* a fixture in prose: #[cfg(test)] opens a test module */\nfn kept() {}\n",
@@ -1431,15 +2034,30 @@ pub(super) mod oracles {
         let mut compared = 0_usize;
         let mut strictly_larger = 0_usize;
         let mut gained: BTreeSet<String> = BTreeSet::new();
+        let mut narrowed: BTreeSet<String> = BTreeSet::new();
         for (path, source) in scanned_sources() {
             let truncated = blank_comments_and_strings(&production_region(&source));
             let whole = production_code(&source);
             let prefix = &whole[..truncated.len().min(whole.len())];
+            let above_the_cut = production_code(&production_region(&source));
             assert_eq!(
                 prefix.replace(' ', ""),
-                truncated.replace(' ', ""),
-                "{path}: the truncating region keeps code this one does not"
+                above_the_cut.replace(' ', ""),
+                "{path}: above the truncating cut, this region reads the whole file differently \
+                 from the text above the cut read alone"
             );
+            assert!(
+                above_the_cut.len() == truncated.len()
+                    && above_the_cut
+                        .bytes()
+                        .zip(truncated.bytes())
+                        .all(|(kept, cut)| kept == cut || kept == b' '),
+                "{path}: the truncating region keeps code this one does not, other than code this \
+                 one removes as test-only"
+            );
+            if above_the_cut != truncated {
+                narrowed.insert(path.clone());
+            }
             compared += 1;
             if whole.trim().len() > truncated.trim().len() {
                 strictly_larger += 1;
@@ -1456,6 +2074,17 @@ pub(super) mod oracles {
             gained.contains("src/engine/coordinator.rs"),
             "the legacy coordinator — 35 of 1599 lines under the truncating region — must be one \
              of the files that gains, or the census that adopted this helper still cannot see it"
+        );
+        assert_eq!(
+            narrowed,
+            BTreeSet::from([
+                "src/agent/proc.rs".to_owned(),
+                "src/agent/proc/ambient.rs".to_owned(),
+            ]),
+            "the files where this region removes, above the truncating cut, an item the truncating \
+             region reads as production moved. That region cuts at the literal `#[cfg(test)]` and \
+             reads nothing else; this one also removes an item under a `cfg` that entails `test` \
+             in any other spelling -- `all(unix, test)` in these two"
         );
 
         const SENTINEL: &str = "\npub fn sentinel_below_every_configured_item() {}\n";

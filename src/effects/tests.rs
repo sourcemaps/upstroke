@@ -754,10 +754,10 @@ fn is_whole_file_test_module(path: &str) -> bool {
     })
 }
 
-use super::census_domain::{Predicate, parse_predicate, with_literal_identity};
 use super::lint_levels::{
     Applied, applied_attributes, attribute_arguments, attribute_name, top_level_arguments,
 };
+use super::{Predicate, parse_predicate, with_literal_identity};
 
 struct ReadAttribute {
     start: usize,
@@ -2747,6 +2747,30 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             "an impl after a `fn` in a macro's braces",
             "fn f() {\n    n! { fn x }\n}\nimpl X {\n    m!();\n}\n",
         ),
+        (
+            "an impl whose only generic parameter is test-only",
+            "impl<#[cfg(test)] 'a> X {\n    m!();\n}\n",
+        ),
+        (
+            "a trait whose last generic parameter is test-only",
+            "trait T<A, #[cfg(test)] B> {\n    m!();\n}\n",
+        ),
+        (
+            "an enum whose last generic parameter is test-only",
+            "enum E<#[cfg(test)] T = u8> {\n    A = m!(),\n}\n",
+        ),
+        (
+            "a struct whose last generic parameter is test-only",
+            "struct S<#[cfg(test)] const N: usize> {\n    f: m!(),\n}\n",
+        ),
+        (
+            "production code after a generic test-only function",
+            "#[cfg(test)]\nfn t<A, B>() -> Result<A, B> {\n    assert!(true);\n}\nm!();\n",
+        ),
+        (
+            "production code after an item a compound gate removes",
+            "#[cfg(all(unix, test))]\nmacro_rules! t {\n    () => {};\n}\nm!();\n",
+        ),
     ] {
         assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
     }
@@ -2826,6 +2850,38 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
         ),
         ("a macro in a comment", "// m!();\n/* n!{} */\nfn f() {}\n"),
         ("a macro in a string", "const S: &str = \"m!()\";\n"),
+        (
+            "a test-only function with two type parameters",
+            "#[cfg(test)]\nfn t<A: Copy, B>(a: A, b: B) {\n    assert!(true);\n}\n",
+        ),
+        (
+            "a test-only function with a lifetime and a type",
+            "#[cfg(test)]\nfn t<'a, T>(x: &'a T) -> &'a T {\n    panic!()\n}\n",
+        ),
+        (
+            "a test-only generic function returning a two-argument type",
+            "#[cfg(test)]\nfn t<T>() -> Result<T, String> {\n    Err(format!(\"x\"))\n}\n",
+        ),
+        (
+            "a test-only function with a where clause of two predicates",
+            "#[cfg(test)]\nfn t<T>(x: T) where T: Copy, T: Clone {\n    assert!(true);\n}\n",
+        ),
+        (
+            "the tree's own `same_path`, made generic",
+            "#[cfg(test)]\npub(crate) fn same_path<L: AsRef<Path>, R: AsRef<Path>>(left: L, right: R) -> bool {\n    let (left, right) = (left.as_ref(), right.as_ref());\n    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {\n        _ => panic!(),\n    }\n}\n",
+        ),
+        (
+            "a macro definition under a compound test-only gate",
+            "#[cfg(all(unix, test))]\nmacro_rules! observed {\n    ($pid:expr) => {\n        observe_child_group($pid)\n    };\n}\n",
+        ),
+        (
+            "a thread-local under a compound test-only gate",
+            "#[cfg(all(test, target_os = \"linux\"))]\nthread_local! { static X: u8 = 0; }\n",
+        ),
+        (
+            "a const initializer under a compound test-only gate",
+            "#[cfg(all(unix, test))]\nconst C: u8 = m!();\n",
+        ),
     ] {
         assert!(
             outside(source).is_empty(),
@@ -6432,9 +6488,8 @@ fn the_whole_file_test_modules_are_resolved_from_the_declarations_not_the_file_n
 
 #[test]
 fn the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute() {
-    use crate::effects::census_domain::{
-        Predicate, ScannedDeclaration, entails_test, parse_predicate, scan_module_declarations,
-    };
+    use crate::effects::census_domain::{ScannedDeclaration, scan_module_declarations};
+    use crate::effects::{Predicate, entails_test, parse_predicate};
 
     fn scan(source: &str) -> Vec<ScannedDeclaration> {
         scan_module_declarations(source)
@@ -7011,8 +7066,9 @@ fn a_narrowed_cfg_guard_is_test_only_but_is_not_the_literal_mod_tests_form() {
 fn the_module_resolver_refuses_every_shape_it_cannot_resolve() {
     use crate::effects::census_domain::{
         CandidateRefusal, ScanRefusal, candidates_for, contained_in, declaration_cycle,
-        module_directory, parse_predicate, scan_module_declarations, sole_present,
+        module_directory, scan_module_declarations, sole_present,
     };
+    use crate::effects::parse_predicate;
 
     fn refusal(source: &str) -> ScanRefusal {
         scan_module_declarations(source).expect_err("this source is refused")
@@ -8464,6 +8520,11 @@ fn the_production_code_region_removes_a_configured_item_and_keeps_the_rest() {
 #[test]
 fn the_production_code_region_excludes_typed_test_functions() {
     oracles::typed_test_functions_are_removed_and_later_code_is_kept();
+}
+
+#[test]
+fn the_production_code_region_ends_a_test_only_element_where_rustc_does() {
+    oracles::a_test_only_element_is_removed_to_where_rustc_ends_it();
 }
 
 #[test]

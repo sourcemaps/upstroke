@@ -577,7 +577,9 @@ inside a comment or a string.
 ## `pub fn production_code(source: &str) -> String {`
 
 The production **code** of `source`: comments and string literals blanked,
-and every `#[cfg(test)]`-configured item removed.
+and every element a `cfg` removes from every production build blanked in
+place -- an item, a statement, a field, a variant, an argument or a
+parameter, with the outer attributes stacked on it.
 
 [`production_region`] keeps its truncating answer for the censuses that pin
 its cut point by name (`every_production_region_that_stops_early_stops_at_a_module`),
@@ -605,46 +607,472 @@ pays for with a truncating region, all three measured on this tree:
   `run_with_timeout` eight times, five in code and three in doc comments, so
   a real ninth entry point could be paid for by deleting two sentences.
 
-So this returns the **whole file**, blanked, with each `#[cfg(test)]` item
+So this returns the **whole file**, blanked, with each test-only element
 blanked out in place. Newlines survive, so a byte offset still maps to the
 line it came from.
 
-The item's extent is found by delimiter matching over the blanked text — a
-brace body ends at its matching `}` (and takes a trailing `;` with it, for
-`use a::{b, c};`), anything else ends at the first `;` or `,` outside a
-nested delimiter, except that a recognized function return type keeps its
-commas until the function body or semicolon. A closing delimiter that would
-leave the enclosing block ends the item too. Angle brackets are not matched: a
-`#[cfg(test)] field: BTreeMap<K, V>,` ends at the comma inside the generics
-and leaves `V>,` behind. That is the safe direction — a region that is too
-**large** can only make a census match more, never less.
+**Which gates remove an element.** An outer `cfg` whose predicate is false
+wherever `test` is false ([`entails_test`]): `test`, `all(unix, test)`,
+`not(not(test))`, and `any()`, which no build satisfies. Its tokens are read
+where rustc reads them ([`attribute_open`]), and its predicate through
+[`with_literal_identity`], as the module walk reads a declaration's gate, so
+the two cannot disagree about what a predicate means. Until #325's fourth
+round this matched the bytes `#[cfg(test)]` and nothing else, so an item
+under `cfg(all(unix, test))` read as production: the macro-position census
+refused a `macro_rules!` in one (executed on `src/agent/proc.rs` by a review
+of #325), and the classification census demanded rows for seven test-only
+functions of `src/agent/proc.rs` and `src/agent/proc/ambient.rs`, which that
+round removed from `effects/wrappers.toml`. Not read, and so read as
+production, which only makes a census match more: a gate applied through
+`cfg_attr(P, cfg(Q))`, an inner `#![cfg(..)]`, a raw attribute name, a
+predicate that does not parse.
 
-## `pub fn production_code(source: &str) -> String` › `while let Some(at) = bytes`
+**Where an element ends** is [`configured_item_end`]'s question.
 
-Searched over bytes rather than `str::find`, because a cut offset is not
-guaranteed to be a char boundary and slicing one panics.
+**Measured at #325's fourth round**, with the reader of `c0aa018c` and this one
+over the same input (`~/findings-sweep/orch-p1/p1-six-modules-r4/differential/`):
+over this tree's 192 files, three regions change -- `src/agent/proc.rs` and
+`src/agent/proc/ambient.rs` (their compound gates) and `src/engine/options.rs`,
+whose test-only `type AfterCandidateCapture = fn(..) -> Result<(), UpstrokeError>;`
+used to stop at the comma inside `Result<(), ..>` -- and the macro-position
+census's domain (33 files) and its answer there (no invocation) do not. Over
+the 11,041 files of this box's cargo registry, 214 regions change and every
+change removes bytes, none restores any: 199 compound gates, 18 extents that
+now reach the item's end, and 55 attributes stacked above a gate.
 
-## `pub fn production_code(source: &str) -> String` › `let mut start = at + ATTR.len();`
+## `fn next_test_only_attribute(source: &str, blanked: &str, from: usize) -> Option<(usize, usize)> {`
 
-Any further attributes stacked on the same item belong to it.
+The `#` and the `]` of the next outer attribute at or after `from` that
+removes its element from every production build. A `#` that opens no
+attribute, or opens one that never closes, is passed and the scan goes on.
+An inner attribute is never one: `#![cfg(test)]` removes the module or body
+it stands in, whose start is behind it.
+
+## `fn configures_test_only(source: &str, blanked: &str, open: usize) -> bool {`
+
+Whether the attribute whose `[` is at `open` is `cfg(P)` with `P` false
+wherever `test` is false. `P` goes through [`with_literal_identity`] --
+comments out, each literal a token of its value -- because
+[`parse_predicate`]'s splitter tracks a string only by toggling at `"`. A
+predicate that does not read that way is no gate here.
+
+## `fn past_outer_attributes(source: &str, bytes: &[u8], from: usize) -> usize {`
+
+Past the outer attributes stacked after a gate: they belong to the element
+it removes.
+
+## `fn first_of_the_stack(bytes: &[u8], at: usize) -> usize {`
+
+The first of the outer attributes stacked immediately before `at`, or `at`.
+They belong to the element too -- `#[doc = concat!(..)] #[cfg(test)] fn t() {}`
+-- so they are removed with it, and the element's position is read from the
+token before them.
+
+## `fn outer_attribute_before(bytes: &[u8], at: usize) -> Option<usize> {`
+
+The `#` of the outer attribute that ends just before `at`. An inner
+attribute's `[` follows a `!`, and a `]` that closes anything else follows
+no `#`: neither is one, so an earlier item's attributes and a module's own
+are left alone.
+
+## `fn opening(bytes: &[u8], close: usize, opener: u8, closer: u8) -> Option<usize> {`
+
+The opener matching the closer at `close`, scanning back. Parentheses,
+brackets and braces are token trees, balanced in any text rustc accepts, so
+these are the only groups read; `<` and `>` are not.
+
+## `fn closing(bytes: &[u8], open: usize) -> Option<usize> {`
+
+The closer matching the opener at `open`, whichever of the three it is.
 
 ## `fn configured_item_end(bytes: &[u8], start: usize) -> usize {`
 
-Where the item beginning at `start` ends, exclusive. See [`production_code`].
+Where the element beginning at `start` -- past its attributes -- ends,
+exclusive. [`production_code`] asks, and so does the allowance census's gate
+reader, `effects::tests::gates_in_the_file`.
 
-**The two give-up paths return `start`, not `bytes.len()`.** Both are reached
-only when the blanked text does not parse — an unbalanced brace, or an item
-with no terminator before end of file — and neither is reachable from this
-tree today (measured: zero occurrences over all 92 source files). What
-decides the value is the *direction* they fail in. `bytes.len()` reads "the
-item is the rest of the file" and blanks it, so a tokeniser that has lost
-phase silently removes every production item below the attribute from every
-census that consults this region — which is exactly what
-[`char_literal_end`]'s desync used to buy. Returning `start` blanks the
-attribute and nothing else, so the test module below it reads as production
-and the censuses go **loud** instead. The larger region is always the safe
-one here, for the same reason the doc above gives for not matching angle
-brackets: it can only make a census match more, never less.
+**The end depends on where the element is**, so that is read first, from the
+token before its attribute stack ([`configured_position`]): a generic
+parameter ends at a `,` or at the `>` closing its list; a closure parameter at
+a `,` or at the `|` closing its list; anything else is read as an item, then a
+`let` or `if` statement, then an element of a list. Until #325's fourth round
+one rule served all of them -- the first `;` or `,` outside a group, or a brace
+body -- and angle brackets were not counted. It failed in both directions:
+
+* **Too early.** A test-only function with a `,` in its header -- two generic
+  parameters, `<'a, T>`, `-> Result<T, E>` on a generic function, two `where`
+  predicates -- ended at that comma, so its header was removed and its body
+  left, and every macro in the body read as invoked outside a function body
+  (executed on this tree by making `util::same_path` generic).
+* **Too late.** A test-only **last** generic parameter --
+  `impl<#[cfg(test)] 'a> X { .. }`, and the same in a `trait`, `struct` or
+  `enum` -- ends at `>`, which was no stop, so the "element" ran on through
+  the item's own braces and removed the whole of it from the macro-position
+  census and the classification census.
+
+**What is left, where the grammar is not read.** In a list or a statement the
+rule stops at the first place the element could end, so a region can keep
+part of a test-only element and cannot lose production code: a test-only
+field `f: HashMap<K, V>,` still ends at the comma inside its type and leaves
+`V>,` behind. A census over the region can match more, never less.
+
+**The give-up paths return `start`, not `bytes.len()`.** They are reached
+only when the blanked text does not parse -- an unbalanced group, a header or
+an initializer with no end before the next function or the end of the file --
+and none is reached on this tree or in the registry (measured at #325's fourth
+round: none of 184 elements here, none of 2,364 there). What decides the value
+is the *direction* they fail in. `bytes.len()` reads "the item is the rest of
+the file" and blanks it, so a tokeniser that has lost phase silently removes
+every production item below the attribute from every census that consults
+this region — which is exactly what [`char_literal_end`]'s desync used to
+buy. Returning `start` blanks the attributes and nothing else, so what
+follows reads as production and the censuses go **loud** instead.
+
+## `enum Position {`
+
+Where an attributed element sits, which decides how it ends.
+
+## `fn configured_position(bytes: &[u8], start: usize) -> Position {`
+
+The position of the element at `start`, from the token before its attribute
+stack. After `<` it is a generic parameter -- an attribute can follow `<`
+nowhere else -- and after `|` a closure's parameter; after `,`,
+[`enclosing_list`] decides. After anything else -- `{`, `;`, `}`, `(`, `[`,
+the start of the file -- it is an item, a statement or a list element.
+
+## `fn enclosing_list(bytes: &[u8], comma: usize) -> Position {`
+
+Which list the `,` before an attribute separates, scanning back. A group is
+passed whole, and an opener ends the search: the list is that tree's. `<`
+and `>` are counted, except the `>` of `->`, which a bound or a closure's type
+holds; an unmatched `<` that [`opens_generic_parameters`] is the generic
+list's, and any other is a comparison and passes. An unmatched `|` outside
+counted angle brackets is the closure's list. A `=>` ends the search: no
+generic or closure parameter list holds one, and a match arm's or-pattern
+behind it would otherwise read as a closure's `|`.
+
+Taking a list for a closure's is harmless by construction: the closure rule is
+the element rule with `|` as one more stop, so it can only end an element
+sooner.
+
+## `fn follows(bytes: &[u8], at: usize, byte: u8) -> bool {`
+
+Whether `byte` is the byte before `at`.
+
+## `fn follows_a_hyphen(bytes: &[u8], at: usize) -> bool {`
+
+Whether the `>` at `at` is the head of `->`.
+
+## `fn opens_generic_parameters(bytes: &[u8], less_than: usize) -> bool {`
+
+Whether the `<` at `less_than` opens a generic **parameter** list: it follows
+`impl` or `for` (a binder), or a name that follows `fn`, `struct`, `enum`,
+`union`, `trait` or `type`. No other `<` opens one, so no other can hold an
+attribute. A raw identifier is a name, never one of these keywords: `r#for < a`
+compares.
+
+## `fn generic_parameter_end(bytes: &[u8], start: usize) -> usize {`
+
+A generic parameter's end: the `,` after it, taken with it, or the `>` that
+closes its list, left. Its bounds and default are types or const arguments --
+a literal, a path or a block -- so `<` and `>` are counted, `->`'s `>`
+excepted, and groups, a default's block among them, are passed whole. A closer
+or a `;` first means the list never closed, and the attribute alone is removed.
+
+## `fn item_end(bytes: &[u8], start: usize) -> Option<usize> {`
+
+An item's end, when `start` begins one whose header can hold a `,` or a `<`
+outside a group: `fn`, `struct`, `enum`, `union` or `trait` with a name, or
+`impl`, after a visibility and the qualifiers `const`, `unsafe`, `async` and
+`extern "abi"`; and a `static`, a `type` or a `const` item, which end at their
+`;`. `None` otherwise -- for an inline `const { .. }` block, and for a
+function-pointer type (`unsafe fn(u8)`, a tuple field), which has no name
+after `fn`. `mod`, `use`, `extern crate`, an `extern` block and `macro_rules!`
+are not read here: nothing in their headers is a `,` or a `<` outside a group,
+so the element rule ends them where this would.
+
+## `fn header_end(bytes: &[u8], start: usize, from: usize) -> usize {`
+
+A headed item's end: its body's `}`, or a bodiless item's `;`. A header is
+types -- generics, parameters, a return type, a `where` clause, supertraits, an
+`impl`'s paths -- so `<` and `>` are counted, `->`'s `>` excepted, and a `{`
+inside angle brackets is a const argument's block, not the body. A named
+function at the header's level, an unmatched `>`, a closer, or a `;` inside
+angle brackets means the header never ended: the attribute alone is removed.
+
+## `fn semicolon_end(bytes: &[u8], start: usize, from: usize) -> usize {`
+
+To the `;` outside every group; what an initializer compares or captures does
+not matter. A named function, or a closer, before it means no `;` came.
+
+## `fn statement_end(bytes: &[u8], start: usize) -> Option<usize> {`
+
+A `let` statement ends at its `;` -- a type annotation can hold a `,` inside
+`<..>` -- and an `if` statement at the end of its `else` chain. Anything else
+is an element.
+
+## `fn if_end(bytes: &[u8], from: usize) -> Option<usize> {`
+
+An `if` with every `else if` and `else` after it. Its block is the first `{`
+outside a group, because rustc refuses a struct literal in a condition unless
+it is parenthesised. An `if let` whose pattern is a braced struct pattern ends
+at the pattern's `}`, early, and leaves the rest -- the direction the element
+rule leaves in.
+
+## `fn first_block_brace(bytes: &[u8], from: usize) -> Option<usize> {`
+
+The first `{` outside a group. A `;` or a closer before it means there is no
+block.
+
+## `fn element_end(bytes: &[u8], start: usize, closure_parameter: bool) -> usize {`
+
+The end of an element whose grammar is not read -- a field, a variant, an
+argument, a parameter, a match arm, a statement: the first `,` or `;` outside a
+group, taken; a closer, left, for a list's last element; a braced group, taken
+with a `;` after it (`use a::{b, c};`); and, for a closure's parameter, the `|`
+that closes its list, left.
+
+## `fn past_a_semicolon(bytes: &[u8], from: usize) -> usize {`
+
+Past a `;` that follows `from`, if one does.
+
+## `fn starts_named_function_item(bytes: &[u8], at: usize) -> bool {`
+
+A named function begins at `at`: `fn`, whitespace, and a name -- so a
+function-pointer type (`fn(u8)`) is not one. It is how a header or an
+initializer that never ended is recognised: the next function starts.
+
+## `struct Identifier<'a> {`
+
+An identifier in the blanked text, and whether it was written raw.
+
+## `fn identifier_from(bytes: &[u8], at: usize) -> Identifier<'_> {`
+
+The identifier starting at `at`, possibly empty. Read forward only where a
+keyword or a name is expected, so no `r#` is read: a raw identifier then reads
+as a lone `r`, which is no keyword, as it should not be.
+
+## `fn identifier_before(bytes: &[u8], at: usize) -> Option<Identifier<'_>> {`
+
+The identifier ending at the last significant byte before `at`, with an `r#`
+before it read as part of it.
+
+## `fn is_identifier_byte(byte: u8) -> bool {`
+
+ASCII alphanumerics, `_`, and every non-ASCII byte. In the blanked view a
+byte above 0x7F outside a comment or a literal is part of an identifier:
+rustc's six non-ASCII separators are already spaces there
+(`RUSTC_WHITESPACE`), and any other non-ASCII character outside an
+identifier is a lexer error. Reading them as identifier bytes is what
+lets `\u{e9}!()` read as an invocation and `fn \u{e9}()` as a header, and
+what lets [`production_code`] read `fn \u{e9}<T, #[cfg(test)] U>` as a
+generic list; `is_ident_byte`, which the module walk uses, stops at them.
+Moved up from `census_domain` in #325's fourth round, so the macro-position
+reader and [`production_code`] share one definition.
+
+## `pub(crate) enum Predicate {`
+
+A `cfg` predicate, reduced to the one question this module asks of it.
+
+`effects::tests::cfg` models predicates *properly* — every `target_os`,
+every CI valuation, which platform compiles which body — and answers a
+different question with them. This decides one: is the predicate false
+wherever `test` is false. So every atom that is not `test` collapses to
+[`Predicate::Other`], and the grammar below is the whole of what the
+derivation reads. A predicate it cannot parse is a refusal, not a guess.
+
+Out of `census_domain` since #325's fourth round, with [`entails_test`],
+[`parse_predicate`] and [`with_literal_identity`], because [`production_code`]
+reads a gate with them too, and a production function cannot call into a
+`#[cfg(test)]` module.
+
+## `pub(crate) enum Predicate` › `Test,`
+
+The `test` atom itself.
+
+## `pub(crate) enum Predicate` › `Other(String),`
+
+Any other atom: a bare name, or `key = "value"`.
+
+## `pub(crate) enum Predicate` › `All(Vec<Predicate>),`
+
+`all(…)`, and the conjunction an inline ancestry composes.
+
+## `pub(crate) enum Predicate` › `Any(Vec<Predicate>),`
+
+`any(…)`.
+
+## `pub(crate) enum Predicate` › `Not(Box<Predicate>),`
+
+`not(…)`.
+
+## `pub(crate) fn entails_test(predicate: &Predicate) -> bool {`
+
+Whether `predicate` is false wherever `test` is false.
+
+Three-valued, with `test` bound to false and every other atom left
+*unknown* — which is the only sound reading, because this module knows
+nothing about platforms or features and must not pretend to. `all(test,
+unix)` entails; `any(test, unix)` does not, because a Unix build without
+`test` compiles it; `not(test)` does not.
+
+## `pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
+
+`predicate` with `test = false` and every other atom unknown.
+
+`pub(crate)` since #318: [`super::lint_levels`] decides a `cfg_attr`'s
+predicate through it, as the module scan decides a declaration's gate, so
+those readers cannot disagree about what `all(test, unix)` means. The
+production-fence rule in `tests.rs` asked it first until #318's fifth round;
+it now decides an allowance against CI's production valuations, which know
+`unix` and `target_os` where this leaves them unknown, and agrees with this on
+every predicate this decides (`test` false in every production build).
+
+## `fn decide_without_test(predicate: &Predicate) -> Option<bool> {` › `Predicate::All(parts) => {`
+
+Short-circuiting, and the `None` arms are the point: one
+undecidable conjunct does not make a conjunction undecidable if
+another is already false, and one undecidable disjunct does not
+make a disjunction undecidable if another is already true. The
+empty forms answer as `cfg` does -- `all()` is true, `any()` is
+false.
+
+## `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {`
+
+`written` as a [`Predicate`], or why it cannot be read.
+
+The grammar is `all(…)`, `any(…)`, `not(P)`, and an atom — a bare name
+or `name = "value"`. Anything else is refused: an unknown combinator, an
+unbalanced paren, `not` with other than one argument, an empty atom.
+
+Its splitter tracks a string only by toggling at `"`, so it is handed
+[`with_literal_identity`]'s text, never raw source: there a literal is a
+token with no quote, escape or separator inside it, and the token is the
+literal's decoded value. An atom's text is its identity (`Predicate::Other`),
+so `target_os = "linux"` and `target_os = "windows"` are two atoms -- what
+#318's third reviews executed the absence of -- and `target_os = "linux"`,
+`target_os = r"linux"` and `target_os = "lin\x75x"` are one, because rustc
+gives the three one value -- what #318's fourth reviews executed the absence
+of (`R4-MAIN-01`, `R4-REG-01`). Two different predicates over related atoms
+-- `unix` and `target_family = "unix"` -- are still two atoms here; the
+production-fence rule decides them against CI's valuations, where they are
+related, and the lint reader treats them as independent, which only adds an
+outcome.
+
+## `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {` › `if name.is_empty() {`
+
+An atom: `test`, `unix`, or `key = "value"`.
+
+## `fn split_arguments(text: &str) -> Result<Vec<&str>, String> {`
+
+The comma-separated arguments of a parenthesised group starting at `(`.
+
+## `pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {`
+
+An attribute's text -- `raw` between its brackets, with `blanked` the same
+span of [`super::blank_comments_and_strings`] -- with every comment blanked
+and every string or char literal replaced by a token that **names its value
+exactly and carries nothing a splitter reads as structure**; `None` when the
+two spans disagree about where the code is, or when the text holds a doc
+comment.
+
+**Why it exists: the value is the predicate's identity.** Every reader of a
+`cfg` or `cfg_attr` here used to parse the blanked text, where
+`target_os = "linux"` and `target_os = "windows"` are both `target_os =`
+followed by spaces: the grammar refused both, and the lint reader then made
+the refused text one condition, so the two were assumed to hold together.
+`#![deny(L)] #![cfg_attr(target_os = "linux", allow(L))]
+#![cfg_attr(target_os = "windows", deny(L))]` read as a definite `deny`
+while clippy-driver on Linux applied the `allow` -- 12 of 57 compiler cases
+across the three governed lints in #318's third MAIN review, and the same
+aliasing in the third regression review (`R3-MAIN-02`, `R3-REG-02`). The
+production-fence rule in `tests.rs` dropped the whole unreadable predicate
+instead, so `cfg(all(test, target_os = "linux"))` lost its `test` and an
+allowance no production build compiles excused a `deny` (`R3-MAIN-01`).
+Parsing the raw text is not the repair either: the grammar's splitter
+toggles at every `"`, so an escaped quote inside a value moves top-level
+commas into and out of the atom.
+
+**One value is one token, whatever its spelling.** Every string literal is
+read for the value rustc gives it in a `cfg` predicate
+([`string_literal_value`]) and written back as a token for that value
+([`literal_token`]): the value itself when it is ASCII letters, digits, `_`,
+`-` and `.`, so a predicate still renders as the source usually spells it,
+and otherwise `"%"` and the hex of the value's UTF-8 bytes. `"linux"`,
+`r"linux"`, `r###"linux"###`, `"lin\x75x"`, `"lin\u{7_5}x"` and a `"lin\`
+continued on the next line as `ux"` are one token; `r"lin\x75x"`, whose
+backslash a raw string keeps, is another, and so is every other value. Until
+#318's fifth round the token was the spelling -- a plain literal kept, any
+other one its source text in hex -- so `all(target_os = "linux",
+not(target_os = r"linux"))`, which no configuration satisfies, was two
+independent atoms the production-fence rule satisfied with the first true
+and the second false: it excused a `deny` for an allowance nothing applies,
+and a macro-written `allow` behind that `deny` wrote 47 bytes through an
+ordinary library with all ten local gates green (`R4-MAIN-01`,
+`~/orch-pr10/reviews/pr-318r4/main-evidence/X4-raw*`; `R4-REG-01`, 63 bytes,
+`regression-evidence/r4-equivalent-literals*`). The same split refused the
+legitimate `all(target_os = "linux", target_os = r"linux")`, which Linux
+applies.
+
+**What it cannot decode, it does not name.** A literal it cannot read with
+certainty -- a byte or C string, a suffix, an escape rustc refuses, a raw
+string past 255 `#`s -- becomes `"?"` and the hex of its source text: no two
+different literals share that token, and [`literal_token_value`] reads no
+value from it, so the production-fence rule counts the atom it sits in as
+unknown and never as evidence, and the lint reader counts it as a condition
+of its own. rustc refuses every such literal in a `cfg` predicate.
+
+**The structure is always `blanked`'s.** The walk mirrors
+`code_bytes_only`'s rules -- comments first, then [`super::literal_end`]
+where `code_bytes_only` would read a string, then [`super::char_literal_end`]
+-- and every byte it keeps as code must be the byte `blanked` holds there,
+every comment or literal must be spaces there; a rustc whitespace character
+`blanked` turned to spaces is a space. Any disagreement is `None`, which
+every caller treats as an attribute it cannot read, never as one it can. A
+doc comment is the one comment that is not whitespace: rustc lexes `///`,
+`//!`, `/**` and `/*!` as attribute tokens ([`is_doc_comment`]), and inside
+an attribute's brackets one is an error, so the text has no reading.
+
+## `fn literal_token(literal: &str) -> String {`
+
+The token a string literal is read as: its value when
+[`string_literal_value`] decodes it -- the value itself when every byte is
+one [`is_kept_value_byte`] keeps, otherwise `"%"` and the hex of the value's
+bytes -- and `"?"` and the hex of the literal's source text when it does not.
+The three forms share no token: a kept value holds neither `%` nor `?`.
+
+## `fn is_kept_value_byte(byte: u8) -> bool {`
+
+The bytes a value may hold and still be written as itself: ASCII letters,
+digits, `_`, `-` and `.`, which is every value a `cfg` in this tree names.
+
+## `const MOST_RAW_STRING_HASHES: usize = 255;`
+
+rustc's limit on a raw string's `#`s; past it rustc refuses the literal and
+this reads no value from it.
+
+## `fn string_literal_value(literal: &str) -> Option<String> {`
+
+A string literal's value as rustc reads it in a `cfg` predicate, or `None`.
+Plain `"…"`: `\n`, `\r`, `\t`, `\\`, `\0`, `\'` and `\"`; `\x` and two hex
+digits up to `7F`; `\u{…}` with one to six hex digits, underscores after the
+first, naming a character; and a backslash ending a line, which drops the
+line break and the spaces, tabs and line breaks after it. Raw `r"…"`, with
+up to 255 `#`s: the text between, as written. A CRLF is read as LF, as rustc
+reads the file, and a bare CR is refused. Anything else -- a byte string, a
+C string, an escape a string may not carry -- is `None`.
+
+Measured, not assumed: clippy-driver applies a `cfg_attr` on Linux under
+each of the escaped, underscored, line-continued and raw spellings of
+`linux`, and refuses a byte string, a C string and a suffix there
+(`~/orch-pr10/repair-318-r5-evidence/measure/clippy-semantics/`);
+`effects::tests::the_production_fence_rule_reads_the_effective_activation_of_every_allowance`
+compiles every spelling it names under the fence the rule asks for.
+
+## `fn unescape(characters: &mut std::str::Chars<'_>, value: &mut String) -> Option<()> {`
+
+One escape after a backslash, pushed onto `value`; `None` for one a string
+literal may not carry.
 
 ## `pub fn governed_allows(source: &str) -> Vec<GovernedAllow> {`
 
@@ -2147,19 +2575,14 @@ writes into an existing body is callable from any module that declares it
 in an `unsafe extern` block, and the lint does not apply to it. That route
 is recorded, executed, in `PR7-WRAPPERS-EMPTY-DOMAIN`'s Remaining.
 
-Production code only: `production_code` blanks every `#[cfg(test)]`
-item first, and its exact-spelling match can only leave test code in,
-which refuses more rather than less.
-
-## `pub(crate) mod census_domain` › `fn is_identifier_byte(byte: u8) -> bool {`
-
-ASCII alphanumerics, `_`, and every non-ASCII byte. In the blanked view a
-byte above 0x7F outside a comment or a literal is part of an identifier:
-rustc's six non-ASCII separators are already spaces there
-(`RUSTC_WHITESPACE`), and any other non-ASCII character outside an
-identifier is a lexer error. Reading them as identifier bytes is what
-lets `\u{e9}!()` read as an invocation and `fn \u{e9}()` as a header;
-`is_ident_byte`, which the module walk uses, stops at them.
+Production code only: `production_code` blanks every test-only element
+first -- under any `cfg` whose predicate entails `test`, to the element's own
+end. Until #325's fourth round it read the bytes `#[cfg(test)]` alone and no
+angle brackets, and so failed this census both ways: a generic test-only
+function whose header held a depth-zero comma lost its header and kept its
+body, whose macros then read as invoked outside a function body, and a
+test-only last generic parameter took its whole `impl`, `trait`, `struct` or
+`enum` with it.
 
 ## `pub(crate) mod census_domain` › `fn identifier_end(bytes: &[u8], from: usize) -> usize {`
 
@@ -2342,37 +2765,6 @@ A name with neither terminator is malformed, and the caller
 refuses it. Reported through an empty-bodied shape so the caller
 sees the position rather than silently skipping the item.
 
-## `pub(crate) mod census_domain` › `pub(crate) enum Predicate {`
-
-A `cfg` predicate, reduced to the one question this module asks of it.
-
-`effects::tests::cfg` models predicates *properly* — every `target_os`,
-every CI valuation, which platform compiles which body — and answers a
-different question with them. This decides one: is the predicate false
-wherever `test` is false. So every atom that is not `test` collapses to
-[`Predicate::Other`], and the grammar below is the whole of what the
-derivation reads. A predicate it cannot parse is a refusal, not a guess.
-
-## `pub(crate) enum Predicate` › `Test,`
-
-The `test` atom itself.
-
-## `pub(crate) enum Predicate` › `Other(String),`
-
-Any other atom: a bare name, or `key = "value"`.
-
-## `pub(crate) enum Predicate` › `All(Vec<Predicate>),`
-
-`all(…)`, and the conjunction an inline ancestry composes.
-
-## `pub(crate) enum Predicate` › `Any(Vec<Predicate>),`
-
-`any(…)`.
-
-## `pub(crate) enum Predicate` › `Not(Box<Predicate>),`
-
-`not(…)`.
-
 ## `impl Predicate` › `fn all(parts: Vec<Predicate>) -> Self {`
 
 The conjunction of `parts`, flattened; the empty one is `All([])`,
@@ -2382,146 +2774,6 @@ which is true and entails nothing.
 
 The predicate as it reads, for a diagnostic.
 
-## `pub(crate) mod census_domain` › `pub(crate) fn entails_test(predicate: &Predicate) -> bool {`
-
-Whether `predicate` is false wherever `test` is false.
-
-Three-valued, with `test` bound to false and every other atom left
-*unknown* — which is the only sound reading, because this module knows
-nothing about platforms or features and must not pretend to. `all(test,
-unix)` entails; `any(test, unix)` does not, because a Unix build without
-`test` compiles it; `not(test)` does not.
-
-## `pub(crate) mod census_domain` › `pub(crate) fn decide_without_test(predicate: &Predicate) -> Option<bool> {`
-
-`predicate` with `test = false` and every other atom unknown.
-
-`pub(crate)` since #318: [`super::lint_levels`] decides a `cfg_attr`'s
-predicate through it, as the module scan decides a declaration's gate, so
-those readers cannot disagree about what `all(test, unix)` means. The
-production-fence rule in `tests.rs` asked it first until #318's fifth round;
-it now decides an allowance against CI's production valuations, which know
-`unix` and `target_os` where this leaves them unknown, and agrees with this on
-every predicate this decides (`test` false in every production build).
-
-## `fn decide_without_test(predicate: &Predicate) -> Option<bool> {` › `Predicate::All(parts) => {`
-
-Short-circuiting, and the `None` arms are the point: one
-undecidable conjunct does not make a conjunction undecidable if
-another is already false, and one undecidable disjunct does not
-make a disjunction undecidable if another is already true. The
-empty forms answer as `cfg` does -- `all()` is true, `any()` is
-false.
-
-## `pub(crate) mod census_domain` › `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {`
-
-`written` as a [`Predicate`], or why it cannot be read.
-
-The grammar is `all(…)`, `any(…)`, `not(P)`, and an atom — a bare name
-or `name = "value"`. Anything else is refused: an unknown combinator, an
-unbalanced paren, `not` with other than one argument, an empty atom.
-
-Its splitter tracks a string only by toggling at `"`, so it is handed
-[`with_literal_identity`]'s text, never raw source: there a literal is a
-token with no quote, escape or separator inside it, and the token is the
-literal's decoded value. An atom's text is its identity (`Predicate::Other`),
-so `target_os = "linux"` and `target_os = "windows"` are two atoms -- what
-#318's third reviews executed the absence of -- and `target_os = "linux"`,
-`target_os = r"linux"` and `target_os = "lin\x75x"` are one, because rustc
-gives the three one value -- what #318's fourth reviews executed the absence
-of (`R4-MAIN-01`, `R4-REG-01`). Two different predicates over related atoms
--- `unix` and `target_family = "unix"` -- are still two atoms here; the
-production-fence rule decides them against CI's valuations, where they are
-related, and the lint reader treats them as independent, which only adds an
-outcome.
-
-## `pub(crate) fn parse_predicate(written: &str) -> Result<Predicate, String> {` › `if name.is_empty() {`
-
-An atom: `test`, `unix`, or `key = "value"`.
-
-## `pub(crate) mod census_domain` › `fn split_arguments(text: &str) -> Result<Vec<&str>, String> {`
-
-The comma-separated arguments of a parenthesised group starting at `(`.
-
-## `pub(crate) mod census_domain` › `pub(crate) fn with_literal_identity(raw: &str, blanked: &str) -> Option<String> {`
-
-An attribute's text -- `raw` between its brackets, with `blanked` the same
-span of [`super::blank_comments_and_strings`] -- with every comment blanked
-and every string or char literal replaced by a token that **names its value
-exactly and carries nothing a splitter reads as structure**; `None` when the
-two spans disagree about where the code is, or when the text holds a doc
-comment.
-
-**Why it exists: the value is the predicate's identity.** Every reader of a
-`cfg` or `cfg_attr` here used to parse the blanked text, where
-`target_os = "linux"` and `target_os = "windows"` are both `target_os =`
-followed by spaces: the grammar refused both, and the lint reader then made
-the refused text one condition, so the two were assumed to hold together.
-`#![deny(L)] #![cfg_attr(target_os = "linux", allow(L))]
-#![cfg_attr(target_os = "windows", deny(L))]` read as a definite `deny`
-while clippy-driver on Linux applied the `allow` -- 12 of 57 compiler cases
-across the three governed lints in #318's third MAIN review, and the same
-aliasing in the third regression review (`R3-MAIN-02`, `R3-REG-02`). The
-production-fence rule in `tests.rs` dropped the whole unreadable predicate
-instead, so `cfg(all(test, target_os = "linux"))` lost its `test` and an
-allowance no production build compiles excused a `deny` (`R3-MAIN-01`).
-Parsing the raw text is not the repair either: the grammar's splitter
-toggles at every `"`, so an escaped quote inside a value moves top-level
-commas into and out of the atom.
-
-**One value is one token, whatever its spelling.** Every string literal is
-read for the value rustc gives it in a `cfg` predicate
-([`string_literal_value`]) and written back as a token for that value
-([`literal_token`]): the value itself when it is ASCII letters, digits, `_`,
-`-` and `.`, so a predicate still renders as the source usually spells it,
-and otherwise `"%"` and the hex of the value's UTF-8 bytes. `"linux"`,
-`r"linux"`, `r###"linux"###`, `"lin\x75x"`, `"lin\u{7_5}x"` and a `"lin\`
-continued on the next line as `ux"` are one token; `r"lin\x75x"`, whose
-backslash a raw string keeps, is another, and so is every other value. Until
-#318's fifth round the token was the spelling -- a plain literal kept, any
-other one its source text in hex -- so `all(target_os = "linux",
-not(target_os = r"linux"))`, which no configuration satisfies, was two
-independent atoms the production-fence rule satisfied with the first true
-and the second false: it excused a `deny` for an allowance nothing applies,
-and a macro-written `allow` behind that `deny` wrote 47 bytes through an
-ordinary library with all ten local gates green (`R4-MAIN-01`,
-`~/orch-pr10/reviews/pr-318r4/main-evidence/X4-raw*`; `R4-REG-01`, 63 bytes,
-`regression-evidence/r4-equivalent-literals*`). The same split refused the
-legitimate `all(target_os = "linux", target_os = r"linux")`, which Linux
-applies.
-
-**What it cannot decode, it does not name.** A literal it cannot read with
-certainty -- a byte or C string, a suffix, an escape rustc refuses, a raw
-string past 255 `#`s -- becomes `"?"` and the hex of its source text: no two
-different literals share that token, and [`literal_token_value`] reads no
-value from it, so the production-fence rule counts the atom it sits in as
-unknown and never as evidence, and the lint reader counts it as a condition
-of its own. rustc refuses every such literal in a `cfg` predicate.
-
-**The structure is always `blanked`'s.** The walk mirrors
-`code_bytes_only`'s rules -- comments first, then [`super::literal_end`]
-where `code_bytes_only` would read a string, then [`super::char_literal_end`]
--- and every byte it keeps as code must be the byte `blanked` holds there,
-every comment or literal must be spaces there; a rustc whitespace character
-`blanked` turned to spaces is a space. Any disagreement is `None`, which
-every caller treats as an attribute it cannot read, never as one it can. A
-doc comment is the one comment that is not whitespace: rustc lexes `///`,
-`//!`, `/**` and `/*!` as attribute tokens ([`is_doc_comment`]), and inside
-an attribute's brackets one is an error, so the text has no reading.
-
-## `pub(crate) mod census_domain` › `fn literal_token(literal: &str) -> String {`
-
-The token a string literal is read as: its value when
-[`string_literal_value`] decodes it -- the value itself when every byte is
-one [`is_kept_value_byte`] keeps, otherwise `"%"` and the hex of the value's
-bytes -- and `"?"` and the hex of the literal's source text when it does not.
-The three forms share no token: a kept value holds neither `%` nor `?`.
-
-## `pub(crate) mod census_domain` › `fn is_kept_value_byte(byte: u8) -> bool {`
-
-The bytes a value may hold and still be written as itself: ASCII letters,
-digits, `_`, `-` and `.`, which is every value a `cfg` in this tree names.
-
 ## `pub(crate) mod census_domain` › `pub(crate) fn literal_token_value(token: &str) -> Option<String> {`
 
 The value a token [`literal_token`] wrote stands for: a kept value as it
@@ -2529,34 +2781,6 @@ stands, a `%` token's hex decoded; `None` for a `?` token -- a literal that
 could not be decoded -- and for any text that is not a token at all. The
 production-fence rule reads an atom's value through this and nothing else,
 so a value it cannot name is an atom it cannot decide.
-
-## `pub(crate) mod census_domain` › `const MOST_RAW_STRING_HASHES: usize = 255;`
-
-rustc's limit on a raw string's `#`s; past it rustc refuses the literal and
-this reads no value from it.
-
-## `pub(crate) mod census_domain` › `fn string_literal_value(literal: &str) -> Option<String> {`
-
-A string literal's value as rustc reads it in a `cfg` predicate, or `None`.
-Plain `"…"`: `\n`, `\r`, `\t`, `\\`, `\0`, `\'` and `\"`; `\x` and two hex
-digits up to `7F`; `\u{…}` with one to six hex digits, underscores after the
-first, naming a character; and a backslash ending a line, which drops the
-line break and the spaces, tabs and line breaks after it. Raw `r"…"`, with
-up to 255 `#`s: the text between, as written. A CRLF is read as LF, as rustc
-reads the file, and a bare CR is refused. Anything else -- a byte string, a
-C string, an escape a string may not carry -- is `None`.
-
-Measured, not assumed: clippy-driver applies a `cfg_attr` on Linux under
-each of the escaped, underscored, line-continued and raw spellings of
-`linux`, and refuses a byte string, a C string and a suffix there
-(`~/orch-pr10/repair-318-r5-evidence/measure/clippy-semantics/`);
-`effects::tests::the_production_fence_rule_reads_the_effective_activation_of_every_allowance`
-compiles every spelling it names under the fence the rule asks for.
-
-## `pub(crate) mod census_domain` › `fn unescape(characters: &mut std::str::Chars<'_>, value: &mut String) -> Option<()> {`
-
-One escape after a backslash, pushed onto `value`; `None` for one a string
-literal may not carry.
 
 ## `pub(crate) mod lint_levels {`
 
@@ -3073,19 +3297,6 @@ that ask only which level governs a module.
 of the whole-file test-module population -- reaches the one census outside
 this module that floors a count on it. Test-only either way: the module is
 compiled only under `cfg(test)`.
-
-## `if depth == 0`
-
-A named function cannot be part of the preceding return type. If a
-malformed test signature has no body, keep the following item visible
-instead of taking its brace as the missing test body's boundary.
-
-## `fn configured_function_return_start(bytes: &[u8], start: usize) -> Option<usize> {`
-
-Recognize the return arrow of a named function item without type parameters.
-A field's function-pointer type is not an item. Unknown prefixes, generic
-parameter lists and incomplete signatures keep the conservative comma rule.
-The input is already blanked, including any extern ABI string.
 
 ## `#[must_use]`
 
