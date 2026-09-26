@@ -306,6 +306,13 @@ fn one_tag_twice_in_one_process_is_two_roots_and_the_second_is_fresh() {
 /// one that matters for the measurement in this row, because a suite leaks
 /// a directory per *failing* fixture and those are the runs a developer
 /// repeats.
+///
+/// The unwinding half acquires its tree **before** the closure and moves
+/// the guard in, so the closure owns it when the panic starts and the
+/// unwind is what drops it. The path is read off the guard first, so
+/// nothing has to carry it back out. It also keeps a refused acquisition
+/// loud: that panic starts outside `catch_unwind` and fails this test,
+/// where inside it would be caught as if it were the unwind under test.
 #[test]
 fn the_scratch_tree_is_reclaimed_on_both_exits() {
     let normal = {
@@ -320,30 +327,21 @@ fn the_scratch_tree_is_reclaimed_on_both_exits() {
         normal.display()
     );
 
-    let unwinding = std::sync::Arc::new(std::sync::Mutex::new(PathBuf::new()));
-    let recorded = std::sync::Arc::clone(&unwinding);
+    let tree = scratch("reclaimed-while-unwinding");
+    let unwinding = tree.path().to_path_buf();
+    assert!(
+        unwinding.is_dir(),
+        "the fixture exists while its guard is held"
+    );
     let outcome = std::panic::catch_unwind(move || {
-        let tree = scratch("reclaimed-while-unwinding");
-        let mut slot = recorded.lock().unwrap_or_else(|held| held.into_inner());
-        slot.clone_from(&tree.path().to_path_buf());
-        drop(slot);
+        let _held = tree;
         panic!("the assertion a fixture is abandoned by");
     });
     assert!(outcome.is_err(), "the witness has to actually unwind");
-    let path = unwinding
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .clone();
-    // An empty slot is an acquisition that never happened, and a pass on it
-    // would say nothing about the unwinding reclaim.
     assert!(
-        !path.as_os_str().is_empty(),
-        "the closure unwound before it recorded a root, so no unwinding reclaim was measured"
-    );
-    assert!(
-        scratch_tree::proves_absent(&path),
+        scratch_tree::proves_absent(&unwinding),
         "the fixture survived an unwind, which is the run a leak is measured on: {}",
-        path.display()
+        unwinding.display()
     );
 }
 

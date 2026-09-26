@@ -463,13 +463,9 @@ fn a_scratch_root_is_reclaimed_on_every_exit_including_an_unwind() {
 #[test]
 fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {
     let outer = Scratch::new("raii-reported");
-    let recorded = Mutex::new(None);
+    let root = Scratch::under(outer.path(), "replaced");
+    let path = root.path().to_path_buf();
     let reported = std::panic::catch_unwind(|| {
-        let root = Scratch::under(outer.path(), "replaced");
-        let path = root.path().to_path_buf();
-        *recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.clone());
         remove_public_husk(&path, &mut NoHooks).expect("the tree reclaims early");
         create_private_dir(&path.join("another-holders-content"), &mut NoHooks)
             .expect("a replacement at the root's name, holding something of its own");
@@ -478,17 +474,13 @@ fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {
             "the guard still sees the directory it acquired at its name, so its reclaim \
              would succeed and nothing about a failed one would be measured"
         );
+        drop(root);
     })
     .expect_err("the guard reclaimed a root it had not created, or said nothing");
 
     let message = reported
         .downcast_ref::<String>()
         .map_or_else(String::new, Clone::clone);
-    let path = recorded
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .expect("the closure recorded its root before the guard dropped");
     assert!(
         message.contains("was not reclaimed") && message.contains(&path.display().to_string()),
         "the report must name the root it could not reclaim: {message}"

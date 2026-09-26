@@ -178,6 +178,16 @@ every platform in `rundir::scratch_tree`'s own suite: a replaced root
 refused, and a failed reclaim raised on the normal path and suppressed
 while unwinding.
 
+## `fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {` › `drop(root);`
+
+The guard is built before the closure and moved into it, and its path is
+read off it first, so the assertions after the closure have the root
+without anything carrying it out. Dropping it here, as the closure's last
+statement, is what makes the failed reclaim this test's subject: the guard
+drops on the normal path inside `catch_unwind`, so the panic caught is its
+report. Without this line the closure only borrows the guard, returns
+normally, and `expect_err` fails the test.
+
 ## `fn scratch_unwind_with_a_failed_reclamation_child() {`
 
 The child half of
