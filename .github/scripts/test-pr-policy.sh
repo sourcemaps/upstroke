@@ -6388,7 +6388,10 @@ echo 'diff-rule fixtures passed'
 #     a one-line `function name { … }`;
 #   - pathname expansion: a word holding `*` or `?` is skipped where a command
 #     could stand, as every argument is, so a glob passes whether bash expands
-#     it to a directory's names or to the command it then runs.
+#     it to a directory's names or to the command it then runs;
+#   - a redirection written before the command word with a descriptor number,
+#     `2>/dev/null git …`: a word that starts with a digit is taken for the
+#     command word and skipped, so the command after it is read as an argument.
 #
 # A miss that hides a command word hides a helper the region keeps to itself in
 # the same way: the rule that refuses one reads it only where the command scan
@@ -6441,7 +6444,8 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
       # skip, an END inside a heredoc this thought open ended the region for the
       # cap and not for the lint, and a second END lower down ended it for the
       # lint: the lines between were neither linted nor counted. A marker ends
-      # any heredoc this thinks open, so what follows it is read as code.
+      # any heredoc this thinks open, so what follows it is not skipped as the
+      # body of that heredoc. It ends no string or substitution.
       if (line ~ /^# ==== AUDITED HELPERS BEGIN/) { audited = 1; heredoc = ""; heredoc_tabs = 0; next }
       if (line ~ /^# ==== AUDITED HELPERS END/)   { audited = 0; heredoc = ""; heredoc_tabs = 0; next }
       # With `<<-` bash strips leading tabs before it compares the end line, and
@@ -6833,6 +6837,8 @@ if ! SHAPE_DIR="$shape_stub" "$BASH" -c 'names=( "$SHAPE_DIR"/* ); [[ ${names[*]
   exit 1
 fi
 shape_missed=$(( shape_missed + 1 ))
+# A redirection with a descriptor number, written before the command word.
+shape_residual '2>/dev/null git rev-parse --is-inside-work-tree'
 echo "shape lint: $shape_caught probes caught, $shape_missed listed residuals still missed and still live"
 
 # THE AUDITED REGION IS WHERE THE GUARANTEE IS: a stated number of lines, few

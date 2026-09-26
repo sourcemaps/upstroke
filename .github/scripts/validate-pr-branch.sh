@@ -293,11 +293,14 @@
 # the day a badly named file landed on master -- including the pull request that
 # was going to fix it. What a pull request may be held to is what it does.
 #
-# NEITHER INPUT IS BUILT HERE. Nothing below the AUDITED HELPERS END marker may
-# run a command that is not a shell builtin or redirect from a path, so this
-# file does not take a diff or read a blob. That part of the file is read as any
-# diff is read, with .github/scripts/test-pr-policy.sh linting it for the
-# mistakes that would break the rule, beside the reading and not in place of it.
+# NEITHER INPUT IS BUILT HERE. This file runs git only through `git_probe`, and
+# every call to it, directly or through `ledger_probe`, asks `rev-parse` or
+# `ls-files`, so it takes no diff and reads no blob. Those calls are why, and
+# not the rule for the lines below the AUDITED HELPERS END marker, stated further
+# down: it lets a call to `git_probe` through whatever the call asks. That part
+# of the file is read as any diff is read, with .github/scripts/test-pr-policy.sh
+# linting it for the mistakes that would break the rule, beside the reading and
+# not in place of it.
 # .github/scripts/changed-in-range.sh builds both, the workflow calls it, the
 # fixtures call it too, and they arrive here as LISTINGS read through
 # `read_file` exactly as the three finding listings are.
