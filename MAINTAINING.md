@@ -352,7 +352,8 @@ from a glob after a separate command's exit 0 read an unreadable directory as an
 file establishes nothing about reading it, and a successful producer establishes nothing about a
 successful read. Below the audited region `test-pr-policy.sh` **lints** the rest of the file against
 an **allowlist** — a command may only be a shell builtin from a short list or a function the file
-defines, nothing may redirect from a path, and a backtick is refused — because five rounds of
+defines, and of the audited region's functions only the three helpers, not the primitive they share;
+nothing may redirect from a path, and a backtick is refused — because five rounds of
 closing unsafe calls one at a time produced more of them each round, and the ban list that replaced
 those cases was itself walked past by an assignment prefix, a `command --`, and a reader it did not
 name. **That lint is best-effort and it is not a guarantee.** It is a text scan over one file, and a

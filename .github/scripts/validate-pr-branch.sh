@@ -515,14 +515,15 @@
 # is the only place any of the three obtains a byte.
 # .github/scripts/test-pr-policy.sh LINTS everything below the AUDITED HELPERS
 # END marker for a command that is not a shell builtin or a function defined in
-# this file, a redirection from a path, and a backtick. It is a best-effort text
-# scan and not a proof: it is aimed at mistakes made in good faith, it has been
-# walked past by constructs nobody had listed, and the misses found so far are
-# listed and tested there. The guarantee is the audited region: a stated number
-# of lines, capped in that gate and few enough to read whole, and every edit to
-# it is an edit under .github/scripts/, which the first limb of MAINTAINING.md
-# step 7 leaves with the owner. The rest of the file is read as any diff is
-# read, with the lint beside the reading and not in place of it.
+# this file, a call to `capture` or anything else the region keeps to itself, a
+# redirection from a path, and a backtick. It is a best-effort text scan and not
+# a proof: it is aimed at mistakes made in good faith, it has been walked past
+# by constructs nobody had listed, and the misses found so far are listed and
+# tested there. The guarantee is the audited region: a stated number of lines,
+# capped in that gate and few enough to read whole, and every edit to it is an
+# edit under .github/scripts/, which the first limb of MAINTAINING.md step 7
+# leaves with the owner. The rest of the file is read as any diff is read, with
+# the lint beside the reading and not in place of it.
 #
 # `git_probe`'s contract is the part that matters: the caller ENUMERATES the exit
 # statuses it is prepared to read as answers, and any other status refuses the

@@ -6344,8 +6344,10 @@ echo 'diff-rule fixtures passed'
 # `head` and not `sed`; and `read -r record<"$f"` past a redirection regex that
 # wanted a space before the `<`. All four are probes below. So a command must be
 # a shell builtin from the short list in the scanner or a function the validator
-# itself defines, nothing may redirect from a path, and a backtick is refused
-# outright. Naming what may run closed those four. It did not close everything.
+# itself defines -- but of the functions its audited region defines, only the
+# three the region is there to provide: `git_probe`, `read_file` and `list_dir`
+# -- nothing may redirect from a path, and a backtick is refused outright. Naming
+# what may run closed those four. It did not close everything.
 #
 # IT IS A LINT AND NOT A PROOF. It is a text scan over one file, and a text scan
 # cannot bound what a file does. It was walked past in three consecutive review
@@ -6388,18 +6390,27 @@ echo 'diff-rule fixtures passed'
 #     could stand, as every argument is, so a glob passes whether bash expands
 #     it to a directory's names or to the command it then runs.
 #
+# A miss that hides a command word hides a helper the region keeps to itself in
+# the same way: the rule that refuses one reads it only where the command scan
+# reads a command.
+#
 # THE INSTRUMENT IS TESTED FIRST, because a rule that matches nothing would pass
 # this file forever while proving nothing: each shape below is appended to a COPY
 # of the validator and must be caught.
 shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violation
   awk '
-    # Pass one: the functions this file defines are commands it may run.
+    # Pass one: the functions this file defines are commands it may run, and
+    # those defined between the markers, read as pass two and the cap read them,
+    # belong to the audited region.
     NR == FNR {
+      if ($0 ~ /^# ==== AUDITED HELPERS BEGIN/) { region = 1 }
+      if ($0 ~ /^# ==== AUDITED HELPERS END/)   { region = 0 }
       if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\(\)/) {
         name = $0
         sub(/^[[:space:]]*/, "", name)
         sub(/\(\).*$/, "", name)
         defined[name] = 1
+        if (region) { own[name] = 1 }
       }
       next
     }
@@ -6409,6 +6420,10 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
       # run no program.
       split(": true false echo printf local return exit shift unset shopt read set export cd pwd trap break continue", w, " ")
       for (i in w) allowed[w[i]] = 1
+      # The three helpers the audited region is there to provide. Every other
+      # function it defines is its own, and is refused outside it.
+      split("git_probe read_file list_dir", p, " ")
+      for (i in p) provided[p[i]] = 1
       # Keywords that introduce a COMMAND: scanning continues past them.
       split("if elif while until then else do time", t, " ")
       for (i in t) transparent[t[i]] = 1
@@ -6572,6 +6587,14 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
         cmdpos = 0
         if (tok ~ /[*?]/) { continue }
         if (tok ~ /^[0-9]/) { continue }
+        # A HELPER THE REGION KEEPS TO ITSELF IS NOT A COMMAND OUTSIDE IT. The
+        # file defines `capture`, so `capture … -- git …` passed here while the
+        # same line calling git directly was reported, and `capture` runs what
+        # it is handed; `read_private` opens its argument. Of the functions the
+        # region defines, only the three named above may stand where a command
+        # does outside it. A definition written `capture()` puts its name there
+        # too, so defining a kept helper again outside is refused as a call is.
+        if (own[tok] && !provided[tok]) { print FNR ": a helper the audited region keeps to itself: " $0; break }
         if (allowed[tok] || defined[tok]) { continue }
         print FNR ": " $0
         break
@@ -6607,6 +6630,13 @@ shape_missed=0
 shape_passes() {  # shape_passes <line to append>... -> 0 when the lint reports nothing
   cp -- "$branch_validator" "$shape_mutant"
   printf '%s\n' "$@" >> "$shape_mutant"
+  [[ -z "$(shape_violations "$shape_mutant")" ]]
+}
+shape_passes_inside() {  # shape_passes_inside <line>... -> as shape_passes, the lines written just above END
+  { sed '/^# ==== AUDITED HELPERS END/,$d' "$branch_validator"
+    printf '%s\n' "$@"
+    sed -n '/^# ==== AUDITED HELPERS END/,$p' "$branch_validator"
+  } > "$shape_mutant"
   [[ -z "$(shape_violations "$shape_mutant")" ]]
 }
 shape_probe() {  # shape_probe <line to append>...
@@ -6717,14 +6747,33 @@ shape_probe ": \\'" 'git rev-parse --is-inside-work-tree'
 # went unlinted.
 shape_probe '# ==== AUDITED HELPERS BEGIN' ": # <<'true'" '# ==== AUDITED HELPERS END' \
   'git rev-parse --is-inside-work-tree' 'true'
+# A helper the region keeps to itself, called outside it. The file defines
+# `capture`, so this line passed while the same line calling git directly was
+# reported, and `capture` runs what it is handed. `read_private` opens its
+# argument and `remove_probe_dir` runs rm, so all three of the region's own are
+# here.
+shape_own_call='capture "$probe_dir/o" "$probe_dir/e" none -- git rev-parse --is-inside-work-tree'
+shape_probe "$shape_own_call"
+shape_probe 'read_private "$listing"'
+shape_probe 'remove_probe_dir'
 
-# And the file as it stands has none of them. Checked before the residuals,
-# which are appended to a copy of this file: a violation of its own would
-# make every one of them look caught, and name the wrong line.
+# And the file as it stands has none of them. Checked before the residuals and
+# the call that must pass, which are written into a copy of this file: a
+# violation of its own would make every residual look caught and that call look
+# reported, and name the wrong line.
 shape_found="$(shape_violations "$branch_validator")"
 if [[ -n "$shape_found" ]]; then
-  echo 'validate-pr-branch.sh fails the shape lint outside its audited helpers -- a command it may not run, a file it reads, a backtick, or a scan that lost its place:' >&2
+  echo 'validate-pr-branch.sh fails the shape lint outside its audited helpers -- a command it may not run, a helper the region keeps to itself, a file it reads, a backtick, or a scan that lost its place:' >&2
   printf '%s\n' "$shape_found" >&2
+  exit 1
+fi
+
+# THE CALL THE HELPER RULE MUST PASS: the same line just above the END marker,
+# where it is the region calling its own helper. The other side of the rule, the
+# three helpers the region is there to provide, is held by the check above: the
+# rest of the file calls each of them, and a rule refusing one reports it there.
+if ! shape_passes_inside "$shape_own_call"; then
+  echo "the shape lint reports [$shape_own_call] just above the END marker, where the region calls its own helpers" >&2
   exit 1
 fi
 
