@@ -2039,12 +2039,7 @@ pub(crate) mod census_domain {
     }
 
     fn raw_prefix_before(bytes: &[u8], start: usize) -> bool {
-        start >= 2
-            && bytes.get(start - 2..start) == Some(b"r#".as_slice())
-            && !start
-                .checked_sub(3)
-                .and_then(|before| bytes.get(before))
-                .is_some_and(|byte| is_identifier_byte(*byte))
+        start >= 2 && bytes.get(start - 2..start) == Some(b"r#".as_slice())
     }
 
     fn token_end(bytes: &[u8], from: usize) -> usize {

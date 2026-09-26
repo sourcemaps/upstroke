@@ -2168,7 +2168,11 @@ One past the last identifier byte from `from`.
 ## `pub(crate) mod census_domain` › `fn raw_prefix_before(bytes: &[u8], start: usize) -> bool {`
 
 Whether the identifier starting at `start` is written raw: `r#`
-immediately before it, and no identifier byte before the `r`. In
+immediately before it. Whether an identifier byte stands before that `r`
+is not asked: outside a macro's arguments that cannot compile (an
+identifier is not followed by `#`, and a raw string's `r#` prefix is
+blanked with its body), and inside them, where `xr#fn` lexes as `xr`, `#`,
+`fn`, reading `fn` as raw finds one body fewer, which refuses more. In
 `function_bodies` it is what keeps `impl T for r#fn where .. {` -- a type
 called `fn` -- from reading as a function `where` whose body is the `impl`
 block's.
