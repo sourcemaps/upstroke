@@ -5206,7 +5206,9 @@ fn replace_head_with_a_sibling(repo: &Path) {
     git_in(repo, &["replace", &head, &sibling]);
     git_in(repo, &["reset", "-q", "--hard", "HEAD"]);
     assert_eq!(
-        fs::read_to_string(repo.join("README.md")).expect("the checked-out README"),
+        fs::read_to_string(repo.join("README.md"))
+            .expect("the checked-out README")
+            .replace("\r\n", "\n"),
         "replaced\n",
         "the checkout was written through the replacement"
     );
