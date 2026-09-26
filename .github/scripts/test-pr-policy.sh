@@ -6354,16 +6354,18 @@ echo 'diff-rule fixtures passed'
 # arithmetic, which the arithmetic rule deleted before the command scan read it
 # (SHAPE-GATE-MISSES-ARITHMETIC-SUBSTITUTION). It is not a barrier against an
 # author set on getting past it, and nothing here says it is. THE GUARANTEE THAT
-# IS REAL IS THE AUDITED REGION: a stated number of lines, capped below, which a
-# reviewer reads whole. The rest of the file is read as any diff is read, with
-# this as a lint beside the reading and not in place of it.
+# IS REAL IS THE AUDITED REGION: a stated number of lines, capped below and few
+# enough to read whole, and every edit to it is an edit under .github/scripts/,
+# which the first limb of step 7 of MAINTAINING.md leaves with the owner. The
+# rest of the file is read as any diff is read, with this as a lint beside the
+# reading and not in place of it.
 #
 # THE MISSES FOUND SO FAR ARE LISTED, AND TESTED IN BOTH DIRECTIONS, rather than
 # denied. Each is a residual below: appended to a copy of the validator it must
 # pass this lint, and run by bash it must reach the stub git -- or, for the
-# glob, list a directory -- so an entry that stops being a miss, or never was
-# one, fails here and the list is corrected. It is the list of what has been
-# found and not a list of all there is.
+# glob that runs nothing, list a directory -- so an entry that stops being a
+# miss, or never was one, fails here and the list is corrected. It is the list
+# of what has been found and not a list of all there is.
 #
 #   - a command word written entirely inside quotes: `"git" "status"`;
 #   - a string bash evaluates later: `eval` itself is refused, but the string a
@@ -6372,16 +6374,19 @@ echo 'diff-rule fixtures passed'
 #   - a `)` bash reads as part of a substitution -- closing a subshell, an
 #     arithmetic expansion or a case label -- ends the reading of it here, so
 #     inside a double-quoted string the rest of the substitution reads as text;
-#   - quote and heredoc tracking thrown off by text bash reads as neither: a
-#     heredoc operator or a quote in a trailing comment, an escaped quote
-#     outside quotes or inside `$'…'`. Nothing is read as code until the
-#     tracking finds its place again; where it never does, the END check in
-#     the scanner reports it;
+#   - quote and heredoc tracking thrown off, in both directions: by text bash
+#     reads as neither -- a heredoc operator or a quote in a trailing comment,
+#     an escaped quote outside quotes or inside `$'…'` -- and by a quote bash
+#     reads and this never does, on a line inside a string that starts with
+#     `#`, which is skipped as a comment before a character of it is tracked.
+#     Nothing is read as code until the tracking finds its place again; where
+#     it never does, the END check in the scanner reports it;
 #   - a function the scanner credits that bash does not define at the call --
 #     after `unset -f`, or from a definition inside a string -- and the body of
 #     a one-line `function name { … }`;
-#   - pathname expansion: a glob lists a directory, and this does not look at
-#     globs at all.
+#   - pathname expansion: a word holding `*` or `?` is skipped where a command
+#     could stand, as every argument is, so a glob passes whether bash expands
+#     it to a directory's names or to the command it then runs.
 #
 # THE INSTRUMENT IS TESTED FIRST, because a rule that matches nothing would pass
 # this file forever while proving nothing: each shape below is appended to a COPY
@@ -6416,6 +6421,14 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
     }
     {
       line = $0
+      # THE MARKERS ARE READ BEFORE ANYTHING IS SKIPPED, as the cap below reads
+      # them, so the two agree on where the region ends. Read after the heredoc
+      # skip, an END inside a heredoc this thought open ended the region for the
+      # cap and not for the lint, and a second END lower down ended it for the
+      # lint: the lines between were neither linted nor counted. A marker ends
+      # any heredoc this thinks open, so what follows it is read as code.
+      if (line ~ /^# ==== AUDITED HELPERS BEGIN/) { audited = 1; heredoc = ""; heredoc_tabs = 0; next }
+      if (line ~ /^# ==== AUDITED HELPERS END/)   { audited = 0; heredoc = ""; heredoc_tabs = 0; next }
       # With `<<-` bash strips leading tabs before it compares the end line, and
       # so does this: compared whole, a tab-indented end never matched, and not
       # one line after it was read.
@@ -6425,21 +6438,24 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
         if (closing == heredoc) { heredoc = "" }
         next
       }
-      if (line ~ /^# ==== AUDITED HELPERS BEGIN/) { audited = 1; next }
-      if (line ~ /^# ==== AUDITED HELPERS END/)   { audited = 0; next }
       if (line ~ /^[[:space:]]*#/) { next }
-      # A quoted run becomes one Q on the masked line and vanishes from the bare
-      # one. Redirections are judged on the masked line, so a `<` inside a
+      # The masked line keeps one character for each character of the raw line,
+      # a Q for each quote and each quoted one, so the two stay the same length:
+      # the heredoc opener below depends on that. The bare line drops the quoted
+      # ones. Redirections are judged on the masked line, so a `<` inside a
       # message is prose and a `<` outside one is an open; commands are read off
       # the bare line, so a case label like `100644|100755)` is not read as one.
       masked = ""; bare = ""; tick = 0
       n = length(line); i = 1
       while (i <= n) {
         c = substr(line, i, 1)
-        # A BACKTICK OUTSIDE SINGLE QUOTES IS A COMMAND SUBSTITUTION, inside
-        # double quotes too, and the command scan below cannot tell where one
-        # begins or ends: `local x=` then a backticked `git …` passed it. So a
-        # backtick is refused outright and not read; `$(…)` says the same.
+        # A BACKTICK OUTSIDE SINGLE QUOTES IS REFUSED, ESCAPED OR NOT. Unescaped
+        # it is a command substitution, inside double quotes too, and the command
+        # scan below cannot tell where one begins or ends: `local x=` then a
+        # backticked `git …` passed it; `$(…)` says the same. Escaped it is a
+        # literal to bash and is refused all the same: telling the two apart is
+        # more of bash for this to model, and a message can quote a word another
+        # way. Either way the report says it is a backtick.
         if (c == "\x60" && !insingle) { tick = 1 }
         # A COMMAND SUBSTITUTION INSIDE A STRING IS STILL CODE. `x="$(git …)"`
         # is quoted from end to end, so a scan that dropped quoted runs whole
@@ -6462,12 +6478,12 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
         masked = masked c; bare = bare c; i++
       }
       # A HEREDOC IS OPENED BY CODE AND NOT BY TEXT. Its `<<` is looked for on
-      # the masked line, where a quoted run is Q, and never as the last two
-      # characters of the `<<<` of a here-string; the tag is then read off the
-      # line at that place. Read off the raw line, an `echo` of a message naming
-      # `<<"EOF"`, and a `read` from a here-string of a quoted word, each skipped
-      # every line up to one spelling the tag, or the rest of the file where
-      # none did.
+      # the masked line, where each quoted character is a Q, and never as the
+      # last two characters of the `<<<` of a here-string; the tag is then read
+      # off the raw line at the same place. Looked for on the raw line, as it
+      # was, an `echo` of a message naming `<<"EOF"`, and a `read` from a
+      # here-string of a quoted word, each skipped every line up to one
+      # spelling the tag, or the rest of the file where none did.
       if (match(masked, /(^|[^<])<<-?Q/)) {
         tag = substr(line, RSTART)
         sub(/^[^<]/, "", tag)
@@ -6479,7 +6495,7 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
         }
       }
       if (audited) { next }
-      if (tick) { print FNR ": " $0; next }
+      if (tick) { print FNR ": a backtick, refused whether or not it is escaped: " $0; next }
       # ARITHMETIC IS TAKEN OUT OF BOTH READINGS, because `(( i < n ))` is a
       # comparison and read as an open it reported every `<` the file writes in
       # arithmetic -- BUT NEVER A SPAN THAT HOLDS A SUBSTITUTION. Arithmetic
@@ -6675,11 +6691,17 @@ shape_probe '(( $(git rev-parse --is-inside-work-tree >/dev/null; echo 1)))'
 shape_probe 'for (( i = 0; i < 1; i += $(git rev-parse --is-inside-work-tree >/dev/null; echo 1))); do :; done'
 shape_probe '[[ $(( $(git rev-parse --is-inside-work-tree >/dev/null; echo 1))) -eq 1 ]] || true'
 shape_probe 'n=$(($(read -r l < "$f"; echo 1)))'
-# A backtick, in every place one was read past.
+# The command scan catches that one too, on the `$` before the inner `(`, so it
+# holds nothing about the masked line. Here the first operand is a literal,
+# which the command scan skips, so the redirection check alone can see it.
+shape_probe 'n=$((1+$(read -r l < "$f"; echo 1)))'
+# A backtick, in every place one was read past; and one bash reads as a
+# literal, which is refused all the same, as the scanner says.
 shape_probe 'probe() { local head=`git rev-parse HEAD`; }'
 shape_probe ': `git rev-parse --is-inside-work-tree`'
 shape_probe 'x="`git rev-parse --is-inside-work-tree`"'
 shape_probe '[[ -n `git rev-parse --is-inside-work-tree` ]] || true'
+shape_probe 'echo "see \`true\` for why"'
 # A heredoc opened by text, and one whose end is indented with tabs: each
 # skipped the lines after it up to one spelling the tag, which each of these
 # then writes, so that the END check below cannot be what catches them.
@@ -6688,13 +6710,20 @@ shape_probe 'read -r x <<<"true"' 'git rev-parse --is-inside-work-tree' 'true'
 shape_probe "read -r -d '' _ <<-'true' || true" $'\tx' $'\ttrue' 'git rev-parse --is-inside-work-tree' 'true'
 # And tracking that never finds its place again: the END check.
 shape_probe ": \\'" 'git rev-parse --is-inside-work-tree'
+# A heredoc the lint thinks open across an END marker. Read after the heredoc
+# skip, the marker was never seen, and the region ran on for the lint though
+# the cap stops counting there; read first, but with the heredoc left open, the
+# line after it was skipped as the heredoc's body. Either way git below that END
+# went unlinted.
+shape_probe '# ==== AUDITED HELPERS BEGIN' ": # <<'true'" '# ==== AUDITED HELPERS END' \
+  'git rev-parse --is-inside-work-tree' 'true'
 
 # And the file as it stands has none of them. Checked before the residuals,
 # which are appended to a copy of this file: a violation of its own would
 # make every one of them look caught, and name the wrong line.
 shape_found="$(shape_violations "$branch_validator")"
 if [[ -n "$shape_found" ]]; then
-  echo 'validate-pr-branch.sh runs a command it may not, or reads a file, outside its audited helpers:' >&2
+  echo 'validate-pr-branch.sh fails the shape lint outside its audited helpers -- a command it may not run, a file it reads, a backtick, or a scan that lost its place:' >&2
   printf '%s\n' "$shape_found" >&2
   exit 1
 fi
@@ -6738,10 +6767,14 @@ shape_residual ": # <<'true'" 'git rev-parse --is-inside-work-tree' 'true'
 shape_residual ": # don't" 'git rev-parse --is-inside-work-tree' ": # '"
 shape_residual ": \\'" 'git rev-parse --is-inside-work-tree' ": \\'"
 shape_residual "x=\$'it\\'s'" 'git rev-parse --is-inside-work-tree' ": # '"
+shape_residual 'x="' '# "' 'git rev-parse --is-inside-work-tree' ': # "'
 shape_residual 'git() { :; }' 'unset -f git' 'git rev-parse --is-inside-work-tree'
 shape_residual ": '" 'git() { :; }' "'" 'git rev-parse --is-inside-work-tree'
 shape_residual 'function probe { git rev-parse --is-inside-work-tree; }' 'trap probe EXIT'
-# A glob reaches no git, so its other half is that bash lists the directory.
+# A glob where a command could stand runs what it expands to, and run from the
+# fixture directory this one names the stub. One that runs nothing reaches no
+# git, so its other half is that bash lists the directory.
+shape_residual 'shape-stub/gi? rev-parse --is-inside-work-tree'
 if ! shape_passes 'names=( "$SHAPE_DIR"/* )'; then
   echo 'the shape lint now catches a glob: move it to the probes and off the residual list' >&2
   exit 1
@@ -6753,14 +6786,16 @@ fi
 shape_missed=$(( shape_missed + 1 ))
 echo "shape lint: $shape_caught probes caught, $shape_missed listed residuals still missed and still live"
 
-# THE AUDITED REGION IS WHERE THE GUARANTEE IS, so it has to stay small enough
-# that a reviewer reads all of it. The cap bounds that reading and nothing else,
-# and it counts every line from one marker to the other, both markers and every
-# comment included.
+# THE AUDITED REGION IS WHERE THE GUARANTEE IS: a stated number of lines, few
+# enough to read whole, and every edit to it is an edit under .github/scripts/,
+# which the first limb of step 7 of MAINTAINING.md leaves with the owner. This
+# cap is the bound on that number and on nothing else. It counts every line from
+# one marker to the other, both markers and every comment included, and the lint
+# above reads the markers as this does.
 #
-# THE CAP HAS MOVED ONCE, FROM 200 TO 250, and it was moved by the author of the
-# code it admitted: in the round of #251 that made `capture` the only way any
-# helper reaches bytes (546cee9b), the region went from 200 lines, 133 of them
+# THE CAP HAS MOVED ONCE, FROM 200 TO 250, in the commit that grew the code it
+# admitted: in the round of #251 that made `capture` the only way any helper
+# reaches bytes (546cee9b), the region went from 200 lines, 133 of them
 # code, to 242, 158 of them code, because checking that a destination opened,
 # that the producer ran, and that both copies read back to their sentinel is
 # four checks where each helper used to make three and the three were not the
@@ -6768,13 +6803,13 @@ echo "shape lint: $shape_caught probes caught, $shape_missed listed residuals st
 #
 # THE RAISE IS KEPT, FOR A STATED REASON. Moving comments out of the region
 # would bring it back under 200 with no code touched, and that would restore the
-# number without restoring the reading: 161 lines of code are what a reviewer
-# reads either way. What keeps the number honest is the fence MAINTAINING.md
-# puts round it: the pull request that raises the cap again states why in its
-# body, is not the pull request that grows the region, and is not written by
-# whoever wrote the code the raise would admit. No check enforces that; a raise
-# is an edit to this file, a gate script, which the first limb of step 7 of
-# MAINTAINING.md keeps out of standing delegation and with the owner.
+# number without restoring what there is to read: 161 lines of code either way.
+# What keeps the number honest is the owner: a raise is an edit to this file, a
+# gate script, which the first limb of step 7 of MAINTAINING.md keeps out of
+# standing delegation and with the owner, who merges it or does not.
+# MAINTAINING.md fences it besides -- the pull request that raises the cap again
+# states why in its body and is not the pull request that grows the region --
+# and no check enforces that fence.
 shape_region_lines="$(awk '
   /^# ==== AUDITED HELPERS BEGIN/ { inside = 1 }
   inside { n = n + 1 }

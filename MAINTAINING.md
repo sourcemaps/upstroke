@@ -363,15 +363,17 @@ good faith, such as git called directly or a file read with `<`, and not at an a
 past it, and some constructs written in good faith get past it too. The misses found so far are
 listed in the gate and tested there in both directions — the lint passes each, and bash run on each
 reaches git or lists a directory — and that list is what has been found, not all there is. **The
-guarantee that is real is the audited region: a stated number of lines, and a reviewer reads all of
-them.** The gate caps it at 250 lines, comments included. The cap bounds that reviewer's reading and
-nothing else, and it is fenced accordingly. It has moved once, from 200 to 250, in the #251 commit
-that also grew the code it admitted, so by that code's author; the raise is kept, with its reason
-stated beside the cap, because moving comments out would bring the region back under 200 with no
-code touched and restore the number without restoring the reading. **A pull request that raises the
-cap again states its reason in its body, is not the pull request that grows the region, and is not
-authored by whoever wrote the code the raise would admit.** No check enforces that fence; a raise is
-an edit to a gate script, which the first limb of step 7 keeps out of standing delegation.
+guarantee that is real is the audited region: a stated number of lines, few enough to read whole,
+and every edit to it is an edit under `.github/scripts/`, which the first limb of step 7 leaves with
+the owner.** The rest of the file is read as any diff is read, with the lint beside the reading and
+not in place of it. The gate caps the region at 250 lines, comments included; the cap bounds that
+number and nothing else, and it is fenced accordingly. It has moved once, from 200 to 250, in the
+#251 commit that also grew the code it admitted; the raise is kept, with its reason stated beside
+the cap, because moving comments out would bring the region back under 200 with no code touched and
+restore the number without restoring what there is to read. **A pull request that raises the cap
+again states its reason in its body and is not the pull request that grows the region.** No check
+enforces that fence; a raise is an edit to a gate script, which the first limb of step 7 keeps out
+of standing delegation and with the owner.
 
 **A directory handed in as a listing is answered out of git's records, not out of the checkout.**
 The directory form locates the repository and the path within it and then reads `git ls-files -s`
