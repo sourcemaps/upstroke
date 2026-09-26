@@ -1996,6 +1996,157 @@ pub(crate) mod census_domain {
         })
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct OutsideInvocation {
+        pub(crate) line: usize,
+        pub(crate) name: String,
+    }
+
+    #[must_use]
+    pub(crate) fn macro_invocations_outside_function_bodies(
+        source: &str,
+    ) -> Vec<OutsideInvocation> {
+        let code = super::production_code(source);
+        let bytes = code.as_bytes();
+        let bodies = function_bodies(bytes);
+        macro_bangs(bytes)
+            .into_iter()
+            .filter(|(bang, _)| {
+                !bodies
+                    .iter()
+                    .any(|(open, close)| open < bang && bang < close)
+            })
+            .map(|(bang, name)| OutsideInvocation {
+                line: code
+                    .get(..bang)
+                    .map_or(0, |before| before.matches('\n').count())
+                    + 1,
+                name,
+            })
+            .collect()
+    }
+
+    fn is_identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
+    }
+
+    fn identifier_end(bytes: &[u8], from: usize) -> usize {
+        let mut end = from;
+        while bytes.get(end).is_some_and(|byte| is_identifier_byte(*byte)) {
+            end += 1;
+        }
+        end
+    }
+
+    fn raw_prefix_before(bytes: &[u8], start: usize) -> bool {
+        start >= 2
+            && bytes.get(start - 2..start) == Some(b"r#".as_slice())
+            && !start
+                .checked_sub(3)
+                .and_then(|before| bytes.get(before))
+                .is_some_and(|byte| is_identifier_byte(*byte))
+    }
+
+    fn token_end(bytes: &[u8], from: usize) -> usize {
+        if bytes.get(from..from + 2) == Some(b"r#".as_slice())
+            && bytes
+                .get(from + 2)
+                .is_some_and(|byte| is_identifier_byte(*byte))
+        {
+            return identifier_end(bytes, from + 2);
+        }
+        identifier_end(bytes, from)
+    }
+
+    fn function_bodies(bytes: &[u8]) -> Vec<(usize, usize)> {
+        let mut bodies = Vec::new();
+        let mut at = 0;
+        while let Some(&byte) = bytes.get(at) {
+            if !is_identifier_byte(byte) {
+                at += 1;
+                continue;
+            }
+            let end = identifier_end(bytes, at);
+            if bytes.get(at..end) == Some(b"fn".as_slice()) && !raw_prefix_before(bytes, at) {
+                let name = whitespace(bytes, end);
+                if name > end
+                    && bytes
+                        .get(name)
+                        .is_some_and(|byte| is_identifier_byte(*byte))
+                {
+                    if let Some(open) = body_brace(bytes, token_end(bytes, name)) {
+                        if let Some(close) = super::matching(bytes, open, b'{', b'}') {
+                            bodies.push((open, close));
+                        }
+                    }
+                }
+            }
+            at = end;
+        }
+        bodies
+    }
+
+    fn body_brace(bytes: &[u8], from: usize) -> Option<usize> {
+        let mut angle = 0_usize;
+        let mut at = from;
+        while let Some(&byte) = bytes.get(at) {
+            match byte {
+                b'(' => at = super::matching(bytes, at, b'(', b')')?,
+                b'[' => at = super::matching(bytes, at, b'[', b']')?,
+                b'{' if angle == 0 => return Some(at),
+                b'{' => at = super::matching(bytes, at, b'{', b'}')?,
+                b'<' => angle += 1,
+                b'>' if at.checked_sub(1).and_then(|before| bytes.get(before)) == Some(&b'-') => {}
+                b'>' => angle = angle.checked_sub(1)?,
+                b';' | b')' | b']' | b'}' if angle == 0 => return None,
+                _ => {}
+            }
+            at += 1;
+        }
+        None
+    }
+
+    fn macro_bangs(bytes: &[u8]) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        for (bang, byte) in bytes.iter().enumerate() {
+            if *byte != b'!' || bytes.get(bang + 1) == Some(&b'=') {
+                continue;
+            }
+            let mut name_end = bang;
+            while name_end > 0 && bytes.get(name_end - 1).is_some_and(u8::is_ascii_whitespace) {
+                name_end -= 1;
+            }
+            let mut name_start = name_end;
+            while name_start > 0
+                && bytes
+                    .get(name_start - 1)
+                    .is_some_and(|before| is_identifier_byte(*before))
+            {
+                name_start -= 1;
+            }
+            let Some(name) = bytes.get(name_start..name_end) else {
+                continue;
+            };
+            if name.is_empty()
+                || name.first().is_some_and(u8::is_ascii_digit)
+                || (is_keyword(name) && !raw_prefix_before(bytes, name_start))
+            {
+                continue;
+            }
+            let after = whitespace(bytes, bang + 1);
+            let opens = |at: usize| matches!(bytes.get(at), Some(b'(' | b'[' | b'{'));
+            let invoked = opens(after)
+                || (bytes
+                    .get(after)
+                    .is_some_and(|next| is_identifier_byte(*next))
+                    && opens(whitespace(bytes, token_end(bytes, after))));
+            if invoked {
+                found.push((bang, String::from_utf8_lossy(name).into_owned()));
+            }
+        }
+        found
+    }
+
     fn module_shaped_between(bytes: &[u8], from: usize, to: usize) -> Option<usize> {
         let mut at = from;
         while at < to {

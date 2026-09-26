@@ -257,10 +257,8 @@ fn cmd_switch_index(program: &Path, spec: &CommandSpec) -> Option<usize> {
 mod naming;
 use self::naming::{ProgramNaming, composed_value, resolve_program};
 
-thread_local! {
-    static RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static SEARCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+mod counters;
+use self::counters::{ESTABLISHMENTS, RESOLUTIONS, SEARCHES};
 
 #[must_use]
 pub fn program_resolutions() -> u64 {
@@ -293,10 +291,6 @@ mod proof {
 }
 
 pub use self::proof::{Contained, contain_write_command};
-
-thread_local! {
-    static ESTABLISHMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
 
 #[must_use]
 pub fn containment_establishments() -> u64 {

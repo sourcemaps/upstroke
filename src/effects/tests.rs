@@ -2573,6 +2573,227 @@ fn every_crate_root_forbids_non_local_definitions() {
     }
 }
 
+fn production_files_a_governed_lint_is_not_forbidden_in(
+    sources: &[(String, String)],
+) -> BTreeSet<String> {
+    let by_path: BTreeMap<String, String> = sources.iter().cloned().collect();
+    let mut domain = BTreeSet::new();
+    for (path, source) in sources {
+        if is_whole_file_test_module(path) {
+            continue;
+        }
+        let ancestors = ancestor_module_files(path, &by_path);
+        let lowerable = USED_GOVERNED_LINTS.iter().any(|lint| {
+            let own = crate::effects::lint_levels::file_level_lint_resolution(source, lint);
+            if own.undecided {
+                return true;
+            }
+            let effective = own.level.or_else(|| {
+                ancestors.iter().find_map(|ancestor| {
+                    by_path.get(ancestor).and_then(|above| {
+                        crate::effects::lint_levels::file_level_lint_state(above, lint)
+                    })
+                })
+            });
+            effective != Some("forbid")
+        });
+        if lowerable {
+            domain.insert(path.clone());
+        }
+    }
+    domain
+}
+
+#[test]
+fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {
+    let sources = scanned_sources();
+    let domain = production_files_a_governed_lint_is_not_forbidden_in(&sources);
+    let mut outside = Vec::new();
+    for (path, source) in &sources {
+        if !domain.contains(path) {
+            continue;
+        }
+        for invocation in super::census_domain::macro_invocations_outside_function_bodies(source) {
+            outside.push(format!("{path}:{} `{}!`", invocation.line, invocation.name));
+        }
+    }
+    assert!(
+        outside.is_empty(),
+        "a macro invoked outside a function body can write an item no census reads -- a `fn` \
+         under a name the source does not spell, a module, an allow -- and one in a module-level \
+         `const _` defines a method `non_local_definitions` does not lint; in a file that does \
+         not forbid every governed lint that item can hold an effect nothing classifies. Move \
+         the invocation into a module that forbids all three:\n{outside:#?}"
+    );
+
+    for named in [
+        "src/rundir.rs",
+        "src/runner/host.rs",
+        "src/util.rs",
+        "src/workspace.rs",
+        "src/runner/container.rs",
+        "src/main.rs",
+        "examples/probe.rs",
+    ] {
+        assert!(
+            domain.contains(named),
+            "`{named}` allows a governed lint and is not in the domain: {domain:#?}"
+        );
+    }
+    for forbidding in ["src/util/terminal.rs", "src/runner/host/naming.rs"] {
+        assert!(
+            !domain.contains(forbidding),
+            "`{forbidding}` forbids all three governed lints and was read as lowerable"
+        );
+    }
+    let list = allowlist();
+    for entry in list.funnel.iter().chain(&list.legacy) {
+        if entry.allows.is_empty() || is_whole_file_test_module(&entry.path) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(repo_root().join(&entry.path)).expect("an allowlisted file");
+        let allowed_in_production = USED_GOVERNED_LINTS.iter().any(|lint| {
+            crate::effects::lint_levels::file_level_lint_state(&source, lint) != Some("forbid")
+        });
+        assert!(
+            !allowed_in_production || domain.contains(&entry.path),
+            "`{}` carries an allowance the production build applies and is not in the domain",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
+    fn outside(source: &str) -> Vec<String> {
+        super::census_domain::macro_invocations_outside_function_bodies(source)
+            .into_iter()
+            .map(|invocation| invocation.name)
+            .collect()
+    }
+
+    for (position, source) in [
+        (
+            "module item position",
+            "thread_local! { static X: u8 = 0; }\n",
+        ),
+        (
+            "a macro's path",
+            "std::thread_local! { static X: u8 = 0; }\n",
+        ),
+        ("spaced", "m ! ( );\n"),
+        ("a comment between the tokens", "m /* c */ ! /* d */ { }\n"),
+        ("a raw name", "r#m!();\n"),
+        ("a raw keyword name", "r#match!();\n"),
+        ("a non-ASCII name", "\u{e9}!();\n"),
+        ("a definition", "macro_rules! m { () => {}; }\n"),
+        ("a raw definition name", "macro_rules! r#m { () => {}; }\n"),
+        (
+            "an aliased include",
+            "use std::include as rd;\nrd!(\"x.inc\");\n",
+        ),
+        ("an inline module", "mod inner {\n    m!();\n}\n"),
+        ("an impl block", "impl X {\n    m!();\n}\n"),
+        ("a trait block", "trait T {\n    m!();\n}\n"),
+        ("an extern block", "extern \"C\" {\n    m!();\n}\n"),
+        (
+            "a module-level `const _`",
+            "const _: () = {\n    m!();\n};\n",
+        ),
+        (
+            "a nested `const _`",
+            "const _: () = {\n    const _: () = {\n        m!();\n    };\n};\n",
+        ),
+        ("a named `const`", "const C: u8 = m!();\n"),
+        ("a `static`", "static S: u8 = m!();\n"),
+        (
+            "a closure in a `static`",
+            "static F: fn() = || {\n    m!();\n};\n",
+        ),
+        ("an enum discriminant", "enum E {\n    A = m!(),\n}\n"),
+        ("a field's type", "struct S {\n    f: m!(),\n}\n"),
+        ("a return type", "fn f() -> m!() {\n    0\n}\n"),
+        ("a parameter's type", "fn f(x: [u8; m!()]) {}\n"),
+        (
+            "a const-generic default",
+            "fn f<const N: usize = { m!() }>() {}\n",
+        ),
+        (
+            "an attribute's value",
+            "#[doc = concat!(\"a\")]\nfn f() {}\n",
+        ),
+        (
+            "production code beside a test item",
+            "#[cfg(test)]\nfn t() {}\nm!();\n",
+        ),
+    ] {
+        assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
+    }
+
+    for (position, source) in [
+        ("a function body", "fn f() {\n    m!();\n}\n"),
+        (
+            "a method body",
+            "impl X {\n    pub fn f(&self) {\n        m!();\n    }\n}\n",
+        ),
+        (
+            "a trait's default body",
+            "trait T {\n    fn d(&self) {\n        m!();\n    }\n}\n",
+        ),
+        (
+            "a function inside a `const _`",
+            "const _: () = {\n    fn g() {\n        m!();\n    }\n};\n",
+        ),
+        (
+            "a header holding a const block",
+            "fn f() -> Foo<{ 1 }> {\n    m!()\n}\n",
+        ),
+        (
+            "a header holding an array",
+            "fn f(x: [u8; 3]) -> [u8; 3] {\n    m!(x)\n}\n",
+        ),
+        (
+            "a where clause",
+            "fn f<T>() where T: Tr<{ 2 }>, for<'a> &'a T: Fn() -> u8 {\n    m!()\n}\n",
+        ),
+        (
+            "an arrow in the return type",
+            "fn f() -> impl Fn() -> u8 {\n    || m!()\n}\n",
+        ),
+        (
+            "qualifiers",
+            "pub(crate) const unsafe extern \"C\" fn f() {\n    m!();\n}\n",
+        ),
+        ("a raw function name", "fn r#match() {\n    m!();\n}\n"),
+        ("a non-ASCII function name", "fn \u{e9}() {\n    m!();\n}\n"),
+        (
+            "a nested function",
+            "fn f() {\n    fn g() {\n        m!();\n    }\n    n!();\n}\n",
+        ),
+        (
+            "a test-only item",
+            "#[cfg(test)]\nthread_local! { static X: u8 = 0; }\n",
+        ),
+        (
+            "a test-only module",
+            "#[cfg(test)]\nmod tests {\n    m!();\n}\n",
+        ),
+        (
+            "no macro",
+            "const B: bool = !A;\nfn f(a: bool, b: u8) -> bool {\n    if !a { return !(b != 1); }\n    a != (b == 2)\n}\n",
+        ),
+        ("a macro in a comment", "// m!();\n/* n!{} */\nfn f() {}\n"),
+        ("a macro in a string", "const S: &str = \"m!()\";\n"),
+    ] {
+        assert!(
+            outside(source).is_empty(),
+            "{position}: {source:?} -> {:?}",
+            outside(source)
+        );
+    }
+}
+
 #[test]
 fn the_legacy_section_is_frozen_and_may_only_shrink() {
     let list = allowlist();
