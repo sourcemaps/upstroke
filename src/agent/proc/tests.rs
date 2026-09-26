@@ -3403,7 +3403,6 @@ fn unix_reaper_kills_labeled_containers() {
                  settle path: {:?}",
                 std::fs::read_to_string(&log)
             );
-            let _ = std::fs::remove_dir_all(dir);
             continue;
         }
 
@@ -3488,7 +3487,6 @@ fn unix_reaper_kills_labeled_containers() {
             let _ = libc::kill(agent_pid, libc::SIGKILL);
             let _ = libc::kill(-agent_pid, libc::SIGKILL);
         }
-        let _ = std::fs::remove_dir_all(dir);
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"

@@ -1752,7 +1752,6 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 + ONE_CI_PLATFORM_APPLIES.len()),
         "a fixture was skipped"
     );
-    let _ = fs::remove_dir_all(scratch);
 }
 
 const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
@@ -1808,7 +1807,6 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
             );
         }
     }
-    let _ = fs::remove_dir_all(scratch);
 }
 
 #[test]
@@ -6561,8 +6559,6 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
         ],
         "this package's exact target inventory"
     );
-
-    let _ = fs::remove_dir_all(scratch);
 }
 
 #[test]
@@ -7557,8 +7553,6 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         restated.is_empty(),
         "the ordered reading is exercised by fixtures only while this holds: {restated:#?}"
     );
-
-    let _ = fs::remove_dir_all(scratch);
 }
 
 #[test]

@@ -6437,7 +6437,6 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
                  cannot exist here, and neither can the shape this test guards against",
                 error.raw_os_error()
             );
-            let _ = fs::remove_dir_all(root);
             return;
         }
         Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
@@ -6478,7 +6477,6 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
         ObjectResidue::None,
         "an absent target in a byte-named repository is unregistered, as at the merge base"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -7711,7 +7709,6 @@ fn assert_a_role_process_sees_replacements(tag: &str) {
          enumeration is missing a mechanism and closing it is the fix",
         ambient_replacement_controls()
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// One `git` gate, run through the production runner in `workspace`.
@@ -8297,8 +8294,6 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
         "no row is a control on the Git running this suite, so this grid \
          measured nothing at all"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 /// `GIT_CONFIG` captures a fixture's own configuration write, and the
@@ -8396,8 +8391,6 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
         redirected, "",
         "the pin still reached the operator's file: {redirected}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 /// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].

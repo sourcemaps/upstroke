@@ -875,7 +875,6 @@ fn orphan_reclaimed_before_slot_reset() {
         inner.container(stuck.as_str()).is_some(),
         "the container is still there, and nothing admitted over it"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1114,7 +1113,6 @@ fn same_run_resume_censuses_recorded_root_after_default_changed() {
             private_root_label(&recorded.root)
         )]
     );
-    let _ = fs::remove_dir_all(other_root);
 }
 
 #[test]
@@ -1432,7 +1430,6 @@ fn a_reclaimer_suspended_mid_sequence_converges_with_one_that_finished() {
     );
     assert!(runtime.container(name.as_str()).is_none());
     assert!(!view_path(&root, &name).exists());
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -2620,7 +2617,6 @@ fn a_container_that_never_terminates_exhausts_the_bounded_observation_and_refuse
         trace.rendered()
     );
     assert!(inner.container(name.as_str()).is_some());
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -2868,7 +2864,6 @@ fn real_docker_census_reclaims_a_dead_owner_and_spares_a_live_one() {
             for name in &names {
                 cleanup(name);
             }
-            let _ = fs::remove_dir_all(&root);
             panic!("the census refused against real Docker: {error}");
         }
     };
@@ -2883,7 +2878,6 @@ fn real_docker_census_reclaims_a_dead_owner_and_spares_a_live_one() {
     for name in &names {
         cleanup(name);
     }
-    let _ = fs::remove_dir_all(&root);
 
     assert_eq!(report.reclaimed.len(), 1, "{report:#?}");
     assert_eq!(report.reclaimed[0].name, dead_name);

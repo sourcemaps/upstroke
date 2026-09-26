@@ -5772,7 +5772,6 @@ mod termination {
                 "{} listings for {ROUNDS} rounds plus the empty one that ends the loop",
                 logged(dir, "ps").len()
             );
-            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]
@@ -5832,7 +5831,6 @@ mod termination {
                 logged(dir, "ps").len() >= 3,
                 "one listing cannot hold 130 ids"
             );
-            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]
@@ -5861,7 +5859,6 @@ mod termination {
             );
             assert_eq!(logged(dir, "kill").len(), 2, "{:?}", logged(dir, "kill"));
             assert_eq!(logged(dir, "rm").len(), 2, "{:?}", logged(dir, "rm"));
-            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]

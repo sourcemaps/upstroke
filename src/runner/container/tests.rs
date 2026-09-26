@@ -4246,7 +4246,6 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         phrases.len() * 4,
         "every phrase was measured against every command"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4418,7 +4417,6 @@ fn the_production_lock_probe_sees_a_lock_another_process_holds() {
         );
         std::thread::yield_now();
     }
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4534,7 +4532,6 @@ fn a_role_view_that_cannot_be_removed_refuses_and_records_nothing() {
     );
 
     let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o755));
-    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(windows)]
