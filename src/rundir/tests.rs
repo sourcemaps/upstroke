@@ -399,10 +399,24 @@ fn a_refused_acquisition_panics_and_names_what_it_refused() {
 /// The witness plants a root of that shape by hand, because `acquire_named`
 /// is private to `scratch_tree` and rightly so, and then shows both halves:
 /// a later acquisition succeeds beside the orphan, and the orphan is still
-/// there afterwards. The shape is read off a real acquisition for the same
-/// tag rather than restated, so a change to `acquire`'s name cannot leave
-/// this planting a name `acquire` no longer produces -- which a sweep of
-/// same-shaped siblings would then pass by.
+/// there afterwards **with its bytes**. The shape is read off a real
+/// acquisition for the same tag rather than restated, so a change to
+/// `acquire`'s name cannot leave this planting a name `acquire` no longer
+/// produces -- which a sweep of same-shaped siblings would then pass by.
+///
+/// **And the orphan is old.** A reclaimer that sweeps only siblings past an
+/// age floor is the shape #322's round-2 delta review called the likeliest
+/// for one written into `acquire`, and the shape the build box's own sweeper
+/// has (six hours, on the top-level entry's modification time). An orphan
+/// planted a moment ago is younger than any such floor: under a one-hour
+/// reclaimer in `acquire` the witness planting one stayed green, and the
+/// same reclaimer removed a two-hour-old orphan planted beside another test
+/// (that review's D4). This one is dated to 2001 -- decades past the box
+/// sweeper's six hours and the thirty days the box's `systemd-tmpfiles` rule
+/// gives `/tmp` -- and the date is read back before the acquisition, so a
+/// filesystem that ignored it fails here rather than passing vacuously. No
+/// process can date back the change time, so a reclaimer gated on that is
+/// outside this witness.
 #[test]
 fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
     let tag = format!("orphaned-{}", crate::ulid::ulid());
@@ -420,11 +434,19 @@ fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
     let id = crate::ulid::ulid();
     let suffix = id.get(id.len().saturating_sub(suffix_len)..).unwrap_or(&id);
     let orphan = PlantedRoot::at(std::env::temp_dir().join(format!("{prefix}{suffix}")));
-    fs::write(
-        orphan.path().join("half-built"),
-        b"a dead process's fixture",
-    )
-    .expect("what the dead process had written");
+    let half_built = orphan.path().join("half-built");
+    fs::write(&half_built, b"a dead process's fixture").expect("what the dead process had written");
+    let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    date_back(&half_built, long_ago);
+    date_back(orphan.path(), long_ago);
+    let dated = fs::metadata(orphan.path())
+        .and_then(|metadata| metadata.modified())
+        .expect("the orphan's modification time");
+    assert!(
+        dated <= long_ago + Duration::from_secs(2),
+        "the orphan reads as modified at {dated:?}, not in 2001, so an age-gated reclaimer \
+         would pass it by and this witness would measure nothing about one"
+    );
 
     let tree = scratch(&tag);
 
@@ -433,11 +455,45 @@ fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
         orphan.path(),
         "a fresh ULID cannot draw the orphan's name"
     );
-    assert!(
-        orphan.path().is_dir(),
+    assert_eq!(
+        fs::read(&half_built).ok().as_deref(),
+        Some(&b"a dead process's fixture"[..]),
         "the orphan is the residual this design accepts, and a repair that removed it here \
          would be pre-cleaning a root it has no claim on all over again"
     );
+}
+
+/// Date `path` back to `when`: its access and its modification time both.
+///
+/// std sets a time only through a handle, and a directory's handle has to
+/// be asked for on Windows: `CreateFileW` opens a directory only with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, and setting its times needs
+/// `FILE_WRITE_ATTRIBUTES` -- the shape `scratch_tree`'s `open_directory`
+/// opens with, the write right in place of the read one. On Unix a
+/// read-only descriptor is enough: `futimens` asks whether the caller owns
+/// the file, not how it was opened.
+fn date_back(path: &Path, when: std::time::SystemTime) {
+    let times = fs::FileTimes::new().set_accessed(when).set_modified(when);
+    open_to_set_times(path)
+        .and_then(|handle| handle.set_times(times))
+        .unwrap_or_else(|error| panic!("date {} back: {error}", path.display()));
+}
+
+#[cfg(unix)]
+fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+#[cfg(windows)]
+fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }
 
 /// Make `<repo>/.upstroke/runs/<run_id>` a husk: a directory whose log holds no
