@@ -473,15 +473,35 @@ drives the two halves together.
 
 ## `fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {`
 
-What keeps the finding closed as the module changes. It reads this file's
-production region -- the test module cut off and comments and string literals
-blanked, both through `crate::effects`' own derivations -- and asserts that
-`Command::new(` occurs once, inside `git_command`; that `git_command` sets
-`NO_REPLACEMENT_OBJECTS`' pair; that `Command` is never renamed with `as` and is
-named nowhere but the process import and `git_command`; and that neither
-`env_remove(` nor `env_clear(` occurs. The list of functions at its top is the
-positive control: a region cut short or blanked away fails there rather than
-passing every count below.
+What keeps the finding closed as the module changes. It reads the whole file,
+with comments and string literals blanked by
+`crate::effects::blank_comments_and_strings`, and takes one span out: the file's
+one test module, from the `#[cfg(test)]` above `mod tests` to the brace that
+closes it. It does not read `crate::effects::production_region`, which ends at
+the first `#[cfg(test)]` in the file. Below a `#[cfg(test)] mod test_support {}`
+placed at the end of production, a raw Git child without the pair, reached from
+`parent_sha` or from `discard_uncommitted`'s `reset -q --hard HEAD`, passed the
+census as it stood at `915c0646` (rows G4 and G5 below; the second review of
+#326 found it). Nor does it read `crate::effects::production_code`, whose
+blanking of `#[cfg(test)]` items another pull request is repairing. What it
+keeps from `crate::effects` is the blanking, and it asserts the one property it
+relies on: every byte stays at its offset, so the span it takes out is the test
+module's.
+
+It then asserts that `Command::new(` occurs once, inside `git_command`; that
+`git_command` sets `NO_REPLACEMENT_OBJECTS`' pair; that `Command` is never
+renamed with `as` and is named nowhere but the process import and `git_command`;
+that `git_command` is named nowhere but its definition and its calls, and that
+the functions calling it are, in source order, the fourteen it lists; and that
+neither `env_remove(` nor `env_clear(` occurs. The list of functions at its top
+is the positive control: a region cut short or blanked away fails there rather
+than passing every count below.
+
+The list of callers is what a new Git child moves. Every child of this module
+comes from `git_command`, so a new one changes no `Command::new(` count, here or
+in `runner::contract`'s census, where the builder took this file from fourteen
+to one. It adds a function to that list instead, and whoever adds it names the
+function there.
 
 Each clause went red under a mutation, with the two witnesses above run beside
 it (the census, then the capture and snapshot witnesses):
@@ -501,7 +521,23 @@ The five the witnesses cannot see are why the census exists: `rev-parse HEAD`
 prints the raw id with or without a replacement, and `branch_exists` is on
 neither witness's path.
 
+Round 3 ran the census alone, and wrote each row's expectation before it ran
+(`r3/` in the pull request's evidence). F4 and F5, the first attempt at the
+review's shape, are not in the table: they put the block above `impl Workspace`,
+and the positive control failed there under both versions of the test.
+
+| mutation | at this head | as `915c0646` had it |
+|---|---|---|
+| none (control) | ok | -- |
+| a new `git_command` call in `head_sha_full` | FAILED | -- |
+| `git_command` taken as a value in `head_sha_full`, then called | FAILED | -- |
+| G1: the block, then a raw child below it that `parent_sha` calls | FAILED | ok |
+| G2: the block, then a raw child below it that the rollback's `reset -q --hard HEAD` calls | FAILED | ok |
+| G3: the block alone | ok | -- |
+
 What it cannot see: a Git child that another module's code starts on this
 module's behalf, or a `Command` value this file is handed without naming its
 type. The production region calls no function of another crate module but
-`crate::ulid::ulid`.
+`crate::ulid::ulid`. What it reads as production and a compiler would not: a
+`#[cfg(test)]` item outside the test module. One that builds a `Command` fails
+the census rather than hiding from it.

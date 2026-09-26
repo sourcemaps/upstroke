@@ -3223,9 +3223,59 @@ mod tests {
 
     #[test]
     fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {
-        let code = crate::effects::blank_comments_and_strings(&crate::effects::production_region(
-            include_str!("workspace.rs"),
-        ));
+        let source = include_str!("workspace.rs");
+        let mut code = crate::effects::blank_comments_and_strings(source);
+        assert_eq!(
+            code.len(),
+            source.len(),
+            "the blanking must keep every byte where it was, or the span taken out \
+             below is not the test module's"
+        );
+        let modules: Vec<usize> = code
+            .match_indices("mod tests")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !code
+                    .as_bytes()
+                    .get(at + "mod tests".len())
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            })
+            .collect();
+        assert_eq!(
+            modules.len(),
+            1,
+            "one test module, the only span this census does not read: {modules:?}"
+        );
+        let module = *modules.first().expect("the test module");
+        let attribute = code
+            .get(..module)
+            .map(str::trim_end)
+            .filter(|before| before.ends_with("#[cfg(test)]"))
+            .map(|before| before.len() - "#[cfg(test)]".len())
+            .expect("the test module is configured out of production by the attribute above it");
+        let body = module
+            + code
+                .get(module..)
+                .and_then(|rest| rest.find('{'))
+                .expect("the test module is inline");
+        let mut depth = 0_usize;
+        let mut end = None;
+        for (at, byte) in code.bytes().enumerate().skip(body) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("the test module closes");
+        code.replace_range(attribute..=end, &" ".repeat(end + 1 - attribute));
+
         for present in [
             "fn git_output(",
             "fn run_git_with_private_hooks(",
@@ -3330,6 +3380,69 @@ mod tests {
             elsewhere.is_empty(),
             "`Command` is named outside the process import and `git_command` at byte \
              offsets {elsewhere:?}"
+        );
+
+        let bytes = code.as_bytes();
+        let mut callers: Vec<&str> = Vec::new();
+        for (at, name) in code.match_indices("git_command") {
+            if identifier(bytes.get(at.wrapping_sub(1)))
+                || identifier(bytes.get(at + name.len()))
+                || (start..=close).contains(&at)
+            {
+                continue;
+            }
+            assert!(
+                code.get(at + name.len()..)
+                    .map(str::trim_start)
+                    .is_some_and(|rest| rest.starts_with('(')),
+                "`git_command` is named at byte offset {at} without being called, and a \
+                 Git child built through that value is one the list below cannot place"
+            );
+            let keyword = code
+                .get(..at)
+                .and_then(|before| {
+                    before
+                        .rmatch_indices("fn")
+                        .map(|(keyword, _)| keyword)
+                        .find(|keyword| {
+                            !identifier(bytes.get(keyword.wrapping_sub(1)))
+                                && bytes
+                                    .get(keyword + "fn".len())
+                                    .is_some_and(u8::is_ascii_whitespace)
+                        })
+                })
+                .expect("every call of the builder sits inside a function");
+            let signature = code
+                .get(keyword + "fn".len()..)
+                .map(str::trim_start)
+                .expect("the enclosing function's name");
+            let signature = signature.strip_prefix("r#").unwrap_or(signature);
+            let end = signature
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(signature.len());
+            callers.push(signature.get(..end).expect("an identifier"));
+        }
+        assert_eq!(
+            callers,
+            [
+                "git_output",
+                "run_git_with_private_hooks",
+                "git_output_with_input",
+                "commit_tree_with_upstroke_identity",
+                "current_branch_ref",
+                "parent_sha",
+                "branch_exists",
+                "add_gate_worktree",
+                "verify_gate_worktree",
+                "prepared_commit_matches",
+                "symbolic_ref_target",
+                "prepared_pin_target",
+                "cleanup_gate_workspace",
+                "worktree_is_registered",
+            ],
+            "every Git child of this module is a call of `git_command`, so a new one moves \
+             no `Command::new(` count anywhere: it moves this list, in source order, and \
+             whoever adds it names its function here"
         );
 
         for undo in ["env_remove(", "env_clear("] {
