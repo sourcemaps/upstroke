@@ -563,10 +563,6 @@ pub fn execution_root_of(private_root: &Path, repo_key: &str, run_id: &str) -> P
 /// case-insensitive filesystem names the same root as its uppercase twin and
 /// would make two managers of one root; not a shorter or longer string; not
 /// a path. Refused before any path is built.
-fn names_a_type(found: &str) -> String {
-    format!(" (it names a {found})")
-}
-
 fn refuse_unplain_run_id(run_id: &str) -> Result<(), Refusal> {
     if is_canonical_ulid(run_id) {
         return Ok(());
@@ -585,6 +581,12 @@ fn refuse_unplain_run_id(run_id: &str) -> Result<(), Refusal> {
         name: run_id.to_owned(),
         why,
     })
+}
+
+/// The ` (it names a …)` clause of [`Refusal::SnapshotInputResolvesElsewhere`]'s
+/// message, when the repository resolved the input to an object of another type.
+fn names_a_type(found: &str) -> String {
+    format!(" (it names a {found})")
 }
 
 // ---------------------------------------------------------------------------
