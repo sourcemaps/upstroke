@@ -30,6 +30,8 @@ per-boundary rather than per-spawn is the parent's, in
 level is scoped by the module tree and not by the file, so an out-of-line
 child of `src/runner/host.rs` would otherwise inherit that file's inner
 `#![allow(clippy::disallowed_methods, disallowed_types, disallowed_macros)]`
+(its allow of all three when this was written; since 2026-09-26 it allows
+`clippy::disallowed_types` alone and forbids the other two in production)
 -- `PR6-LANEF-004`, and the mistake two W1 pull requests each made
 independently. Nothing here reaches a governed primitive, so all three are
 DENIED rather than allowed, and this module takes no `effects/allowlist.toml`
