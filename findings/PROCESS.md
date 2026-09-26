@@ -376,8 +376,8 @@ the contention is not evenly spread:
 **How that was counted**, so that it can be redone rather than believed: the `location:` line of
 each of the 307 files at `44edb2a1`, file part only — everything before the first `:` — mapped to a
 module by the rule above and counted strictly as written. The other eleven of the 40 non-`src/`
-paths are `Cargo.toml`, `DESIGN.md`, `pr8-plan.md`, `scripts/pr-ready-audit.sh` and the seven
-unresolved names below.
+paths are `Cargo.toml`, `DESIGN.md`, the PR8 working plan then tracked at the repository root
+(since removed from master), `scripts/pr-ready-audit.sh` and the seven unresolved names below.
 
 **Nine findings name a path that does not resolve from the repository root**, tested against
 `git ls-tree -r --name-only 44edb2a1`. They are counted outside `src/`, where they are written,

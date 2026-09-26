@@ -3154,8 +3154,8 @@ P7/P8 startup repair reads the same refs the transaction recovery moves.
 
 The `RecordingRefs` double every other resume here supplies answers
 "absent" to the startup repair whatever the repository holds, which is
-exactly how a resume that refused its own published head stayed green
-(`pr8-triage.md` C1). A publication test resumes through this.
+exactly how a resume that refused its own published head stayed green.
+A publication test resumes through this.
 
 ## `fn resume_as_certified_by(`
 
