@@ -2,11 +2,8 @@
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -267,10 +264,13 @@ fn the_readiness_expectations_are_per_site_and_both_records_say_so() {
     let source = fs::read_to_string(repo_root().join(READINESS)).expect("the readiness module");
 
     for lint in USED_GOVERNED_LINTS {
+        let level = if *lint == LINT { "deny" } else { "forbid" };
         assert_eq!(
             crate::effects::lint_levels::file_level_lint_state(&source, lint),
-            Some("deny"),
-            "{READINESS} must deny `{lint}` at file-module level"
+            Some(level),
+            "{READINESS} must {level} `{lint}` at file-module level: `deny` for the one lint its \
+             per-site expectations narrow, where `forbid` is E0453 at each of them, and `forbid` \
+             for every other, which nothing in the file lowers"
         );
     }
 

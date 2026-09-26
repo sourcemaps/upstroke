@@ -212,8 +212,26 @@ here instead of quietly searching for a phrase no record contains.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {` › `for lint in USED_GOVERNED_LINTS {`
 
-(1) **All three governed lints are denied at file scope, and none is
-allowed there.** The deny is what makes an expectation a narrowing.
+(1) **Every governed lint is stated at file scope as a denial, none as an
+allowance, and each at the strongest level that compiles.** The file is an
+out-of-line child of the Process funnel, so a lint it leaves unstated takes
+whatever `src/agent/proc.rs` says (`PR6-LANEF-004`). `disallowed_methods` is
+`deny`: the six per-site expectations narrow it, which is what makes an
+expectation a narrowing, and `forbid` would make each of them `E0453`.
+`disallowed_types` and `disallowed_macros` are `forbid`: nothing in the file
+lowers them, and `forbid` is the one level no attribute below can lower -- a
+macro-written allow and a spelled-apart one included -- where `deny` is a
+level such an allow reopens.
+
+Until 2026-09-26 this asserted `deny` for all three, because one attribute
+fenced all three and the fence census excused it whole by the expectations of
+one; `forbid` of the other two compiles (clippy `-D warnings`, measured at
+`a3767bcc` on Linux, Windows and macOS). The levels are pinned exactly
+rather than as "`deny` or `forbid`" for that reason:
+`fences_that_deny_where_forbid_would_compile`
+still excuses an attribute whole by an allowance of any lint it names, so the
+three rejoined in one `deny` would pass it, and this assertion is what refuses
+that.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {` › `let found = governed_allows(&source);`
 

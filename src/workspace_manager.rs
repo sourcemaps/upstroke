@@ -56,11 +56,8 @@
 //! `File`, an `OpenOptions`, or a `Command` — the only handles that leave this
 //! module are paths, object ids, and values.
 
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
 use std::ffi::OsString;

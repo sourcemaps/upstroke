@@ -20,11 +20,8 @@
 // Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 // carries this module's review clause -- effects only inside site-taking APIs,
 // no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};

@@ -37,10 +37,17 @@ can be held across the await points PR11 introduces.
 
 ## `#![deny(`
 
-The three governed lints are `deny` here, and `deny` is the strongest level
-that compiles: this module's children allow governed lints at file level in
-production code (recorded rows of `effects/allowlist.toml`), and a `forbid`
-above an `allow` is `E0453` in every build. A `deny` is a level an inner
+`disallowed_methods` and `disallowed_types` are `deny` here, and `deny` is the
+strongest level that compiles for them: this module's children allow both at
+file level in production code (recorded rows of `effects/allowlist.toml`), and
+a `forbid` above an `allow` is `E0453` in every build. `disallowed_macros` is
+`forbid` in the production build since 2026-09-26, when the two production
+allowances of it below this file, in `host.rs` and `container.rs`, were dropped
+as unused on every CI target; the whole-file test module `host/tests.rs` still
+allows it, so the `forbid` is `cfg_attr(not(test), ..)`, the form #318 gave
+`src/runner/container/census.rs`, and
+`effects::tests::no_deny_of_a_governed_lint_is_excused_by_test_code_alone` is
+the census that asks for it. A `deny` is a level an inner
 `allow` lowers, so since #318's third round this file holds **nothing but
 declarations and re-exports** -- every item it used to hold lives in
 [`contract`](contract.md), which can `forbid` -- and
