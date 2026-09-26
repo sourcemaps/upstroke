@@ -901,8 +901,16 @@ legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 engine's Git operations — branch, checkout, \
 stage, commit, rollback — each a `std::process::Command` on the system git, plus \
 the working-tree writes around them. `invariants_preserved[1]` requires this \
-module's behaviour untouched; the schema-4 equivalents live behind funnels in \
-`crate::workspace_manager` and nothing here calls them."""
+module's behaviour untouched, AMENDED ONCE: to close \
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, by the route that finding's guard \
+names ("an owner decision to unfreeze the module for this one change"), every \
+Git child is built by `git_command`, which sets \
+`crate::workspace_manager::NO_REPLACEMENT_OBJECTS`, so these operations read \
+the objects the repository holds rather than whatever `refs/replace/*` points \
+at them. Each child's arguments are what they were; that variable is the whole \
+of the change, and every other behaviour of the module stays frozen. The \
+schema-4 equivalents live behind funnels in `crate::workspace_manager` and \
+nothing here calls them: the constant is read, and no funnel is called."""
 shrinks_when = "the schema-4 engine replaces the legacy paths that call this module (PR7-PR11); the module goes with them."
 
 [[legacy]]

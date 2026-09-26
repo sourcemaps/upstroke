@@ -28,6 +28,14 @@ execution root, detached worktrees with intents, exact snapshots, engine
 refs, and the Git-object creation contexts — live behind typed funnels in
 [`crate::workspace_manager`] instead, and nothing here calls them.
 
+One behaviour has changed since, to close
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, and the allowlist row says so:
+the Git children are built by `git_command` (its section below), which
+sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS`, so they read
+the objects the repository holds rather than whatever `refs/replace/*`
+points at them. This module reads that constant and calls none of the
+manager's funnels.
+
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.
 
@@ -60,6 +68,35 @@ rather than against Git's defaults. A configured `diff.external`
 escape codes; `textconv` substitutes a rendered form for the bytes. Any of
 those corrupts every downstream check that reads the diff — and
 `capture_diff_is_immune_to_user_diff_config` is the test that says so.
+
+## `fn git_command(directory: &Path) -> Command {`
+
+Where every Git child this file's production code starts is built, and so the
+one place their environment is set. It supplies the `-C <directory>` each of the fourteen
+production sites supplied for itself until
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, in the same position, and one
+thing none of them did: `NO_REPLACEMENT_OBJECTS`.
+
+`git replace P Q` makes Git read `Q` wherever `P` is named while `rev-parse`
+still prints `P`. Measured on git 2.43.0 with this module's code before the
+builder: `capture_candidate` took `P` from `rev-parse HEAD` and diffed it
+against the staged tree, so with the replacement installed its review payload
+was `-two +agent-edit` where without it the payload was `-one +agent-edit`,
+while `commit-tree -p P` writes `parent P` either way; and a gate snapshot of a tree `A` with
+`refs/replace/A -> B` installed checked out `B`'s bytes under a commit that
+records `A`. With the pair set, both read what the repository holds.
+`design/15`, "What an exact snapshot is exact against", is the rule for the
+schema-4 path, which sets the same pair from the same constant.
+
+The variable decides by its presence: set to `1`, to `0` or to nothing, and
+with `core.useReplaceRefs=true` given by `-c` or in the repository's own
+configuration, `git show P:f` read `P`'s own content (git 2.43.0, measured). So
+a call site gets the replaced graph back by building a `Command` of its own or
+by taking the variable off the one it was given, and the census below refuses
+both shapes.
+
+`every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
+the shape; see its section.
 
 ## `impl Workspace` › `pub fn open(root: &Path) -> Result<Self, UpstrokeError> {`
 
@@ -401,3 +438,67 @@ death (CODING_STANDARDS.md §12).
 ## `fn hard_killed_snapshot_owner_is_reclaimed_before_resume()` › `let snapshot_path = store.join("worktrees").join(name);`
 
 Rejoined to the root the parent already knew.
+
+## `fn a_replaced_parent_leaves_the_captured_candidate_unchanged() {`
+
+The witness `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` names: one candidate,
+captured with no replacement installed and again with
+`refs/replace/<parent> -> <another commit>` in place, must be the same
+`CapturedCandidate` -- branch, parent, tree and payload. Against this module's
+code before `git_command` it fails, the payload reading `-two +agent-edit`
+where the first capture read `-one +agent-edit` (measured).
+
+The body runs in a child through `run_replacement_witness_child`, for the
+reason every replacement witness in the crate does: a suite started with
+`GIT_NO_REPLACE_OBJECTS` exported, or with `core.useReplaceRefs=false`
+configured, would hand the code under test the protection this witness exists
+to prove it sets. Before the second capture it asserts its own premise: a Git
+child that does not refuse the refs reads the replacing commit wherever the
+parent is named.
+
+## `fn a_replaced_candidate_tree_materialises_as_recorded() {`
+
+The checkout half. A gate snapshot of a tree that carries a replacement must
+hold the tree its ephemeral commit records. Against the code before
+`git_command` the snapshot held `replacing` (measured), under a commit that
+records the other tree.
+
+This is the producer's half only. A gate a runner starts in that snapshot gets
+the environment the runner composes, and `HostRunner::for_legacy_workspace`,
+which the v0.1 conductor installs, reads `ObjectGraph::AsReplaced`: so over
+these recorded bytes such a gate still reads the replaced graph through Git.
+
+## `fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {`
+
+What keeps the finding closed as the module changes. It reads this file's
+production region -- the test module cut off and comments and string literals
+blanked, both through `crate::effects`' own derivations -- and asserts that
+`Command::new(` occurs once, inside `git_command`; that `git_command` sets
+`NO_REPLACEMENT_OBJECTS`' pair; that `Command` is never renamed with `as` and is
+named nowhere but the process import and `git_command`; and that neither
+`env_remove(` nor `env_clear(` occurs. The list of functions at its top is the
+positive control: a region cut short or blanked away fails there rather than
+passing every count below.
+
+Each clause went red under a mutation, with the two witnesses above run beside
+it (the census, then the capture and snapshot witnesses):
+
+| mutation | census | capture | snapshot |
+|---|---|---|---|
+| none (control) | ok | ok | ok |
+| a raw `Command::new("git")` in `head_sha_full` | FAILED | ok | ok |
+| a fully qualified `std::process::Command::new("git")` in `branch_exists` | FAILED | ok | ok |
+| `Command as Git` in the import list, used in `branch_exists` | FAILED | ok | ok |
+| `use std::process::Command as Git;` on a line of its own, used in `branch_exists` | FAILED | ok | ok |
+| `git_command` without the pair | FAILED | FAILED | FAILED |
+| `.env_remove(NO_REPLACEMENT_OBJECTS.0)` in `git_output` | FAILED | FAILED | ok |
+| `.env_clear()` in `branch_exists` | FAILED | ok | ok |
+
+The five the witnesses cannot see are why the census exists: `rev-parse HEAD`
+prints the raw id with or without a replacement, and `branch_exists` is on
+neither witness's path.
+
+What it cannot see: a Git child that another module's code starts on this
+module's behalf, or a `Command` value this file is handed without naming its
+type. The production region calls no function of another crate module but
+`crate::ulid::ulid`.
