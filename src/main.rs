@@ -946,9 +946,8 @@ mod tests {
     fn a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not() {
         let record = std::env::temp_dir().join(format!(
             "upstroke-pr4-cli-ambient-latch-{}",
-            std::process::id()
+            upstroke::ulid::ulid()
         ));
-        let _ = std::fs::remove_file(&record);
         let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .args(["cli_ambient_latch_helper", "--ignored", "--nocapture"])
             .env(AMBIENT_LATCH_RECORD, &record)

@@ -40,8 +40,23 @@ children and then the directory — because `RunDir.RemovePrivateHusk`
 takes a [`crate::rundir::PrivateHalfProof`], and a pre-lock scratch root
 is not the two-halves shape that mints one.
 
-The naming is the predecessor's, unchanged: the pid and the thread id
-keep two live fixtures apart, and reclamation is what this type adds.
+Reclamation is what this type added. Its naming was the predecessor's
+until `fn new` below changed it: the pid and the thread id kept two live
+fixtures apart and did nothing about a later process that repeats both.
+
+## `impl Scratch` › `fn new(tag: &str) -> Self {`
+
+The root was `temp_dir()/upstroke-prelock-<tag>-<pid>-ThreadId(<n>)`, and a later process
+repeats both ids: it computed a name a crashed predecessor had left, and `create_private_dir`
+adopted what stood there (`PR7-SCRATCH-FIXTURE-LEAK`). The name now ends in the tail of a fresh
+ULID, the part `scratch_tree::acquire` names its roots with, which no later process computes. The
+tail is taken with `get` rather than a slice, because §7 denies panicking indexing.
+
+This type keeps its own `Drop` rather than holding a `ScratchTree` guard, because the witnesses
+in this file pin that `Drop`'s contract: a root removed early is a reclaim that failed and is
+reported, where the guard reads an absent root as reclaimed. The create still adopts an existing
+directory, since a `TOPOLOGY_MODULE` has no exclusive-create funnel; what keeps anything from
+standing at the name is the ULID.
 
 ## `impl Scratch` › `fn path(&self) -> &Path {`
 
@@ -201,8 +216,8 @@ selected-and-passed, and selected-nothing-at-all.
 ## `fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {` › `env: Vec::new(),`
 
 Nothing to pass: the child derives its own scratch root from
-the temp directory and its own pid, so the two processes
-cannot collide and there is no state to hand over.
+the temp directory and a fresh ULID of its own, so the two
+processes cannot collide and there is no state to hand over.
 
 ## `fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {` › `assert_eq!(`
 

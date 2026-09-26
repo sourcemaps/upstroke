@@ -179,11 +179,9 @@ struct Scratch {
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "upstroke-prelock-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let id = crate::ulid::ulid();
+        let tail = id.get(id.len().saturating_sub(10)..).unwrap_or(&id);
+        let root = std::env::temp_dir().join(format!("upstroke-prelock-{tag}-{tail}"));
         create_private_dir(&root, &mut NoHooks).expect("scratch root");
         Self { root }
     }

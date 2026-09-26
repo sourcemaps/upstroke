@@ -1137,12 +1137,15 @@ fn timeout_kills_the_process_tree_quickly() {
 #[cfg(unix)]
 #[test]
 fn timeout_kills_a_background_grandchild_before_it_can_escape() {
-    let marker = std::env::temp_dir().join(format!(
-        "upstroke-proc-tree-{}-{}.marker",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed")
-    ));
-    let _ = std::fs::remove_file(&marker);
+    let parent = std::env::temp_dir();
+    let tree = match crate::rundir::scratch_tree::acquire(&parent, "proc-tree") {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `proc-tree` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let marker = tree.path().join("marker");
 
     let mut command = shell("(sleep 1; printf leaked > \"$UPSTROKE_MARKER\") & wait");
     command.env("UPSTROKE_MARKER", &marker);
@@ -1151,7 +1154,6 @@ fn timeout_kills_a_background_grandchild_before_it_can_escape() {
 
     thread::sleep(Duration::from_millis(1300));
     let leaked = marker.exists();
-    let _ = std::fs::remove_file(&marker);
     assert!(
         !leaked,
         "the timed-out process group's background grandchild survived"

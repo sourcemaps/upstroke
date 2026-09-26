@@ -8163,11 +8163,15 @@ mod termination {
         /// side by side in one process and two fixtures share shape names.
         #[cfg(target_os = "linux")]
         fn run_a_stand_in_fixture(fixture: &str, variable: &str, shape: &str) {
-            let record = std::env::temp_dir().join(format!(
-                "upstroke-stand-in-{}-{fixture}-{shape}.pid",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&record);
+            let parent = std::env::temp_dir();
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, "stand-in") {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `stand-in` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let record = tree.path().join(format!("{fixture}-{shape}.pid"));
             let path = record.to_str().expect("a UTF-8 temporary path");
             run_fixture_within(
                 fixture,
@@ -8183,7 +8187,6 @@ mod termination {
             // The obligation the bound takes on: a helper left behind is the
             // exiting process's to shed, not a leak into the run.
             assert_the_process_is_gone(stand_in, &format!("the {fixture} {shape} stand-in"));
-            let _ = std::fs::remove_file(&record);
         }
 
         /// A `Reaper` handle whose pipes are this fixture's own, with the
