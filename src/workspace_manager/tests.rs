@@ -460,12 +460,6 @@ fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
     fs::create_dir_all(present.join("nested")).expect("a tree to remove");
     assert!(remove_tree_once_handles_close(&present).is_ok());
     assert!(!present.exists(), "and it is actually gone");
-    // `scratch` has no `Drop` guard, so a test that does not remove its own
-    // root leaves one empty directory in the temp dir per process, forever.
-    // Three had already accumulated from this test alone before it was
-    // noticed -- the same leak recorded against `rundir.rs::scratch` in
-    // `reviews/FINDINGS.md`, reintroduced by the test that reported it.
-    fs::remove_dir_all(root).expect("this test cleans up after itself");
 }
 
 /// Run `body`, returning its panic message if it panicked.

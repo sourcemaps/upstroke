@@ -49,10 +49,6 @@ fn make_dir(path: &Path) {
         .expect("the scratch directory");
 }
 
-fn drop_dir(path: &Path) {
-    let _ = crate::rundir::remove_public_husk(path, &mut crate::rundir::NoHooks);
-}
-
 struct Fixture {
     /// The guard over the root [`Fixture::new`] acquired, kept for the
     /// fixture's whole life so the tree is reclaimed when it drops -- on a
@@ -235,12 +231,6 @@ impl Fixture {
             .common_git_dir()
             .join("worktrees")
             .join("kalpha-g0")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        drop_dir(&self.root);
     }
 }
 
