@@ -634,8 +634,17 @@ impl crate::agent::AdapterSource for ScaffoldAdapters {
     }
 }
 
+fn scaffold_run_paths(fixture: &Fixture) -> crate::rundir::RunPaths {
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.base,
+        "01SCAFFOLD00000000000000AA",
+        &fixture.root.join("home"),
+    );
+    paths.create().expect("the scaffold's run directories");
+    paths
+}
+
 pub(super) struct Run {
-    pub(super) fixture: Fixture,
     pub(super) paths: crate::rundir::RunPaths,
     pub(super) harness: Arc<Mutex<HookHarness>>,
     pub(super) hooks: Hooks,
@@ -649,6 +658,7 @@ pub(super) struct Run {
     pub(super) verify_reviewers: Vec<super::attempt::ReviewerPlan>,
     pub(super) verify_review: VerifyReview,
     pub(super) ids_source: super::seams::RealIds,
+    pub(super) fixture: Fixture,
 }
 
 impl super::integrate::IntegrationJournal for Run {
@@ -877,12 +887,7 @@ impl Run {
             ids_source: super::seams::RealIds,
             timeline,
             harness,
-            paths: {
-                let paths =
-                    crate::rundir::RunPaths::new(&fixture.base, "01SCAFFOLD00000000000000AA");
-                paths.create().expect("the scaffold's run directories");
-                paths
-            },
+            paths: scaffold_run_paths(&fixture),
             fixture,
         }
     }
@@ -1045,12 +1050,7 @@ impl Run {
             ids_source: super::seams::RealIds,
             timeline,
             harness,
-            paths: {
-                let paths =
-                    crate::rundir::RunPaths::new(&fixture.base, "01SCAFFOLD00000000000000AA");
-                paths.create().expect("the scaffold's run directories");
-                paths
-            },
+            paths: scaffold_run_paths(&fixture),
             fixture,
         };
         adopted.runner.watching(adopted.emitter.log.path());
