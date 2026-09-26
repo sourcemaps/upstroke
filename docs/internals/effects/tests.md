@@ -1074,6 +1074,58 @@ And the three that ARE used are exactly the three recorded.
 
 No table at all is the strongest form of the answer.
 
+## `fn forbids_non_local_definitions(source: &str) -> bool {`
+
+Whether a crate root forbids `non_local_definitions` at file level, read
+with the prologue reader every fence census here uses, so it reads what
+that reader reads: the production build's level (`cfg_attr(not(test), ..)`
+counts, `cfg_attr(test, ..)` does not), after doc comments, plain comments
+and other inner attributes, and nothing after the first item.
+
+## `fn every_crate_root_forbids_non_local_definitions() {`
+
+The pin on the line PR #325 added to `src/lib.rs`, `src/main.rs` and
+`examples/probe.rs`; without it, deleting any of the three failed nothing.
+
+What the line closes: a macro invoked inside a function body can expand to
+an `impl` of a type or trait defined outside that body, and the methods it
+defines are callable from anywhere under a name no source text spells --
+so no census here reads the name, and the method's body is compiled in the
+lint scope of the file that invoked the macro, allowance included.
+`non_local_definitions` is rustc's lint for exactly that `impl` (and for a
+`#[macro_export]` macro defined inside a body). It warns by default, so
+CI's `-D warnings` refuses it only until an inner `#[allow]` lowers it --
+measured: `-D warnings` with an inner allow builds -- and the macro can
+write that allow itself. `forbid` is the level no inner attribute lowers:
+rustc refuses the attempt as `E0453`, whatever the expansion spells, and a
+command-line `-A non_local_definitions` does not lower a source `forbid`
+either; only `--cap-lints` does, which is `.cargo/` configuration and an
+instrument of its own.
+
+What it does not close, measured on rustc 1.97.1 and 1.85.0 with the lint
+forbidden: an `impl` in a **module-level `const _` initializer** -- nested
+in another `const _` or inside an inline `mod` included -- is not linted,
+because rustc treats that body as transparent for derive output. A macro
+there defines a method another module calls, and the crate builds. Every
+other body was refused: a function body, a named `const` or `static`, an
+array length, an enum discriminant, a const-generic default, an associated
+`const`, an inline `const`, a closure in a `static`, a trait's default
+body, and a `const _` inside a function. So the line is not, alone, a
+refusal of expansion outside a function body.
+
+The domain is every target root `cargo metadata` reports, so a new bin,
+example or test target is read without being named; the three written
+out are asserted as roots so that a metadata reading that lost one cannot
+pass by reading fewer.
+
+## `fn every_crate_root_forbids_non_local_definitions() {` › `for (source, forbidden) in [`
+
+Negative controls: the reader answers `forbid` only for a file-level
+statement the production build applies -- not for `deny` or `warn`, not
+for one the test build alone applies, not for a different lint, a comment,
+an inner attribute after the first item, an outer attribute on an item or
+an inner attribute of an inline module.
+
 ## `fn the_legacy_section_is_frozen_and_may_only_shrink() {`
 
 ---------------------------------------------------------------------------

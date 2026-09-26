@@ -2510,6 +2510,69 @@ fn cargo_toml_declares_no_lint_table_that_could_allow_a_governed_lint() {
     }
 }
 
+fn forbids_non_local_definitions(source: &str) -> bool {
+    crate::effects::lint_levels::file_level_lint_state(source, "non_local_definitions")
+        == Some("forbid")
+}
+
+#[test]
+fn every_crate_root_forbids_non_local_definitions() {
+    let roots = crate_roots();
+    let mut read = Vec::new();
+    let mut silent = Vec::new();
+    for root in roots.roots() {
+        let source = fs::read_to_string(root).expect("a crate root");
+        if !forbids_non_local_definitions(&source) {
+            silent.push(root.display().to_string());
+        }
+        read.push(root.display().to_string());
+    }
+    assert!(
+        silent.is_empty(),
+        "a crate root that does not forbid `non_local_definitions` at file level lets a macro \
+         invoked inside a function define a method reachable from anywhere: {silent:#?}"
+    );
+    for named in ["src/lib.rs", "src/main.rs", "examples/probe.rs"] {
+        assert!(
+            roots.is_root_relative(named),
+            "`{named}` is no longer a target root of this package, so the census above did not \
+             read it: {read:#?}"
+        );
+    }
+
+    for (source, forbidden) in [
+        ("#![forbid(non_local_definitions)]\n", true),
+        (
+            "//! docs\n#![forbid(non_local_definitions)]\n// a note\n#![allow(dead_code)]\npub mod a;\n",
+            true,
+        ),
+        (
+            "#![cfg_attr(not(test), forbid(non_local_definitions))]\n",
+            true,
+        ),
+        ("#![forbid(dead_code, non_local_definitions)]\n", true),
+        ("", false),
+        ("pub mod a;\n", false),
+        ("#![deny(non_local_definitions)]\n", false),
+        ("#![warn(non_local_definitions)]\n", false),
+        ("#![cfg_attr(test, forbid(non_local_definitions))]\n", false),
+        ("#![forbid(dead_code)]\n", false),
+        ("// #![forbid(non_local_definitions)]\n", false),
+        ("pub mod a;\n#![forbid(non_local_definitions)]\n", false),
+        ("#[forbid(non_local_definitions)]\npub mod a;\n", false),
+        (
+            "mod inner {\n    #![forbid(non_local_definitions)]\n}\n",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            forbids_non_local_definitions(source),
+            forbidden,
+            "{source:?}"
+        );
+    }
+}
+
 #[test]
 fn the_legacy_section_is_frozen_and_may_only_shrink() {
     let list = allowlist();
