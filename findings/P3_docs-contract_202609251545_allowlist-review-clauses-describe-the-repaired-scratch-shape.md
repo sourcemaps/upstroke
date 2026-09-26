@@ -44,6 +44,29 @@ Measured at this head by extracting each `review` block and matching its sentenc
 
 `src/runner/host/tests.rs`'s clause is untouched and still accurate: that file was not changed.
 
+**Amended by #322's round 3.** The list above was measured at this row's reviewed SHA, and #322's
+later commits, round 2's conversions among them, moved more. Two more clauses now describe a shape
+the tree no longer has:
+
+- **`src/review.rs`** — "review transcript writes and the review scratch directories its tests
+  build". Round 2 moved the four tests that built those directories to `review_tree`, which takes
+  its root through `rundir::scratch_tree::acquire`; `create_dir_all(` and `remove_dir_all(` each
+  occur 4 times in the file at this row's reviewed SHA and 0 times at the round-3 head (comment
+  lines excluded, a lexical count and not the denial census the clause means), so what the
+  allowance still covers may be the transcript writes alone.
+- **`src/agent/bin.rs`** — "the Windows batch-shim witness creates a scratch directory". Round 2
+  acquires that directory through the same token; `create_dir_all(` goes from 1 to 0 by the same
+  count. The `.cmd` write and its execution remain.
+
+And the per-method counts of files this row already names moved again, by the same lexical count
+between this row's reviewed SHA and the round-3 head: `src/agent/proc/tests.rs`'s
+`remove_dir_all(` 16 → 14 and `remove_file(` 4 → 2, so the "12 to 10" above is stale too;
+`src/workspace_manager/tests.rs`'s `remove_dir_all(` 15 → 9; `src/runner/container/tests.rs`'s
+9 → 3. `src/agent/proc.rs`, `src/runner/container/view.rs`, `src/runner/container/census/tests.rs`,
+`src/effects/tests.rs`, `src/export.rs` and `src/main.rs` also lost removal calls in those commits,
+but their clauses state no per-method count, and read against the round-3 head, none describes a
+pre-clean or a predictable root, so nothing in their prose moved.
+
 ## What the change that takes this up should do
 
 Rewrite those clauses to describe the token-carried shape, and re-measure each census by denying
