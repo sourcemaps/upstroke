@@ -2771,6 +2771,14 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             "production code after an item a compound gate removes",
             "#[cfg(all(unix, test))]\nmacro_rules! t {\n    () => {};\n}\nm!();\n",
         ),
+        (
+            "an identifier ending `fn` before a `where`",
+            "impl T for Tfn where u8: Copy {\n    m!();\n}\n",
+        ),
+        (
+            "an identifier with `fn` after an underscore before a `where`",
+            "impl T for x_fn where u8: Copy {\n    m!();\n}\n",
+        ),
     ] {
         assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
     }
@@ -2851,6 +2859,10 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
         ("a macro in a comment", "// m!();\n/* n!{} */\nfn f() {}\n"),
         ("a macro in a string", "const S: &str = \"m!()\";\n"),
         (
+            "a comparison in a const block in the return type",
+            "fn f() -> Foo<{ N > 1 }> {\n    m!()\n}\n",
+        ),
+        (
             "a test-only function with two type parameters",
             "#[cfg(test)]\nfn t<A: Copy, B>(a: A, b: B) {\n    assert!(true);\n}\n",
         ),
@@ -2892,6 +2904,36 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
 }
 
 #[test]
+fn the_macro_position_reader_names_each_invocation_and_the_line_of_its_bang() {
+    fn outside(source: &str) -> Vec<(String, usize)> {
+        super::census_domain::macro_invocations_outside_function_bodies(source)
+            .into_iter()
+            .map(|invocation| (invocation.name, invocation.line))
+            .collect()
+    }
+    let named = |name: &str, line: usize| (name.to_owned(), line);
+
+    assert_eq!(outside("m!();\n"), vec![named("m", 1)]);
+    assert_eq!(outside("fn f() {}\n\nm!();\n"), vec![named("m", 3)]);
+    assert_eq!(
+        outside("const C: u8 = m\n    !\n    ();\n"),
+        vec![named("m", 2)],
+        "the line is the `!`'s, not the name's"
+    );
+    assert_eq!(
+        outside("declare_const!();\nx_fn!();\n"),
+        vec![named("declare_const", 1), named("x_fn", 2)],
+        "a name is read through its underscores, so neither is a keyword"
+    );
+    assert_eq!(
+        outside("n! { fn x > { m!() } }\n"),
+        vec![named("n", 1), named("m", 1)],
+        "a `>` that closes no `<` ends a header that has no body, so the braces after it are \
+         not a function body and what is inside them is reported"
+    );
+}
+
+#[test]
 fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {
     const ALL_THREE: &str = "#![forbid(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    clippy::disallowed_macros\n)]\n";
     let tree: Vec<(String, String)> = [
@@ -2926,6 +2968,24 @@ fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lower
             "#![allow(clippy::disallowed_methods)]\n".to_owned(),
         ),
         ("examples/root.rs", "#![allow(clippy::disallowed_macros)]\n".to_owned()),
+        (
+            "src/far_allow.rs",
+            "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        ("src/far_allow/near_forbid.rs", ALL_THREE.to_owned()),
+        (
+            "src/far_allow/near_forbid/silent_grandchild.rs",
+            "pub fn f() {}\n".to_owned(),
+        ),
+        ("src/far_forbid.rs", ALL_THREE.to_owned()),
+        (
+            "src/far_forbid/near_allow.rs",
+            "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/far_forbid/near_allow/silent_grandchild.rs",
+            "pub fn f() {}\n".to_owned(),
+        ),
     ]
     .into_iter()
     .map(|(path, source)| (path.to_owned(), source))
@@ -2939,6 +2999,9 @@ fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lower
         "src/test_only_forbid.rs",
         "src/forbidding/undecided_child.rs",
         "examples/root.rs",
+        "src/far_allow.rs",
+        "src/far_forbid/near_allow.rs",
+        "src/far_forbid/near_allow/silent_grandchild.rs",
     ]
     .into_iter()
     .map(str::to_owned)

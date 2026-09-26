@@ -1217,10 +1217,12 @@ test item, an `impl` for a type named `r#fn`, an associated `const` after a
 bodiless declaration, an `impl` after a `fn` written in a macro's
 parentheses, brackets or braces, an `impl`, a `trait`, an `enum` and a
 `struct` whose last generic parameter is test-only (which used to take the
-whole item out of the region), and production code after a generic test-only
-function and after an item a compound gate removes. Accepted: a function body,
-a method body, a trait's default body, a function inside a `const _`, headers
-holding a const block, an array, a `where` clause
+whole item out of the region), production code after a generic test-only
+function and after an item a compound gate removes, and an `impl` for a type
+whose name ends in `fn` (`Tfn`) or holds one after an underscore (`x_fn`),
+neither of which is a `fn` header. Accepted: a function body, a method body,
+a trait's default body, a function inside a `const _`, headers holding a
+const block -- one comparing inside it, too -- an array, a `where` clause
 with a higher-ranked bound and an arrow, qualifiers and an ABI, raw and
 non-ASCII function names, a nested function, test-only items and modules,
 test-only functions with a comma in the header (two type parameters, a
@@ -1242,6 +1244,20 @@ precision, pinned because the census prints the list: a mutation matrix
 over the reader found the two closers pinned by nothing else, since a `;`
 ended every other header they could.
 
+## `fn the_macro_position_reader_names_each_invocation_and_the_line_of_its_bang() {`
+
+The list the census prints, name and line. The line is the `!`'s, counted
+from one; a name is read through its underscores, so `declare_const!` and
+`x_fn!` are reported and neither is read as a keyword; and a `>` that closes
+no `<` ends a header with no body, so what the braces after it hold is
+reported too. Added in #325's fourth round with the `Tfn`, `x_fn` and
+`Foo<{ N > 1 }>` fixtures above and the three-level trees below: a review's
+compiled mutation matrix at `c0aa018c` left six of the reader's and the
+domain's decisions alive (the line's `+ 1`, `_` as an identifier byte,
+searching for `fn` from every byte rather than every identifier, a header's
+const block scanned rather than skipped, an unopened `>` ignored, and the
+ancestors read farthest first), and each is killed here.
+
 ## `fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {`
 
 The domain derivation over a synthetic tree, each file there for one
@@ -1251,7 +1267,9 @@ in when it allows or denies a lint, when a child states nothing under an
 allowing parent, when nothing states a level at all, when its `forbid` is
 written for the test build only, and when its prologue is undecided under
 a forbidding parent -- the case that inheritance would otherwise read as
-forbidden.
+forbidden. Three levels deep, a child that states nothing takes its
+**nearest** ancestor's level: out under a forbidding parent whose own
+parent allows, in under an allowing parent whose own parent forbids.
 
 ## `fn the_legacy_section_is_frozen_and_may_only_shrink() {`
 
