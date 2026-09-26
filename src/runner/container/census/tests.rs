@@ -1314,7 +1314,6 @@ fn concurrent_reclaimers_converge() {
         if counts.iter().all(|count| *count > 0) {
             interleaved += 1;
         }
-        let _ = fs::remove_dir_all(&root);
     }
     assert!(
         interleaved > 0,
@@ -3491,7 +3490,6 @@ fn a_fresh_and_a_resuming_census_race_one_container_and_converge() {
             assert!(!name.intent_path(&root).exists(), "[round {round}]");
             assert!(!view_path(&root, name).exists(), "[round {round}]");
         }
-        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -3847,5 +3845,4 @@ fn a_view_removal_that_never_succeeds_blocks_admission() {
         .expect("the census completes once the view can be removed");
     assert_eq!(complete.report().reclaimed.len(), 1);
     assert!(!view.exists() && !harness.intent_exists(&name));
-    let _ = fs::remove_dir_all(&harness.root);
 }

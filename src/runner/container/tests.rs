@@ -4742,7 +4742,6 @@ fn windows_a_view_held_delete_pending_past_the_budget_refuses_and_keeps_the_inte
     .expect("once the name has gone the retained intent is reclaimed by the next census");
     assert!(!view_path.exists());
     assert!(!launched.intent_path.exists());
-    let _ = fs::remove_dir_all(&fixture.root);
 }
 
 #[test]
@@ -4811,7 +4810,6 @@ fn windows_an_intent_whose_remover_stalls_delete_pending_is_read_and_removed_onc
     });
     windows_assert_converged_through_the_wait("removal", &schedule);
     assert!(!path.exists());
-    let _ = fs::remove_dir_all(&fixture.root);
 }
 
 #[test]
