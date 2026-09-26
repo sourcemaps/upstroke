@@ -2069,10 +2069,9 @@ pub(crate) mod census_domain {
             let end = identifier_end(bytes, at);
             if bytes.get(at..end) == Some(b"fn".as_slice()) && !raw_prefix_before(bytes, at) {
                 let name = whitespace(bytes, end);
-                if name > end
-                    && bytes
-                        .get(name)
-                        .is_some_and(|byte| is_identifier_byte(*byte))
+                if bytes
+                    .get(name)
+                    .is_some_and(|byte| is_identifier_byte(*byte))
                 {
                     if let Some(open) = body_brace(bytes, token_end(bytes, name)) {
                         if let Some(close) = super::matching(bytes, open, b'{', b'}') {
@@ -2109,7 +2108,7 @@ pub(crate) mod census_domain {
     fn macro_bangs(bytes: &[u8]) -> Vec<(usize, String)> {
         let mut found = Vec::new();
         for (bang, byte) in bytes.iter().enumerate() {
-            if *byte != b'!' || bytes.get(bang + 1) == Some(&b'=') {
+            if *byte != b'!' {
                 continue;
             }
             let mut name_end = bang;
@@ -2127,10 +2126,7 @@ pub(crate) mod census_domain {
             let Some(name) = bytes.get(name_start..name_end) else {
                 continue;
             };
-            if name.is_empty()
-                || name.first().is_some_and(u8::is_ascii_digit)
-                || (is_keyword(name) && !raw_prefix_before(bytes, name_start))
-            {
+            if name.is_empty() || (is_keyword(name) && !raw_prefix_before(bytes, name_start)) {
                 continue;
             }
             let after = whitespace(bytes, bang + 1);

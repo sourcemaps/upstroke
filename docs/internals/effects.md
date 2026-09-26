@@ -2168,7 +2168,10 @@ One past the last identifier byte from `from`.
 ## `pub(crate) mod census_domain` › `fn raw_prefix_before(bytes: &[u8], start: usize) -> bool {`
 
 Whether the identifier starting at `start` is written raw: `r#`
-immediately before it, and no identifier byte before the `r`.
+immediately before it, and no identifier byte before the `r`. In
+`function_bodies` it is what keeps `impl T for r#fn where .. {` -- a type
+called `fn` -- from reading as a function `where` whose body is the `impl`
+block's.
 
 ## `pub(crate) mod census_domain` › `fn token_end(bytes: &[u8], from: usize) -> usize {`
 
@@ -2176,8 +2179,8 @@ One past the identifier at `from`, reading an `r#` prefix as part of it.
 
 ## `pub(crate) mod census_domain` › `fn function_bodies(bytes: &[u8]) -> Vec<(usize, usize)> {`
 
-The brace pair of every function body: every non-raw `fn` followed by
-whitespace and an identifier, so an item or an associated or foreign
+The brace pair of every function body: every non-raw `fn` whose next token
+is an identifier, so an item or an associated or foreign
 function, whatever qualifiers and visibility precede it, and not a
 function-pointer type, where `(` follows `fn`. A declaration without a
 body contributes nothing. A function nested in another's body, or
@@ -2197,18 +2200,26 @@ except the `>` of `->`, the only other `>` a header writes outside a
 group -- so the body is the first `{` at angle depth zero. A const block
 inside angle brackets is skipped whole too, so a `<` or `>` in it counts
 for nothing. A `;` or an unmatched closer at depth zero ends a header that
-has no body. Reading a const block as the body would put a real body's
-macros outside and a header's inside -- the two readings the fixtures
-`a header holding a const block` and `a const-generic default` pin.
+has no body: a declaration's `;`, and the `)`, `]` or `}` that closes a
+macro's arguments when a `fn` and a name are written inside them, where scanning on
+would take the next item's braces -- an associated `const`, an `impl` -- for
+a body and hide what is in them. Reading a const block as the body would
+put a real body's macros outside and a header's inside -- the two readings
+the fixtures `a header holding a const block` and `a const-generic default`
+pin -- and the two ends are pinned by the fixtures that put an associated
+`const` after a bodiless declaration and an `impl` after a `fn` written in
+a macro's arguments.
 
 ## `pub(crate) mod census_domain` › `fn macro_bangs(bytes: &[u8]) -> Vec<(usize, String)> {`
 
 Every macro invocation's `!` and the name before it.
 
-Read from the `!` rather than from the name: a `!` that is not `!=`,
-whose preceding token is an identifier -- not a keyword unless raw, not
-a number -- and whose next token is a delimiter, or an identifier and
-then a delimiter (`macro_rules! name { .. }`). The keyword test is what
+Read from the `!` rather than from the name: a `!` whose preceding token
+is an identifier -- not a keyword unless raw -- and whose next token is a
+delimiter, or an identifier and then a delimiter
+(`macro_rules! name { .. }`). Requiring the delimiter is what keeps
+`a != b` out, as it does in `macro_at`: after that `!` comes `=`, which
+opens nothing. The keyword test is what
 keeps unary negation out -- `if !(x)`, `return !(x)`, `while !done {` --
 and, because no other identifier stands before a `!` in valid Rust, it
 also lets the second identifier be read after any name rather than after

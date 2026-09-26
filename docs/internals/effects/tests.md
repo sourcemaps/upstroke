@@ -1212,13 +1212,27 @@ names, `macro_rules!` (a raw name too), an aliased `include!`, an inline
 module, an `impl`, a `trait` and an `extern` block, a module-level and a
 nested `const _`, a named `const`, a `static` and a closure in one, an
 enum discriminant, a field's type, a return type, a parameter's type, a
-const-generic default, an attribute's value, and production code beside
-a test item. Accepted: a function body, a method body, a trait's default
+const-generic default, an attribute's value, production code beside a
+test item, an `impl` for a type named `r#fn`, an associated `const` after a
+bodiless declaration, and an `impl` after a `fn` written in a macro's
+parentheses, brackets or braces. Accepted: a function body, a method body, a trait's default
 body, a function inside a `const _`, headers holding a const block, an
 array, a `where` clause with a higher-ranked bound and an arrow,
 qualifiers and an ABI, raw and non-ASCII function names, a nested
-function, test-only items and modules, and unary `!`, `!=`, comments and
-strings that are not invocations at all.
+function, test-only items and modules, a keyword before a `!` outside a
+body, and unary `!`, `!=`, comments and strings that are not invocations
+at all.
+
+## `fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {`
+
+The domain derivation over a synthetic tree, each file there for one
+reading: out when all three are forbidden, or inherited forbidden by a
+child that states nothing, or when the file is a whole-file test module;
+in when it allows or denies a lint, when a child states nothing under an
+allowing parent, when nothing states a level at all, when its `forbid` is
+written for the test build only, and when its prologue is undecided under
+a forbidding parent -- the case that inheritance would otherwise read as
+forbidden.
 
 ## `fn the_legacy_section_is_frozen_and_may_only_shrink() {`
 

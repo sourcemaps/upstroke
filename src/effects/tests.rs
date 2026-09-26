@@ -2727,6 +2727,26 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             "production code beside a test item",
             "#[cfg(test)]\nfn t() {}\nm!();\n",
         ),
+        (
+            "an impl for a type named `r#fn`",
+            "impl T for r#fn where u8: Copy {\n    m!();\n}\n",
+        ),
+        (
+            "an associated const after a bodiless declaration",
+            "trait T {\n    fn a(&self);\n    const C: () = {\n        m!()\n    };\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's arguments",
+            "fn f() {\n    n!(fn x);\n}\nimpl X {\n    m!();\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's brackets",
+            "fn f() {\n    n![fn x];\n}\nimpl X {\n    m!();\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's braces",
+            "fn f() {\n    n! { fn x }\n}\nimpl X {\n    m!();\n}\n",
+        ),
     ] {
         assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
     }
@@ -2783,6 +2803,10 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             "no macro",
             "const B: bool = !A;\nfn f(a: bool, b: u8) -> bool {\n    if !a { return !(b != 1); }\n    a != (b == 2)\n}\n",
         ),
+        (
+            "a keyword before a `!` outside a body",
+            "const X: bool = if !A { true } else { !B };\n",
+        ),
         ("a macro in a comment", "// m!();\n/* n!{} */\nfn f() {}\n"),
         ("a macro in a string", "const S: &str = \"m!()\";\n"),
     ] {
@@ -2792,6 +2816,61 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             outside(source)
         );
     }
+}
+
+#[test]
+fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {
+    const ALL_THREE: &str = "#![forbid(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    clippy::disallowed_macros\n)]\n";
+    let tree: Vec<(String, String)> = [
+        ("src/forbidding.rs", ALL_THREE.to_owned()),
+        (
+            "src/forbidding/silent_child.rs",
+            "pub fn f() {}\n".to_owned(),
+        ),
+        (
+            "src/allowing.rs",
+            "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/allowing/silent_child.rs",
+            "#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/denying.rs",
+            "#![deny(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        ("src/silent.rs", "pub fn f() {}\n".to_owned()),
+        (
+            "src/test_only_forbid.rs",
+            "#![cfg_attr(test, forbid(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    clippy::disallowed_macros\n))]\n".to_owned(),
+        ),
+        (
+            "src/forbidding/undecided_child.rs",
+            "#![cfg_attr(unix, forbid(clippy::disallowed_methods))]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/rundir/tests.rs",
+            "#![allow(clippy::disallowed_methods)]\n".to_owned(),
+        ),
+        ("examples/root.rs", "#![allow(clippy::disallowed_macros)]\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source))
+    .collect();
+    let domain = production_files_a_governed_lint_is_not_forbidden_in(&tree);
+    let expected: BTreeSet<String> = [
+        "src/allowing.rs",
+        "src/allowing/silent_child.rs",
+        "src/denying.rs",
+        "src/silent.rs",
+        "src/test_only_forbid.rs",
+        "src/forbidding/undecided_child.rs",
+        "examples/root.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(domain, expected);
 }
 
 #[test]
