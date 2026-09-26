@@ -1111,7 +1111,9 @@ other body was refused: a function body, a named `const` or `static`, an
 array length, an enum discriminant, a const-generic default, an associated
 `const`, an inline `const`, a closure in a `static`, a trait's default
 body, and a `const _` inside a function. So the line is not, alone, a
-refusal of expansion outside a function body.
+refusal of expansion outside a function body;
+`every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body`
+is the census for the positions it does not reach.
 
 The domain is every target root `cargo metadata` reports, so a new bin,
 example or test target is read without being named; the three written
@@ -1125,6 +1127,98 @@ statement the production build applies -- not for `deny` or `warn`, not
 for one the test build alone applies, not for a different lint, a comment,
 an inner attribute after the first item, an outer attribute on an item or
 an inner attribute of an inline module.
+
+## `fn production_files_a_governed_lint_is_not_forbidden_in(`
+
+The domain of the census below: every file of `src/` and `examples/`,
+whole-file test modules excepted, in which some governed lint's
+production level is not `forbid`. The level is the file's own file-level
+statement, else the nearest ancestor module file's (`ancestor_module_files`),
+else none -- `-D warnings` alone. A prologue the reader cannot decide is in
+the domain, whatever an ancestor says.
+
+**Derived, not listed, and wider than `effects/allowlist.toml`.** A file
+that states nothing inherits its parent's level, so a child that drops its
+own fence under an allowing parent is in the domain the moment it does,
+with no row for anyone to add; a file that `deny`s a lint is in it too,
+because a macro can write the `allow` that lowers a `deny`. Out of it is
+exactly the file where all three are forbidden: there an `allow` is
+`E0453` however it is written, so what a macro puts at item position can
+do nothing its caller could not do itself.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {`
+
+Option 2 of the 2026-09-26 ruling on `PR7-WRAPPERS-EMPTY-DOMAIN`: the
+restriction, enforced as a property of the text. In a file of the domain
+above, every macro invocation is inside a function body
+(`census_domain::macro_invocations_outside_function_bodies` says why the
+line is there). The executed routes of that finding -- a
+`macro_rules!` writing `pub(super) fn $name` at item position, one
+substituting `mod`, the allowance level and the name, and an aliased
+`include!` -- are each an invocation at item position in an allowing file,
+and each is refused here whatever it is called; so is one in a
+module-level `const _`, the position the crate roots' forbid of
+`non_local_definitions` does not reach.
+
+When it was written it named five invocations: the four production
+`thread_local!`s (`src/rundir.rs`, `src/runner/host.rs` twice,
+`src/util.rs`) and a `format!` in a thiserror `#[error(..)]` argument in
+`src/workspace_manager.rs`. The statics moved into
+`src/util/thread_barriers.rs`, `src/runner/host/counters.rs` and
+`src/rundir/cleanup_scopes.rs`, which forbid all three governed lints and
+are therefore outside the domain, and the `format!` into a private
+function the attribute names. Moving rather than allowing by name: a name
+allowlist would need guards against `use x as thread_local` and a local
+`macro_rules! thread_local`, which is more recogniser.
+
+What it does not read: the items a derive or an attribute macro from a
+dependency writes (no `!` is spelled; their output is fixed by
+`Cargo.lock`, and `macro_rules!` attributes and derives are unstable on
+the toolchains CI builds), and an item written inside a function body that
+is reached by symbol rather than by name, which is recorded in the
+finding's Remaining.
+
+Witnessed against the real tree by editing sources the compiled suite
+reads at run time (`~/findings-sweep/orch-p1/p1-six-modules-r3/step3-rows.*`):
+a `thread_local!` back at item position, a macro in a module-level
+`const _`, at `impl`-item position, in an inline module, a `macro_rules!`,
+an aliased `include!`, the `format!` back in its attribute, and a moved
+module that loses its fence or writes it test-only each fail naming the
+file and line; a macro inside an existing function, one at item position
+in a forbidding file and one in a `#[cfg(test)]` item pass.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `for named in [`
+
+The domain by name, so a reading that lost a file cannot pass by reading
+fewer: files that allow a governed lint in production, a crate root of
+each target kind among them.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `for forbidding in ["src/util/terminal.rs", "src/runner/host/naming.rs"] {`
+
+And two files that forbid all three, by name, so the exclusion is not
+vacuous either.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `let list = allowlist();`
+
+Every file the allowlist records an allowance for, whose production build
+applies one, is in the domain: the derivation cannot drift below the
+record.
+
+## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {`
+
+The reader over each position, one invocation each. Refused: module item
+position, a path, spaced and commented spellings, raw and non-ASCII
+names, `macro_rules!` (a raw name too), an aliased `include!`, an inline
+module, an `impl`, a `trait` and an `extern` block, a module-level and a
+nested `const _`, a named `const`, a `static` and a closure in one, an
+enum discriminant, a field's type, a return type, a parameter's type, a
+const-generic default, an attribute's value, and production code beside
+a test item. Accepted: a function body, a method body, a trait's default
+body, a function inside a `const _`, headers holding a const block, an
+array, a `where` clause with a higher-ranked bound and an arrow,
+qualifiers and an ABI, raw and non-ASCII function names, a nested
+function, test-only items and modules, and unary `!`, `!=`, comments and
+strings that are not invocations at all.
 
 ## `fn the_legacy_section_is_frozen_and_may_only_shrink() {`
 

@@ -2110,6 +2110,114 @@ the whole block would be skipped. Keyed on the one name that has it.
 The defined name may itself be raw -- `macro_rules! r#mod { … }`
 is how a macro takes a keyword for a name.
 
+## `pub(crate) mod census_domain` › `pub(crate) struct OutsideInvocation {`
+
+A macro invocation written outside every function body: the 1-based line
+of its `!` and the name before it, for the diagnostic.
+
+## `pub(crate) mod census_domain` › `pub(crate) fn macro_invocations_outside_function_bodies(`
+
+Every macro invocation in `source`'s production code that is not inside a
+function body. Added on 2026-09-26 (PR #325) for the expansion half of
+`PR7-WRAPPERS-EMPTY-DOMAIN`, and read by
+`effects::tests::every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body`.
+
+**Why the line is the function body.** What a macro invocation expands to
+is in no text a reader here reads, so a census cannot follow it; what a
+census can do is refuse the positions where what it expands to would
+matter. Inside a function body, an item a macro writes is local to that
+body: nothing outside can name it, and the two ways it can reach out by
+name -- an `impl` of a type or trait declared outside the body, and a
+`#[macro_export]` macro -- are `non_local_definitions`, which the crate
+roots forbid. Outside a function body, what it writes is an item of the
+module, the `impl`, the `trait` or the `extern` block it sits in, or of a
+`const` or `static` initializer, and in a module-level `const _`
+initializer rustc exempts even a non-local `impl` from the lint (measured,
+`effects::tests::every_crate_root_forbids_non_local_definitions`). So the
+reading is one question, is this `!` inside a function body, rather than
+a list of the positions outside one: a list is a recogniser of the
+positions someone thought of, and the brace test holds for the ones they
+did not. An attribute's arguments are outside too, deliberately: a
+derive's helper attribute hands its tokens to code in a dependency, which
+decides where they expand.
+
+What a function body does not stop is an item inside it that is reached
+by symbol rather than by name: a `#[unsafe(no_mangle)]` function a macro
+writes into an existing body is callable from any module that declares it
+in an `unsafe extern` block, and the lint does not apply to it. That route
+is recorded, executed, in `PR7-WRAPPERS-EMPTY-DOMAIN`'s Remaining.
+
+Production code only: `production_code` blanks every `#[cfg(test)]`
+item first, and its exact-spelling match can only leave test code in,
+which refuses more rather than less.
+
+## `pub(crate) mod census_domain` › `fn is_identifier_byte(byte: u8) -> bool {`
+
+ASCII alphanumerics, `_`, and every non-ASCII byte. In the blanked view a
+byte above 0x7F outside a comment or a literal is part of an identifier:
+rustc's six non-ASCII separators are already spaces there
+(`RUSTC_WHITESPACE`), and any other non-ASCII character outside an
+identifier is a lexer error. Reading them as identifier bytes is what
+lets `\u{e9}!()` read as an invocation and `fn \u{e9}()` as a header;
+`is_ident_byte`, which the module walk uses, stops at them.
+
+## `pub(crate) mod census_domain` › `fn identifier_end(bytes: &[u8], from: usize) -> usize {`
+
+One past the last identifier byte from `from`.
+
+## `pub(crate) mod census_domain` › `fn raw_prefix_before(bytes: &[u8], start: usize) -> bool {`
+
+Whether the identifier starting at `start` is written raw: `r#`
+immediately before it, and no identifier byte before the `r`.
+
+## `pub(crate) mod census_domain` › `fn token_end(bytes: &[u8], from: usize) -> usize {`
+
+One past the identifier at `from`, reading an `r#` prefix as part of it.
+
+## `pub(crate) mod census_domain` › `fn function_bodies(bytes: &[u8]) -> Vec<(usize, usize)> {`
+
+The brace pair of every function body: every non-raw `fn` followed by
+whitespace and an identifier, so an item or an associated or foreign
+function, whatever qualifiers and visibility precede it, and not a
+function-pointer type, where `(` follows `fn`. A declaration without a
+body contributes nothing. A function nested in another's body, or
+written inside a `const _`, is found the same way, and its body is inside
+the answer on its own.
+
+## `pub(crate) mod census_domain` › `fn body_brace(bytes: &[u8], from: usize) -> Option<usize> {`
+
+The opening brace of the body of the header that starts at `from`, or
+`None` for a declaration.
+
+A header holds braces that are not the body: a const block in a generic
+argument or default (`Foo<{ 1 }>`, `<const N: usize = { 1 }>`) and, in a
+parameter or return type, an array length (`[u8; { 1 }]`). Parenthesised
+and bracketed groups are skipped whole, and `<` and `>` are counted --
+except the `>` of `->`, the only other `>` a header writes outside a
+group -- so the body is the first `{` at angle depth zero. A const block
+inside angle brackets is skipped whole too, so a `<` or `>` in it counts
+for nothing. A `;` or an unmatched closer at depth zero ends a header that
+has no body. Reading a const block as the body would put a real body's
+macros outside and a header's inside -- the two readings the fixtures
+`a header holding a const block` and `a const-generic default` pin.
+
+## `pub(crate) mod census_domain` › `fn macro_bangs(bytes: &[u8]) -> Vec<(usize, String)> {`
+
+Every macro invocation's `!` and the name before it.
+
+Read from the `!` rather than from the name: a `!` that is not `!=`,
+whose preceding token is an identifier -- not a keyword unless raw, not
+a number -- and whose next token is a delimiter, or an identifier and
+then a delimiter (`macro_rules! name { .. }`). The keyword test is what
+keeps unary negation out -- `if !(x)`, `return !(x)`, `while !done {` --
+and, because no other identifier stands before a `!` in valid Rust, it
+also lets the second identifier be read after any name rather than after
+`macro_rules` alone: `if !condition {` is refused by the keyword, not by
+the name. A path's last segment is the name (`std::thread_local!`), a
+comment or a line break between the tokens is a space in this view, and
+an alias is an invocation like any other, so `use std::include as rd;`
+then `rd!(..)` reads as `rd`.
+
 ## `pub(crate) mod census_domain` › `fn module_shaped_between(bytes: &[u8], from: usize, to: usize) -> Option<usize> {`
 
 Where a module-shaped token sequence starts inside `from..to`, if any.
