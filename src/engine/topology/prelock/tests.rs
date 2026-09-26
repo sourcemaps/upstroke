@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use super::*;
-use crate::rundir::{NoHooks, create_private_dir, remove_public_husk};
+#[cfg(unix)]
+use crate::rundir::remove_public_husk;
+use crate::rundir::scratch_tree::{ScratchTree, acquire};
+use crate::rundir::{NoHooks, create_private_dir};
 use crate::runner::container::runtime::{
     ContainerExecution, CreateSpec, CreatedContainer, DiscoveredContainer, ImageInspection,
     Liveness, RuntimeError, RuntimeOp, StopMode,
@@ -174,31 +177,26 @@ impl IdSource for Ids {
 }
 
 struct Scratch {
-    root: PathBuf,
+    tree: ScratchTree,
 }
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let id = crate::ulid::ulid();
-        let tail = id.get(id.len().saturating_sub(10)..).unwrap_or(&id);
-        let root = std::env::temp_dir().join(format!("upstroke-prelock-{tag}-{tail}"));
-        create_private_dir(&root, &mut NoHooks).expect("scratch root");
-        Self { root }
+        Self::under(&std::env::temp_dir(), tag)
+    }
+
+    fn under(parent: &Path, tag: &str) -> Self {
+        match acquire(parent, &format!("prelock-{tag}")) {
+            Ok(tree) => Self { tree },
+            Err(refusal) => panic!(
+                "a scratch tree for `prelock-{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     fn path(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let reclaimed = remove_public_husk(&self.root, &mut NoHooks);
-        assert!(
-            reclaimed.is_ok() || std::thread::panicking(),
-            "the scratch root {} was not reclaimed: {reclaimed:?}",
-            self.root.display()
-        );
+        self.tree.path()
     }
 }
 
@@ -461,35 +459,62 @@ fn a_scratch_root_is_reclaimed_on_every_exit_including_an_unwind() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {
+    let outer = Scratch::new("raii-reported");
+    let recorded = Mutex::new(None);
     let reported = std::panic::catch_unwind(|| {
-        let root = Scratch::new("raii-reported");
-        remove_public_husk(root.path(), &mut NoHooks).expect("the tree reclaims early");
+        let root = Scratch::under(outer.path(), "replaced");
+        let path = root.path().to_path_buf();
+        *recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.clone());
+        remove_public_husk(&path, &mut NoHooks).expect("the tree reclaims early");
+        create_private_dir(&path.join("another-holders-content"), &mut NoHooks)
+            .expect("a replacement at the root's name, holding something of its own");
+        assert!(
+            root.tree.checked_path().is_err(),
+            "the guard still sees the directory it acquired at its name, so its reclaim \
+             would succeed and nothing about a failed one would be measured"
+        );
     })
-    .expect_err("the guard discarded a failed reclamation");
+    .expect_err("the guard reclaimed a root it had not created, or said nothing");
 
     let message = reported
         .downcast_ref::<String>()
         .map_or_else(String::new, Clone::clone);
+    let path = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the closure recorded its root before the guard dropped");
     assert!(
-        message.contains("was not reclaimed") && message.contains("raii-reported"),
+        message.contains("was not reclaimed") && message.contains(&path.display().to_string()),
         "the report must name the root it could not reclaim: {message}"
+    );
+    assert!(
+        path.join("another-holders-content").is_dir(),
+        "the guard deleted what stood at its name, which it had not created"
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "spawned by a_failed_reclamation_during_an_unwind_does_not_abort_the_process"]
 fn scratch_unwind_with_a_failed_reclamation_child() {
     const PRIMARY: &str = "the primary failure this witness keeps observable";
 
+    let outer = Scratch::new("raii-unwind-unreclaimable");
     let caught = std::panic::catch_unwind(|| {
-        let root = Scratch::new("raii-unwind-unreclaimable");
+        let root = Scratch::under(outer.path(), "replaced");
         remove_public_husk(root.path(), &mut NoHooks).expect("the tree reclaims early");
+        create_private_dir(root.path(), &mut NoHooks)
+            .expect("a replacement at the root's name, which the guard did not create");
         assert!(
-            !root.path().exists(),
-            "the guard's own removal has to be the one that fails, and it would succeed \
-             against a root that is still there"
+            root.tree.checked_path().is_err(),
+            "the guard's own reclaim has to be the one that fails, and it would succeed \
+             against the root it acquired"
         );
         panic!("{PRIMARY}");
     })
@@ -507,6 +532,7 @@ fn scratch_unwind_with_a_failed_reclamation_child() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
     use crate::runner::host::HostRunner;
@@ -556,5 +582,12 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
         "the harness printed no passing result for exactly one selected test, so the child \
          either aborted before printing or selected nothing at all: {}",
         output.stdout
+    );
+    assert!(
+        output.stderr.contains("was not reclaimed while unwinding")
+            && output.stderr.contains("upstroke-prelock-replaced-"),
+        "the child's stderr carries no report of the root its guard could not reclaim while \
+         unwinding, so a tree lost on a failing run would be lost in silence: {}",
+        output.stderr
     );
 }
