@@ -4898,9 +4898,9 @@ impl WorkspaceManager {
     /// filesystem and every process inspecting it through Git see one tree --
     /// the judged one. `design/15_design_event_log_resume_run_layout.md`, "What
     /// an exact snapshot is exact against", is the product sentence that says
-    /// so, and its second paragraph is why the v0.1 conductor, which takes no
-    /// snapshot from this manager, is the one runner that reads the other
-    /// graph.
+    /// so, and its second paragraph is how the v0.1 conductor, which takes no
+    /// snapshot from this manager, reads the recorded graph over the workspace
+    /// it does take.
     fn command(&self, cwd: &Path, args: &[OsString]) -> Command {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(self.hooks_dir());

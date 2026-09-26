@@ -52,8 +52,9 @@
 //! `design/15_design_event_log_resume_run_layout.md`, "What an exact snapshot
 //! is exact against", is the product sentence: a snapshot is exact against the
 //! objects the repository holds, and no adapter, image or overlay can turn that
-//! off. The v0.1 conductor's runner reads the other graph, which costs this
-//! nothing: no snapshot of this manager is ever taken on that path.
+//! off. The v0.1 conductor takes no snapshot of this manager; how its own
+//! workspace and runner read the recorded graph is that section's second
+//! paragraph.
 //!
 //! **What a [`Snapshot`] holds together** (§5, §6): its fields are private
 //! and it has one constructor, [`Snapshot::new`], visible to the parent only.
