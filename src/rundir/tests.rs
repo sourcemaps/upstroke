@@ -129,10 +129,14 @@ fn the_root_the_old_helper_would_have_taken(tag: &str) -> PathBuf {
 /// A directory this test planted, with an owner that is not [`scratch`].
 ///
 /// It exists so that the witnesses have something to lose. Its `Drop`
-/// restores any permission it changed and removes it, so a witness that
-/// fails still leaves nothing -- the defect it is testing for.
+/// restores any permission a witness changed and removes it, so a witness
+/// that fails still leaves nothing -- the defect it is testing for.
 struct PlantedRoot {
     root: PathBuf,
+    /// The child [`PlantedRoot::lock_a_child`] made unreadable, whose mode
+    /// the drop restores before it removes the tree.
+    #[cfg(unix)]
+    locked: Option<PathBuf>,
 }
 
 impl PlantedRoot {
@@ -147,20 +151,44 @@ impl PlantedRoot {
                 root.display()
             )
         });
-        Self { root }
+        Self {
+            root,
+            #[cfg(unix)]
+            locked: None,
+        }
     }
 
     fn path(&self) -> &Path {
         &self.root
+    }
+
+    /// Plant an **empty** child at mode `0o000`: `remove_dir_all` fails on it
+    /// with `EACCES`, because it opens every child directory to recurse into
+    /// it, and nothing else about the root changes.
+    ///
+    /// Not `0o500` on the root, which is what this witness first used: a
+    /// process killed between that `chmod` and this type's drop left a root
+    /// no `rm -rf` can remove, and the build box's out-of-tree sweeper runs
+    /// exactly that on every `upstroke-*` root, so it would fail on it every
+    /// hour for good. `rm -rf` removes an empty directory it cannot read.
+    #[cfg(unix)]
+    fn lock_a_child(&mut self, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let child = self.root.join(name);
+        fs::create_dir(&child).expect("the child a failing removal leaves behind");
+        self.locked = Some(child.clone());
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o000))
+            .expect("a child no removal can open");
+        child
     }
 }
 
 impl Drop for PlantedRoot {
     fn drop(&mut self) {
         #[cfg(unix)]
-        {
+        if let Some(child) = &self.locked {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o755));
+            let _ = fs::set_permissions(child, fs::Permissions::from_mode(0o755));
         }
         let _ = fs::remove_dir_all(&self.root);
     }
@@ -198,24 +226,20 @@ fn the_scratch_helper_deletes_nothing_on_its_way_in() {
 /// **Defect 2, the discarded cleanup result.** A removal the helper could
 /// not perform must not be swallowed into a fixture that is not fresh.
 ///
-/// Unix-only because the failure has to be arranged: `0o500` on the planted
-/// root makes `remove_dir_all` fail with `EACCES` on the child it cannot
-/// unlink. At `d724fb16` `let _ =` discarded exactly that error and the
-/// following `create_dir_all` succeeded over the surviving directory, so
-/// the helper handed back a root still holding another holder's child and
-/// said nothing. Here the removal does not happen at all, so there is no
-/// result to discard: the root is a new one and it is empty.
+/// Unix-only because the failure has to be arranged: an empty child at
+/// `0o000` ([`PlantedRoot::lock_a_child`]) makes `remove_dir_all` fail with
+/// `EACCES` when it opens the child. At `d724fb16` `let _ =` discarded
+/// exactly that error and the following `create_dir_all` succeeded over the
+/// surviving directory, so the helper handed back a root still holding
+/// another holder's child and said nothing. Here the removal does not happen
+/// at all, so there is no result to discard: the root is a new one and it is
+/// empty.
 #[cfg(unix)]
 #[test]
 fn a_removal_the_helper_cannot_perform_never_becomes_a_fixture_that_is_not_fresh() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let tag = format!("undeletable-{}", crate::ulid::ulid());
-    let planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
-    let child = planted.path().join("undeletable-child");
-    fs::create_dir(&child).expect("the child a failing removal leaves behind");
-    fs::set_permissions(planted.path(), fs::Permissions::from_mode(0o500))
-        .expect("a root whose children cannot be unlinked");
+    let mut planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
+    let child = planted.lock_a_child("undeletable-child");
 
     let tree = scratch(&tag);
 
@@ -310,8 +334,14 @@ fn the_scratch_tree_is_reclaimed_on_both_exits() {
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .clone();
+    // An empty slot is an acquisition that never happened, and a pass on it
+    // would say nothing about the unwinding reclaim.
     assert!(
-        path.as_os_str().is_empty() || scratch_tree::proves_absent(&path),
+        !path.as_os_str().is_empty(),
+        "the closure unwound before it recorded a root, so no unwinding reclaim was measured"
+    );
+    assert!(
+        scratch_tree::proves_absent(&path),
         "the fixture survived an unwind, which is the run a leak is measured on: {}",
         path.display()
     );
@@ -369,13 +399,27 @@ fn a_refused_acquisition_panics_and_names_what_it_refused() {
 /// The witness plants a root of that shape by hand, because `acquire_named`
 /// is private to `scratch_tree` and rightly so, and then shows both halves:
 /// a later acquisition succeeds beside the orphan, and the orphan is still
-/// there afterwards.
+/// there afterwards. The shape is read off a real acquisition for the same
+/// tag rather than restated, so a change to `acquire`'s name cannot leave
+/// this planting a name `acquire` no longer produces -- which a sweep of
+/// same-shaped siblings would then pass by.
 #[test]
 fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
     let tag = format!("orphaned-{}", crate::ulid::ulid());
-    let orphan = PlantedRoot::at(
-        std::env::temp_dir().join(format!("upstroke-{tag}-{}", crate::ulid::ulid())),
-    );
+    let prefix = format!("upstroke-{tag}-");
+    let suffix_len = {
+        let probe = scratch(&tag);
+        probe
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(&prefix))
+            .map(str::len)
+            .expect("an acquired root is named `upstroke-<tag>-<suffix>`")
+    };
+    let id = crate::ulid::ulid();
+    let suffix = id.get(id.len().saturating_sub(suffix_len)..).unwrap_or(&id);
+    let orphan = PlantedRoot::at(std::env::temp_dir().join(format!("{prefix}{suffix}")));
     fs::write(
         orphan.path().join("half-built"),
         b"a dead process's fixture",
@@ -1215,17 +1259,20 @@ fn a_holder_never_opens_its_own_lock_file() {
     // from a process that has no claim of its own to answer from.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
-        let file = File::open(lock_file(&paths.public)).expect("open");
-        let free = matches!(imp::holder(&file), Holder::Nobody);
-        unsafe { libc::_exit(i32::from(free)) };
+        // Every way out of the child is `_exit`. An unwind here would run the
+        // drops of the parent's stack that the fork copied, `tree`'s guard
+        // among them, and that guard would delete the parent's live tree.
+        let code = match File::open(lock_file(&paths.public)) {
+            Ok(file) => i32::from(matches!(imp::holder(&file), Holder::Nobody)),
+            Err(_) => 2,
+        };
+        unsafe { libc::_exit(code) };
     }
     let mut status = 0;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    assert_eq!(
-        libc::WEXITSTATUS(status),
-        0,
-        "the holder released its own lock by looking at it"
-    );
+    let code = libc::WEXITSTATUS(status);
+    assert_ne!(code, 2, "the child could not open the lock file to ask");
+    assert_eq!(code, 0, "the holder released its own lock by looking at it");
 }
 
 #[test]
