@@ -16,9 +16,10 @@ guard: project owner — the `unsafe_code` governance `PR7-WRAPPERS-EMPTY-DOMAIN
 `decisions.effect_site_inventory.mechanism` (3) holds that a topology module reaches no effect except
 through a funnel that takes a site, because every effectful primitive is denied **by path**: 32 of
 `clippy.toml`'s entries name a C-library function under `libc::` (`libc::unlink` at line 113, with
-`libc::write`, `libc::open`, `libc::kill`, `libc::rmdir`, `libc::execv` and the rest), and a topology
-module forbids all three governed lints, so a call to a denied path there is an error no attribute
-can lower. Nothing denies the C function itself. So, reasoned from the code:
+`libc::write`, `libc::open`, `libc::kill`, `libc::rmdir`, `libc::execv` and the rest), and **in a
+topology module that forbids all three governed lints**, a call to a denied path is an error no
+attribute can lower. Not every topology module does: the funnels among them —
+`src/runner/host.rs`, `src/runner/container.rs`, `src/workspace_manager.rs` and others — allow some. Nothing denies the C function itself. So, reasoned from the code:
 
 1. A topology module that forbids `clippy::disallowed_methods`, `clippy::disallowed_types` and
    `clippy::disallowed_macros` declares the function in its own foreign block --
@@ -33,8 +34,12 @@ can lower. Nothing denies the C function itself. So, reasoned from the code:
    `libc::` item, so it asks nothing of it.
 4. `unsafe_code` is allowed by default and appears nowhere in the tree: nothing refuses the
    `unsafe extern` block. No census reads a foreign block, `#[unsafe(no_mangle)]` or
-   `#[unsafe(export_name)]` in a topology module. The classification census does not apply --
-   a topology module is not classified -- and its reader would not see the declaration anyway:
+   `#[unsafe(export_name)]` in a topology module. The classification census does not reach it:
+   **it reads only a classified module's reachable names, and a privately declared foreign item is
+   none.** (Some topology modules *are* classified — `src/workspace_manager.rs` with its children and
+   `src/runner/host.rs` are classified by `effects/wrappers.toml` — so the earlier wording "a topology
+   module is not classified" was too broad; what matters is that the census reads reachable names.)
+   Its reader would not see the declaration anyway:
    `effects::declares_visibility` strips `extern`, `unsafe`, `const` and `async` before a `fn` but not
    `safe`, so a `pub safe fn` in a foreign block reads as private.
 5. The topology module unlinks a file with fmt, clippy under `-D warnings`, and every census green.
