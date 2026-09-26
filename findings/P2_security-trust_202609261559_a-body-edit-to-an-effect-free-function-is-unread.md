@@ -19,8 +19,9 @@ classified by review, and the effectful ones are denied by path in `clippy.toml`
 the classification to the tree compares **names only**:
 `effects::tests::classification::checks::classification_disagreement` derives the set of reachable
 function names from each classified module's text (`effects::externally_reachable_fns`) and compares it
-with the names `effects/wrappers.toml` records, class by class. No census reads a classified function's
-body, and nothing re-derives a class once a name is recorded.
+with the union of the names `effects/wrappers.toml` records in the module's four classes, refusing a name
+recorded in two of them. No census reads a classified function's body, and nothing re-derives a class
+once a name is recorded.
 
 So, reasoned from that code:
 
