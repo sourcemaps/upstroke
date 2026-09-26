@@ -69,13 +69,37 @@ escape codes; `textconv` substitutes a rendered form for the bytes. Any of
 those corrupts every downstream check that reads the diff — and
 `capture_diff_is_immune_to_user_diff_config` is the test that says so.
 
+## `const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];`
+
+The second half of what `git_command` sets, and the half the floor needs. Git
+2.40 and 2.41, inside the "Git 2.40+" `README.md` requires, read
+`core.useReplaceRefs` in their default configuration as
+`read_replace_refs = git_config_bool(...)`, which overwrites what
+`GIT_NO_REPLACE_OBJECTS` set; 2.42 made the variable final (`disable_replace_refs`).
+So on 2.40 and 2.41 a `core.useReplaceRefs = true` in the system, global or
+repository configuration, or in command-line configuration a child inherits,
+turned replacements back on for a child that carried only the variable
+(measured on both, at each of those four places). With `-c
+core.useReplaceRefs=false` as well, the child read the recorded graph at every
+place and on 2.40.0, 2.41.0, 2.42.0 and 2.43.0 (measured): a `-c` on the command
+line is applied after every file and after inherited command-line
+configuration, and Git passes it on to the children it starts, as `worktree
+add` starts `reset --hard`.
+
+This module's own replacement witnesses showed it before anything else did:
+their fixtures pin `core.useReplaceRefs = true` in the repository, for the
+reason `pin_replacement_refs_in` gives, and with the variable alone both failed
+on 2.40.0 and 2.41.0 and passed on 2.42.0 and 2.43.0 (`r3/` in the pull
+request's evidence). With this, both pass on all four.
+
 ## `fn git_command(directory: &Path) -> Command {`
 
 Where every Git child this file's production code starts is built, and so the
 one place their environment is set. It supplies the `-C <directory>` each of the fourteen
 production sites supplied for itself until
-`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, in the same position, and one
-thing none of them did: `NO_REPLACEMENT_OBJECTS`.
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, in the same position, and two
+things none of them did: `NO_REPLACEMENT_OBJECTS`, and `REPLACE_REFS_REFUSED`
+right after the directory, before anything the call site adds.
 
 `git replace P Q` makes Git read `Q` wherever `P` is named while `rev-parse`
 still prints `P`. Measured on git 2.43.0 with this module's code before the
@@ -90,10 +114,12 @@ schema-4 path, which sets the same pair from the same constant.
 
 The variable decides by its presence: set to `1`, to `0` or to nothing, and
 with `core.useReplaceRefs=true` given by `-c` or in the repository's own
-configuration, `git show P:f` read `P`'s own content (git 2.43.0, measured). So
-a call site gets the replaced graph back by building a `Command` of its own or
-by taking the variable off the one it was given, and the census below refuses
-both shapes.
+configuration, `git show P:f` read `P`'s own content (git 2.43.0, measured). That
+holds from Git 2.42 on. On 2.40 and 2.41 the configuration wins, which is why
+`REPLACE_REFS_REFUSED` is set beside it; see its section. So a call site gets
+the replaced graph back by building a `Command` of its own or by taking either
+half off the one it was given, and the census below refuses the shapes it can
+see.
 
 `every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
 the shape; see its section.
@@ -489,7 +515,9 @@ relies on: every byte stays at its offset, so the span it takes out is the test
 module's.
 
 It then asserts that `Command::new(` occurs once, inside `git_command`; that
-`git_command` sets `NO_REPLACEMENT_OBJECTS`' pair; that `Command` is never
+`git_command` sets `NO_REPLACEMENT_OBJECTS`' pair and passes
+`REPLACE_REFS_REFUSED`, whose value it reads directly, since the blanking
+empties string literals; that `Command` is never
 renamed with `as` and is named nowhere but the process import and `git_command`;
 that `git_command` is named nowhere but its definition and its calls, and that
 the functions calling it are, in source order, the fourteen it lists; and that

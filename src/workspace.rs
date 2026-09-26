@@ -40,11 +40,14 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
     "--no-color",
 ];
 
+const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
+
 fn git_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(directory)
+        .args(REPLACE_REFS_REFUSED)
         .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1);
     command
 }
@@ -3337,6 +3340,16 @@ mod tests {
         assert!(
             builder.contains(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)"),
             "the builder must set the pair on every child it builds: {builder}"
+        );
+        assert!(
+            builder.contains(".args(REPLACE_REFS_REFUSED)"),
+            "and refuse replacements at command scope too, which on git 2.40 and 2.41 is \
+             what outranks a `core.useReplaceRefs = true` in any configuration: {builder}"
+        );
+        assert_eq!(
+            REPLACE_REFS_REFUSED,
+            ["-c", "core.useReplaceRefs=false"],
+            "the census blanks string literals, so the setting is read here"
         );
 
         let import = code.find("use std::process::").expect("the process import");
