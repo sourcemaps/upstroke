@@ -35,7 +35,7 @@ must already be object-safe and its request must already be a single
 borrowed value. It is, and [`Runner`] is `Send + Sync` so a `&dyn Runner`
 can be held across the await points PR11 introduces.
 
-## `#![deny(`
+## `#![deny(clippy::disallowed_methods, clippy::disallowed_types)]`
 
 `disallowed_methods` and `disallowed_types` are `deny` here, and `deny` is the
 strongest level that compiles for them: this module's children allow both at
