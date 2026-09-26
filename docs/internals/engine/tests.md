@@ -1315,6 +1315,26 @@ Before it returns, the fixture states its premise with a Git child of its
 own that honours replacements: `git show HEAD:probe.txt` reads `replacing`.
 Without that, neither gate would be measuring anything.
 
+## `fn a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run() {`
+
+Both refusals of a checkout that differs from what HEAD records while
+`git status` finds nothing to differ. `replace_head_with_a_sibling` replaces
+HEAD with a sibling commit whose `README.md` differs and checks HEAD out through
+the replacement, so the file on disk and the index are the sibling's. Plain
+`git status` reads the same replacement and reports the checkout clean; upstroke
+reads the recorded commit and finds `README.md` modified. Until round 3 of #326
+the run's refusal said only "working tree is not clean; commit or stash first",
+which `git status` contradicts, and there `git commit` finds nothing to commit
+and `git stash` no local changes to save (git 2.43.0, measured). The fixture
+asserts both views before either refusal runs, and each refusal is asserted to
+name the command that shows upstroke's view, `git --no-replace-objects status`,
+and the one that lists replacements, `git replace -l`.
+
+The first leg is the run's start. The second parks a run, switches back to
+`main` and makes the same checkout there, so the refusal that fires is the
+resume's, off the run branch. Reverting either message to its `915c0646`
+wording turns the test red (`r3/` in the pull request's evidence).
+
 ## `#[test]`
 
 The v0.1 conductor runs and resumes on the graph its own workspace wrote. Since

@@ -5179,6 +5179,116 @@ fn v1_object_graph_helper() {
 }
 
 #[test]
+fn a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::replaced_head_refusal_helper",
+    );
+    assert!(
+        status.success(),
+        "the child refuses a run, and a resume off the run branch, over a checkout that \
+         a replacement of HEAD rewrote, and ended {status:?}"
+    );
+}
+
+fn replace_head_with_a_sibling(repo: &Path) {
+    let head = git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let parent = git_in(repo, &["rev-parse", "HEAD^"]).trim().to_owned();
+    fs::write(repo.join("README.md"), "replaced\n").expect("the replacing content");
+    git_in(repo, &["add", "README.md"]);
+    let tree = git_in(repo, &["write-tree"]).trim().to_owned();
+    git_in(repo, &["reset", "-q", "--hard", &head]);
+    let sibling = git_in(
+        repo,
+        &["commit-tree", &tree, "-p", &parent, "-m", "replacing"],
+    )
+    .trim()
+    .to_owned();
+    git_in(repo, &["replace", &head, &sibling]);
+    git_in(repo, &["reset", "-q", "--hard", "HEAD"]);
+    assert_eq!(
+        fs::read_to_string(repo.join("README.md")).expect("the checked-out README"),
+        "replaced\n",
+        "the checkout was written through the replacement"
+    );
+    assert!(
+        git_in(repo, &["status", "--porcelain"]).trim().is_empty(),
+        "plain `git status` reads the replacement and reports the checkout clean"
+    );
+    assert_eq!(
+        git_in(repo, &["--no-replace-objects", "status", "--porcelain"]).trim(),
+        "M  README.md",
+        "the command the refusal names lists what upstroke finds"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn replaced_head_refusal_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("replaced-head-refusal");
+
+    let repo = temp_engine_repo("replacedheadrun");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some("[interaction]\nmode = \"never\"\n"),
+    );
+    replace_head_with_a_sibling(&repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let refused = run_with(&opts, &fake(Effect::EditFile))
+        .expect_err("a checkout that differs from what HEAD records is refused")
+        .to_string();
+    for named in [
+        "not clean",
+        "`git --no-replace-objects status`",
+        "`git replace -l`",
+    ] {
+        assert!(refused.contains(named), "`{named}` in: {refused}");
+    }
+    assert_eq!(
+        git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "main",
+        "no run branch was created"
+    );
+
+    let repo = temp_engine_repo("replacedheadresume");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let parked = run_with(
+        &opts,
+        &source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]),
+    )
+    .expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    git_in(&repo, &["switch", "-q", "main"]);
+    replace_head_with_a_sibling(&repo);
+    let refused = resume_with(
+        &resume_options(&repo, &parked.run_id),
+        &fake(Effect::EditFile),
+    )
+    .expect_err("a resume off the run branch over that checkout is refused")
+    .to_string();
+    for named in [
+        "uncommitted changes",
+        "`git --no-replace-objects status`",
+        "`git replace -l`",
+    ] {
+        assert!(refused.contains(named), "`{named}` in: {refused}");
+    }
+}
+
+#[test]
 fn a_parked_run_is_answered_out_of_band_and_resumed() {
     let repo = temp_engine_repo("answerresume");
     seed(

@@ -439,7 +439,11 @@ pub(super) fn resume_harness_inner_on(
             return Err(refuse(format!(
                 "you have uncommitted changes and are not on `{}`. Commit or stash them, then \
                  resume — switching branches over them would lose work that is not this run's \
-                 to discard.",
+                 to discard. upstroke compares the checkout with the objects the repository \
+                 records, never with what `git replace` substitutes for them, so \
+                 `git --no-replace-objects status` lists what it found; plain `git status` \
+                 can report the checkout clean when a replacement changes what HEAD holds \
+                 (`git replace -l` lists them).",
                 started.branch
             )));
         }
