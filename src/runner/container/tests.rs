@@ -9,6 +9,7 @@ use super::runtime::Settled;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::fake::absent_reason;
 use super::intent::{
@@ -3425,15 +3426,331 @@ fn real_docker_refuses_a_reference_it_does_not_hold_without_pulling() {
     );
 }
 
-fn wait_until_terminated(docker: &dyn ContainerRuntime, name: &str) -> Liveness {
-    for _ in 0..200 {
+const TERMINATION_BUDGET: Duration = Duration::from_secs(30);
+
+const TERMINATION_PAUSE: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+struct StillRunningPastBudget {
+    name: String,
+    budget: Duration,
+    pause: Duration,
+    waited: Duration,
+    observations: u32,
+}
+
+impl std::fmt::Display for StillRunningPastBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` is still running after {} observations over {:?}, the whole {:?} budget with \
+             {:?} between observations",
+            self.name, self.observations, self.waited, self.budget, self.pause
+        )
+    }
+}
+
+fn wait_until_terminated_within(
+    docker: &dyn ContainerRuntime,
+    name: &str,
+    budget: Duration,
+    pause: Duration,
+) -> Result<Liveness, StillRunningPastBudget> {
+    let started = Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
         let state = docker.observe(name).expect("reachable");
         if state.is_terminated() {
-            return state;
+            return Ok(state);
         }
-        std::thread::yield_now();
+        let waited = started.elapsed();
+        if waited >= budget {
+            return Err(StillRunningPastBudget {
+                name: name.to_owned(),
+                budget,
+                pause,
+                waited,
+                observations,
+            });
+        }
+        std::thread::sleep(pause);
     }
-    panic!("`{name}` is still running after 200 observations");
+}
+
+fn wait_until_terminated(docker: &dyn ContainerRuntime, name: &str) -> Liveness {
+    match wait_until_terminated_within(docker, name, TERMINATION_BUDGET, TERMINATION_PAUSE) {
+        Ok(state) => state,
+        Err(past_budget) => panic!("{past_budget}"),
+    }
+}
+
+fn observations_of(runtime: &FakeRuntime) -> usize {
+    runtime
+        .calls()
+        .into_iter()
+        .filter(|op| *op == RuntimeOp::Observe)
+        .count()
+}
+
+struct Scripted<'a, F>(&'a FakeRuntime, F);
+
+impl<F: Fn(Liveness) -> Liveness + Send + Sync> ContainerRuntime for Scripted<'_, F> {
+    fn probe(&self) -> Result<(), RuntimeError> {
+        self.0.probe()
+    }
+    fn image_by_reference(&self, reference: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+        self.0.image_by_reference(reference)
+    }
+    fn image_by_id(&self, id: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+        self.0.image_by_id(id)
+    }
+    fn volume_present(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.0.volume_present(name)
+    }
+    fn containers_with_label(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<super::runtime::DiscoveredContainer>, RuntimeError> {
+        self.0.containers_with_label(key, value)
+    }
+    fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
+        self.0.observe(name).map(&self.1)
+    }
+    fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
+        self.0.collect(name)
+    }
+    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.0.create(spec)
+    }
+    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+        self.0.start(name)
+    }
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
+        self.0.stop(name, mode)
+    }
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+        self.0.remove(name)
+    }
+}
+
+fn a_running_container(name: &str) -> FakeRuntime {
+    let runtime = FakeRuntime::new(ContainerTrace::recording());
+    runtime.add_image(IMAGE_ID, None);
+    runtime.seed_container(name, BTreeMap::new(), IMAGE_ID, IMAGE_ID, Liveness::Running);
+    runtime
+}
+
+#[test]
+fn a_container_that_exits_after_a_delay_is_waited_for_by_the_clock_and_not_by_a_count() {
+    const NAME: &str = "upstroke-exits-later";
+    let runtime = a_running_container(NAME);
+    let delay = Duration::from_millis(250);
+    let bound = Duration::from_secs(10);
+    let (observed_running, running_was_observed) = std::sync::mpsc::sync_channel::<Instant>(1);
+    let first_observation = std::sync::OnceLock::new();
+    let container = Scripted(&runtime, |state| {
+        let now = Instant::now();
+        if first_observation.set((now, state)).is_ok() {
+            observed_running
+                .send(now)
+                .expect("the exit publisher holds its end of the channel until it has heard this");
+        }
+        state
+    });
+    let (state, returned) = std::thread::scope(|scope| {
+        let runtime = &runtime;
+        let exiting = scope.spawn(move || {
+            running_was_observed.recv_timeout(bound).expect(
+                "the wait made no first observation, so there was no running container to exit",
+            );
+            std::thread::sleep(delay);
+            runtime.set_container_state(NAME, Liveness::Exited);
+        });
+        let state = wait_until_terminated_within(&container, NAME, bound, Duration::from_millis(5))
+            .unwrap_or_else(|past_budget| panic!("{past_budget}"));
+        let returned = Instant::now();
+        exiting.join().expect("the exit publisher panicked");
+        (state, returned)
+    });
+    assert_eq!(state, Liveness::Exited);
+    let (first_at, first_state) = first_observation
+        .get()
+        .copied()
+        .expect("the wait returned without observing the container at all");
+    assert_eq!(
+        first_state,
+        Liveness::Running,
+        "the first observation has to find the container running: its exit is published only \
+         after that observation has been made"
+    );
+    let waited = returned.duration_since(first_at);
+    assert!(
+        waited >= delay,
+        "the wait returned {state:?} {waited:?} after first observing the container running, \
+         before the exit it was to observe was published at {delay:?}"
+    );
+    let observations = observations_of(&runtime);
+    assert!(
+        observations >= 2,
+        "{observations} observation(s): the container was observed running and then never \
+         observed again, yet the wait returned {state:?}"
+    );
+}
+
+#[test]
+fn a_container_that_never_exits_fails_the_wait_at_its_budget_and_the_message_says_how_long() {
+    const NAME: &str = "upstroke-never-exits";
+    let runtime = a_running_container(NAME);
+    let (answered, answers) = std::sync::mpsc::channel::<Instant>();
+    let never = Scripted(&runtime, |_| {
+        answered
+            .send(Instant::now())
+            .expect("the test holds the receiving end until the wait has returned");
+        Liveness::Running
+    });
+    let budget = Duration::from_millis(500);
+    let pause = Duration::from_millis(20);
+    let started = Instant::now();
+    let past_budget = wait_until_terminated_within(&never, NAME, budget, pause)
+        .expect_err("a container that never exits cannot be observed terminated");
+    let waited = started.elapsed();
+    let answered_at: Vec<Instant> = answers.try_iter().collect();
+    assert!(
+        waited >= budget,
+        "the wait gave up after {waited:?}, inside its {budget:?} budget"
+    );
+    assert!(
+        past_budget.waited >= budget && past_budget.waited <= waited,
+        "the report says it waited {:?}; the caller measured {waited:?} against {budget:?}",
+        past_budget.waited
+    );
+    let observations = observations_of(&runtime);
+    assert_eq!(
+        usize::try_from(past_budget.observations).expect("a small count"),
+        observations,
+        "the report counts every observation made, and only those"
+    );
+    assert_eq!(
+        answered_at.len(),
+        observations,
+        "every observation the fake counted was one the script answered"
+    );
+    for (earlier, later) in answered_at.iter().zip(answered_at.iter().skip(1)) {
+        let gap = later.duration_since(*earlier);
+        assert!(
+            gap >= pause,
+            "two observations {gap:?} apart, closer than the {pause:?} pause between observations"
+        );
+    }
+    let most = budget.as_nanos().div_ceil(pause.as_nanos()) + 1;
+    assert!(
+        u128::try_from(observations).expect("a small count") <= most,
+        "{observations} observations over {waited:?}: at most {most} fit a {budget:?} budget with \
+         {pause:?} between them, so the wait went on observing after the budget was spent"
+    );
+    let message = past_budget.to_string();
+    for needle in [
+        NAME.to_owned(),
+        format!("{observations} observations"),
+        format!("{budget:?}"),
+        format!("{:?}", past_budget.waited),
+    ] {
+        assert!(
+            message.contains(&needle),
+            "{message:?} does not say {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn a_terminal_first_observation_is_returned_at_once_without_a_pause_or_a_budget() {
+    const NAME: &str = "upstroke-already-terminated";
+    for terminal in [Liveness::Exited, Liveness::Gone] {
+        let runtime = a_running_container(NAME);
+        let terminated = Scripted(&runtime, |_| terminal);
+        let pause = Duration::from_secs(60);
+        let started = Instant::now();
+        let state = wait_until_terminated_within(&terminated, NAME, Duration::ZERO, pause)
+            .unwrap_or_else(|past_budget| {
+                panic!("a terminal observation is the answer whatever the budget: {past_budget}")
+            });
+        let waited = started.elapsed();
+        assert_eq!(
+            state, terminal,
+            "the terminal state observed is the one returned"
+        );
+        assert_eq!(
+            observations_of(&runtime),
+            1,
+            "the container was observed again after it was observed {terminal:?}"
+        );
+        assert!(
+            waited < pause,
+            "the wait returned {terminal:?} only after {waited:?}: it paused after the terminal \
+             observation instead of returning"
+        );
+    }
+}
+
+#[test]
+fn a_first_observation_that_outlasts_the_budget_is_the_only_one_and_is_reported_in_full() {
+    const NAME: &str = "upstroke-slow-daemon";
+    let runtime = a_running_container(NAME);
+    let round_trip = Duration::from_millis(100);
+    let slow = Scripted(&runtime, |state| {
+        std::thread::sleep(round_trip);
+        state
+    });
+    let budget = Duration::from_millis(20);
+    let started = Instant::now();
+    let past_budget = wait_until_terminated_within(&slow, NAME, budget, Duration::from_millis(5))
+        .expect_err(
+            "the container is running once the observation completes, and the budget is spent",
+        );
+    let waited = started.elapsed();
+    assert_eq!(
+        observations_of(&runtime),
+        1,
+        "the observation that outlasted the budget is the last: the budget is checked once it \
+         completes, and nothing is asked again"
+    );
+    assert_eq!(past_budget.observations, 1);
+    assert!(
+        past_budget.waited >= round_trip && past_budget.waited <= waited,
+        "the report says {:?} against a {budget:?} budget; the one observation alone took \
+         {round_trip:?} and the caller measured {waited:?}",
+        past_budget.waited
+    );
+}
+
+#[test]
+fn a_terminal_observation_that_completes_past_the_budget_is_still_accepted() {
+    const NAME: &str = "upstroke-slow-exit";
+    let runtime = a_running_container(NAME);
+    let round_trip = Duration::from_millis(100);
+    let slow_exit = Scripted(&runtime, |_| {
+        std::thread::sleep(round_trip);
+        Liveness::Exited
+    });
+    let budget = Duration::from_millis(20);
+    let started = Instant::now();
+    let state = wait_until_terminated_within(&slow_exit, NAME, budget, Duration::from_millis(5))
+        .unwrap_or_else(|past_budget| {
+            panic!(
+                "a terminal observation is the answer whenever it completes; the budget is \
+                 consulted only after a running one: {past_budget}"
+            )
+        });
+    let waited = started.elapsed();
+    assert_eq!(state, Liveness::Exited);
+    assert_eq!(observations_of(&runtime), 1);
+    assert!(
+        waited >= round_trip,
+        "the wait returned after {waited:?}, before the observation could have completed at \
+         {round_trip:?}"
+    );
 }
 
 #[test]
