@@ -209,6 +209,46 @@ The bare lint name an attribute entry refers to, if it is governed.
 `clippy::disallowed_methods` and `disallowed_methods` are the same lint;
 `clippy::too_many_arguments` is not governed and answers `None`.
 
+**It names a lint the way Clippy's lint store does**, from the same two tables
+the prologue reader's [`lint_levels::what_a_lint_path_names`] uses: a raw
+segment is the name it spells (`clippy::r#disallowed_methods`, `r#clippy::..`,
+`clippy::r#all`), an old name under the `clippy` tool is the governed lint it
+was renamed to ([`RENAMED_TO_A_GOVERNED_LINT`]), and a one-segment old group
+name is its group ([`PREFIXLESS_GROUP_ALIASES`]). Clippy applies every one of
+those to the governed lint: a raw name alone, a rename or an alias with
+`renamed_and_removed_lints` allowed beside it, since `-D warnings` otherwise
+refuses its deprecation warning. Measured with `clippy-driver` 0.1.97 and
+`-D warnings` on a file that denies `disallowed_methods` and writes through
+`std::fs::write`, each spelling's `allow` builds; and each is compiled against
+a `forbid` in `an_allowance_rustc_reads_whatever_separates_or_spells_its_tokens_is_one_the_placement_census_reads`
+and against a `deny` in `the_file_level_lint_reader_answers_what_rustc_does`.
+Until the attribute-token repair of 2026-09-26 this read none of them, so
+the placement census recorded none of them while the compiler applied each.
+
+Two spellings are left alone because Clippy applies neither (measured the
+same way, each still a build error): an old name with no tool
+(`disallowed_method`) and an old group name under the tool
+(`clippy::clippy_all`). Any other path is named by its last segment, as it
+always was, which reads `rustdoc::disallowed_methods` as the lint Clippy
+does not apply it to: that over-reads, and a census that over-reads refuses
+more, never less. `the_placement_census_names_a_lint_as_clippy_does_and_no_further`
+holds each spelling both ways.
+
+## `const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];`
+
+Clippy's old names for the two groups that hold the governed lints, which
+rustc still applies as the group, with a deprecation warning. One table for
+[`normalize_lint`] and [`lint_levels::what_a_lint_path_names`], so the
+placement census and the prologue reader cannot name a lint differently.
+
+## `const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [`
+
+The renames in Clippy's table whose new name is a governed lint: rustc
+applies `clippy::disallowed_method` to `clippy::disallowed_methods` and
+`clippy::disallowed_type` to `clippy::disallowed_types`, with a warning.
+`disallowed_macros` has none, and the prefixless old names apply to nothing.
+Shared the same way as [`PREFIXLESS_GROUP_ALIASES`].
+
 ## `pub struct GovernedAllow {`
 
 One `allow`/`expect` of a governed lint, as the scan found it.
@@ -232,7 +272,11 @@ The governed lints it names, normalized, in source order.
 
 ## `pub struct GovernedAllow` › `pub written: Vec<String>,`
 
-Every lint it names, as written — so a widening is visible.
+Every lint it names, as written — so a widening is visible — with the
+separators between its tokens taken out: `clippy :: disallowed_methods` is
+recorded as `clippy::disallowed_methods`, which is the one lint rustc reads
+either way, so a spacing is no difference from the allowlist's row. A raw or
+renamed spelling is kept as written, so it is a difference.
 
 ## `pub struct GovernedAllow` › `pub keywords: Vec<&'static str>,`
 
@@ -295,6 +339,10 @@ which on that text is the whole set.
 **What it does not reach.** A reader that reads the raw source instead of the
 tokenizer's text is outside it; the module walk read an attribute's name that
 way and now reads it from the tokenizer's text (see `scan_modules`).
+[`attribute_open`] reads the source between an attribute's tokens on purpose,
+because there a doc comment and a literal are not separators and the
+tokenizer's text cannot tell them from one; what it skips is
+[`is_rustc_whitespace`] and plain comments, nothing else.
 [`blank_comments`] keeps literals and is not rewritten: its callers look for a
 string's contents, not for where a token ends. And a separator is one thing a
 recogniser can misread, not the only one: see `PR7-WRAPPERS-EMPTY-DOMAIN`.
@@ -605,11 +653,77 @@ Every `allow`/`expect` of a governed lint in `source`, with where it sits.
 Attributes are found in the blanked text and read out of the original, so a
 fixture quoted in a doc comment is invisible and a real attribute is not.
 
+**An attribute's tokens are read wherever rustc reads them.** `#`, `!`, `[`
+and the keyword's `(` are separate tokens, and rustc reads whitespace and
+plain comments between any two of them: `# ![allow(..)]`, `#! [allow(..)]`,
+`#![allow (..)]`, `#/* c */[allow(..)]`, and U+200E or any other of
+[`RUSTC_WHITESPACE`] between each pair are applied under `-D warnings`
+exactly as the joined spelling is. This census wanted them touching until
+the attribute-token repair of 2026-09-26, so an allow the compiler applied
+was an allow no census recorded: the fifth review of #309 executed that,
+behind `#[rustfmt::skip]`, with every gate green and the bytes written
+(`PR7-WRAPPERS-EMPTY-DOMAIN`). [`attribute_open`] finds the attribute and
+[`past_comments_and_whitespace`] the keyword's `(`, both in the source, the
+way the prologue reader has found `#`, `!` and `[` since #318's fifth round;
+the lint list is read in the blanked text, and a lint path is named by
+[`normalize_lint`]. A doc comment is a token, not a separator: between the
+tokens rustc refuses it, and it ends the attribute here too.
+
+`the_placement_census_reads_an_attribute_whatever_rustc_reads_between_its_tokens`
+holds every separator in every gap, against the joined spelling as the
+control, and holds a doc comment, a literal and a string between the tokens
+as no attribute; `an_allowance_rustc_reads_whatever_separates_or_spells_its_tokens_is_one_the_placement_census_reads`
+compiles each spelling against a `forbid` so the reading is of an allowance
+rustc applies.
+
+## `fn attribute_open(source: &str, blanked: &[u8], hash: usize) -> Option<(bool, usize)> {`
+
+Whether an attribute starts at `hash`, and if so whether it is inner and
+where its `[` is. `hash` has to be a `#` in the blanked text, so a `#` in a
+literal or a comment is none. The gaps after it are read in the source, past
+rustc's whitespace and plain comments ([`past_comments_and_whitespace`]):
+in the blanked text a doc comment and a literal are spaces like any other,
+and rustc reads neither as a separator. The module walk, the placement
+census, [`is_module_level`] and [`lint_levels::leading_inner_attributes`]
+all find an attribute here, so they cannot disagree about where one is.
+
+## `fn past_whitespace(bytes: &[u8], from: usize) -> usize {`
+
+The first byte at or after `from` that is not ASCII whitespace. On the
+blanked text that is rustc's separators and every comment, which is what the
+readers that start from it want between an attribute and the item it is on.
+
+## `fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {`
+
+The next token at or after `from`: past rustc's whitespace and plain
+comments, and past doc comments too when asked. Here rather than in
+[`lint_levels`] since the attribute-token repair, because the placement
+census reads the gaps in an attribute with it.
+
+## `pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {`
+
+Whether the comment opening at `at` is a doc comment, as rustc's lexer
+classes it: `//!` and `/*!` inner; `///` and `/**` outer; `////`, `/***` and
+`/**/` plain. rustc lexes a doc comment as an attribute, not as whitespace,
+so [`census_domain::with_literal_identity`] refuses one inside an attribute's
+text, and [`attribute_open`] and [`lint_levels`]'s prologue walk refuse one
+between an attribute's `#`, `!` and `[`; between inner attributes an inner
+one is an inner attribute that states no level, and an outer one ends the
+prologue.
+
+## `pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {`
+
+The end of the nested block comment opening at `from`, as
+`code_bytes_only` counts it: `/* /** */ */` is one plain comment, and the
+`/**` inside it opens no doc comment. For [`past_comments_and_whitespace`],
+which skips a comment between inner attributes, and between one's `#`, `!`
+and `[`, by the same count.
+
 ## `fn matching(bytes: &[u8], open: usize, opener: u8, closer: u8) -> Option<usize> {`
 
 The index of the bracket closing the one at `open`, or `None`.
 
-## `fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> bool {`
+## `fn is_module_level(source: &str, bytes: &[u8], hash: usize, close: usize, inner: bool) -> bool {`
 
 An inner attribute in the file's prologue, or an outer attribute on a `mod`.
 
@@ -619,13 +733,27 @@ module; a `#[allow(…)] mod inner { … }` governs that module; an attribute on
 a function, a statement or an expression governs neither and is what the rule
 exists to refuse.
 
-## `fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> bool {` › `let mut prefix = &blanked[..hash];`
+The attributes are found by [`attribute_open`] and the words past
+whitespace, so a prologue attribute written apart, `pub (crate)`,
+`pub(in path)`, `pub(self)` and a `mod` followed by a tab or a line break are
+read as rustc reads them. Until the attribute-token repair an inner allow
+after a spaced first attribute, and an allow on any of those modules, read as
+below module level, and the placement census refused a placement rustc
+allows: that failed closed, so correcting it opens nothing.
 
-Nothing but whitespace and other attributes may precede it.
+## `fn is_module_level(source: &str, bytes: &[u8], hash: usize, close: usize, inner: bool) -> bool {` › `if inner {`
 
-## `fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> bool {` › `let mut rest = &blanked[close + 1..];`
+Nothing but whitespace and other attributes may precede it, from the file's
+first byte.
 
-Outer: skip further attributes and whitespace, then require `mod`.
+## `fn is_module_level(source: &str, bytes: &[u8], hash: usize, close: usize, inner: bool) -> bool {` › `let mut at = past_whitespace(bytes, close + 1);`
+
+Outer: skip further attributes and whitespace, then a visibility and its
+restriction, then require the word `mod`.
+
+## `fn word_at(bytes: &[u8], at: usize, word: &[u8]) -> bool {`
+
+Whether `word` is written at `at` as a whole word, so `module` is not `mod`.
 
 ## `pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[`
 
@@ -1855,6 +1983,23 @@ separators ([`RUSTC_WHITESPACE`]), not by a compiled witness;
 `every_separator_rustc_reads_is_one_every_reader_here_reads` holds the refusal
 for all eleven.
 
+Two more readings of the same attribute were the walk's own until the
+attribute-token repair of 2026-09-26. Its `#`, `!` and `[` had to touch, so
+`#`, a space or U+200E, `[path = ".."] mod y;` was a plain `mod y;` to the
+walk, where the joined spelling is refused (the fifth review of #309 executed
+that at the reader); they are now found by [`super::attribute_open`], past
+whitespace and plain comments, as rustc finds them. And the name was read as
+the run of identifier characters it starts with, so `#[r#path = ".."]` named
+`r`: rustc reads a raw name as the name it spells and compiled the file the
+attribute names (measured, rustc 1.97.1). The name now comes from
+[`super::lint_levels::attribute_name`], which reads `r#path` as `path`, as it
+reads `r#cfg` and `r#cfg_attr` for the prologue reader.
+`the_module_walk_reads_an_attribute_whatever_rustc_reads_between_its_tokens`
+holds a `path`, a `cfg_attr` path, a `cfg` gate and an inner `cfg` for every
+separator and both raw names, in the real `src/engine/attempt.rs`, with the
+joined spellings as the control and a doc comment or a string between the
+tokens as no attribute.
+
 ## `pub(crate) mod census_domain` › `if let Some(invocation) = macro_at(bytes, i) {`
 
 -- a macro, whose body is token trees and not items ------------
@@ -2241,23 +2386,6 @@ doc comment is the one comment that is not whitespace: rustc lexes `///`,
 `//!`, `/**` and `/*!` as attribute tokens ([`is_doc_comment`]), and inside
 an attribute's brackets one is an error, so the text has no reading.
 
-## `pub(crate) mod census_domain` › `pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {`
-
-Whether the comment opening at `at` is a doc comment, as rustc's lexer
-classes it: `//!` and `/*!` inner; `///` and `/**` outer; `////`, `/***` and
-`/**/` plain. rustc lexes a doc comment as an attribute, not as whitespace,
-so [`with_literal_identity`] refuses one inside an attribute's text and
-[`super::lint_levels`]'s prologue walk refuses one between an attribute's
-`#`, `!` and `[`; between inner attributes an inner one is an inner attribute
-that states no level, and an outer one ends the prologue.
-
-## `pub(crate) mod census_domain` › `pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {`
-
-The end of the nested block comment opening at `from`, as
-`code_bytes_only` counts it. `pub(crate)` for [`super::lint_levels`]'s
-prologue walk, which skips a comment between inner attributes, and between
-one's `#`, `!` and `[`, by the same count.
-
 ## `pub(crate) mod census_domain` › `fn literal_token(literal: &str) -> String {`
 
 The token a string literal is read as: its value when
@@ -2483,13 +2611,18 @@ lowers, which is the question every census here asks.
 
 **An allowance only this reader reads.** An `allow` or `expect` of the lint
 spelled so that the placement census (`super::governed_allows`) does not
-read it -- `#`, `!` and `[` spaced or commented apart, a raw lint name, a
-prefixless group alias, a rename -- is a lowering no row of
-`effects/allowlist.toml` accounts for, and the censuses here take a stated
-`allow` for one the placement census recorded. So when such a statement sets
-the level the reader answers undecided rather than `allow`
-([`recorded_by_the_placement_census`]); the same spelling the production-fence
-rule refuses to count as an excuse.
+read it is a lowering no row of `effects/allowlist.toml` accounts for, and
+the censuses here take a stated `allow` for one the placement census
+recorded. So when such a statement sets the level the reader answers
+undecided rather than `allow` ([`recorded_by_the_placement_census`]); the
+same spelling the production-fence rule refuses to count as an excuse. Until
+the attribute-token repair of 2026-09-26 this was a list -- `#`, `!` and `[`
+spaced or commented apart, a raw lint name, a prefixless group alias, a
+rename -- and the placement census now reads every one of them
+([`super::normalize_lint`], [`super::attribute_open`]): each is a decided row
+of `the_file_level_lint_reader_answers_what_rustc_does`, compiled. No
+spelling this reader reads and the census does not is known; the undecided
+answer stays for the one a later reading misses.
 
 **`warnings` over a `warn`.** A `warnings` level replaces a lint's `warn`,
 the default included, and leaves a stated `allow`, `expect`, `deny` or
@@ -2552,18 +2685,6 @@ The Clippy groups that hold the three governed lints. `clippy-driver -W help`
 lists ten groups; `disallowed_methods`, `disallowed_types` and
 `disallowed_macros` are in `all` and `style` and in no other, `restriction`
 included.
-
-## `pub(crate) mod lint_levels` › `const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];`
-
-Clippy's old names for those two groups, which rustc still applies as the
-group, with a deprecation warning.
-
-## `pub(crate) mod lint_levels` › `const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [`
-
-The renames in Clippy's table whose new name is a governed lint: rustc
-applies `clippy::disallowed_method` to `clippy::disallowed_methods` and
-`clippy::disallowed_type` to `clippy::disallowed_types`, with a warning.
-`disallowed_macros` has none, and the prefixless old names apply to nothing.
 
 ## `pub(crate) mod lint_levels` › `const LINT_TOOLS_NAMING_NO_GOVERNED_LINT: [&str; 2] = ["rustdoc", "rustc"];`
 
@@ -2636,11 +2757,6 @@ is not `[` -- a shebang, which rustc strips, `#!/** doc */[..]` included
 (measured: that first line applies nothing). Until #318's fifth round the
 walk began at the first byte, so a mark or a shebang ended the prologue
 before it began and every level below it was read as unstated.
-
-## `pub(crate) mod lint_levels` › `fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {`
-
-The next token at or after `from`: past rustc's whitespace and plain
-comments, and past doc comments too when asked.
 
 ## `pub(crate) mod lint_levels` › `fn past_inner_doc_comments(source: &str, from: usize) -> usize {`
 
@@ -2814,7 +2930,12 @@ writes inside its braces, and to a compiled fixture, as the header of a crate
 root that has to carry exactly what `src/engine/mod.rs` carries
 (`the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes`).
 It stops where [`file_level_lint_resolution`] stops, for the same reason: an
-inner attribute after the first item is not one rustc accepts.
+inner attribute after the first item is not one rustc accepts. It finds each
+attribute with [`super::attribute_open`], so `# ![..]` and `#! [..]` are
+leading attributes as they are to rustc and to the prologue walk; until the
+attribute-token repair they ended the prologue here, which handed
+`governed_allows` an inline module's leading attributes with its spelled-apart
+allow cut off (`the_prologue_readers_read_an_inner_attribute_whatever_rustc_reads_between_its_tokens`).
 
 ## `pub(crate) mod lint_levels` › `pub(crate) fn file_level_lint_state(source: &str, lint: &str) -> Option<&'static str> {`
 

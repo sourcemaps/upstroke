@@ -593,10 +593,15 @@ under `cfg_attr(test, ..)`, an item under `cfg(any())` that no build
 compiles, an inner allowance inside a `cfg(all(test, unix))` module and
 inside a module nested in one, and `cfg(not(not(test)))`; since #318's
 fifth round, a feature no CI valuation sets, which establishes no production
-build, and an allowance written `# [allow(..)]`, which the placement census
-does not read and so no census records. Excused, or not
+build; and an allowance only a macro's expansion writes, which the placement
+census does not read and so no census records. That row was
+`# [allow(..)]` until the attribute-token repair of 2026-09-26 made the
+placement census read the tokens apart; the spaced spelling is now among the
+excused. Excused, or not
 the rule's: the repair itself; every fence forbids; a production child
-allows; the file's own production region allows; a platform-gated
+allows; the file's own production region allows; an allowance whose `#`,
+`[` and keyword's `(` are written apart, which rustc applies and the
+placement census reads; a platform-gated
 allowance; a whole-file test module that fences, which has no production
 region; an outer `#[deny]` on an item, which the sweep names and this
 does not read; a `cfg(not(test))` module; an allowance under
@@ -685,10 +690,14 @@ hold was removed in turn and failed a row
 
 ## `const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[`
 
-Production allowances rustc applies and `governed_allows` does not read:
-`#`, `[` spaced or commented apart on an outer attribute, `#`, `!`, `[`
-spaced on an inner one, and a raw lint name, alone or applied through
-`cfg_attr(not(test), ..)`.
+Production allowances rustc applies and `governed_allows` does not read: an
+outer and an inner allow whose level a `macro_rules!` substitutes -- what an
+expansion writes and no text holds, the half of `PR7-WRAPPERS-EMPTY-DOMAIN`
+no reader here closes. Until the attribute-token repair of 2026-09-26 the
+rows were `#`, `[` spaced or commented apart on an outer attribute, `#`, `!`,
+`[` spaced on an inner one, and a raw lint name alone or applied through
+`cfg_attr(not(test), ..)`; the placement census reads all five now, and they
+are rows of `ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES`.
 
 ## `fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {`
 
@@ -701,6 +710,28 @@ allowance is real. So the rule refuses on purpose here: the remedy is the
 allowance written as the placement census reads it, which records it, not a
 `deny` excused by a lowering nothing accounts for. The fenced shapes compile
 as one batch per lint, and each must carry its own `E0453`.
+
+## `const ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES: &[(&str, &str)] = &[`
+
+The same kind of allowance, spelled every way rustc reads it that the
+placement census read none of before the attribute-token repair: `#` and
+`[` apart by a space, a comment or U+200E; the keyword apart from its `(` by
+a space or a line; an inner attribute with `#`, `!`, `[` and the `(` apart by
+a space, U+2028, U+200F and U+0085; a spaced path; a raw lint name, alone
+and through `cfg_attr(not(test), ..)`. The joined spelling is the first row,
+the control, and `#[r#allow(..)]`, which the census always read, the last.
+
+## `fn an_allowance_rustc_reads_whatever_separates_or_spells_its_tokens_is_one_the_placement_census_reads() {`
+
+**The placement census's half of the repair, held by the compiler.** For each
+governed lint, each row of `ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES`
+and Clippy's renames onto that lint: `governed_allows` reads exactly that
+lint; the production-fence rule takes it as the excuse it takes the joined
+spelling for, so a `deny` above it is not named; and clippy-driver refuses a
+`forbid` above it with `E0453`, which it does only for an allowance it
+applies. The renames are listed in the test, not read from
+`RENAMED_TO_A_GOVERNED_LINT`, so a wrong table fails here rather than agree
+with itself. At `a3767bcc`'s readers the first spaced row fails, `left: []`.
 
 ## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
 
@@ -788,15 +819,18 @@ crate root; a classified module; a whole-file test module; an example.
 
 ## `fn an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one() {`
 
-**Undecided is not a passing fence.** Five prologues the file-level reader
-will not answer for -- an allowance only it reads, a list entry rustc
-refuses, a predicate the grammar refuses, `warnings` over a `warn`, and a
-platform the production valuations disagree on -- are each undecided; the
+**Undecided is not a passing fence.** Four prologues the file-level reader
+will not answer for -- a list entry rustc refuses, a predicate the grammar
+refuses, `warnings` over a `warn`, and a platform the production valuations
+disagree on -- are each undecided; the
 per-site-expectation rule does not take one for a `deny`; the roll-call guard
 names the file, and names a silent child of it, whose nearest stating
 ancestor states nothing to inherit. The classified-module pin and the
 container census read the live tree and are not fed fixtures; what they do
 with an undecided answer is stated at `lint_levels::Resolution::undecided`.
+There were five until the attribute-token repair of 2026-09-26: the fifth,
+an allowance only this reader reads, was `# ![allow(..)]`, which the placement
+census now reads, and no spelling of one is known to be left.
 
 ## `fn every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid() {`
 
@@ -1530,6 +1564,94 @@ What it does not hold: that the walk then *judges* the child. That is
 which walks the tree on disk from what `scan_modules` reports; the compiled
 witness, with the child file and a topology caller, is in the round's
 evidence and not in the suite.
+
+## `fn what_rustc_reads_between_tokens() -> Vec<(String, String)> {`
+
+What may stand between two of an attribute's tokens, each with a name for the
+failure message: each of the eleven separators rustc reads, a block comment, a
+nested one, one holding `/**` (a plain comment, not a doc comment), a line
+comment, and a run of several. The four tests below spell an attribute with
+each of them in each gap.
+
+## `type ReadAllow = (bool, bool, Vec<String>, Vec<String>, Vec<&'static str>, bool);`
+
+What `governed_allows` reports of one attribute but its line: inner,
+module-level, the lints, what they are written as, the keywords, and whether
+a reason is given. The line moves when a gap holds a line break; nothing else
+may.
+
+## `fn allows_as_read(source: &str) -> Vec<ReadAllow> {`
+
+`governed_allows` of `source`, as `ReadAllow`s.
+
+## `fn the_placement_census_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The placement census reads an attribute's tokens where rustc reads them.**
+Six shapes -- an inner allow in the prologue, an outer allow on a module, an
+outer `expect` with a reason on a statement, an allow a `cfg_attr` applies to
+a declared module, the second of two inner attributes, and an inner allow in
+an inline module's braces -- each with what it must read as. Each is read
+joined first, which is the control and is what `a3767bcc`'s census read too;
+then with every gap of `what_rustc_reads_between_tokens` after the `#`, after
+the `!`, after the keyword, around the path's `::`, and in all four at once,
+and each must read exactly as the joined spelling. Then a module's visibility
+and keyword spaced every way (`pub (crate)`, `pub(in ..)`, `pub(self)`,
+`pub`, none) is module-level, and an allow on a function, on an item whose
+name starts with `mod`, and an inner allow after the first item are not.
+Then the other direction, what must read as no allowance: a doc comment
+between `#` and `[`, between `!` and `[`, and between the keyword and its
+list, all of which rustc refuses; a keyword that only starts a longer word;
+the attribute in a string, in comments, and with a literal between its `#`
+and `[` inside a `stringify!`.
+
+Failing before, passing after: at `a3767bcc`'s readers the first spaced
+spelling fails, `U+0009 after #`, `left: []`. Each part of the repair was
+reverted alone on the head and killed this test: the placement census's
+`#`/`!`/`[`, its keyword's `(`, its `written` spacing, the prologue walk and
+the visibility and `mod` words of `is_module_level`. The last group reports
+every row it fails, so each of the three reversions that read the gaps
+wrongly is seen at the rows it breaks: skipping a doc comment as a separator
+fails the three doc-comment rows between `#`, `!` and `[`; reading the gaps in
+the blanked text fails those and the literal inside `stringify!`; reading the
+keyword's gap in the blanked text fails the doc comment before the list.
+
+## `fn the_placement_census_names_a_lint_as_clippy_does_and_no_further() {`
+
+`normalize_lint`, and the placement census through it, name a lint as
+Clippy's lint store does: joined and spaced paths, a bare name, raw segments,
+the two renames under `clippy`, the two prefixless aliases, raw or not, and a
+raw group. And no further, each a spelling Clippy does not apply to a
+governed lint: a bare old name, an alias under the tool, an upper-case name,
+three segments, `r#` apart from its name, and an ungoverned lint.
+
+## `fn the_module_walk_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The module walk reads an attribute's tokens where rustc reads them.** A
+`path` attribute is refused joined and raw (`#[r#path = ..]`, which rustc
+reads as `path`), and, for every gap, with the gap after the `#`, around
+every token of the attribute, and as a `cfg_attr` that applies a `path`;
+each in the real `src/engine/attempt.rs`, so the refusal is of this tree's
+text and not only of a fixture. A `cfg(test)` gate is read joined, raw and
+with every gap, so the declaration is test-only; an inner `cfg` is refused
+the same three ways. A doc comment between `#` and `[`, which rustc refuses,
+and a `path` attribute quoted in a string are no attribute: the declaration
+is read plainly, and that group reports every row it fails. At `a3767bcc`'s
+walk the raw `path` row fails first; with only the raw-name reading reverted
+it is that row, with only the `#`/`!`/`[` reading reverted it is the first
+spaced one, and with a doc comment skipped as a separator, or the gaps read
+in the blanked text, it is the doc-comment row.
+
+## `fn the_prologue_readers_read_an_inner_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The prologue readers read an inner attribute's tokens where rustc reads
+them.** For every gap, a `deny` then an `allow` with their `#`, `!`, `[` and
+the allow's `(` apart: `leading_inner_attributes` is both attributes, and the
+file-level reader answers `allow`, decided, as it does joined. And a
+`forbid` then the same allow is `E0453` rather than a level, which the reader
+already answered at `a3767bcc` and which is here so the `allow` answer is not
+a reader that stopped reading. At `a3767bcc` the prologue came back empty,
+and the reader, which has read the tokens apart since #318's fifth round,
+answered undecided, because the placement census did not record the allow.
 
 ## `fn inline_module_openers(source: &str) -> usize {`
 
@@ -3145,25 +3267,35 @@ because a doc comment follows its `#!`; a trailing comma; a raw `reason`; an
 empty list; and names that resolve to no lint -- unknown, removed, upper-case,
 `rustdoc::`, `rustc::`.
 
+Since the attribute-token repair of 2026-09-26 it also holds the allowances
+that were the fourth table's, because the placement census now reads them
+and the reader answers them: an `allow` after a `deny` with `#`, `!` and `[`
+spaced, commented or on two lines, with the keyword apart from its `(`, and
+with U+200E, U+2029 and U+000B between the tokens; `clippy::r#<lint>`,
+`clippy::r#all`; and the aliases `clippy_all` and `clippy_style`. Each is
+predicted `allow` and compiled; at `a3767bcc` each left the reader
+undecided, which this table refuses.
+
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `let unread: &[(&str, &str, bool)] = &[`
 
 The fourth table: prologues the reader will not answer for, each with
 whether clippy-driver builds it. The reader must be undecided with no world
-at all. Clippy builds the allowances only this reader reads -- `#`, `!`, `[`
-spaced, commented or on two lines, `clippy::r#<lint>`, `clippy::r#all`, the
-aliases `clippy_all` and `clippy_style` -- so a definite `deny` there would
-have been false and a definite `allow` one no census records; it builds
-`warnings` lowering a `warn`, and refuses the rest: `deny(warnings)` alone, a
-three-segment path, a doc comment inside or between the tokens, an outer doc
-comment before an inner attribute, a custom inner attribute, brackets for
-parentheses, a literal or name-value entry, `reason` first, an unknown tool,
-a leading `::`, and a `#!` that opens nothing.
+at all. Clippy builds `warnings` lowering a `warn`, and refuses the rest:
+`deny(warnings)` alone, a three-segment path, a doc comment inside or between
+the tokens, an outer doc comment before an inner attribute, a custom inner
+attribute, brackets for parentheses, a literal or name-value entry, `reason`
+first, an unknown tool, a leading `::`, and a `#!` that opens nothing. Until
+the attribute-token repair of 2026-09-26 it also held the allowances only
+this reader read -- `#`, `!`, `[` spaced, commented or on two lines,
+`clippy::r#<lint>`, `clippy::r#all`, the aliases -- which are decided rows
+now.
 
 Then Clippy's two renames onto a governed lint: `clippy::disallowed_method`
 and `clippy::disallowed_type` after a `deny` compile clean for the lint each
-names, which no census records, so the reader is undecided there; for the
-other two lints each is a name that lowers nothing, and the answer is the
-`deny` clippy-driver enforces.
+names, and since the attribute-token repair the placement census records
+them, so the reader answers `allow` and the row is predicted like any
+decided one; for the other two lints each is a name that lowers nothing, and
+the answer is the `deny` clippy-driver enforces.
 
 How the rows reach the compiler, since #318's fifth round. A decided row the
 reader predicts to build or to fire, an unread row clippy builds, and the two

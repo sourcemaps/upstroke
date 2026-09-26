@@ -46,9 +46,36 @@ pub const USED_GOVERNED_LINTS: &[&str] = &[
 
 #[must_use]
 pub fn normalize_lint(entry: &str) -> Option<&'static str> {
-    let bare = entry.trim().rsplit("::").next()?.trim();
-    GOVERNED_LINTS.iter().copied().find(|name| *name == bare)
+    let segments: Vec<&str> = entry
+        .split("::")
+        .map(|segment| {
+            let segment = segment.trim();
+            segment.strip_prefix("r#").unwrap_or(segment)
+        })
+        .collect();
+    let named = match segments.as_slice() {
+        ["clippy", name] => RENAMED_TO_A_GOVERNED_LINT
+            .iter()
+            .find(|(old, _)| old == name)
+            .map_or(*name, |(_, new)| *new),
+        [name] if PREFIXLESS_GROUP_ALIASES.contains(name) => {
+            name.strip_prefix("clippy_").unwrap_or(*name)
+        }
+        [.., name] => *name,
+        [] => return None,
+    };
+    GOVERNED_LINTS
+        .iter()
+        .copied()
+        .find(|governed| *governed == named)
 }
+
+const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];
+
+const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [
+    ("disallowed_method", "disallowed_methods"),
+    ("disallowed_type", "disallowed_types"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernedAllow {
@@ -489,63 +516,62 @@ pub fn governed_allows(source: &str) -> Vec<GovernedAllow> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'#' {
+        let Some((inner, open)) = attribute_open(source, bytes, i) else {
             i += 1;
             continue;
-        }
-        let inner = bytes.get(i + 1) == Some(&b'!');
-        let open = if inner { i + 2 } else { i + 1 };
-        if bytes.get(open) != Some(&b'[') {
-            i += 1;
-            continue;
-        }
+        };
         let Some(close) = matching(bytes, open, b'[', b']') else {
             i += 1;
             continue;
         };
-        let attribute = &blanked[open + 1..close];
+        let within = bytes.get(..close).unwrap_or_default();
         let mut lints = Vec::new();
         let mut written = Vec::new();
         let mut keywords: Vec<&'static str> = Vec::new();
         let mut reasoned = false;
         for keyword in ["allow", "expect"] {
-            let mut at = 0;
-            while let Some(hit) = attribute[at..].find(keyword) {
-                let start = at + hit;
-                let after = start + keyword.len();
-                let is_word_start = start == 0
-                    || !attribute.as_bytes()[start - 1].is_ascii_alphanumeric()
-                        && attribute.as_bytes()[start - 1] != b'_';
-                if is_word_start && attribute.as_bytes().get(after) == Some(&b'(') {
-                    if let Some(end) = matching(attribute.as_bytes(), after, b'(', b')') {
-                        let before = lints.len();
-                        for entry in attribute[after + 1..end].split(',') {
-                            let entry = entry.trim();
-                            if entry.is_empty() {
-                                continue;
-                            }
-                            if entry.starts_with("reason") {
-                                reasoned = true;
-                                continue;
-                            }
-                            written.push(entry.to_owned());
-                            if let Some(name) = normalize_lint(entry) {
-                                lints.push(name.to_owned());
-                            }
-                        }
-                        if lints.len() > before && !keywords.contains(&keyword) {
-                            keywords.push(keyword);
-                        }
+            let attribute = blanked.get(open + 1..close).unwrap_or_default();
+            for (at, _) in attribute.match_indices(keyword) {
+                let start = open + 1 + at;
+                let is_word_start = start
+                    .checked_sub(1)
+                    .and_then(|before| bytes.get(before))
+                    .is_none_or(|byte| !is_ident_byte(*byte));
+                let paren = past_comments_and_whitespace(source, start + keyword.len(), false);
+                if !is_word_start || within.get(paren) != Some(&b'(') {
+                    continue;
+                }
+                let Some(end) = matching(within, paren, b'(', b')') else {
+                    continue;
+                };
+                let before = lints.len();
+                for entry in blanked.get(paren + 1..end).unwrap_or_default().split(',') {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    if entry.starts_with("reason") {
+                        reasoned = true;
+                        continue;
+                    }
+                    written.push(entry.split_ascii_whitespace().collect());
+                    if let Some(name) = normalize_lint(entry) {
+                        lints.push(name.to_owned());
                     }
                 }
-                at = after;
+                if lints.len() > before && !keywords.contains(&keyword) {
+                    keywords.push(keyword);
+                }
             }
         }
         if !lints.is_empty() {
             found.push(GovernedAllow {
-                line: blanked[..i].matches('\n').count() + 1,
+                line: blanked
+                    .get(..i)
+                    .map_or(0, |before| before.matches('\n').count())
+                    + 1,
                 inner,
-                module_level: is_module_level(&blanked, i, close, inner),
+                module_level: is_module_level(source, bytes, i, close, inner),
                 lints,
                 written,
                 keywords,
@@ -555,6 +581,83 @@ pub fn governed_allows(source: &str) -> Vec<GovernedAllow> {
         i = close + 1;
     }
     found
+}
+
+fn attribute_open(source: &str, blanked: &[u8], hash: usize) -> Option<(bool, usize)> {
+    if blanked.get(hash) != Some(&b'#') {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let after_hash = past_comments_and_whitespace(source, hash + 1, false);
+    let inner = bytes.get(after_hash) == Some(&b'!');
+    let open = if inner {
+        past_comments_and_whitespace(source, after_hash + 1, false)
+    } else {
+        after_hash
+    };
+    (bytes.get(open) == Some(&b'[')).then_some((inner, open))
+}
+
+fn past_whitespace(bytes: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    at
+}
+
+fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while let Some(rest) = source.get(at..) {
+        let skipped = doc_comments_too || !is_doc_comment(bytes, at);
+        if let Some(character) = rest
+            .chars()
+            .next()
+            .filter(|character| is_rustc_whitespace(*character))
+        {
+            at += character.len_utf8();
+        } else if rest.starts_with("/*") && skipped {
+            at = block_comment_end(bytes, at);
+        } else if rest.starts_with("//") && skipped {
+            at += rest.find('\n').unwrap_or(rest.len());
+        } else {
+            break;
+        }
+    }
+    at
+}
+
+pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {
+    if bytes.get(at) != Some(&b'/') {
+        return false;
+    }
+    match (bytes.get(at + 1), bytes.get(at + 2), bytes.get(at + 3)) {
+        (Some(b'/' | b'*'), Some(b'!'), _) => true,
+        (Some(b'/'), Some(b'/'), next) => next != Some(&b'/'),
+        (Some(b'*'), Some(b'*'), next) => !matches!(next, Some(b'*' | b'/')),
+        _ => false,
+    }
+}
+
+pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {
+    let mut depth = 1_usize;
+    let mut at = from + 2;
+    while depth > 0 {
+        match (bytes.get(at), bytes.get(at + 1)) {
+            (None, _) => break,
+            (Some(b'/'), Some(b'*')) => {
+                depth += 1;
+                at += 2;
+            }
+            (Some(b'*'), Some(b'/')) => {
+                depth -= 1;
+                at += 2;
+            }
+            _ => at += 1,
+        }
+    }
+    at.min(bytes.len())
 }
 
 fn matching(bytes: &[u8], open: usize, opener: u8, closer: u8) -> Option<usize> {
@@ -572,45 +675,41 @@ fn matching(bytes: &[u8], open: usize, opener: u8, closer: u8) -> Option<usize> 
     None
 }
 
-fn is_module_level(blanked: &str, hash: usize, close: usize, inner: bool) -> bool {
+fn is_module_level(source: &str, bytes: &[u8], hash: usize, close: usize, inner: bool) -> bool {
+    let attribute_end = |at: usize| {
+        attribute_open(source, bytes, at).and_then(|(_, open)| matching(bytes, open, b'[', b']'))
+    };
     if inner {
-        let mut prefix = &blanked[..hash];
-        loop {
-            let trimmed = prefix.trim_end();
-            if trimmed.ends_with(']') {
-                let Some(open) = trimmed.rfind("#![").or_else(|| trimmed.rfind("#[")) else {
-                    return false;
-                };
-                prefix = &trimmed[..open];
-                continue;
-            }
-            return trimmed.is_empty();
-        }
-    }
-    let mut rest = &blanked[close + 1..];
-    loop {
-        rest = rest.trim_start();
-        if rest.starts_with('#') {
-            let Some(open) = rest.find('[') else {
+        let mut at = past_whitespace(bytes, 0);
+        while at < hash {
+            let Some(end) = attribute_end(at) else {
                 return false;
             };
-            let Some(end) = matching(rest.as_bytes(), open, b'[', b']') else {
+            at = past_whitespace(bytes, end + 1);
+        }
+        return at == hash;
+    }
+    let mut at = past_whitespace(bytes, close + 1);
+    while let Some(end) = attribute_end(at) {
+        at = past_whitespace(bytes, end + 1);
+    }
+    if word_at(bytes, at, b"pub") {
+        at = past_whitespace(bytes, at + b"pub".len());
+        if bytes.get(at) == Some(&b'(') {
+            let Some(end) = matching(bytes, at, b'(', b')') else {
                 return false;
             };
-            rest = &rest[end + 1..];
-            continue;
+            at = past_whitespace(bytes, end + 1);
         }
-        for visibility in ["pub(crate)", "pub(super)", "pub", ""] {
-            let candidate = rest.strip_prefix(visibility).unwrap_or(rest).trim_start();
-            if candidate.starts_with("mod ") {
-                return true;
-            }
-            if visibility.is_empty() {
-                return false;
-            }
-        }
-        return false;
     }
+    word_at(bytes, at, b"mod")
+}
+
+fn word_at(bytes: &[u8], at: usize, word: &[u8]) -> bool {
+    bytes.get(at..).is_some_and(|rest| rest.starts_with(word))
+        && !bytes
+            .get(at + word.len())
+            .is_some_and(|byte| is_ident_byte(*byte))
 }
 
 pub const FROZEN_LEGACY_ALLOWLIST: &[&str] = &[
@@ -1089,6 +1188,7 @@ pub(crate) mod census_domain {
     use std::path::PathBuf;
 
     use super::lint_levels::{applied_attributes, attribute_arguments, attribute_name};
+    use super::{block_comment_end, is_doc_comment};
 
     pub(crate) fn production_calls(code: &str, name: &str, form: Call) -> usize {
         let needle = format!("{name}(");
@@ -1643,7 +1743,12 @@ pub(crate) mod census_domain {
         let blanked = super::blank_comments_and_strings(source);
         debug_assert_eq!(blanked.len(), source.len());
         let bytes = blanked.as_bytes();
-        let line_of = |at: usize| blanked[..at].matches('\n').count() + 1;
+        let line_of = |at: usize| {
+            blanked
+                .get(..at)
+                .map_or(0, |before| before.matches('\n').count())
+                + 1
+        };
 
         let mut found = Vec::new();
         let mut inline = Vec::new();
@@ -1655,30 +1760,23 @@ pub(crate) mod census_domain {
         let mut depth = 0_usize;
         let mut i = 0;
 
-        while i < bytes.len() {
-            let byte = bytes[i];
+        while let Some(&byte) = bytes.get(i) {
             if byte.is_ascii_whitespace() {
                 i += 1;
                 continue;
             }
 
             if byte == b'#' {
-                let inner = bytes.get(i + 1) == Some(&b'!');
-                let open = if inner { i + 2 } else { i + 1 };
-                if bytes.get(open) != Some(&b'[') {
+                let Some((inner, open)) = super::attribute_open(source, bytes, i) else {
                     i += 1;
                     continue;
-                }
+                };
                 let Some(close) = super::matching(bytes, open, b'[', b']') else {
                     return Err(ScanRefusal::UnclosedAttribute { line: line_of(i) });
                 };
                 let raw = source.get(open + 1..close).unwrap_or_default();
                 let shape = blanked.get(open + 1..close).unwrap_or_default();
-                let name = shape
-                    .trim_start()
-                    .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                    .next()
-                    .unwrap_or_default();
+                let name = attribute_name(shape.trim_start());
                 match name {
                     "cfg" | "cfg_attr" => {
                         if name == "cfg_attr" && raw.contains("path") {
@@ -1818,9 +1916,9 @@ pub(crate) mod census_domain {
                             test_only: entails_test(&effective),
                         });
                         pending.clear();
-                        i = bytes[name_at..]
-                            .iter()
-                            .position(|byte| *byte == b';')
+                        i = bytes
+                            .get(name_at..)
+                            .and_then(|rest| rest.iter().position(|byte| *byte == b';'))
                             .map_or(bytes.len(), |at| name_at + at + 1);
                     }
                 }
@@ -2305,38 +2403,6 @@ pub(crate) mod census_domain {
         Some(out)
     }
 
-    pub(crate) fn is_doc_comment(bytes: &[u8], at: usize) -> bool {
-        if bytes.get(at) != Some(&b'/') {
-            return false;
-        }
-        match (bytes.get(at + 1), bytes.get(at + 2), bytes.get(at + 3)) {
-            (Some(b'/' | b'*'), Some(b'!'), _) => true,
-            (Some(b'/'), Some(b'/'), next) => next != Some(&b'/'),
-            (Some(b'*'), Some(b'*'), next) => !matches!(next, Some(b'*' | b'/')),
-            _ => false,
-        }
-    }
-
-    pub(crate) fn block_comment_end(bytes: &[u8], from: usize) -> usize {
-        let mut depth = 1_usize;
-        let mut at = from + 2;
-        while depth > 0 {
-            match (bytes.get(at), bytes.get(at + 1)) {
-                (None, _) => break,
-                (Some(b'/'), Some(b'*')) => {
-                    depth += 1;
-                    at += 2;
-                }
-                (Some(b'*'), Some(b'/')) => {
-                    depth -= 1;
-                    at += 2;
-                }
-                _ => at += 1,
-            }
-        }
-        at.min(bytes.len())
-    }
-
     fn literal_token(literal: &str) -> String {
         let hex =
             |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
@@ -2450,8 +2516,11 @@ pub(crate) mod lint_levels {
     use std::collections::BTreeSet;
 
     use super::census_domain::{
-        Predicate, block_comment_end, decide_without_test, is_doc_comment, parse_predicate,
-        with_literal_identity,
+        Predicate, decide_without_test, parse_predicate, with_literal_identity,
+    };
+    use super::{
+        PREFIXLESS_GROUP_ALIASES, RENAMED_TO_A_GOVERNED_LINT, block_comment_end, is_doc_comment,
+        past_comments_and_whitespace,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2508,13 +2577,6 @@ pub(crate) mod lint_levels {
     }
 
     const GROUPS_NAMING_THE_GOVERNED_LINTS: [&str; 2] = ["all", "style"];
-
-    const PREFIXLESS_GROUP_ALIASES: [&str; 2] = ["clippy_all", "clippy_style"];
-
-    const RENAMED_TO_A_GOVERNED_LINT: [(&str, &str); 2] = [
-        ("disallowed_method", "disallowed_methods"),
-        ("disallowed_type", "disallowed_types"),
-    ];
 
     const LINT_TOOLS_NAMING_NO_GOVERNED_LINT: [&str; 2] = ["rustdoc", "rustc"];
 
@@ -2671,28 +2733,6 @@ pub(crate) mod lint_levels {
             .get(start..)
             .and_then(|rest| rest.find('\n'))
             .map_or(source.len(), |line| start + line)
-    }
-
-    fn past_comments_and_whitespace(source: &str, from: usize, doc_comments_too: bool) -> usize {
-        let bytes = source.as_bytes();
-        let mut at = from;
-        while let Some(rest) = source.get(at..) {
-            let skipped = doc_comments_too || !is_doc_comment(bytes, at);
-            if let Some(character) = rest
-                .chars()
-                .next()
-                .filter(|character| super::is_rustc_whitespace(*character))
-            {
-                at += character.len_utf8();
-            } else if rest.starts_with("/*") && skipped {
-                at = block_comment_end(bytes, at);
-            } else if rest.starts_with("//") && skipped {
-                at += rest.find('\n').unwrap_or(rest.len());
-            } else {
-                break;
-            }
-        }
-        at
     }
 
     fn past_inner_doc_comments(source: &str, from: usize) -> usize {
@@ -2926,23 +2966,12 @@ pub(crate) mod lint_levels {
         let blanked = super::blank_comments_and_strings(source);
         let bytes = blanked.as_bytes();
         let mut end = 0;
-        let mut at = 0;
-        while at < bytes.len() {
-            if bytes[at].is_ascii_whitespace() {
-                at += 1;
-                continue;
-            }
-            if bytes[at] != b'#'
-                || bytes.get(at + 1) != Some(&b'!')
-                || bytes.get(at + 2) != Some(&b'[')
-            {
-                break;
-            }
-            let Some(close) = super::matching(bytes, at + 2, b'[', b']') else {
-                break;
-            };
-            at = close + 1;
-            end = at;
+        while let Some(close) =
+            super::attribute_open(source, bytes, super::past_whitespace(bytes, end))
+                .filter(|(inner, _)| *inner)
+                .and_then(|(_, open)| super::matching(bytes, open, b'[', b']'))
+        {
+            end = close + 1;
         }
         source.get(..end).unwrap_or_default()
     }
