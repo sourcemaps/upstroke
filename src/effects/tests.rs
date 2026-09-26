@@ -2752,6 +2752,23 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
     }
 
     for (position, source) in [
+        (
+            "a block after a `fn` in a macro's parentheses",
+            "const C: u8 = if n!(fn x) {\n    m!()\n} else {\n    0\n};\n",
+        ),
+        (
+            "a block after a `fn` in a macro's brackets",
+            "const C: u8 = if n![fn x] {\n    m!()\n} else {\n    0\n};\n",
+        ),
+    ] {
+        assert_eq!(
+            outside(source),
+            vec!["n".to_owned(), "m".to_owned()],
+            "{position}: {source:?}"
+        );
+    }
+
+    for (position, source) in [
         ("a function body", "fn f() {\n    m!();\n}\n"),
         (
             "a method body",

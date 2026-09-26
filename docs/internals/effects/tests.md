@@ -1223,6 +1223,18 @@ function, test-only items and modules, a keyword before a `!` outside a
 body, and unary `!`, `!=`, comments and strings that are not invocations
 at all.
 
+## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {` › `assert_eq!(`
+
+The two invocations of a `const` whose `if` names a `fn` inside a macro's
+parentheses or brackets, both reported. The `)` or `]` that closes the
+arguments is what ends that `fn`'s header here; read past it, the `if`
+block would be taken for the `fn`'s body and the invocation in it dropped
+from the list. The verdict cannot turn on it -- the macro holding the `fn`
+is outside a body and refused either way -- so this is the list's
+precision, pinned because the census prints the list: a mutation matrix
+over the reader found the two closers pinned by nothing else, since a `;`
+ended every other header they could.
+
 ## `fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {`
 
 The domain derivation over a synthetic tree, each file there for one
