@@ -78,22 +78,32 @@ in the engine acts on a record's contents: reclaim trusts the intent's file name
 record is provenance for an operator and for any future reader, which this contract binds. The
 implementation is `IntentRecord` in `src/workspace_manager/naming.rs`.
 
-**What an exact snapshot is exact against.** A snapshot is exact against the objects the
-repository holds, never against the objects `git replace` points at them. `refs/replace/A -> B`
-makes Git read `B` wherever `A` is named while `rev-parse` still prints `A`, so a resolve-once
-check cannot see it: measured on git 2.43, `commit-tree A -p P` records the raw tree `A` and
-`worktree add --detach` materialises `A`, while a process inside that worktree reading through Git
-sees `B` — `git show HEAD:f` returns the replacement and `git status --porcelain` reports the
-untouched checkout modified. Two trees for one snapshot is not a tree §4's "ground truth is the
-diff" could name, so upstroke removes the ambiguity rather than detecting it: every child that
-runs Git over a snapshot — the manager's own commands and read-only reads, and every gate,
-reviewer and implementer the runners start, on the host runner and in a container alike — runs
-with `GIT_NO_REPLACE_OBJECTS=1`. No adapter, image or command overlay can turn it back on: the
-runners compose it last. A replacement graph is a ref outside the recorded inputs of a run, so a
-verdict that depended on one would not be reproducible from the record; an operator who wants the
-replaced history judged rewrites it, and the run judges what the repository then holds. The
-variable is one constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of
-those boundaries.
+**What an exact snapshot is exact against.** A snapshot is exact against the objects the repository
+holds, never against the objects `git replace` points at them. `refs/replace/A -> B`
+makes Git read `B` wherever `A` is named while `rev-parse` still prints `A`, so a resolve-once check
+cannot see it: measured on git 2.43, `commit-tree A -p P` records the raw tree `A`
+and `worktree add --detach` materialises `A`, while a process inside that worktree reading
+through Git sees `B` — `git show HEAD:f` returns the replacement and
+`git status --porcelain` reports the untouched checkout modified. Two trees for one
+snapshot is not a tree §4's "ground truth is the diff" could name, so upstroke removes the ambiguity
+rather than detecting it: every child that runs Git over a snapshot — the manager's own commands and
+read-only reads, and every gate, reviewer and implementer the runners start, on the host runner and
+in a container alike — runs with `GIT_NO_REPLACE_OBJECTS=1`, which the runners compose last. On Git
+2.42 and later the variable is final, and no adapter, image or command overlay can turn it back on.
+On Git 2.40 and 2.41, inside the floor `README.md` states, it is not final: a
+`core.useReplaceRefs = true` in a system, global or repository configuration file, or in
+command-line configuration a child inherits, which is what a `GIT_CONFIG_*` pair in an image or an
+overlay is, turns replacements back on for a child that carries only the variable (measured with Git
+on 2.40.0 and 2.41.0 at each of those places; 2.42.0 and 2.43.0 held). The v0.1 workspace's own
+children pass `-c core.useReplaceRefs=false` as well, which outranks all of them (the next
+paragraph). The manager's children and every runner's role processes carry the variable alone, so on
+2.40 and 2.41 the rule holds for them only where nothing configures
+`core.useReplaceRefs = true` (`PR326-MANAGER-GIT-CHILDREN-CARRY-THE-VARIABLE-ALONE` for
+the manager, `PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` for the schema-4
+runners). A replacement graph is a ref outside the recorded inputs of a run, so a verdict that
+depended on one would not be reproducible from the record; an operator who wants the replaced
+history judged rewrites it, and the run judges what the repository then holds. The variable is one
+constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of those boundaries.
 
 **Exact snapshots are §5's; the recorded graph is every run's.** The released v0.1 path has no exact
 snapshot: its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, frozen at
@@ -102,15 +112,17 @@ each of them starts from, which reads the same constant and also passes
 `-c core.useReplaceRefs=false`: on Git 2.40 and 2.41 a configured
 `core.useReplaceRefs = true` outranks the variable, and a command-line setting outranks
 every configuration file. The runner the v0.1 conductor installs composes the variable for its
-gates, reviewers and implementers as the schema-4 runners do. So a v0.1 run reads the recorded graph
-throughout, like a schema-4 run. Producer and consumer move together or not at all: a consumer of
-that workspace must read what its own producer wrote or judge a tree nobody created, and a gate
-reading one graph over a snapshot written from the other fails
-`git diff --exit-code HEAD` on a checkout nothing has touched (measured on git 2.43:
-in both directions for a replaced tree or commit; for a replaced blob, only over a snapshot written
-from the replaced graph). Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, the frozen
-module read the replaced graph and the v0.1 runner was exempted to match it; the change that closed
-it amended the freeze for this isolation alone, and the exemption's reason went with it.
+gates, reviewers and implementers as the schema-4 runners do. So on Git 2.42 and later a v0.1 run
+reads the recorded graph throughout, like a schema-4 run; on 2.40 and 2.41 its role processes do so
+only where nothing configures `core.useReplaceRefs = true`, as the paragraph above says.
+Producer and consumer move together or not at all: a consumer of that workspace must read what its
+own producer wrote or judge a tree nobody created, and a gate reading one graph over a snapshot
+written from the other fails `git diff --exit-code HEAD` on a checkout nothing has
+touched (measured on git 2.43: in both directions for a replaced tree or commit; for a replaced
+blob, only over a snapshot written from the replaced graph). Until
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, the frozen module read the replaced graph and
+the v0.1 runner was exempted to match it; the change that closed it amended the freeze for this
+isolation alone, and the exemption's reason went with it.
 
 Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data}` — including `question_raised`, `question_answered`, `design_defect`, `capacity_snapshot`, `pool_exhausted`, and `spend_down_engaged`. `status`, the ledger, and the capacity view are pure folds over this file.
 
