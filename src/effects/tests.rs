@@ -22,6 +22,7 @@ use super::{
     blank_comments_and_strings, governed_allows, legacy_growth, normalize_lint, production_region,
     topology_modules_among,
 };
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::topology::effects::{EffectSiteId, effect_sites, effect_sites_json};
 
 mod policy;
@@ -1655,7 +1656,8 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
             &|_| false,
         )
     }
-    let scratch = scratch_dir("activation");
+    let tree = scratch_dir("activation");
+    let scratch = tree.path();
     let fenced = |lint: &str, shape: &str| {
         format!(
             "#![cfg_attr(not(test), forbid({lint}))]\n{}",
@@ -1730,7 +1732,7 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 .iter()
                 .map(|(_, shape, _)| fenced(lint, shape))
                 .collect();
-            let outcomes = clippy_outcomes(&scratch, &format!("{bare}_{batch}"), &sources, cfgs);
+            let outcomes = clippy_outcomes(scratch, &format!("{bare}_{batch}"), &sources, cfgs);
             for ((tag, _, why), (built, diagnostics)) in cases.iter().zip(&outcomes) {
                 compiled += 1;
                 let rejected = diagnostics.iter().any(|(_, code)| code == "E0453");
@@ -1750,7 +1752,6 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
                 + ONE_CI_PLATFORM_APPLIES.len()),
         "a fixture was skipped"
     );
-    let _ = fs::remove_dir_all(&scratch);
 }
 
 const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
@@ -1766,7 +1767,8 @@ const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
 
 #[test]
 fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
-    let scratch = scratch_dir("unrecorded");
+    let tree = scratch_dir("unrecorded");
+    let scratch = tree.path();
     for lint in USED_GOVERNED_LINTS {
         let bare = normalize_lint(lint).expect("a governed lint");
         let mut fenced = Vec::new();
@@ -1793,7 +1795,7 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
             );
             fenced.push(format!("#![cfg_attr(not(test), forbid({lint}))]\n{shape}"));
         }
-        let outcomes = clippy_outcomes(&scratch, bare, &fenced, &[]);
+        let outcomes = clippy_outcomes(scratch, bare, &fenced, &[]);
         for ((tag, _), (built, diagnostics)) in ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ
             .iter()
             .zip(&outcomes)
@@ -1805,7 +1807,6 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
             );
         }
     }
-    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]
@@ -2691,13 +2692,14 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
 
 #[test]
 fn every_denied_path_this_host_can_resolve_does_resolve() {
-    let scratch = scratch_dir("resolve");
+    let tree = scratch_dir("resolve");
+    let scratch = tree.path();
     let denied_text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
     let stripped = denied_text.replace(", allow-invalid = true", "");
     assert_ne!(stripped, denied_text, "no allow-invalid entry to strip");
     fs::write(scratch.join(CLIPPY_TOML), &stripped).expect("the probe config");
 
-    let unresolved = unresolved_paths(&scratch, "probe");
+    let unresolved = unresolved_paths(scratch, "probe");
     let expected: BTreeSet<String> = host_conditional_paths()
         .into_iter()
         .map(str::to_owned)
@@ -2714,7 +2716,7 @@ fn every_denied_path_this_host_can_resolve_does_resolve() {
         "disallowed-methods = [\n    { path = \"std::fs::wrrite\", reason = \"UPSTROKE-EFFECT: control\" },",
     );
     fs::write(scratch.join(CLIPPY_TOML), with_typo).expect("the control config");
-    let control = unresolved_paths(&scratch, "control");
+    let control = unresolved_paths(scratch, "control");
     assert!(
         control.contains("std::fs::wrrite"),
         "the control typo was not reported: {control:?}"
@@ -2868,9 +2870,10 @@ fn every_platform_conditional_denial_names_something_real() {
 
 #[test]
 fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
-    let scratch = scratch_dir("denial");
+    let tree = scratch_dir("denial");
+    let scratch = tree.path();
 
-    let (ok, diagnostics) = lint_fixture(&scratch, "control", DENIAL_CONTROL);
+    let (ok, diagnostics) = lint_fixture(scratch, "control", DENIAL_CONTROL);
     assert!(
         ok && diagnostics.is_empty(),
         "the positive control did not compile clean, so no refusal below is \
@@ -2881,7 +2884,7 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
     let mut lints = BTreeSet::new();
     for fixture in DENIAL_FIXTURES {
         let tag = fixture.shape.replace([' ', '-'], "_");
-        let (_, diagnostics) = lint_fixture(&scratch, &tag, fixture.source);
+        let (_, diagnostics) = lint_fixture(scratch, &tag, fixture.source);
         let emitted: BTreeSet<&str> = diagnostics.iter().map(|(lint, _)| lint.as_str()).collect();
         assert_eq!(
             emitted,
@@ -2993,7 +2996,8 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     }
     assert!(children > 30, "only {children} topology children scanned");
 
-    let scratch = scratch_dir("facade");
+    let tree = scratch_dir("facade");
+    let scratch = tree.path();
     fs::write(
         scratch.join("facade-child.rs"),
         "pub fn probe(p: &std::path::Path) -> bool {\n\
@@ -3041,7 +3045,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     // No attribute anywhere: all four reaches are refused, so the fixture
     // sees everything the two shapes below can hide.
     let (ok, control) = lint_fixture(
-        &scratch,
+        scratch,
         "facade_control",
         &root("", "facade-topology-open.rs"),
     );
@@ -3073,7 +3077,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     // An ancestor's allow with nothing below it: the child's reach into a
     // denied wrapper goes unrefused, and no file wrote the allow that let it.
     let (ok, inherited) = lint_fixture(
-        &scratch,
+        scratch,
         "facade_inherit",
         &root(&facade_allow, "facade-topology-open.rs"),
     );
@@ -3097,7 +3101,7 @@ fn the_topology_root_re_denies_every_lint_the_engine_facade_allows() {
     // three reaches build errors again, and the ancestor's own call stays
     // under the allow it wrote.
     let (ok, tree) = lint_fixture(
-        &scratch,
+        scratch,
         "facade_tree",
         &root(&facade_allow, "facade-topology-denying.rs"),
     );
@@ -3354,7 +3358,8 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     // The review's witness, compiled: a sibling reaching `std::fs::write`, a
     // topology module carrying the root's deny and referencing the sibling,
     // and an ancestor allowing what this tree's facade allowed on #306.
-    let scratch = scratch_dir("siblings");
+    let tree = scratch_dir("siblings");
+    let scratch = tree.path();
     let fence = format!("#![deny({})]\n", GOVERNED.join(", "));
     fs::write(scratch.join("sibling-open.rs"), SIBLING).expect("the open sibling fixture");
     fs::write(
@@ -3395,11 +3400,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
 
     // No attribute anywhere: the sibling's reach and the facade's own are
     // both reported, so the fixture sees what the two shapes below can hide.
-    let (ok, control) = lint_fixture(
-        &scratch,
-        "siblings_control",
-        &root_of("", "sibling-open.rs"),
-    );
+    let (ok, control) = lint_fixture(scratch, "siblings_control", &root_of("", "sibling-open.rs"));
     assert!(
         ok,
         "the control shape must compile with warnings only: {control:#?}"
@@ -3420,7 +3421,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     // sibling's reach goes unreported, the crate builds, and no file wrote the
     // allow that let it -- the hole the third review executed.
     let (ok, hole) = lint_fixture(
-        &scratch,
+        scratch,
         "siblings_inherited",
         &root_of(facade_allow, "sibling-open.rs"),
     );
@@ -3438,7 +3439,7 @@ fn every_child_the_engine_facade_declares_re_denies_or_records_what_it_inherits(
     // children write, its reach is a build error again, and the ancestor's own
     // call stays under the allow it wrote.
     let (ok, tree) = lint_fixture(
-        &scratch,
+        scratch,
         "siblings_fenced",
         &root_of(facade_allow, "sibling-fenced.rs"),
     );
@@ -3560,7 +3561,8 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
          and item in it -- is whatever the crate root and the command line say"
     );
 
-    let scratch = scratch_dir("routes");
+    let tree = scratch_dir("routes");
+    let scratch = tree.path();
     let fence = format!("#![deny({})]\n", USED_GOVERNED_LINTS.join(", "));
     let header = leading_inner_attributes(&facade.source);
     assert!(
@@ -3606,7 +3608,7 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
         };
 
         let (ok, control) =
-            lint_fixture(&scratch, &format!("routes_{route}_control"), &facade_of(""));
+            lint_fixture(scratch, &format!("routes_{route}_control"), &facade_of(""));
         assert!(
             ok,
             "{route}: the control shape must compile with warnings only: {control:#?}"
@@ -3618,7 +3620,7 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
         );
 
         let (ok, hole) = lint_fixture(
-            &scratch,
+            scratch,
             &format!("routes_{route}_under_the_allow_of_306"),
             &facade_of(FACADE_ALLOW_OF_306),
         );
@@ -3629,7 +3631,7 @@ fn the_engine_facade_allows_no_governed_lint_and_refuses_both_escape_routes() {
         );
 
         let (ok, tree_shape) = lint_fixture(
-            &scratch,
+            scratch,
             &format!("routes_{route}_this_tree"),
             &facade_of(header),
         );
@@ -5020,11 +5022,27 @@ fn crate_under_test() -> (PathBuf, PathBuf) {
     (deps, rlib)
 }
 
-fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-effects-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-effects-<tag>-<pid>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an occupied root rather
+/// than emptying it, keys on a ULID no recycled pid can supply, and
+/// reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch_dir("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch_dir(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 #[test]
@@ -6400,7 +6418,8 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
         }
     }
 
-    let scratch = scratch_dir("inventory");
+    let tree = scratch_dir("inventory");
+    let scratch = tree.path();
     fs::write(
         scratch.join("Cargo.toml"),
         "[package]\n\
@@ -6423,8 +6442,8 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
     )
     .expect("the fixture manifest");
 
-    let inventory = crate_roots_of(&scratch).expect("cargo reads the fixture manifest");
-    assert_eq!(inventory.package_dir(), scratch.as_path());
+    let inventory = crate_roots_of(scratch).expect("cargo reads the fixture manifest");
+    assert_eq!(inventory.package_dir(), scratch);
     assert_eq!(
         inventory.roots().collect::<Vec<_>>(),
         vec![
@@ -6540,8 +6559,6 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
         ],
         "this package's exact target inventory"
     );
-
-    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]
@@ -7322,7 +7339,8 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
             &["feature=\"a\\\", b\""],
         ),
     ];
-    let scratch = scratch_dir("levels");
+    let tree = scratch_dir("levels");
+    let scratch = tree.path();
     let mut observed_shapes: BTreeSet<(bool, Vec<String>, bool)> = BTreeSet::new();
     for (lint, body) in GOVERNED {
         let bare = normalize_lint(lint).expect("a governed lint");
@@ -7338,7 +7356,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         };
         let outcome = |tag: &str, source: &str, cfgs: &[&str]| {
             let (built, diagnostics) =
-                clippy_outcome(&scratch, &format!("{tag}_{bare}"), source, cfgs);
+                clippy_outcome(scratch, &format!("{tag}_{bare}"), source, cfgs);
             read(built, diagnostics)
         };
         let mut passes: Vec<(String, String, Wants)> = Vec::new();
@@ -7456,7 +7474,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
 
         for (batch, rows) in [("passes", &passes), ("refused", &refused)] {
             let sources: Vec<&str> = rows.iter().map(|(_, source, _)| source.as_str()).collect();
-            let outcomes = clippy_outcomes(&scratch, &format!("{bare}_{batch}"), &sources, &[]);
+            let outcomes = clippy_outcomes(scratch, &format!("{bare}_{batch}"), &sources, &[]);
             for ((tag, _, wants), (built, diagnostics)) in rows.iter().zip(outcomes) {
                 judge(
                     lint,
@@ -7535,8 +7553,6 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         restated.is_empty(),
         "the ordered reading is exercised by fixtures only while this holds: {restated:#?}"
     );
-
-    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]

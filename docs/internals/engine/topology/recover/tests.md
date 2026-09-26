@@ -24,10 +24,12 @@ pair for the two private records, and `EventLog` for the log. That is not a
 ceremony: a fixture that planted `owner.json` with `fs::write` would be
 asserting against a file the production writer never produced.
 
-`rundir::remove_public_husk` is what takes a fixture down. It removes a
-directory's children and then the directory, which is exactly a recursive
-delete through a site-taking funnel, and it is the only such funnel this
-module can reach.
+A fixture's tree is taken down by its `ScratchTree` guard: the test build's
+deletion-authority token (`crate::rundir::scratch_tree`), which removes the
+one tree it acquired and nothing else. `rundir::remove_public_husk` removes a
+directory's children and then the directory, a recursive delete through a
+site-taking funnel, and it is what removes the root a witness here plants for
+itself, `Predecessor`.
 
 ## `const RUN_ID: &str = "01KZTPR7E00000000000000001";`
 
@@ -46,15 +48,26 @@ but a marker is not a marker without one.
 A clock that does not move, so a durable byte can be asserted against a
 literal.
 
-## `fn fixture_root(tag: &str) -> PathBuf {`
+## `fn fixture_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
 
 ---------------------------------------------------------------------------
 The fixture
 ---------------------------------------------------------------------------
 
-## `fn fixture_root(tag: &str) -> PathBuf {`
+## `fn fixture_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
 
-A unique directory per fixture, in one per-process tree.
+The tree a [`Fixture`] is built in, guarded by the token that authorises its
+deletion.
+
+It was `temp_dir()/upstroke-pr7e-<pid>-<tag>-<ordinal>`: a process id and a
+counter that starts at zero in every process, created over whatever was already
+there and removed by a `Drop` that discarded the result -- and nothing removed
+it at all when `Fixture::build` panicked half-way. A process that drew a
+recycled pid computed the name a crashed predecessor had left and built on its
+repository, so the seed commit found nothing to commit
+(`PR7-SCRATCH-FIXTURE-LEAK`). `acquire` refuses an occupied root instead of
+adopting it, names the root with a ULID no recycled pid supplies, and reclaims
+it when the guard drops.
 
 ## `struct Fixture {`
 
@@ -107,6 +120,14 @@ lease held and releases it; `None` otherwise, which is every other test.
 Unix only, as the fork is. A fixture dropped with the fork still here drops
 the fork, which releases and reaps its child on its own bound, so a test
 that unwinds first leaves no child behind.
+
+## `struct Fixture` › `_tree: Option<crate::rundir::scratch_tree::ScratchTree>,`
+
+The guard over the root `Fixture::build` acquired. Declared last so it drops
+last: fields drop in declaration order, so the ones above -- a parked holder
+among them -- have let go of the tree before it is reclaimed. `None` only in
+`Fixture::adopted_by_a_kill_child`, whose root the parent's guard holds and
+which is never dropped.
 
 ## `struct Fixture` › `holder_released: Cell<Option<(u32, std::process::ExitStatus)>>,`
 
@@ -208,6 +229,11 @@ stubbed: (g)'s whole subject is a real `Worktree.Verify` against a real
 checkout, and a manager that could not reach one would make every
 assertion about the step vacuous.
 
+## `fn build(tag: &str, damage: Damage) -> Self` › `let tree = fixture_tree(tag);`
+
+The first local, so the last to drop: a panic anywhere below unwinds through
+the guard, and the half-built tree goes with it.
+
 ## `fn build(tag: &str, damage: Damage) -> Self` › `crate::workspace_manager::fixture::git(&repo_root, &["init", "-q", "-b", "main"]);`
 
 A **real** repository, not a `.git` directory made with `mkdir`.
@@ -283,12 +309,56 @@ The repository-scoped R25 lock file, whose *existence* is what a
 all. Production's ceiling is 3 and refuses here; see
 `RootDerived::derive_with`.
 
-## `fn drop(&mut self)` › `let _ = rundir::remove_public_husk(&self.root, &mut NoHooks);`
+## `fn the_root_the_pid_keyed_helper_gave_a_first_fixture(tag: &str) -> PathBuf {`
 
-`remove_public_husk` removes a directory's children and then the
-directory. It is the one recursive delete this module can reach
-through a site-taking funnel, and a fixture per test is what
-exhausts inodes on the build box when nothing does.
+The root the pid-keyed helper this file used gave the **first** fixture a
+process built for `tag`: `temp_dir()/upstroke-pr7e-<pid>-<tag>-0`.
+
+Its counter started at zero in every process, so this is both the root a
+process that died in its first fixture left behind and the root a later
+process drawing that pid computed for its own first one: the recycled-pid
+collision, in the one form a single process can stage.
+
+## `struct Predecessor {`
+
+A crashed predecessor's fixture root, planted by a witness and removed when the
+witness ends. Its tag carries a fresh ULID, so no other holder can be standing
+on it; the removal is asserted, so a teardown that fails is not the silence
+`PR7-SCRATCH-FIXTURE-LEAK` recorded.
+
+## `fn a_fixture_never_builds_on_a_root_a_crashed_process_under_this_pid_left() {`
+
+**The recycled pid.** A root that a crashed process under this pid left where
+the old helper put a first fixture is neither built on nor removed.
+
+At `67d9bd41` a process's first fixture computed exactly this name,
+`create_dir_all` adopted it, the build ran inside it, and the fixture's `Drop`
+removed it and the predecessor's bytes with it -- so the witness is red there
+whenever its fixture is its process's first, which is what a later process
+drawing the pid builds, and always when it runs alone.
+
+## `thread_local!` › `static ABANDONED_AT: std::cell::RefCell<Option<PathBuf>> =`
+
+The public directory `abandon_the_build` found the build had reached. Named in
+full because `RefCell` is imported for `cfg(unix)` only.
+
+## `fn abandon_the_build(owner: &mut OwnerRecord) {`
+
+An owner-record damage that notes how far the build got and abandons it: the
+panic a half-built fixture unwinds through.
+
+## `fn a_build_that_panics_half_way_leaves_no_tree_behind() {`
+
+**A panic inside `Fixture::build`.** Once it has unwound, the tree built so far
+is gone.
+
+At `67d9bd41` the root was a bare `PathBuf` until `build` returned, so a panic
+before that left the repository, the event log and the private half behind with
+nothing to remove them. This damage panics after all three exist.
+
+## `fn a_build_that_panics_half_way_leaves_no_tree_behind() {` › `let root = public`
+
+`<root>/repo/.upstroke/runs/<run id>`: the root is four levels up.
 
 ## `struct PlantedHusk {`
 
@@ -4551,7 +4621,13 @@ export, so it is not reused here.
 
 The parent's fixture, as its kill child sees it. Every path is the parent's, and the recorded
 start is read back from the planted log's first line rather than built again. The value is never
-dropped, because `Fixture`'s drop removes the tree the parent still has to read.
+dropped: `Fixture`'s drop once removed the root by path, which is the tree the parent still has to
+read.
+
+## `fn adopted_by_a_kill_child(root: PathBuf, plan: Plan) -> std::mem::ManuallyDrop<Self> {` › `_tree: None,`
+
+The parent built this root and its guard reclaims it; this process dies by the kill and is handed
+no token, so it holds none.
 
 ## `fn candidate_sequence_kill_child() {`
 

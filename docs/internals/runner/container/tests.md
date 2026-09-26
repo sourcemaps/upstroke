@@ -41,13 +41,13 @@ longer reaches it. The two lints it does not need are re-denied, so a
 `std::process::Command` or a `println!` appearing here is still a build error.
 `decisions.effect_site_inventory.mechanism` (2).
 
-## `fn scratch(tag: &str) -> PathBuf {`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
 ---------------------------------------------------------------------------
 Fixtures
 ---------------------------------------------------------------------------
 
-## `fn scratch(tag: &str) -> PathBuf {`
+## `fn scratch(tag: &str) -> ScratchTree {`
 
 A scratch private root, in the idiom of `effects::tests::scratch_dir`.
 

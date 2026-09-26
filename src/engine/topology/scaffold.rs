@@ -634,8 +634,17 @@ impl crate::agent::AdapterSource for ScaffoldAdapters {
     }
 }
 
+fn scaffold_run_paths(fixture: &Fixture) -> crate::rundir::RunPaths {
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.base,
+        "01SCAFFOLD00000000000000AA",
+        &fixture.root.join("home"),
+    );
+    paths.create().expect("the scaffold's run directories");
+    paths
+}
+
 pub(super) struct Run {
-    pub(super) fixture: Fixture,
     pub(super) paths: crate::rundir::RunPaths,
     pub(super) harness: Arc<Mutex<HookHarness>>,
     pub(super) hooks: Hooks,
@@ -649,6 +658,7 @@ pub(super) struct Run {
     pub(super) verify_reviewers: Vec<super::attempt::ReviewerPlan>,
     pub(super) verify_review: VerifyReview,
     pub(super) ids_source: super::seams::RealIds,
+    pub(super) fixture: Fixture,
 }
 
 impl super::integrate::IntegrationJournal for Run {
@@ -877,12 +887,7 @@ impl Run {
             ids_source: super::seams::RealIds,
             timeline,
             harness,
-            paths: {
-                let paths =
-                    crate::rundir::RunPaths::new(&fixture.base, "01SCAFFOLD00000000000000AA");
-                paths.create().expect("the scaffold's run directories");
-                paths
-            },
+            paths: scaffold_run_paths(&fixture),
             fixture,
         }
     }
@@ -1045,12 +1050,7 @@ impl Run {
             ids_source: super::seams::RealIds,
             timeline,
             harness,
-            paths: {
-                let paths =
-                    crate::rundir::RunPaths::new(&fixture.base, "01SCAFFOLD00000000000000AA");
-                paths.create().expect("the scaffold's run directories");
-                paths
-            },
+            paths: scaffold_run_paths(&fixture),
             fixture,
         };
         adopted.runner.watching(adopted.emitter.log.path());
@@ -1542,15 +1542,23 @@ const HANDOFF: &str = "fixture-root";
 
 pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
 
-pub(super) fn kill_dir(tag: &str) -> PathBuf {
-    static ORDINAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let ordinal = ORDINAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-topo-{tag}-{}-{ordinal}",
-        std::process::id()
-    ));
-    crate::workspace_manager::fixture::create_dir(&dir);
-    dir
+/// The handoff directory a kill child is pointed at, guarded.
+///
+/// It was `temp_dir()/upstroke-topo-<tag>-<pid>-<ordinal>`, created by the
+/// parent and removed by nobody (`PR7-SCRATCH-FIXTURE-LEAK`, measured at 8
+/// surviving directories per green suite run). This is the **parent's**
+/// directory and the parent returns normally, so its guard runs; the child's
+/// own fixture root is adopted and reclaimed separately
+/// (`workspace_manager::fixture::Fixture::adopt`).
+pub(super) fn kill_dir(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a handoff directory for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {

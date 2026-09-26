@@ -146,17 +146,47 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
+    /// The one hermetic configuration directory this module's tests share.
+    ///
+    /// The tree is held in the `OnceLock` for the life of the process: it is
+    /// read by every test here, so nothing narrower can own it, and a
+    /// `static`'s `Drop` is one of the two this suite genuinely never runs.
+    /// It replaces `temp_dir()/upstroke-route-hermetic-<pid>`, which was
+    /// created and never removed (`PR7-SCRATCH-FIXTURE-LEAK`).
     fn hermetic() -> (PathBuf, PathBuf) {
-        static DIRS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+        struct Hermetic {
+            _tree: crate::rundir::scratch_tree::ScratchTree,
+            dirs: (PathBuf, PathBuf),
+        }
+
+        static DIRS: OnceLock<Hermetic> = OnceLock::new();
         DIRS.get_or_init(|| {
-            let dir = std::env::temp_dir()
-                .join(format!("upstroke-route-hermetic-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let tree = scratch("route-hermetic");
+            let dir = tree.path().to_path_buf();
             let empty = dir.join("no-pools.toml");
             std::fs::write(&empty, "# no pools\n").expect("empty pools file");
-            (dir, empty)
+            Hermetic {
+                _tree: tree,
+                dirs: (dir, empty),
+            }
         })
+        .dirs
         .clone()
+    }
+
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion. Replaces roots of the shape
+    /// `temp_dir()/upstroke-route-<what>-<pid>`, created and never removed
+    /// (`PR7-SCRATCH-FIXTURE-LEAK`).
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     fn default_config() -> Config {
@@ -232,8 +262,8 @@ mod tests {
 
     #[test]
     fn path_floor_raises_start_with_override_source() {
-        let dir = std::env::temp_dir().join(format!("upstroke-route-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let tree = scratch("route");
+        let dir = tree.path();
         let cfg_path: PathBuf = dir.join("floor.toml");
         std::fs::write(
             &cfg_path,
@@ -248,7 +278,7 @@ mod tests {
         )
         .expect("empty pools file");
         let mut warnings = Vec::new();
-        let cfg = config::load(Some(&cfg_path), &dir, Some(&missing), &mut warnings).expect("load");
+        let cfg = config::load(Some(&cfg_path), dir, Some(&missing), &mut warnings).expect("load");
 
         let mut t = task(TaskKind::Fix);
         t.path_hints.push("src/auth/login.rs".to_owned());
@@ -275,8 +305,8 @@ mod tests {
 
     #[test]
     fn pins_bind_their_tier() {
-        let dir = std::env::temp_dir().join(format!("upstroke-route-pin-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let tree = scratch("route-pin");
+        let dir = tree.path();
         let cfg_path = dir.join("pin.toml");
         std::fs::write(
             &cfg_path,
@@ -291,7 +321,7 @@ mod tests {
         )
         .expect("empty pools file");
         let mut warnings = Vec::new();
-        let cfg = config::load(Some(&cfg_path), &dir, Some(&missing), &mut warnings).expect("load");
+        let cfg = config::load(Some(&cfg_path), dir, Some(&missing), &mut warnings).expect("load");
 
         let rc = resolve(&task(TaskKind::Design), &cfg);
         assert_eq!(rc.rungs[0].binding.model, "claude-opus-4-8");

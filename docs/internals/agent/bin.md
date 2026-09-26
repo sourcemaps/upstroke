@@ -296,6 +296,11 @@ Asserting on the constructed `Command` proves we hand `std` the right
 thing; only spawning proves `std` then does the right thing with a batch
 target, which is the half the old hand-rolled code got wrong.
 
+## `fn a_batch_shim_runs_and_receives_its_argument()` › `let parent = std::env::temp_dir();`
+
+The directory was `temp_dir()/upstroke-bin-shim-<pid>`, created over whatever stood at that
+name and never removed (`PR7-SCRATCH-FIXTURE-LEAK`); the guard reclaims it on drop.
+
 ## `fn a_batch_shim_runs_and_receives_its_argument()` › `std::fs::write(&shim, "@echo off\r\necho GOT:%~1\r\n").expect("write shim");`
 
 `%~1` strips the quotes the child got; a benign argument keeps this

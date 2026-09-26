@@ -406,6 +406,16 @@ The same two agents, with the implementer stopping to ask.
 
 The same two agents, with the implementer reporting a rate limit.
 
+## `fn scaffold_run_paths(fixture: &Fixture) -> crate::rundir::RunPaths {`
+
+The run directories a scaffold `Run` writes transcripts, settings and reviews to, with the
+private half inside the fixture's own tree.
+
+They were `RunPaths::new(<repo>, "01SCAFFOLD00000000000000AA")`, whose private half is the
+**default** private root, `~/.upstroke`: one fixed directory that every scaffold run in every
+process on the machine wrote into, over whatever the last one left, and that nothing removed.
+Under the fixture's tree it is this run's alone and goes with the tree.
+
 ## `pub(super) struct Run {`
 
 ---------------------------------------------------------------------------
@@ -416,10 +426,6 @@ The run
 
 A real repository, a real event log, a fold over it, and the five hook
 families on one harness.
-
-## `pub(super) struct Run` › `pub(super) fixture: Fixture,`
-
-The repository and its manager.
 
 ## `pub(super) struct Run` › `pub(super) paths: crate::rundir::RunPaths,`
 
@@ -449,6 +455,15 @@ What a spawn would have been.
 
 The R4 ledger this fixture discharges obligation (3) against. In
 production the driver owns it; here the fixture is the caller.
+
+## `pub(super) struct Run` › `pub(super) fixture: Fixture,`
+
+The repository and its manager.
+
+Last, because fields drop in declaration order and this one's guard reclaims the tree the others
+live in. `emitter`'s `EventLog` holds `events.jsonl` inside that tree open until it drops;
+whether Windows removes a file under an open handle depends on how the handle was opened, and
+closing it first leaves nothing to depend on.
 
 ## `impl Run` › `pub(super) fn started(tag: &str) -> Self {`
 
@@ -558,7 +573,8 @@ Tell the parent where this child's repository is.
 
 Written **before** anything is armed, so a child that dies at its first
 site still hands over a readable pointer. The parent has no other way to
-learn it: the scratch directory is keyed by the child's own process id.
+learn it: the child's fixture root is named with a fresh ULID of the child's
+own, which nothing in the parent can compute.
 
 ## `impl Run` › `pub(super) fn dispatch(&mut self, key: TaskKey, generation: u32) -> Dispatched {`
 
@@ -666,9 +682,12 @@ A child still running at the bound is ended there, and the witness fails naming 
 judging what the child left. `src/engine/tests.rs` cannot name this `#[cfg(test)]` module, so its
 two launches carry a constant of their own with the same value.
 
-## `pub(super) fn kill_dir(tag: &str) -> PathBuf {`
+## `pub(super) fn kill_dir(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
 
-A directory this process owns, unique to this call, for one kill test.
+The directory a kill test hands its child, acquired through the scratch-tree token and returned
+as the guard, so it is reclaimed when the parent's test ends. It was
+`temp_dir()/upstroke-topo-<tag>-<pid>-<ordinal>`, unique to a call within one process and removed
+by nobody (`PR7-SCRATCH-FIXTURE-LEAK`).
 
 ## `pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {`
 

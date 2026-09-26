@@ -5687,15 +5687,25 @@ mod termination {
             assert_eq!(execd(&rendered), Path::new("./docker"));
         }
 
-        fn reaper_stub(tag: &str, script: &str) -> (std::path::PathBuf, ReaperContainers) {
+        /// The guard comes back with the rendered argv because it owns the
+        /// root the stub is under: dropping it here would delete the stub
+        /// before the caller runs it. The helper here pre-cleaned a name it
+        /// had no claim on and left the root behind
+        /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+        fn reaper_stub(
+            tag: &str,
+            script: &str,
+        ) -> (crate::rundir::scratch_tree::ScratchTree, ReaperContainers) {
             use std::os::unix::fs::PermissionsExt as _;
-            let dir = std::env::temp_dir().join(format!(
-                "upstroke-reaper-rounds-{tag}-{}-{}",
-                std::process::id(),
-                crate::ulid::ulid()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch");
+            let parent = std::env::temp_dir();
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `{tag}` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let dir = tree.path();
             let stub = dir.join("docker-stub");
             std::fs::write(&stub, script).expect("write the stub");
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
@@ -5707,7 +5717,7 @@ mod termination {
             )
             .expect("a scope");
             let rendered = render_container_argv(&scope).expect("argv");
-            (dir, rendered)
+            (tree, rendered)
         }
 
         fn logged(dir: &std::path::Path, verb: &str) -> Vec<String> {
@@ -5722,7 +5732,7 @@ mod termination {
         #[test]
         fn the_reaper_performs_as_many_rounds_as_the_machine_needs() {
             const ROUNDS: usize = 12;
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "unbounded",
                 &format!(
                     "#!/bin/sh\n\
@@ -5736,14 +5746,15 @@ mod termination {
                      exit 0\n"
                 ),
             );
+            let dir = tree.path();
 
             reclaim_labeled_containers(&rendered);
 
-            let killed: std::collections::BTreeSet<String> = logged(&dir, "kill")
+            let killed: std::collections::BTreeSet<String> = logged(dir, "kill")
                 .into_iter()
                 .map(|line| line["kill ".len()..].to_owned())
                 .collect();
-            let removed: std::collections::BTreeSet<String> = logged(&dir, "rm")
+            let removed: std::collections::BTreeSet<String> = logged(dir, "rm")
                 .into_iter()
                 .map(|line| line["rm --force --volumes ".len()..].to_owned())
                 .collect();
@@ -5757,17 +5768,16 @@ mod termination {
             );
             assert_eq!(removed, expected, "kill and rm did not settle the same set");
             assert!(
-                logged(&dir, "ps").len() > ROUNDS,
+                logged(dir, "ps").len() > ROUNDS,
                 "{} listings for {ROUNDS} rounds plus the empty one that ends the loop",
-                logged(&dir, "ps").len()
+                logged(dir, "ps").len()
             );
-            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn the_reaper_settles_more_containers_than_one_listing_holds() {
             const CONTAINERS: usize = 130;
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "over-buffer",
                 "#!/bin/sh\n\
                  d=$(dirname \"$0\")\n\
@@ -5778,6 +5788,7 @@ mod termination {
                  esac\n\
                  exit 0\n",
             );
+            let dir = tree.path();
             std::fs::create_dir_all(dir.join("ids")).expect("the id set");
             let expected: std::collections::BTreeSet<String> = (1..=CONTAINERS)
                 .map(|n| format!("{n:064}"))
@@ -5793,11 +5804,11 @@ mod termination {
 
             reclaim_labeled_containers(&rendered);
 
-            let killed: std::collections::BTreeSet<String> = logged(&dir, "kill")
+            let killed: std::collections::BTreeSet<String> = logged(dir, "kill")
                 .into_iter()
                 .map(|line| line["kill ".len()..].to_owned())
                 .collect();
-            let removed: std::collections::BTreeSet<String> = logged(&dir, "rm")
+            let removed: std::collections::BTreeSet<String> = logged(dir, "rm")
                 .into_iter()
                 .map(|line| line["rm --force --volumes ".len()..].to_owned())
                 .collect();
@@ -5817,15 +5828,14 @@ mod termination {
                 "the stub still holds containers the reaper never removed"
             );
             assert!(
-                logged(&dir, "ps").len() >= 3,
+                logged(dir, "ps").len() >= 3,
                 "one listing cannot hold 130 ids"
             );
-            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn a_runtime_that_keeps_answering_the_same_listing_ends_the_loop() {
-            let (dir, rendered) = reaper_stub(
+            let (tree, rendered) = reaper_stub(
                 "no-progress",
                 "#!/bin/sh\n\
                  d=$(dirname \"$0\")\n\
@@ -5837,18 +5847,18 @@ mod termination {
                  esac\n\
                  exit 0\n",
             );
+            let dir = tree.path();
 
             reclaim_labeled_containers(&rendered);
 
             assert_eq!(
-                logged(&dir, "ps").len(),
+                logged(dir, "ps").len(),
                 2,
                 "a repeated listing was acted on again: {:?}",
-                logged(&dir, "ps")
+                logged(dir, "ps")
             );
-            assert_eq!(logged(&dir, "kill").len(), 2, "{:?}", logged(&dir, "kill"));
-            assert_eq!(logged(&dir, "rm").len(), 2, "{:?}", logged(&dir, "rm"));
-            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(logged(dir, "kill").len(), 2, "{:?}", logged(dir, "kill"));
+            assert_eq!(logged(dir, "rm").len(), 2, "{:?}", logged(dir, "rm"));
         }
 
         #[test]
@@ -8150,11 +8160,15 @@ mod termination {
         /// side by side in one process and two fixtures share shape names.
         #[cfg(target_os = "linux")]
         fn run_a_stand_in_fixture(fixture: &str, variable: &str, shape: &str) {
-            let record = std::env::temp_dir().join(format!(
-                "upstroke-stand-in-{}-{fixture}-{shape}.pid",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&record);
+            let parent = std::env::temp_dir();
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, "stand-in") {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `stand-in` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let record = tree.path().join(format!("{fixture}-{shape}.pid"));
             let path = record.to_str().expect("a UTF-8 temporary path");
             run_fixture_within(
                 fixture,
@@ -8170,7 +8184,6 @@ mod termination {
             // The obligation the bound takes on: a helper left behind is the
             // exiting process's to shed, not a leak into the run.
             assert_the_process_is_gone(stand_in, &format!("the {fixture} {shape} stand-in"));
-            let _ = std::fs::remove_file(&record);
         }
 
         /// A `Reaper` handle whose pipes are this fixture's own, with the

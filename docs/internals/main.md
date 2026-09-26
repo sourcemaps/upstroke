@@ -584,3 +584,10 @@ somehow began with the latch set would make them vacuous. And the record
 file is the evidence the child ran: a libtest filter that matches nothing
 exits 0, so a parent that read only the exit status would pass with no
 child at all.
+
+## `fn a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not()` › `let record = std::env::temp_dir().join(format!(`
+
+Named with a ULID, not the pid: a later process under a recycled pid computed the old name
+again, which the old code answered with a discarded `remove_file` before anything had a claim on
+it (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). The test build's scratch-tree token is not reachable
+from the binary's tests: the library they link is built without `cfg(test)`.

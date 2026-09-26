@@ -19,6 +19,7 @@ use super::*;
 use crate::agent::{AdapterSource, AgentAdapter};
 use crate::config::{EngineLimits, RunnerMount, RunnerSelection};
 use crate::engine::{ResumeOptions, RunOptions};
+use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::container::FakeRuntime;
 use crate::runner::container::runtime::{ContainerTrace, Liveness};
 use crate::runner::policy::{canonical_bytes, runner_policy_sha256};
@@ -1091,7 +1092,7 @@ fn legacy_container_selection_refused_before_effects() {
     const HOST_TOML: &str = "host";
 
     for kind in [HOST_TOML, CONTAINER_TOML] {
-        let repo = temp_repo(&format!("legacy-{kind}"));
+        let (_tree, repo) = temp_repo(&format!("legacy-{kind}"));
         let private = repo.join("private");
         fs::create_dir_all(&private).expect("private root");
         let config = if kind == HOST_TOML {
@@ -1256,7 +1257,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         }
     }
 
-    let dir = scratch("engine-limits");
+    let tree = scratch("engine-limits");
+    let dir = tree.path();
     let mut refused = 0;
     for limits in all {
         fs::write(
@@ -1267,8 +1269,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         let mut warnings = Vec::new();
         let error = crate::config::load_limits(
             Some(&dir.join("upstroke.toml")),
-            &dir,
-            Some(&empty_pools(&dir)),
+            dir,
+            Some(&empty_pools(dir)),
             limits,
             &mut warnings,
         )
@@ -1283,8 +1285,8 @@ fn every_engine_limits_reading_refuses_a_container_selection() {
         fs::write(dir.join("upstroke.toml"), "[runner]\nkind = \"host\"\n").expect("config");
         let config = crate::config::load_limits(
             Some(&dir.join("upstroke.toml")),
-            &dir,
-            Some(&empty_pools(&dir)),
+            dir,
+            Some(&empty_pools(dir)),
             limits,
             &mut warnings,
         )
@@ -1558,15 +1560,29 @@ impl AdapterSource for RecordingAdapters {
     }
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-resolve-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-resolve-<tag>-<pid>-<thread>` and pre-cleaned it with a
+/// discarded `remove_dir_all` before it had any claim on the name, then
+/// returned a root nothing reclaimed (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+/// `PR7-SCRATCH-FIXTURE-LEAK`). A thread id distinguishes two fixtures inside
+/// one process and nothing else: a second process, or a second run of this one
+/// under a pid Windows recycled, reaches the same name. `acquire` refuses an
+/// occupied root rather than emptying it, keys on a ULID no recycled pid can
+/// supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -1583,8 +1599,12 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn temp_repo(tag: &str) -> PathBuf {
-    let dir = scratch(tag);
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the repository before the caller's
+/// first assertion.
+fn temp_repo(tag: &str) -> (ScratchTree, PathBuf) {
+    let tree = scratch(tag);
+    let dir = tree.path().to_path_buf();
     git(&dir, &["init", "-q", "-b", "main"]);
     git(&dir, &["config", "user.email", "test@upstroke.local"]);
     git(&dir, &["config", "user.name", "upstroke tests"]);
@@ -1596,7 +1616,7 @@ fn temp_repo(tag: &str) -> PathBuf {
     .expect("plan");
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-q", "-m", "seed"]);
-    dir
+    (tree, dir)
 }
 
 fn empty_pools(dir: &Path) -> PathBuf {

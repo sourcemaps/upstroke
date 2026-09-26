@@ -481,10 +481,11 @@ fn repair_kill_child() {
 #[test]
 fn repair_materialization_reproduced_after_kill() {
     for site in ["before_materialize", "after_materialize"] {
-        let dir = kill_dir("killrepair");
+        let tree = kill_dir("killrepair");
+        let dir = tree.path();
         let mut run = kill_child_and_adopt(
             "engine::topology::dispatch::tests::repair_kill_child",
-            &dir,
+            dir,
             site,
         );
         let repair = crate::topology::registry::TaskKey(2);

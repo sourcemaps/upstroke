@@ -467,6 +467,13 @@ under any scheduling.
 Through the shell, the sleeper is a grandchild — exactly the
 claude.cmd shim shape this module must handle.
 
+## `fn timeout_kills_a_background_grandchild_before_it_can_escape() {` › `let parent = std::env::temp_dir();`
+
+The marker was `temp_dir()/upstroke-proc-tree-<pid>-<test>.marker`, opened by a discarded
+`remove_file` of a name a later process under a recycled pid computes again
+(`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). It is now in a tree this test acquired, whose guard
+reclaims it.
+
 ## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool {`
 
 Whether every writer of `fd`'s pipe is gone, asked of the kernel and
