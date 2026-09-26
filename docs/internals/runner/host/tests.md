@@ -142,21 +142,28 @@ Witnessed failing with the upsert removed from `compose`
 surviving, since this key is deliberately not a reserved one that gets
 stripped) and with it moved above the overlay loop (`Some("0")`).
 
-## `fn the_v1_conductors_environment_composes_no_replacement_isolation() {`
+## `fn the_v1_conductors_environment_disables_replacement_objects() {`
 
-The other half of the pair above: the v0.1 conductor's environment adds
-nothing, so a gate over a v0.1 checkout reads the graph that checkout
-was written from (PR #271, round 1's regression finding).
+The v0.1 conductor's environment composes the replacement isolation too,
+because the v0.1 workspace now writes the recorded graph
+(`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`).
 
-The base carries a value of its own and the assertion is that it
-*survives* — an exemption that stripped the key would be a third graph,
-not the producer's. The last line pins the connection to production:
-`HostRunner::for_legacy_workspace`, which `engine::run` and
-`engine::resume` install, is an environment reading `AsReplaced`.
+Until that finding closed this test was
+`the_v1_conductors_environment_composes_no_replacement_isolation` and
+asserted the opposite: that `HostRunner::for_legacy_workspace` read
+`AsReplaced`, and that the operator's own value of the key survived in
+every role's environment (PR #271, round 1's regression finding). It
+pinned the old design, so it was inverted rather than deleted.
 
-Witnessed failing with the `ObjectGraph::Recorded` condition removed from
-`compose` (`Some("1")` for every role and both name rules), which is the
-head this repair was written against.
+It now asserts three things. The constructor reads `Recorded`. Over a base
+that exports a value of its own, an environment reading what the
+constructor reads composes `GIT_NO_REPLACE_OBJECTS=1` for every role under
+both name rules. That is the old grid, with the expected value flipped from
+the base's surviving value to the pair. And the constructor's own
+environment, over this process's base, composes the pair for every role.
+
+Witnessed failing with `for_legacy_workspace` reading `AsReplaced` again,
+the state of `a9535c42`: the first assertion fails.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 

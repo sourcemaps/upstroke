@@ -37,14 +37,15 @@ below. The bodies are what they were; the call in `run_contained` lost its
 
 The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
 
-`HostRunner::for_legacy_workspace` differs from `HostRunner::new` in one
-field: its children read the object graph `refs/replace/*` describes, which is
-the graph `src/workspace.rs` writes the workspace and its gate snapshots from.
-This function drives the *schema-1..3* coordinator and nothing else, so it is
-the one place that choice belongs. See
-[`ObjectGraph`](../runner/host/environment.md) for why a consumer has to read
-its own producer's graph, and `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for
-the deferred finding about that graph being the replaced one.
+`HostRunner::for_legacy_workspace` reads `ObjectGraph::Recorded`: its
+children read the objects the repository holds, which is the graph
+`src/workspace.rs` writes the workspace and its gate snapshots from since
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed. Until then it read the
+graph `refs/replace/*` describes, to match that frozen producer, and the two
+moved together in the change that closed the finding. This function drives the
+*schema-1..3* coordinator and nothing else, so it is the one place that choice
+belongs. See [`ObjectGraph`](../runner/host/environment.md) for why a consumer
+has to read its own producer's graph.
 
 ## `pub(super) fn run_harness_on(`
 

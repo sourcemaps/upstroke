@@ -74,21 +74,29 @@ repository holds, never the objects `refs/replace/*` points at them
 `compose` writes [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs)
 for.
 
-`AsReplaced` is the schema-1..3 exemption, and it exists because a
-consumer must read what its own producer wrote. The v0.1 workspace
-(`src/workspace.rs`) sets no such pair on its Git children and is frozen
-by `effects/allowlist.toml`'s `[[legacy]]` row — `invariants_preserved[1]`,
-"this module's behaviour untouched" — so its checkout of a commit whose
-recorded tree carries a replacement materialises the *replacing* tree.
-Composing the pair for a gate over that checkout put the two on different
-graphs and failed `git diff --exit-code HEAD` on a workspace the engine
-itself had just written (measured on git 2.43, PR #271 round 1's
-regression finding). So each path is internally consistent instead: the
-v0.1 conductor installs `AsReplaced` at `engine::run` and
-`engine::resume`, and the schema-4 path, whose producer removes
-replacements at both ends, keeps `Recorded`. That the v0.1 path reads
-replacements at all is `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`,
-deferred behind that freeze and unchanged by this.
+`AsReplaced` composes no pair, so a child reads whatever its base says
+about `refs/replace/*`. No conductor installs it. It is a test
+instrument: the witnesses that must show a replacement is live in a
+role process's environment (`src/workspace_manager/tests.rs`), or that
+reading the replaced graph over a snapshot written from the recorded one
+fails (`src/gates.rs`), build a runner reading it.
+
+It was the schema-1..3 exemption from PR #271 (`a55f7049`) until
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed. The rule behind it
+still stands: a consumer must read what its own producer wrote. The v0.1
+workspace (`src/workspace.rs`) then set no pair on its Git children and
+was frozen, so its checkout of a commit whose recorded tree carries a
+replacement materialised the *replacing* tree. Composing the pair for a
+gate over that checkout put the two on different graphs and failed `git
+diff --exit-code HEAD` on a workspace the engine itself had just written
+(measured on git 2.43, PR #271 round 1's regression finding), and the v0.1
+conductor installed `AsReplaced` to match its producer. The exemption
+existed because of the freeze. Closing the finding amended the freeze
+for this one variable: every Git child of the module now sets the pair,
+and the same gate over an untouched snapshot then failed under
+`AsReplaced` and passed under `Recorded` (git 2.43). So the v0.1
+conductor reads `Recorded` too, and both paths read the recorded graph
+at both ends.
 
 It is a field of the environment rather than of the request because it is
 a property of the *conductor* — one schema per run, chosen once where the
@@ -211,9 +219,10 @@ So the reserved keys arrive from one place — this function's supply
 step, which is role-scoped — or not at all.
 
 Then [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs), **after**
-the overlay and not before it, and under [`ObjectGraph::Recorded`] — every
-environment but the v0.1 conductor's, whose own producer reads the replaced
-graph and whose section above says why. `HostRunner::run` clears the ambient environment
+the overlay and not before it, and under [`ObjectGraph::Recorded`] — which
+every conductor's environment reads, the v0.1 conductor's included;
+`AsReplaced` is the test instrument its section above describes.
+`HostRunner::run` clears the ambient environment
 and installs exactly what this returns, so a pair that is not composed here
 reaches no child: a gate or a reviewer inside an exact snapshot would read
 whatever `git replace` points at the judged objects, and measured on git 2.43 it
@@ -221,7 +230,8 @@ did — `git show HEAD:f` returned the replacement and `git status --porcelain`
 called an untouched snapshot modified. `design/15`'s "What an exact snapshot is
 exact against" is the product sentence; the pair is one constant named at each
 of the four boundaries that starts a child which can run Git over a snapshot
-this engine produced.
+this engine produced, and at the one builder every Git child of the v0.1
+workspace starts from (`src/workspace.rs`'s `git_command`).
 
 It is **asserted, not reserved**, and the two are different things. The reserved
 keys are values this boundary reads *from its host* and re-supplies role-scoped,

@@ -118,8 +118,7 @@ impl HostRunner {
 
     #[must_use]
     pub fn for_legacy_workspace() -> Self {
-        Self::new()
-            .with_environment(HostEnvironment::from_process().reading(ObjectGraph::AsReplaced))
+        Self::new().with_environment(HostEnvironment::from_process().reading(ObjectGraph::Recorded))
     }
 
     #[must_use]

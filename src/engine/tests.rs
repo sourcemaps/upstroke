@@ -5055,35 +5055,39 @@ fn crash_child_dies_inside_an_attempt() {
     std::process::exit(0);
 }
 
-const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
-     cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
+const V1_OBJECT_GRAPH_GATES: &str = "[[gates]]\nname = \"snapshot-bytes\"\n\
+     cmd = 'git grep --no-index -q -F recorded -- probe.txt'\n\n\
+     [[gates]]\nname = \"object-graph\"\n\
+     cmd = 'git grep -q -F recorded HEAD -- probe.txt'\n";
 
 fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
     let repo = temp_engine_repo(tag);
     crate::workspace_manager::fixture::pin_replacement_refs_in(&repo);
-    seed(&repo, plan, Some(config));
-
-    git_in(&repo, &["checkout", "-q", "-b", "probe"]);
     fs::write(repo.join("probe.txt"), "recorded\n").expect("the recorded probe");
-    git_in(&repo, &["add", "-A"]);
-    git_in(&repo, &["commit", "-q", "-m", "recorded"]);
-    let recorded = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
-    git_in(&repo, &["tag", "probe-recorded"]);
+    seed(&repo, plan, Some(config));
+    let recorded = git_in(&repo, &["rev-parse", "HEAD:probe.txt"])
+        .trim()
+        .to_owned();
 
-    fs::write(repo.join("probe.txt"), "replacing\n").expect("the replacing probe");
-    git_in(&repo, &["add", "-A"]);
-    git_in(&repo, &["commit", "-q", "-m", "replacing"]);
-    let replacing = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
-    git_in(&repo, &["tag", "probe-replacing"]);
-    assert_ne!(recorded, replacing, "two distinct commits");
+    fs::write(repo.join("replacing.txt"), "replacing\n").expect("the replacing probe");
+    let replacing = git_in(&repo, &["hash-object", "-w", "replacing.txt"])
+        .trim()
+        .to_owned();
+    fs::remove_file(repo.join("replacing.txt")).expect("the replacing probe's file");
+    assert_ne!(recorded, replacing, "two distinct blobs");
 
-    git_in(&repo, &["checkout", "-q", "main"]);
-    git_in(&repo, &["branch", "-q", "-D", "probe"]);
     git_in(&repo, &["replace", &recorded, &replacing]);
     assert_eq!(
         git_in(&repo, &["replace", "-l"]).trim(),
         recorded,
         "the replacement is in place"
+    );
+    assert_eq!(
+        git_in(&repo, &["show", "HEAD:probe.txt"]),
+        "replacing\n",
+        "a Git child that does not refuse the replacement reads the replacing \
+         blob in the tree every snapshot of this run starts from; without that \
+         neither gate measures anything"
     );
     assert!(
         git_in(&repo, &["status", "--porcelain"]).trim().is_empty(),
@@ -5100,7 +5104,8 @@ fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
     assert!(
         status.success(),
         "the child drives `engine::run_harness` and `engine::resume_harness` over a \
-         repository whose probe commit carries a replacement, and ended {status:?}"
+         repository whose committed probe blob carries a replacement, and ended \
+         {status:?}"
     );
 }
 
@@ -5115,12 +5120,16 @@ fn v1_object_graph_helper() {
     let repo = replaced_probe_repo(
         "v1graphrun",
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
-        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATE}"),
+        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATES}"),
     );
     let mut opts = options(&repo);
     opts.config_path = Some(repo.join("upstroke.toml"));
     let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
-    assert_eq!(report.gates, ["object-graph"], "{report:?}");
+    assert_eq!(
+        report.gates,
+        ["snapshot-bytes", "object-graph"],
+        "{report:?}"
+    );
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
     assert!(committed(&report, "t1"), "{report:?}");
 
@@ -5130,7 +5139,7 @@ fn v1_object_graph_helper() {
         &format!(
             "[interaction]\nmode = \"never\"\n\n\
              [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n\
-             {V1_OBJECT_GRAPH_GATE}"
+             {V1_OBJECT_GRAPH_GATES}"
         ),
     );
     let mut opts = options(&repo);
@@ -5160,7 +5169,11 @@ fn v1_object_graph_helper() {
         &fake(Effect::EditFile),
     )
     .expect("the resume");
-    assert_eq!(resumed.gates, ["object-graph"], "{resumed:?}");
+    assert_eq!(
+        resumed.gates,
+        ["snapshot-bytes", "object-graph"],
+        "{resumed:?}"
+    );
     assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
     assert!(committed(&resumed, "t1"), "{resumed:?}");
 }

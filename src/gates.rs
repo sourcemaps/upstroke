@@ -539,7 +539,7 @@ mod tests {
         }
     }
 
-    fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {
+    fn git_honouring_replacements(dir: &Path, args: &[&str]) -> String {
         let mut command = StdCommand::new("git");
         command
             .arg("-C")
@@ -575,33 +575,22 @@ mod tests {
         )
     }
 
-    /// The v0.1 exemption is measured in a **neutralised child**, and the child
-    /// states the precondition before it measures anything (PR #271, round 4).
-    ///
-    /// Every `git` below already runs with the ambient controls taken away, so
-    /// nothing here could be decided by the operator's environment -- but
-    /// "nothing could be" was the claim rounds 1, 2 and 3 each made about a
-    /// witness that then could be. [`assert_replacement_controls_pinned`] is
-    /// that claim executed: the enumerated names are gone, and a Git child of
-    /// this process honours `refs/replace/*` at all. It cannot be stated in the
-    /// parent, because the parent is whatever environment the suite was started
-    /// in; the child is the one this witness's own commands run in.
     #[test]
     fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {
         let status = run_replacement_witness_child("gates::tests::v1_gate_replacement_helper");
         assert!(
             status.success(),
-            "the child witnesses the v0.1 gate exemption over a replaced tree \
-             with every ambient control over `refs/replace/*` taken away from \
-             it, and ended {status:?}"
+            "the child runs a v0.1 gate, through the runner the v0.1 conductor \
+             installs, over a snapshot the v0.1 workspace materialised from a \
+             replaced tree, with every ambient control over `refs/replace/*` \
+             taken away from it, and ended {status:?}"
         );
     }
 
-    /// Spawned by [`a_v1_gate_judges_the_tree_its_own_workspace_materialised`].
     #[test]
     #[ignore = "subprocess helper"]
     fn v1_gate_replacement_helper() {
-        use crate::runner::host::ObjectGraph;
+        use crate::runner::host::{HostRunner, ObjectGraph};
 
         if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
             return;
@@ -611,49 +600,64 @@ mod tests {
         let repo = temp_repo("legacy-replacement");
         pin_replacement_refs_in(&repo);
         fs::write(repo.join("f.txt"), "A\n").expect("the recorded content");
-        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
-        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "recorded"]);
-        let recorded_commit = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD"]);
-        let recorded_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+        git_honouring_replacements(&repo, &["add", "f.txt"]);
+        git_honouring_replacements(&repo, &["commit", "-q", "-m", "recorded"]);
+        let parent = git_honouring_replacements(&repo, &["rev-parse", "HEAD"]);
+        let recorded_tree = git_honouring_replacements(&repo, &["rev-parse", "HEAD^{tree}"]);
 
         fs::write(repo.join("f.txt"), "B\n").expect("the replacing content");
-        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
-        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "replacing"]);
-        let replacing_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+        git_honouring_replacements(&repo, &["add", "f.txt"]);
+        git_honouring_replacements(&repo, &["commit", "-q", "-m", "replacing"]);
+        let replacing_tree = git_honouring_replacements(&repo, &["rev-parse", "HEAD^{tree}"]);
         assert_ne!(recorded_tree, replacing_tree, "two distinct trees");
 
-        git_as_the_legacy_workspace_does(&repo, &["replace", &recorded_tree, &replacing_tree]);
-        git_as_the_legacy_workspace_does(
-            &repo,
-            &["checkout", "--detach", "--quiet", &recorded_commit],
-        );
-
+        git_honouring_replacements(&repo, &["reset", "-q", "--hard", &parent]);
+        git_honouring_replacements(&repo, &["replace", &recorded_tree, &replacing_tree]);
         assert_eq!(
-            fs::read_to_string(repo.join("f.txt")).expect("the checkout"),
-            "B\n",
-            "the v0.1 producer honours `refs/replace/*`; without that this test \
+            git_honouring_replacements(&repo, &["show", &format!("{parent}:f.txt")]),
+            "B",
+            "a Git child that does not refuse the replacement reads the replacing \
+             tree wherever the recorded one is named; without that this test \
              measures nothing"
         );
 
         let ws = Workspace::open(&repo).expect("open");
-        let judge = gate("git diff --exit-code HEAD -- f.txt", 60);
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&parent, &recorded_tree)
+            .expect("the v0.1 workspace's gate snapshot");
+        assert_eq!(
+            fs::read_to_string(snapshot.workspace().root().join("f.txt"))
+                .expect("the snapshot's file"),
+            "A\n",
+            "the v0.1 workspace materialises the tree its snapshot commit records"
+        );
 
+        let judge = gate("git diff --exit-code HEAD -- f.txt", 60);
         let legacy = judge
-            .check(&runner_reading(ObjectGraph::AsReplaced), gate_id(0), &ws)
+            .check(
+                &HostRunner::for_legacy_workspace(),
+                gate_id(0),
+                snapshot.workspace(),
+            )
             .expect("the gate ran");
         assert!(
             matches!(legacy, GateResult::Pass { .. }),
-            "a v0.1 gate over an untouched v0.1 checkout must pass: {legacy:?}"
+            "a v0.1 gate, run by the runner `engine::run` and `engine::resume` \
+             install, over a snapshot nothing has touched must pass: {legacy:?}"
         );
 
-        let recorded = judge
-            .check(&runner_reading(ObjectGraph::Recorded), gate_id(1), &ws)
+        let replaced = judge
+            .check(
+                &runner_reading(ObjectGraph::AsReplaced),
+                gate_id(1),
+                snapshot.workspace(),
+            )
             .expect("the gate ran");
         assert!(
-            matches!(recorded, GateResult::Fail { .. }),
-            "and the disagreement this exemption exists to avoid is real: reading \
-             the recorded graph over a checkout the replacing graph wrote must \
-             fail, or the two legs are not measuring the pair: {recorded:?}"
+            matches!(replaced, GateResult::Fail { .. }),
+            "and the disagreement is real: a runner reading the replaced graph \
+             over the same snapshot must fail, or the two legs are not measuring \
+             the pair: {replaced:?}"
         );
     }
 

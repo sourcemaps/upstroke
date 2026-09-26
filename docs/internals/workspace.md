@@ -465,8 +465,11 @@ records the other tree.
 
 This is the producer's half only. A gate a runner starts in that snapshot gets
 the environment the runner composes, and `HostRunner::for_legacy_workspace`,
-which the v0.1 conductor installs, reads `ObjectGraph::AsReplaced`: so over
-these recorded bytes such a gate still reads the replaced graph through Git.
+which the v0.1 conductor installs, reads `ObjectGraph::Recorded` for that
+reason: a runner reading the replaced graph over these recorded bytes failed
+`git diff --exit-code HEAD` on a snapshot nothing had touched (measured).
+`src/gates.rs`'s `a_v1_gate_judges_the_tree_its_own_workspace_materialised`
+drives the two halves together.
 
 ## `fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {`
 

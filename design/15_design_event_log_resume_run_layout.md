@@ -95,14 +95,18 @@ replaced history judged rewrites it, and the run judges what the repository then
 variable is one constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of
 those boundaries.
 
-**Exact snapshots are §5's, and so is this rule.** The released v0.1 path has no exact snapshot:
-its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, which reads whatever
-the replacement graph describes at both ends, and a consumer of that workspace must read what its
-own producer wrote or judge a tree nobody created. So a v0.1 run reads the replaced graph
-throughout and a schema-4 run reads the recorded one throughout; each is internally consistent, and
-the conductor chooses once, where it builds its runner. That the v0.1 path reads replacements at
-all is a defect, recorded as `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` and deferred behind that
-module's freeze; it closes when the schema-4 engine replaces those paths (§21, PR7-PR11).
+**Exact snapshots are §5's; the recorded graph is every run's.** The released v0.1 path has no
+exact snapshot: its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, frozen
+at PR5. Every Git child of that module refuses replacements all the same, built by the one
+function each of them starts from and reading the same constant, and the runner the v0.1 conductor
+installs composes the variable for its gates, reviewers and implementers as the schema-4 runners
+do. So a v0.1 run reads the recorded graph throughout, like a schema-4 run. Producer and consumer
+move together or not at all: a consumer of that workspace must read what its own producer wrote or
+judge a tree nobody created, and a gate reading one graph over a snapshot written from the other
+fails `git diff --exit-code HEAD` on a checkout nothing has touched (measured on git 2.43, in both
+directions). Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, the frozen module read the
+replaced graph and the v0.1 runner was exempted to match it; the change that closed it amended the
+freeze for this one variable, and the exemption's reason went with it.
 
 Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data}` — including `question_raised`, `question_answered`, `design_defect`, `capacity_snapshot`, `pool_exhausted`, and `spend_down_engaged`. `status`, the ledger, and the capacity view are pure folds over this file.
 

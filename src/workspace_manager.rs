@@ -97,16 +97,16 @@ use crate::util::{DurabilityLedger, DurableStep, EntryObserved};
 /// (`HostEnvironment::compose`, `ContainerEnvironment::compose`), which clear
 /// the ambient environment and so would otherwise drop it.
 ///
-/// **Not the v0.1 path**, which has no exact snapshot: `src/workspace.rs` reads
-/// the replaced graph at both ends and is frozen (`effects/allowlist.toml`'s
-/// `[[legacy]]` row, `invariants_preserved[1]`), so its conductor's runner
-/// reads that graph too rather than judging a tree its own producer never
-/// wrote -- `crate::runner::host::ObjectGraph`, and
-/// `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for the deferred defect.
+/// **The v0.1 path sets it too**, though it has no exact snapshot:
+/// `src/workspace.rs` is frozen (`effects/allowlist.toml`'s `[[legacy]]` row,
+/// `invariants_preserved[1]`), amended once so that its one Git-child builder
+/// sets this pair (`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`), and its
+/// conductor's runner reads the same recorded graph rather than judging a
+/// tree its own producer never wrote -- `crate::runner::host::ObjectGraph`.
 ///
-/// It is one constant rather than four literals so that the key and the value
-/// cannot be separated and a new spawn site names the fact rather than
-/// restating it.
+/// It is one constant rather than a literal at each site that sets it, so that
+/// the key and the value cannot be separated and a new spawn site names the
+/// fact rather than restating it.
 pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
 
 /// The root of every run's ref namespace: a run's refs live under

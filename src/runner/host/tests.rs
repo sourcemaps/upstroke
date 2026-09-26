@@ -297,7 +297,15 @@ fn every_composed_environment_disables_replacement_objects() {
 }
 
 #[test]
-fn the_v1_conductors_environment_composes_no_replacement_isolation() {
+fn the_v1_conductors_environment_disables_replacement_objects() {
+    let legacy = HostRunner::for_legacy_workspace();
+    assert_eq!(
+        legacy.environment().objects(),
+        ObjectGraph::Recorded,
+        "the environment `engine::run` and `engine::resume` install must read \
+         the objects the repository holds, which is the graph `src/workspace.rs` \
+         writes the v0.1 workspace and its gate snapshots from"
+    );
     let mut rows = 0_usize;
     for case in KeyCase::ALL {
         let mut base = synthetic_base();
@@ -305,26 +313,37 @@ fn the_v1_conductors_environment_composes_no_replacement_isolation() {
             os(NO_REPLACEMENT_OBJECTS.0),
             os("whatever-the-operator-exported"),
         ));
-        let environment = HostEnvironment::with_base(base, *case).reading(ObjectGraph::AsReplaced);
+        let environment =
+            HostEnvironment::with_base(base, *case).reading(legacy.environment().objects());
         for role in ExecutionRole::all() {
             let composed = environment
                 .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
                 .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
             assert_eq!(
                 value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
-                Some(OsStr::new("whatever-the-operator-exported")),
-                "{role} ({case:?}): the v0.1 conductor's own base is what its \
-                 children read, and this boundary must add nothing to it"
+                Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
+                "{role} ({case:?}): a v0.1 child would read whatever `git replace` \
+                 points at the tree its own workspace wrote"
             );
             rows += 1;
         }
     }
     assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
-    assert_eq!(
-        HostRunner::for_legacy_workspace().environment().objects(),
-        ObjectGraph::AsReplaced,
-        "and that is the environment `engine::run` and `engine::resume` install"
-    );
+    for role in ExecutionRole::all() {
+        let composed = legacy
+            .environment()
+            .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+            .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
+        assert_eq!(
+            value(
+                &composed,
+                NO_REPLACEMENT_OBJECTS.0,
+                legacy.environment().case()
+            ),
+            Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
+            "{role}: the constructor's own environment, over this process's base"
+        );
+    }
 }
 
 #[test]

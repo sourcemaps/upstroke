@@ -450,18 +450,25 @@ Infallible because `host-v1`'s record is a constant with nothing to inspect;
 
 ## `HostRunner::for_legacy_workspace`
 
-The runner the schema-1..3 conductor installs, and the only thing that separates it from
-[`HostRunner::new`](#hostrunnernew) is which object graph its children read.
+The runner the schema-1..3 conductor installs. It reads `ObjectGraph::Recorded`, so today nothing
+separates it from [`HostRunner::new`](#hostrunnernew) but its name and the fact that it says which
+graph it reads rather than inheriting the default.
 
-`src/workspace.rs` produces the v0.1 workspace and its gate snapshots, sets no
-`NO_REPLACEMENT_OBJECTS` on any of its Git children, and is frozen by `effects/allowlist.toml`'s
-`[[legacy]]` row — `invariants_preserved[1]`, "this module's behaviour untouched". A consumer that
-read a different object graph from that producer failed `git diff --exit-code HEAD` over a checkout
-nothing had touched (measured, git 2.43; PR #271 round 1's regression finding), so this runner reads
-`ObjectGraph::AsReplaced` and the schema-4 path keeps the isolated default. See
-[`ObjectGraph`](host/environment.md) for the whole of that reasoning. `engine::run`,
-`engine::resume` and the two `#[cfg(test)]` coordinator entries beneath them are its call sites, and
-they are all of them: a runner built anywhere else judges the recorded graph.
+Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed it read `ObjectGraph::AsReplaced`. That
+was PR #271's repair (`a55f7049`) for a v0.1 gate regression: `src/workspace.rs`, which produces
+the v0.1 workspace and its gate snapshots, set no `NO_REPLACEMENT_OBJECTS` on its Git children and
+was frozen, so a consumer reading the recorded graph failed `git diff --exit-code HEAD` over a
+checkout nothing had touched. Closing the finding put every Git child of that module on the
+recorded graph, and the same measurement then failed the other way: `for_legacy_workspace` still
+reading `AsReplaced` failed that gate over an untouched snapshot of a replaced tree, where a runner
+reading `Recorded` passed it (git 2.43). So the runner moved with its producer, in the same change.
+See [`ObjectGraph`](host/environment.md) for why the two must agree.
+
+The constructor was kept rather than folded into `HostRunner::new`, deliberately: keeping it leaves
+`engine::run`'s and `engine::resume`'s call sites, its `effect_free` entry in `effects/wrappers.toml`
+and the `CONSTRUCTORS` census untouched, and it keeps the v0.1 path's choice of graph stated at the
+one place that path builds its runner. `engine::run`, `engine::resume` and the two `#[cfg(test)]`
+coordinator entries beneath them are its call sites, and they are all of them.
 
 ## `HostRunner::policy`
 
