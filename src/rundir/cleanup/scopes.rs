@@ -1,6 +1,8 @@
 //! The thread's registry of run directories inside an explicit cleanup
-//! scope, read by `rundir::cleanup` and declared here rather than in
-//! `rundir.rs`.
+//! scope, read by `rundir::cleanup` and declared in this child of it rather
+//! than in `rundir.rs`, so `pub(super)` reaches `rundir::cleanup` and nothing
+//! else in `rundir`: the reach the registry had as a private static of that
+//! module.
 //!
 //! v0.1 drives a run synchronously inside an explicit scope. Thread-local
 //! registration gives concurrent library/test runs the exact cleanup path

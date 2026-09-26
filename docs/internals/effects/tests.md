@@ -1165,7 +1165,7 @@ When it was written it named five invocations: the four production
 `src/util.rs`) and a `format!` in a thiserror `#[error(..)]` argument in
 `src/workspace_manager.rs`. The statics moved into
 `src/util/thread_barriers.rs`, `src/runner/host/counters.rs` and
-`src/rundir/cleanup_scopes.rs`, which forbid all three governed lints and
+`src/rundir/cleanup/scopes.rs`, which forbid all three governed lints and
 are therefore outside the domain, and the `format!` into a private
 function the attribute names. Moving rather than allowing by name: a name
 allowlist would need guards against `use x as thread_local` and a local

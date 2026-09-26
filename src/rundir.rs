@@ -2389,11 +2389,10 @@ pub fn is_running(public: &Path) -> bool {
 }
 
 #[cfg(unix)]
-mod cleanup_scopes;
-
-#[cfg(unix)]
 mod cleanup {
-    use super::cleanup_scopes::ACTIVE;
+    mod scopes;
+
+    use self::scopes::ACTIVE;
     use super::{cleanup_lock_file, refused};
     use crate::error::UpstrokeError;
     use std::fs::File;
