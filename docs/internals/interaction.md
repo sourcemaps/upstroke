@@ -387,7 +387,7 @@ a prompt, but it gives up immediately.
 
 Nothing partial is left behind for the engine to trip over.
 
-## `fn a_detached_run_waits_for_an_answer_file_then_gives_up()` › `let dir = std::env::temp_dir().join(format!("upstroke-answer-wait-{}", std::process::id()));`
+## `fn a_detached_run_waits_for_an_answer_file_then_gives_up()` › `let tree = scratch("answer-wait");`
 
 §19's "hard block (interactive)" for a run with no terminal: it
 waits for `upstroke answer` rather than degrading to CI behaviour.

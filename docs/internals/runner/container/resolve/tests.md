@@ -716,7 +716,7 @@ The recording is the point: an empty log proves the command refused before
 pre-flight ever tried to resolve an agent, which is what "before any effect"
 buys and what a refusal returning the right message would not.
 
-## `fn temp_repo(tag: &str) -> PathBuf {`
+## `fn temp_repo(tag: &str) -> (ScratchTree, PathBuf) {`
 
 A clean repository with a two-task plan, seeded and committed.
 
