@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/main.md`
 
+#![forbid(non_local_definitions)]
 // LEGACY-EFFECT: this module is in the frozen legacy section of
 // `effects/allowlist.toml`, which carries its justification.
 #![allow(

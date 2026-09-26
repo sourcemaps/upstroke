@@ -1,10 +1,7 @@
 //! Extended notes: `docs/internals/agent/proc/test_support/readiness.md`
 
-#![deny(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![deny(clippy::disallowed_methods)]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

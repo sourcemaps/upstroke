@@ -98,7 +98,8 @@ composed values. `None` is "the composed environment does not carry that key at 
 | `program_searches()` | How many program names **this thread** has actually searched a filesystem for. Incremented by `resolve_program` on entry. |
 | `containment_establishments()` | How many times **this thread** has established write-command containment. Incremented by `Contained::new`, so the count and the tokens cannot disagree. |
 
-`RESOLUTIONS`, `SEARCHES` and `ESTABLISHMENTS` are the thread-local cells behind the three.
+`RESOLUTIONS`, `SEARCHES` and `ESTABLISHMENTS` are the thread-local cells behind the three, declared in
+`src/runner/host/counters.rs` since 2026-09-26 and imported here ([`counters.md`](host/counters.md) says why).
 
 ### Containment
 

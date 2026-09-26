@@ -212,8 +212,26 @@ here instead of quietly searching for a phrase no record contains.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {` › `for lint in USED_GOVERNED_LINTS {`
 
-(1) **All three governed lints are denied at file scope, and none is
-allowed there.** The deny is what makes an expectation a narrowing.
+(1) **Every governed lint is stated at file scope as a denial, none as an
+allowance, and each at the strongest level that compiles.** The file is an
+out-of-line child of the Process funnel, so a lint it leaves unstated takes
+whatever `src/agent/proc.rs` says (`PR6-LANEF-004`). `disallowed_methods` is
+`deny`: the six per-site expectations narrow it, which is what makes an
+expectation a narrowing, and `forbid` would make each of them `E0453`.
+`disallowed_types` and `disallowed_macros` are `forbid`: nothing in the file
+lowers them, and `forbid` is the one level no attribute below can lower -- a
+macro-written allow and a spelled-apart one included -- where `deny` is a
+level such an allow reopens.
+
+Until 2026-09-26 this asserted `deny` for all three, because one attribute
+fenced all three and the fence census excused it whole by the expectations of
+one; `forbid` of the other two compiles (clippy `-D warnings`, measured at
+`a3767bcc` on Linux, Windows and macOS). The levels are pinned exactly
+rather than as "`deny` or `forbid`" for that reason:
+`fences_that_deny_where_forbid_would_compile`
+still excuses an attribute whole by an allowance of any lint it names, so the
+three rejoined in one `deny` would pass it, and this assertion is what refuses
+that.
 
 ## `fn the_readiness_expectations_are_per_site_and_both_records_say_so() {` › `let found = governed_allows(&source);`
 
@@ -593,10 +611,15 @@ under `cfg_attr(test, ..)`, an item under `cfg(any())` that no build
 compiles, an inner allowance inside a `cfg(all(test, unix))` module and
 inside a module nested in one, and `cfg(not(not(test)))`; since #318's
 fifth round, a feature no CI valuation sets, which establishes no production
-build, and an allowance written `# [allow(..)]`, which the placement census
-does not read and so no census records. Excused, or not
+build; and an allowance only a macro's expansion writes, which the placement
+census does not read and so no census records. That row was
+`# [allow(..)]` until the attribute-token repair of 2026-09-26 made the
+placement census read the tokens apart; the spaced spelling is now among the
+excused. Excused, or not
 the rule's: the repair itself; every fence forbids; a production child
-allows; the file's own production region allows; a platform-gated
+allows; the file's own production region allows; an allowance whose `#`,
+`[` and keyword's `(` are written apart, which rustc applies and the
+placement census reads; a platform-gated
 allowance; a whole-file test module that fences, which has no production
 region; an outer `#[deny]` on an item, which the sweep names and this
 does not read; a `cfg(not(test))` module; an allowance under
@@ -685,10 +708,14 @@ hold was removed in turn and failed a row
 
 ## `const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[`
 
-Production allowances rustc applies and `governed_allows` does not read:
-`#`, `[` spaced or commented apart on an outer attribute, `#`, `!`, `[`
-spaced on an inner one, and a raw lint name, alone or applied through
-`cfg_attr(not(test), ..)`.
+Production allowances rustc applies and `governed_allows` does not read: an
+outer and an inner allow whose level a `macro_rules!` substitutes -- what an
+expansion writes and no text holds, the half of `PR7-WRAPPERS-EMPTY-DOMAIN`
+no reader here closes. Until the attribute-token repair of 2026-09-26 the
+rows were `#`, `[` spaced or commented apart on an outer attribute, `#`, `!`,
+`[` spaced on an inner one, and a raw lint name alone or applied through
+`cfg_attr(not(test), ..)`; the placement census reads all five now, and they
+are rows of `ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES`.
 
 ## `fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {`
 
@@ -701,6 +728,28 @@ allowance is real. So the rule refuses on purpose here: the remedy is the
 allowance written as the placement census reads it, which records it, not a
 `deny` excused by a lowering nothing accounts for. The fenced shapes compile
 as one batch per lint, and each must carry its own `E0453`.
+
+## `const ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES: &[(&str, &str)] = &[`
+
+The same kind of allowance, spelled every way rustc reads it that the
+placement census read none of before the attribute-token repair: `#` and
+`[` apart by a space, a comment or U+200E; the keyword apart from its `(` by
+a space or a line; an inner attribute with `#`, `!`, `[` and the `(` apart by
+a space, U+2028, U+200F and U+0085; a spaced path; a raw lint name, alone
+and through `cfg_attr(not(test), ..)`. The joined spelling is the first row,
+the control, and `#[r#allow(..)]`, which the census always read, the last.
+
+## `fn an_allowance_rustc_reads_whatever_separates_or_spells_its_tokens_is_one_the_placement_census_reads() {`
+
+**The placement census's half of the repair, held by the compiler.** For each
+governed lint, each row of `ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES`
+and Clippy's renames onto that lint: `governed_allows` reads exactly that
+lint; the production-fence rule takes it as the excuse it takes the joined
+spelling for, so a `deny` above it is not named; and clippy-driver refuses a
+`forbid` above it with `E0453`, which it does only for an allowance it
+applies. The renames are listed in the test, not read from
+`RENAMED_TO_A_GOVERNED_LINT`, so a wrong table fails here rather than agree
+with itself. At `a3767bcc`'s readers the first spaced row fails, `left: []`.
 
 ## `fn no_deny_of_a_governed_lint_is_excused_by_test_code_alone() {`
 
@@ -788,15 +837,18 @@ crate root; a classified module; a whole-file test module; an example.
 
 ## `fn an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one() {`
 
-**Undecided is not a passing fence.** Five prologues the file-level reader
-will not answer for -- an allowance only it reads, a list entry rustc
-refuses, a predicate the grammar refuses, `warnings` over a `warn`, and a
-platform the production valuations disagree on -- are each undecided; the
+**Undecided is not a passing fence.** Four prologues the file-level reader
+will not answer for -- a list entry rustc refuses, a predicate the grammar
+refuses, `warnings` over a `warn`, and a platform the production valuations
+disagree on -- are each undecided; the
 per-site-expectation rule does not take one for a `deny`; the roll-call guard
 names the file, and names a silent child of it, whose nearest stating
 ancestor states nothing to inherit. The classified-module pin and the
 container census read the live tree and are not fed fixtures; what they do
 with an undecided answer is stated at `lint_levels::Resolution::undecided`.
+There were five until the attribute-token repair of 2026-09-26: the fifth,
+an allowance only this reader reads, was `# ![allow(..)]`, which the placement
+census now reads, and no spelling of one is known to be left.
 
 ## `fn every_unclassified_production_file_states_each_governed_lint_or_inherits_its_forbid() {`
 
@@ -1021,6 +1073,178 @@ And the three that ARE used are exactly the three recorded.
 ## `fn cargo_toml_declares_no_lint_table_that_could_allow_a_governed_lint() {` › `return;` (trailing)
 
 No table at all is the strongest form of the answer.
+
+## `fn forbids_non_local_definitions(source: &str) -> bool {`
+
+Whether a crate root forbids `non_local_definitions` at file level, read
+with the prologue reader every fence census here uses, so it reads what
+that reader reads: the production build's level (`cfg_attr(not(test), ..)`
+counts, `cfg_attr(test, ..)` does not), after doc comments, plain comments
+and other inner attributes, and nothing after the first item.
+
+## `fn every_crate_root_forbids_non_local_definitions() {`
+
+The pin on the line PR #325 added to `src/lib.rs`, `src/main.rs` and
+`examples/probe.rs`; without it, deleting any of the three failed nothing.
+
+What the line closes: a macro invoked inside a function body can expand to
+an `impl` of a type or trait defined outside that body, and the methods it
+defines are callable from anywhere under a name no source text spells --
+so no census here reads the name, and the method's body is compiled in the
+lint scope of the file that invoked the macro, allowance included.
+`non_local_definitions` is rustc's lint for exactly that `impl` (and for a
+`#[macro_export]` macro defined inside a body). It warns by default, so
+CI's `-D warnings` refuses it only until an inner `#[allow]` lowers it --
+measured: `-D warnings` with an inner allow builds -- and the macro can
+write that allow itself. `forbid` is the level no inner attribute lowers:
+rustc refuses the attempt as `E0453`, whatever the expansion spells, and a
+command-line `-A non_local_definitions` does not lower a source `forbid`
+either; only `--cap-lints` does, which is `.cargo/` configuration and an
+instrument of its own.
+
+What it does not close, measured on rustc 1.97.1 and 1.85.0 with the lint
+forbidden: an `impl` in a **module-level `const _` initializer** -- nested
+in another `const _` or inside an inline `mod` included -- is not linted,
+because rustc treats that body as transparent for derive output. A macro
+there defines a method another module calls, and the crate builds. Every
+other body was refused: a function body, a named `const` or `static`, an
+array length, an enum discriminant, a const-generic default, an associated
+`const`, an inline `const`, a closure in a `static`, a trait's default
+body, and a `const _` inside a function. So the line is not, alone, a
+refusal of expansion outside a function body;
+`every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body`
+is the census for the positions it does not reach.
+
+The domain is every target root `cargo metadata` reports, so a new bin,
+example or test target is read without being named; the three written
+out are asserted as roots so that a metadata reading that lost one cannot
+pass by reading fewer.
+
+## `fn every_crate_root_forbids_non_local_definitions() {` › `for (source, forbidden) in [`
+
+Negative controls: the reader answers `forbid` only for a file-level
+statement the production build applies -- not for `deny` or `warn`, not
+for one the test build alone applies, not for a different lint, a comment,
+an inner attribute after the first item, an outer attribute on an item or
+an inner attribute of an inline module.
+
+## `fn production_files_a_governed_lint_is_not_forbidden_in(`
+
+The domain of the census below: every file of `src/` and `examples/`,
+whole-file test modules excepted, in which some governed lint's
+production level is not `forbid`. The level is the file's own file-level
+statement, else the nearest ancestor module file's (`ancestor_module_files`),
+else none -- `-D warnings` alone. A prologue the reader cannot decide is in
+the domain, whatever an ancestor says.
+
+**Derived, not listed, and wider than `effects/allowlist.toml`.** A file
+that states nothing inherits its parent's level, so a child that drops its
+own fence under an allowing parent is in the domain the moment it does,
+with no row for anyone to add; a file that `deny`s a lint is in it too,
+because a macro can write the `allow` that lowers a `deny`. Out of it is
+exactly the file where all three are forbidden: there an `allow` is
+`E0453` however it is written, so what a macro puts at item position can
+do nothing its caller could not do itself.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {`
+
+Option 2 of the 2026-09-26 ruling on `PR7-WRAPPERS-EMPTY-DOMAIN`: the
+restriction, enforced as a property of the text. In a file of the domain
+above, every macro invocation is inside a function body
+(`census_domain::macro_invocations_outside_function_bodies` says why the
+line is there). The executed routes of that finding -- a
+`macro_rules!` writing `pub(super) fn $name` at item position, one
+substituting `mod`, the allowance level and the name, and an aliased
+`include!` -- are each an invocation at item position in an allowing file,
+and each is refused here whatever it is called; so is one in a
+module-level `const _`, the position the crate roots' forbid of
+`non_local_definitions` does not reach.
+
+When it was written it named five invocations: the four production
+`thread_local!`s (`src/rundir.rs`, `src/runner/host.rs` twice,
+`src/util.rs`) and a `format!` in a thiserror `#[error(..)]` argument in
+`src/workspace_manager.rs`. The statics moved into
+`src/util/thread_barriers.rs`, `src/runner/host/counters.rs` and
+`src/rundir/cleanup_scopes.rs`, which forbid all three governed lints and
+are therefore outside the domain, and the `format!` into a private
+function the attribute names. Moving rather than allowing by name: a name
+allowlist would need guards against `use x as thread_local` and a local
+`macro_rules! thread_local`, which is more recogniser.
+
+What it does not read: the items a derive or an attribute macro from a
+dependency writes (no `!` is spelled; their output is fixed by
+`Cargo.lock`, and `macro_rules!` attributes and derives are unstable on
+the toolchains CI builds), and an item written inside a function body that
+is reached by symbol rather than by name, which is recorded in the
+finding's Remaining.
+
+Witnessed against the real tree by editing sources the compiled suite
+reads at run time (`~/findings-sweep/orch-p1/p1-six-modules-r3/step3-rows.*`):
+a `thread_local!` back at item position, a macro in a module-level
+`const _`, at `impl`-item position, in an inline module, a `macro_rules!`,
+an aliased `include!`, the `format!` back in its attribute, and a moved
+module that loses its fence or writes it test-only each fail naming the
+file and line; a macro inside an existing function, one at item position
+in a forbidding file and one in a `#[cfg(test)]` item pass.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `for named in [`
+
+The domain by name, so a reading that lost a file cannot pass by reading
+fewer: files that allow a governed lint in production, a crate root of
+each target kind among them.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `for forbidding in ["src/util/terminal.rs", "src/runner/host/naming.rs"] {`
+
+And two files that forbid all three, by name, so the exclusion is not
+vacuous either.
+
+## `fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {` › `let list = allowlist();`
+
+Every file the allowlist records an allowance for, whose production build
+applies one, is in the domain: the derivation cannot drift below the
+record.
+
+## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {`
+
+The reader over each position, one invocation each. Refused: module item
+position, a path, spaced and commented spellings, raw and non-ASCII
+names, `macro_rules!` (a raw name too), an aliased `include!`, an inline
+module, an `impl`, a `trait` and an `extern` block, a module-level and a
+nested `const _`, a named `const`, a `static` and a closure in one, an
+enum discriminant, a field's type, a return type, a parameter's type, a
+const-generic default, an attribute's value, production code beside a
+test item, an `impl` for a type named `r#fn`, an associated `const` after a
+bodiless declaration, and an `impl` after a `fn` written in a macro's
+parentheses, brackets or braces. Accepted: a function body, a method body, a trait's default
+body, a function inside a `const _`, headers holding a const block, an
+array, a `where` clause with a higher-ranked bound and an arrow,
+qualifiers and an ABI, raw and non-ASCII function names, a nested
+function, test-only items and modules, a keyword before a `!` outside a
+body, and unary `!`, `!=`, comments and strings that are not invocations
+at all.
+
+## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {` › `assert_eq!(`
+
+The two invocations of a `const` whose `if` names a `fn` inside a macro's
+parentheses or brackets, both reported. The `)` or `]` that closes the
+arguments is what ends that `fn`'s header here; read past it, the `if`
+block would be taken for the `fn`'s body and the invocation in it dropped
+from the list. The verdict cannot turn on it -- the macro holding the `fn`
+is outside a body and refused either way -- so this is the list's
+precision, pinned because the census prints the list: a mutation matrix
+over the reader found the two closers pinned by nothing else, since a `;`
+ended every other header they could.
+
+## `fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {`
+
+The domain derivation over a synthetic tree, each file there for one
+reading: out when all three are forbidden, or inherited forbidden by a
+child that states nothing, or when the file is a whole-file test module;
+in when it allows or denies a lint, when a child states nothing under an
+allowing parent, when nothing states a level at all, when its `forbid` is
+written for the test build only, and when its prologue is undecided under
+a forbidding parent -- the case that inheritance would otherwise read as
+forbidden.
 
 ## `fn the_legacy_section_is_frozen_and_may_only_shrink() {`
 
@@ -1530,6 +1754,94 @@ What it does not hold: that the walk then *judges* the child. That is
 which walks the tree on disk from what `scan_modules` reports; the compiled
 witness, with the child file and a topology caller, is in the round's
 evidence and not in the suite.
+
+## `fn what_rustc_reads_between_tokens() -> Vec<(String, String)> {`
+
+What may stand between two of an attribute's tokens, each with a name for the
+failure message: each of the eleven separators rustc reads, a block comment, a
+nested one, one holding `/**` (a plain comment, not a doc comment), a line
+comment, and a run of several. The four tests below spell an attribute with
+each of them in each gap.
+
+## `type ReadAllow = (bool, bool, Vec<String>, Vec<String>, Vec<&'static str>, bool);`
+
+What `governed_allows` reports of one attribute but its line: inner,
+module-level, the lints, what they are written as, the keywords, and whether
+a reason is given. The line moves when a gap holds a line break; nothing else
+may.
+
+## `fn allows_as_read(source: &str) -> Vec<ReadAllow> {`
+
+`governed_allows` of `source`, as `ReadAllow`s.
+
+## `fn the_placement_census_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The placement census reads an attribute's tokens where rustc reads them.**
+Six shapes -- an inner allow in the prologue, an outer allow on a module, an
+outer `expect` with a reason on a statement, an allow a `cfg_attr` applies to
+a declared module, the second of two inner attributes, and an inner allow in
+an inline module's braces -- each with what it must read as. Each is read
+joined first, which is the control and is what `a3767bcc`'s census read too;
+then with every gap of `what_rustc_reads_between_tokens` after the `#`, after
+the `!`, after the keyword, around the path's `::`, and in all four at once,
+and each must read exactly as the joined spelling. Then a module's visibility
+and keyword spaced every way (`pub (crate)`, `pub(in ..)`, `pub(self)`,
+`pub`, none) is module-level, and an allow on a function, on an item whose
+name starts with `mod`, and an inner allow after the first item are not.
+Then the other direction, what must read as no allowance: a doc comment
+between `#` and `[`, between `!` and `[`, and between the keyword and its
+list, all of which rustc refuses; a keyword that only starts a longer word;
+the attribute in a string, in comments, and with a literal between its `#`
+and `[` inside a `stringify!`.
+
+Failing before, passing after: at `a3767bcc`'s readers the first spaced
+spelling fails, `U+0009 after #`, `left: []`. Each part of the repair was
+reverted alone on the head and killed this test: the placement census's
+`#`/`!`/`[`, its keyword's `(`, its `written` spacing, the prologue walk and
+the visibility and `mod` words of `is_module_level`. The last group reports
+every row it fails, so each of the three reversions that read the gaps
+wrongly is seen at the rows it breaks: skipping a doc comment as a separator
+fails the three doc-comment rows between `#`, `!` and `[`; reading the gaps in
+the blanked text fails those and the literal inside `stringify!`; reading the
+keyword's gap in the blanked text fails the doc comment before the list.
+
+## `fn the_placement_census_names_a_lint_as_clippy_does_and_no_further() {`
+
+`normalize_lint`, and the placement census through it, name a lint as
+Clippy's lint store does: joined and spaced paths, a bare name, raw segments,
+the two renames under `clippy`, the two prefixless aliases, raw or not, and a
+raw group. And no further, each a spelling Clippy does not apply to a
+governed lint: a bare old name, an alias under the tool, an upper-case name,
+three segments, `r#` apart from its name, and an ungoverned lint.
+
+## `fn the_module_walk_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The module walk reads an attribute's tokens where rustc reads them.** A
+`path` attribute is refused joined and raw (`#[r#path = ..]`, which rustc
+reads as `path`), and, for every gap, with the gap after the `#`, around
+every token of the attribute, and as a `cfg_attr` that applies a `path`;
+each in the real `src/engine/attempt.rs`, so the refusal is of this tree's
+text and not only of a fixture. A `cfg(test)` gate is read joined, raw and
+with every gap, so the declaration is test-only; an inner `cfg` is refused
+the same three ways. A doc comment between `#` and `[`, which rustc refuses,
+and a `path` attribute quoted in a string are no attribute: the declaration
+is read plainly, and that group reports every row it fails. At `a3767bcc`'s
+walk the raw `path` row fails first; with only the raw-name reading reverted
+it is that row, with only the `#`/`!`/`[` reading reverted it is the first
+spaced one, and with a doc comment skipped as a separator, or the gaps read
+in the blanked text, it is the doc-comment row.
+
+## `fn the_prologue_readers_read_an_inner_attribute_whatever_rustc_reads_between_its_tokens() {`
+
+**The prologue readers read an inner attribute's tokens where rustc reads
+them.** For every gap, a `deny` then an `allow` with their `#`, `!`, `[` and
+the allow's `(` apart: `leading_inner_attributes` is both attributes, and the
+file-level reader answers `allow`, decided, as it does joined. And a
+`forbid` then the same allow is `E0453` rather than a level, which the reader
+already answered at `a3767bcc` and which is here so the `allow` answer is not
+a reader that stopped reading. At `a3767bcc` the prologue came back empty,
+and the reader, which has read the tokens apart since #318's fifth round,
+answered undecided, because the placement census did not record the allow.
 
 ## `fn inline_module_openers(source: &str) -> usize {`
 
@@ -3145,25 +3457,35 @@ because a doc comment follows its `#!`; a trailing comma; a raw `reason`; an
 empty list; and names that resolve to no lint -- unknown, removed, upper-case,
 `rustdoc::`, `rustc::`.
 
+Since the attribute-token repair of 2026-09-26 it also holds the allowances
+that were the fourth table's, because the placement census now reads them
+and the reader answers them: an `allow` after a `deny` with `#`, `!` and `[`
+spaced, commented or on two lines, with the keyword apart from its `(`, and
+with U+200E, U+2029 and U+000B between the tokens; `clippy::r#<lint>`,
+`clippy::r#all`; and the aliases `clippy_all` and `clippy_style`. Each is
+predicted `allow` and compiled; at `a3767bcc` each left the reader
+undecided, which this table refuses.
+
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `let unread: &[(&str, &str, bool)] = &[`
 
 The fourth table: prologues the reader will not answer for, each with
 whether clippy-driver builds it. The reader must be undecided with no world
-at all. Clippy builds the allowances only this reader reads -- `#`, `!`, `[`
-spaced, commented or on two lines, `clippy::r#<lint>`, `clippy::r#all`, the
-aliases `clippy_all` and `clippy_style` -- so a definite `deny` there would
-have been false and a definite `allow` one no census records; it builds
-`warnings` lowering a `warn`, and refuses the rest: `deny(warnings)` alone, a
-three-segment path, a doc comment inside or between the tokens, an outer doc
-comment before an inner attribute, a custom inner attribute, brackets for
-parentheses, a literal or name-value entry, `reason` first, an unknown tool,
-a leading `::`, and a `#!` that opens nothing.
+at all. Clippy builds `warnings` lowering a `warn`, and refuses the rest:
+`deny(warnings)` alone, a three-segment path, a doc comment inside or between
+the tokens, an outer doc comment before an inner attribute, a custom inner
+attribute, brackets for parentheses, a literal or name-value entry, `reason`
+first, an unknown tool, a leading `::`, and a `#!` that opens nothing. Until
+the attribute-token repair of 2026-09-26 it also held the allowances only
+this reader read -- `#`, `!`, `[` spaced, commented or on two lines,
+`clippy::r#<lint>`, `clippy::r#all`, the aliases -- which are decided rows
+now.
 
 Then Clippy's two renames onto a governed lint: `clippy::disallowed_method`
 and `clippy::disallowed_type` after a `deny` compile clean for the lint each
-names, which no census records, so the reader is undecided there; for the
-other two lints each is a name that lowers nothing, and the answer is the
-`deny` clippy-driver enforces.
+names, and since the attribute-token repair the placement census records
+them, so the reader answers `allow` and the row is predicted like any
+decided one; for the other two lints each is a name that lowers nothing, and
+the answer is the `deny` clippy-driver enforces.
 
 How the rows reach the compiler, since #318's fifth round. A decided row the
 reader predicts to build or to fire, an unread row clippy builds, and the two

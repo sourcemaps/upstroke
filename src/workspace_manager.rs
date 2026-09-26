@@ -56,11 +56,8 @@
 //! `File`, an `OpenOptions`, or a `Command` — the only handles that leave this
 //! module are paths, object ids, and values.
 
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -427,7 +424,7 @@ pub enum Refusal {
          no object at all",
         .resolved.as_deref().unwrap_or("nothing"),
         .role.object_type(),
-        .found_type.as_deref().map_or_else(String::new, |found| format!(" (it names a {found})"))
+        .found_type.as_deref().map_or_else(String::new, names_a_type)
     )]
     SnapshotInputResolvesElsewhere {
         /// Which id of the input.
@@ -566,6 +563,10 @@ pub fn execution_root_of(private_root: &Path, repo_key: &str, run_id: &str) -> P
 /// case-insensitive filesystem names the same root as its uppercase twin and
 /// would make two managers of one root; not a shorter or longer string; not
 /// a path. Refused before any path is built.
+fn names_a_type(found: &str) -> String {
+    format!(" (it names a {found})")
+}
+
 fn refuse_unplain_run_id(run_id: &str) -> Result<(), Refusal> {
     if is_canonical_ulid(run_id) {
         return Ok(());

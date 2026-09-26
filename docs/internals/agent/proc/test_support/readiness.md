@@ -66,7 +66,12 @@ child of a funnel inherits the funnel's allow silently -- which is
 `PR6-LANEF-004`, measured twice in the Container subtree, and this file is
 the first out-of-line child the Process funnel has ever had. All three
 governed lints are therefore stated here rather than inherited, and all three
-are stated as DENIALS.
+are stated as DENIALS: `disallowed_methods` as `deny`, for the reason below,
+and `disallowed_types` and `disallowed_macros` as `forbid`, the denial no
+attribute below can lower, because nothing in this file lowers either. They
+shared the one `deny` until 2026-09-26, which the fence census excused whole
+by the expectations of the one lint; `forbid` of the two compiles (clippy
+`-D warnings`, measured at `a3767bcc` on Linux, Windows and macOS).
 
 **The denial is the whole statement, and the six exceptions are per site.**
 This file used to open with a blanket `#![allow(clippy::disallowed_methods)]`
@@ -79,8 +84,10 @@ a claim about six lines of it. A seventh denied call, or a denied call in a
 function that has nothing to do with publication, arrives under the same
 allowance and nothing says so.
 
-So the lint is denied at file scope like the other two, and each of the six
-call sites carries its own `#[expect(clippy::disallowed_methods, reason = …)]`.
+So the lint is denied at file scope like the other two, at `deny` rather than
+`forbid` because `forbid` would make each expectation below it `E0453`, and
+each of the six call sites carries its own
+`#[expect(clippy::disallowed_methods, reason = …)]`.
 That makes the compiler the authority on the count, in both directions and
 under the `-D warnings` the gate runs with:
 

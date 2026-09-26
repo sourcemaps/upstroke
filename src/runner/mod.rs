@@ -1,10 +1,7 @@
 //! Extended notes: `docs/internals/runner/mod.md`
 
-#![deny(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 pub mod container;
 pub mod contract;

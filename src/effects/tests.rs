@@ -2,11 +2,8 @@
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -267,10 +264,13 @@ fn the_readiness_expectations_are_per_site_and_both_records_say_so() {
     let source = fs::read_to_string(repo_root().join(READINESS)).expect("the readiness module");
 
     for lint in USED_GOVERNED_LINTS {
+        let level = if *lint == LINT { "deny" } else { "forbid" };
         assert_eq!(
             crate::effects::lint_levels::file_level_lint_state(&source, lint),
-            Some("deny"),
-            "{READINESS} must deny `{lint}` at file-module level"
+            Some(level),
+            "{READINESS} must {level} `{lint}` at file-module level: `deny` for the one lint its \
+             per-site expectations narrow, where `forbid` is E0453 at each of them, and `forbid` \
+             for every other, which nothing in the file lowers"
         );
     }
 
@@ -1275,10 +1275,15 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             vec![],
         ),
         (
-            "an allowance spelled so the placement census does not read it",
+            "an allowance only a macro's expansion writes, which the placement census does not \
+             read",
             vec![(
                 "src/a.rs",
-                &*format!("{DENY}# [allow(clippy::disallowed_methods)]\nmod m {{\n}}\n"),
+                &*format!(
+                    "{DENY}macro_rules! lower {{\n    ($level:ident) => {{\n        \
+                     #[$level(clippy::disallowed_methods)]\n        mod m {{}}\n    }};\n}}\n\
+                     lower!(allow);\n"
+                ),
             )],
             vec![],
         ),
@@ -1320,6 +1325,15 @@ fn the_production_fence_rule_names_a_deny_only_test_code_excuses_and_excuses_one
             vec![(
                 "src/a.rs",
                 "#![deny(clippy::disallowed_methods)]\n#[allow(clippy::disallowed_methods)]\nfn go() {}\n",
+            )],
+            vec![],
+        ),
+        (
+            "an allowance whose tokens are written apart, which rustc applies and the placement \
+             census reads",
+            vec![(
+                "src/a.rs",
+                &*format!("{DENY}# [allow (clippy::disallowed_methods)]\nmod m {{\n}}\n"),
             )],
             vec![],
         ),
@@ -1754,13 +1768,13 @@ fn the_production_fence_rule_reads_the_effective_activation_of_every_allowance()
 }
 
 const ALLOWANCES_THE_PLACEMENT_CENSUS_DOES_NOT_READ: &[(&str, &str)] = &[
-    ("spaced_outer", "# [allow(LINT)]\nmod m {}\n"),
-    ("commented_outer", "#/* c */[allow(LINT)]\nmod m {}\n"),
-    ("spaced_inner", "mod m {\n    # ![allow(LINT)]\n}\n"),
-    ("raw_lint_name", "#[allow(clippy::r#BARE)]\nmod m {}\n"),
     (
-        "raw_lint_name_applied",
-        "#[cfg_attr(not(test), allow(clippy::r#BARE))]\nmod m {}\n",
+        "macro_written_outer",
+        "macro_rules! lower {\n    ($level:ident) => {\n        #[$level(LINT)]\n        mod m {}\n    };\n}\nlower!(allow);\n",
+    ),
+    (
+        "macro_written_inner",
+        "macro_rules! lower {\n    ($level:ident) => {\n        mod m {\n            #![$level(LINT)]\n        }\n    };\n}\nlower!(allow);\n",
     ),
 ];
 
@@ -1802,6 +1816,99 @@ fn an_allowance_the_placement_census_does_not_read_excuses_no_deny() {
                 !built && diagnostics.iter().any(|(_, code)| code == "E0453"),
                 "`{tag}` for `{lint}`: clippy did not apply the allowance, so the refusal above \
                  names nothing real: {diagnostics:?}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+const ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES: &[(&str, &str)] = &[
+    ("joined", "#[allow(LINT)]\nmod m {}\n"),
+    ("spaced_outer", "# [allow(LINT)]\nmod m {}\n"),
+    ("commented_outer", "#/* c */[allow(LINT)]\nmod m {}\n"),
+    ("mark_outer", "#\u{200E}[allow(LINT)]\nmod m {}\n"),
+    ("spaced_keyword", "#[allow (LINT)]\nmod m {}\n"),
+    ("keyword_on_its_own_line", "#[allow\n(LINT)]\nmod m {}\n"),
+    ("spaced_inner", "mod m {\n    # ![allow(LINT)]\n}\n"),
+    ("spaced_bracket_inner", "mod m {\n    #! [allow(LINT)]\n}\n"),
+    (
+        "marked_inner",
+        "mod m {\n    #\u{2028}!\u{200F}[allow\u{0085}(LINT)]\n}\n",
+    ),
+    ("spaced_path", "#[allow(clippy :: BARE)]\nmod m {}\n"),
+    ("raw_lint_name", "#[allow(clippy::r#BARE)]\nmod m {}\n"),
+    (
+        "raw_lint_name_applied",
+        "#[cfg_attr(not(test), allow(clippy::r#BARE))]\nmod m {}\n",
+    ),
+    ("raw_keyword", "#[r#allow(LINT)]\nmod m {}\n"),
+];
+
+#[test]
+fn an_allowance_rustc_reads_whatever_separates_or_spells_its_tokens_is_one_the_placement_census_reads()
+ {
+    let scratch = scratch_dir("recorded");
+    for lint in USED_GOVERNED_LINTS {
+        let bare = normalize_lint(lint).expect("a governed lint");
+        let renamed = [
+            ("disallowed_method", "disallowed_methods"),
+            ("disallowed_type", "disallowed_types"),
+        ]
+        .into_iter()
+        .filter(|(_, new)| *new == bare)
+        .map(|(old, _)| {
+            (
+                format!("renamed_{old}"),
+                format!("#[allow(clippy::{old})]\nmod m {{}}\n"),
+            )
+        });
+        let shapes: Vec<(String, String)> = ALLOWANCES_THE_PLACEMENT_CENSUS_READS_AS_RUSTC_DOES
+            .iter()
+            .map(|(tag, shape)| {
+                (
+                    (*tag).to_owned(),
+                    shape.replace("LINT", lint).replace("BARE", bare),
+                )
+            })
+            .chain(renamed)
+            .collect();
+        let mut fenced = Vec::new();
+        for (tag, shape) in &shapes {
+            let read: Vec<String> = governed_allows(shape)
+                .into_iter()
+                .flat_map(|allow| allow.lints)
+                .collect();
+            assert_eq!(
+                read,
+                [bare],
+                "`{tag}` for `{lint}`: rustc applies this allowance of `{lint}` and the placement \
+                 census does not read it as one: {shape:?}"
+            );
+            let found = denies_the_production_build_could_forbid(
+                &[(
+                    "src/probe.rs".to_owned(),
+                    format!("#![deny({lint})]\n{shape}"),
+                )],
+                &|_| false,
+            );
+            assert!(
+                found.is_empty(),
+                "`{tag}` for `{lint}`: the allowance is read, so `forbid` would be E0453 here and \
+                 the `deny` is excused, as it is for the joined spelling: {found:#?}"
+            );
+            fenced.push(format!("#![cfg_attr(not(test), forbid({lint}))]\n{shape}"));
+        }
+        let outcomes = clippy_outcomes(&scratch, bare, &fenced, &[]);
+        assert_eq!(
+            outcomes.len(),
+            shapes.len(),
+            "`{lint}`: a shape was skipped"
+        );
+        for ((tag, _), (built, diagnostics)) in shapes.iter().zip(&outcomes) {
+            assert!(
+                !built && diagnostics.iter().any(|(_, code)| code == "E0453"),
+                "`{tag}` for `{lint}`: clippy did not apply the allowance, so reading it proves \
+                 nothing about what rustc applies: {diagnostics:?}"
             );
         }
     }
@@ -2049,10 +2156,6 @@ fn the_unclassified_fence_rule_names_a_silent_file_and_excuses_one_a_forbid_reac
 fn an_undecided_prologue_is_no_fence_to_the_censuses_that_read_one() {
     const LINT: &str = "clippy::disallowed_methods";
     for (what, prologue) in [
-        (
-            "an allowance only this reader reads",
-            "#![deny(clippy::disallowed_methods)]\n# ![allow(clippy::disallowed_methods)]\n",
-        ),
         (
             "a list entry rustc refuses",
             "#![forbid(clippy::disallowed_methods)]\n#![allow(footool::disallowed_types)]\n",
@@ -2405,6 +2508,386 @@ fn cargo_toml_declares_no_lint_table_that_could_allow_a_governed_lint() {
             "Cargo.toml [lints] names the governed lint `{lint}`: {rendered}"
         );
     }
+}
+
+fn forbids_non_local_definitions(source: &str) -> bool {
+    crate::effects::lint_levels::file_level_lint_state(source, "non_local_definitions")
+        == Some("forbid")
+}
+
+#[test]
+fn every_crate_root_forbids_non_local_definitions() {
+    let roots = crate_roots();
+    let mut read = Vec::new();
+    let mut silent = Vec::new();
+    for root in roots.roots() {
+        let source = fs::read_to_string(root).expect("a crate root");
+        if !forbids_non_local_definitions(&source) {
+            silent.push(root.display().to_string());
+        }
+        read.push(root.display().to_string());
+    }
+    assert!(
+        silent.is_empty(),
+        "a crate root that does not forbid `non_local_definitions` at file level lets a macro \
+         invoked inside a function define a method reachable from anywhere: {silent:#?}"
+    );
+    for named in ["src/lib.rs", "src/main.rs", "examples/probe.rs"] {
+        assert!(
+            roots.is_root_relative(named),
+            "`{named}` is no longer a target root of this package, so the census above did not \
+             read it: {read:#?}"
+        );
+    }
+
+    for (source, forbidden) in [
+        ("#![forbid(non_local_definitions)]\n", true),
+        (
+            "//! docs\n#![forbid(non_local_definitions)]\n// a note\n#![allow(dead_code)]\npub mod a;\n",
+            true,
+        ),
+        (
+            "#![cfg_attr(not(test), forbid(non_local_definitions))]\n",
+            true,
+        ),
+        ("#![forbid(dead_code, non_local_definitions)]\n", true),
+        ("", false),
+        ("pub mod a;\n", false),
+        ("#![deny(non_local_definitions)]\n", false),
+        ("#![warn(non_local_definitions)]\n", false),
+        ("#![cfg_attr(test, forbid(non_local_definitions))]\n", false),
+        ("#![forbid(dead_code)]\n", false),
+        ("// #![forbid(non_local_definitions)]\n", false),
+        ("pub mod a;\n#![forbid(non_local_definitions)]\n", false),
+        ("#[forbid(non_local_definitions)]\npub mod a;\n", false),
+        (
+            "mod inner {\n    #![forbid(non_local_definitions)]\n}\n",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            forbids_non_local_definitions(source),
+            forbidden,
+            "{source:?}"
+        );
+    }
+}
+
+fn production_files_a_governed_lint_is_not_forbidden_in(
+    sources: &[(String, String)],
+) -> BTreeSet<String> {
+    let by_path: BTreeMap<String, String> = sources.iter().cloned().collect();
+    let mut domain = BTreeSet::new();
+    for (path, source) in sources {
+        if is_whole_file_test_module(path) {
+            continue;
+        }
+        let ancestors = ancestor_module_files(path, &by_path);
+        let lowerable = USED_GOVERNED_LINTS.iter().any(|lint| {
+            let own = crate::effects::lint_levels::file_level_lint_resolution(source, lint);
+            if own.undecided {
+                return true;
+            }
+            let effective = own.level.or_else(|| {
+                ancestors.iter().find_map(|ancestor| {
+                    by_path.get(ancestor).and_then(|above| {
+                        crate::effects::lint_levels::file_level_lint_state(above, lint)
+                    })
+                })
+            });
+            effective != Some("forbid")
+        });
+        if lowerable {
+            domain.insert(path.clone());
+        }
+    }
+    domain
+}
+
+#[test]
+fn every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body() {
+    let sources = scanned_sources();
+    let domain = production_files_a_governed_lint_is_not_forbidden_in(&sources);
+    let mut outside = Vec::new();
+    for (path, source) in &sources {
+        if !domain.contains(path) {
+            continue;
+        }
+        for invocation in super::census_domain::macro_invocations_outside_function_bodies(source) {
+            outside.push(format!("{path}:{} `{}!`", invocation.line, invocation.name));
+        }
+    }
+    assert!(
+        outside.is_empty(),
+        "a macro invoked outside a function body can write an item no census reads -- a `fn` \
+         under a name the source does not spell, a module, an allow -- and one in a module-level \
+         `const _` defines a method `non_local_definitions` does not lint; in a file that does \
+         not forbid every governed lint that item can hold an effect nothing classifies. Move \
+         the invocation into a module that forbids all three:\n{outside:#?}"
+    );
+
+    for named in [
+        "src/rundir.rs",
+        "src/runner/host.rs",
+        "src/util.rs",
+        "src/workspace.rs",
+        "src/runner/container.rs",
+        "src/main.rs",
+        "examples/probe.rs",
+    ] {
+        assert!(
+            domain.contains(named),
+            "`{named}` allows a governed lint and is not in the domain: {domain:#?}"
+        );
+    }
+    for forbidding in ["src/util/terminal.rs", "src/runner/host/naming.rs"] {
+        assert!(
+            !domain.contains(forbidding),
+            "`{forbidding}` forbids all three governed lints and was read as lowerable"
+        );
+    }
+    let list = allowlist();
+    for entry in list.funnel.iter().chain(&list.legacy) {
+        if entry.allows.is_empty() || is_whole_file_test_module(&entry.path) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(repo_root().join(&entry.path)).expect("an allowlisted file");
+        let allowed_in_production = USED_GOVERNED_LINTS.iter().any(|lint| {
+            crate::effects::lint_levels::file_level_lint_state(&source, lint) != Some("forbid")
+        });
+        assert!(
+            !allowed_in_production || domain.contains(&entry.path),
+            "`{}` carries an allowance the production build applies and is not in the domain",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
+    fn outside(source: &str) -> Vec<String> {
+        super::census_domain::macro_invocations_outside_function_bodies(source)
+            .into_iter()
+            .map(|invocation| invocation.name)
+            .collect()
+    }
+
+    for (position, source) in [
+        (
+            "module item position",
+            "thread_local! { static X: u8 = 0; }\n",
+        ),
+        (
+            "a macro's path",
+            "std::thread_local! { static X: u8 = 0; }\n",
+        ),
+        ("spaced", "m ! ( );\n"),
+        ("a comment between the tokens", "m /* c */ ! /* d */ { }\n"),
+        ("a raw name", "r#m!();\n"),
+        ("a raw keyword name", "r#match!();\n"),
+        ("a non-ASCII name", "\u{e9}!();\n"),
+        ("a definition", "macro_rules! m { () => {}; }\n"),
+        ("a raw definition name", "macro_rules! r#m { () => {}; }\n"),
+        (
+            "an aliased include",
+            "use std::include as rd;\nrd!(\"x.inc\");\n",
+        ),
+        ("an inline module", "mod inner {\n    m!();\n}\n"),
+        ("an impl block", "impl X {\n    m!();\n}\n"),
+        ("a trait block", "trait T {\n    m!();\n}\n"),
+        ("an extern block", "extern \"C\" {\n    m!();\n}\n"),
+        (
+            "a module-level `const _`",
+            "const _: () = {\n    m!();\n};\n",
+        ),
+        (
+            "a nested `const _`",
+            "const _: () = {\n    const _: () = {\n        m!();\n    };\n};\n",
+        ),
+        ("a named `const`", "const C: u8 = m!();\n"),
+        ("a `static`", "static S: u8 = m!();\n"),
+        (
+            "a closure in a `static`",
+            "static F: fn() = || {\n    m!();\n};\n",
+        ),
+        ("an enum discriminant", "enum E {\n    A = m!(),\n}\n"),
+        ("a field's type", "struct S {\n    f: m!(),\n}\n"),
+        ("a return type", "fn f() -> m!() {\n    0\n}\n"),
+        ("a parameter's type", "fn f(x: [u8; m!()]) {}\n"),
+        (
+            "a const-generic default",
+            "fn f<const N: usize = { m!() }>() {}\n",
+        ),
+        (
+            "an attribute's value",
+            "#[doc = concat!(\"a\")]\nfn f() {}\n",
+        ),
+        (
+            "production code beside a test item",
+            "#[cfg(test)]\nfn t() {}\nm!();\n",
+        ),
+        (
+            "an impl for a type named `r#fn`",
+            "impl T for r#fn where u8: Copy {\n    m!();\n}\n",
+        ),
+        (
+            "an associated const after a bodiless declaration",
+            "trait T {\n    fn a(&self);\n    const C: () = {\n        m!()\n    };\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's arguments",
+            "fn f() {\n    n!(fn x);\n}\nimpl X {\n    m!();\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's brackets",
+            "fn f() {\n    n![fn x];\n}\nimpl X {\n    m!();\n}\n",
+        ),
+        (
+            "an impl after a `fn` in a macro's braces",
+            "fn f() {\n    n! { fn x }\n}\nimpl X {\n    m!();\n}\n",
+        ),
+    ] {
+        assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
+    }
+
+    for (position, source) in [
+        (
+            "a block after a `fn` in a macro's parentheses",
+            "const C: u8 = if n!(fn x) {\n    m!()\n} else {\n    0\n};\n",
+        ),
+        (
+            "a block after a `fn` in a macro's brackets",
+            "const C: u8 = if n![fn x] {\n    m!()\n} else {\n    0\n};\n",
+        ),
+    ] {
+        assert_eq!(
+            outside(source),
+            vec!["n".to_owned(), "m".to_owned()],
+            "{position}: {source:?}"
+        );
+    }
+
+    for (position, source) in [
+        ("a function body", "fn f() {\n    m!();\n}\n"),
+        (
+            "a method body",
+            "impl X {\n    pub fn f(&self) {\n        m!();\n    }\n}\n",
+        ),
+        (
+            "a trait's default body",
+            "trait T {\n    fn d(&self) {\n        m!();\n    }\n}\n",
+        ),
+        (
+            "a function inside a `const _`",
+            "const _: () = {\n    fn g() {\n        m!();\n    }\n};\n",
+        ),
+        (
+            "a header holding a const block",
+            "fn f() -> Foo<{ 1 }> {\n    m!()\n}\n",
+        ),
+        (
+            "a header holding an array",
+            "fn f(x: [u8; 3]) -> [u8; 3] {\n    m!(x)\n}\n",
+        ),
+        (
+            "a where clause",
+            "fn f<T>() where T: Tr<{ 2 }>, for<'a> &'a T: Fn() -> u8 {\n    m!()\n}\n",
+        ),
+        (
+            "an arrow in the return type",
+            "fn f() -> impl Fn() -> u8 {\n    || m!()\n}\n",
+        ),
+        (
+            "qualifiers",
+            "pub(crate) const unsafe extern \"C\" fn f() {\n    m!();\n}\n",
+        ),
+        ("a raw function name", "fn r#match() {\n    m!();\n}\n"),
+        ("a non-ASCII function name", "fn \u{e9}() {\n    m!();\n}\n"),
+        (
+            "a nested function",
+            "fn f() {\n    fn g() {\n        m!();\n    }\n    n!();\n}\n",
+        ),
+        (
+            "a test-only item",
+            "#[cfg(test)]\nthread_local! { static X: u8 = 0; }\n",
+        ),
+        (
+            "a test-only module",
+            "#[cfg(test)]\nmod tests {\n    m!();\n}\n",
+        ),
+        (
+            "no macro",
+            "const B: bool = !A;\nfn f(a: bool, b: u8) -> bool {\n    if !a { return !(b != 1); }\n    a != (b == 2)\n}\n",
+        ),
+        (
+            "a keyword before a `!` outside a body",
+            "const X: bool = if !A { true } else { !B };\n",
+        ),
+        ("a macro in a comment", "// m!();\n/* n!{} */\nfn f() {}\n"),
+        ("a macro in a string", "const S: &str = \"m!()\";\n"),
+    ] {
+        assert!(
+            outside(source).is_empty(),
+            "{position}: {source:?} -> {:?}",
+            outside(source)
+        );
+    }
+}
+
+#[test]
+fn the_macro_census_domain_is_every_production_file_a_governed_lint_can_be_lowered_in() {
+    const ALL_THREE: &str = "#![forbid(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    clippy::disallowed_macros\n)]\n";
+    let tree: Vec<(String, String)> = [
+        ("src/forbidding.rs", ALL_THREE.to_owned()),
+        (
+            "src/forbidding/silent_child.rs",
+            "pub fn f() {}\n".to_owned(),
+        ),
+        (
+            "src/allowing.rs",
+            "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/allowing/silent_child.rs",
+            "#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/denying.rs",
+            "#![deny(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        ("src/silent.rs", "pub fn f() {}\n".to_owned()),
+        (
+            "src/test_only_forbid.rs",
+            "#![cfg_attr(test, forbid(\n    clippy::disallowed_methods,\n    clippy::disallowed_types,\n    clippy::disallowed_macros\n))]\n".to_owned(),
+        ),
+        (
+            "src/forbidding/undecided_child.rs",
+            "#![cfg_attr(unix, forbid(clippy::disallowed_methods))]\n#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]\n".to_owned(),
+        ),
+        (
+            "src/rundir/tests.rs",
+            "#![allow(clippy::disallowed_methods)]\n".to_owned(),
+        ),
+        ("examples/root.rs", "#![allow(clippy::disallowed_macros)]\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source))
+    .collect();
+    let domain = production_files_a_governed_lint_is_not_forbidden_in(&tree);
+    let expected: BTreeSet<String> = [
+        "src/allowing.rs",
+        "src/allowing/silent_child.rs",
+        "src/denying.rs",
+        "src/silent.rs",
+        "src/test_only_forbid.rs",
+        "src/forbidding/undecided_child.rs",
+        "examples/root.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(domain, expected);
 }
 
 #[test]
@@ -4051,6 +4534,445 @@ fn every_separator_rustc_reads_is_one_every_reader_here_reads() {
             vec!["disallowed_methods"],
             "{at}: an allow whose lint follows the separator is an allow of that lint"
         );
+    }
+}
+
+fn what_rustc_reads_between_tokens() -> Vec<(String, String)> {
+    super::RUSTC_WHITESPACE
+        .iter()
+        .map(|separator| {
+            (
+                format!("U+{:04X}", u32::from(*separator)),
+                separator.to_string(),
+            )
+        })
+        .chain(
+            [
+                ("a block comment", "/* c */"),
+                ("a nested block comment", "/* a /* b */ c */"),
+                ("a block comment holding `/**`", "/* /** */ */"),
+                ("a line comment", " // c\n"),
+                ("a run of separators", " \u{200E}\n\t\u{2029} "),
+            ]
+            .map(|(what, gap)| (what.to_owned(), gap.to_owned())),
+        )
+        .collect()
+}
+
+type ReadAllow = (
+    bool,
+    bool,
+    Vec<String>,
+    Vec<String>,
+    Vec<&'static str>,
+    bool,
+);
+
+fn allows_as_read(source: &str) -> Vec<ReadAllow> {
+    governed_allows(source)
+        .into_iter()
+        .map(|allow| {
+            (
+                allow.inner,
+                allow.module_level,
+                allow.lints,
+                allow.written,
+                allow.keywords,
+                allow.reasoned,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_placement_census_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {
+    type Shape = fn(&str, &str, &str, &str) -> String;
+    let shapes: [(&str, Shape, ReadAllow); 6] = [
+        (
+            "an inner allow in the prologue",
+            |h, b, k, p| {
+                format!("#{h}!{b}[allow{k}(clippy{p}::{p}disallowed_methods)]\nfn go() {{}}\n")
+            },
+            (
+                true,
+                true,
+                vec!["disallowed_methods".to_owned()],
+                vec!["clippy::disallowed_methods".to_owned()],
+                vec!["allow"],
+                false,
+            ),
+        ),
+        (
+            "an outer allow on a module",
+            |h, _, k, p| format!("#{h}[allow{k}(clippy{p}::{p}disallowed_types)]\nmod m {{}}\n"),
+            (
+                false,
+                true,
+                vec!["disallowed_types".to_owned()],
+                vec!["clippy::disallowed_types".to_owned()],
+                vec!["allow"],
+                false,
+            ),
+        ),
+        (
+            "an outer expect with a reason on a statement",
+            |h, _, k, p| {
+                format!(
+                    "fn go() {{\n    #{h}[expect{k}(clippy{p}::{p}disallowed_macros, reason = \
+                     \"r\")]\n    let _ = 1;\n}}\n"
+                )
+            },
+            (
+                false,
+                false,
+                vec!["disallowed_macros".to_owned()],
+                vec!["clippy::disallowed_macros".to_owned()],
+                vec!["expect"],
+                true,
+            ),
+        ),
+        (
+            "an allow a `cfg_attr` applies to a declared module",
+            |h, _, k, p| {
+                format!(
+                    "#{h}[cfg_attr(not(test), allow{k}(clippy{p}::{p}disallowed_methods))]\n\
+                     pub(crate) mod m;\n"
+                )
+            },
+            (
+                false,
+                true,
+                vec!["disallowed_methods".to_owned()],
+                vec!["clippy::disallowed_methods".to_owned()],
+                vec!["allow"],
+                false,
+            ),
+        ),
+        (
+            "the second of two inner attributes",
+            |h, b, k, p| {
+                format!(
+                    "#{h}!{b}[deny(clippy::disallowed_types)]\n\
+                     #{h}!{b}[allow{k}(clippy{p}::{p}disallowed_methods)]\n"
+                )
+            },
+            (
+                true,
+                true,
+                vec!["disallowed_methods".to_owned()],
+                vec!["clippy::disallowed_methods".to_owned()],
+                vec!["allow"],
+                false,
+            ),
+        ),
+        (
+            "an inner allow inside an inline module's braces",
+            |h, b, k, p| {
+                format!("mod m {{\n    #{h}!{b}[allow{k}(clippy{p}::{p}disallowed_methods)]\n}}\n")
+            },
+            (
+                true,
+                false,
+                vec!["disallowed_methods".to_owned()],
+                vec!["clippy::disallowed_methods".to_owned()],
+                vec!["allow"],
+                false,
+            ),
+        ),
+    ];
+    let gaps = what_rustc_reads_between_tokens();
+    for (what, shape, expected) in &shapes {
+        let joined = shape("", "", "", "");
+        assert_eq!(
+            allows_as_read(&joined),
+            std::slice::from_ref(expected),
+            "{what}, joined: the control reads as it always has: {joined:?}"
+        );
+        for (between, gap) in &gaps {
+            for (position, spelled) in [
+                ("after `#`", shape(gap, "", "", "")),
+                ("after `!`", shape("", gap, "", "")),
+                ("after the keyword", shape("", "", gap, "")),
+                ("around `::`", shape("", "", "", gap)),
+                ("everywhere", shape(gap, gap, gap, gap)),
+            ] {
+                assert_eq!(
+                    allows_as_read(&spelled),
+                    std::slice::from_ref(expected),
+                    "{what}, {between} {position}: rustc applies this attribute exactly as it \
+                     applies the joined one, and the placement census read something else: \
+                     {spelled:?}"
+                );
+            }
+        }
+    }
+
+    for (between, gap) in &gaps {
+        for item in [
+            format!("pub{gap}({gap}crate{gap}){gap}mod{gap}m {{}}"),
+            format!("pub{gap}(in{gap}crate::a){gap}mod{gap}m;"),
+            format!("pub{gap}(self){gap}mod{gap}m;"),
+            format!("pub{gap}mod{gap}m;"),
+            format!("mod{gap}m {{}}"),
+        ] {
+            let source = format!("#[allow(clippy::disallowed_methods)]{gap}{item}\n");
+            assert!(
+                allows_as_read(&source)
+                    .iter()
+                    .all(|(_, module_level, ..)| *module_level),
+                "{between}: an allow on a module is module-level however the module's visibility \
+                 and keyword are spaced: {source:?}"
+            );
+            assert_eq!(allows_as_read(&source).len(), 1, "{between}: {source:?}");
+        }
+    }
+
+    for (what, source) in [
+        (
+            "an allow on a function",
+            "#[allow(clippy::disallowed_methods)]\nfn go() {}\n",
+        ),
+        (
+            "an item whose name begins with `mod`",
+            "#[allow(clippy::disallowed_methods)]\nfn module() {}\n",
+        ),
+        (
+            "an inner allow after the first item",
+            "fn go() {}\n# ![allow(clippy::disallowed_methods)]\n",
+        ),
+    ] {
+        assert!(
+            allows_as_read(source)
+                .iter()
+                .all(|(_, module_level, ..)| !*module_level),
+            "{what} is below module level: {source:?}"
+        );
+    }
+
+    let read_as_an_allowance: Vec<(&str, Vec<ReadAllow>)> = [
+        (
+            "a doc comment between `#` and `[`, which rustc refuses",
+            "#/** d */[allow(clippy::disallowed_methods)]\nmod m {}\n",
+        ),
+        (
+            "an outer line doc comment between `#` and `[`",
+            "#/// d\n[allow(clippy::disallowed_methods)]\nmod m {}\n",
+        ),
+        (
+            "an inner doc comment between `!` and `[`",
+            "#!/*! d */[allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "a doc comment between the keyword and its list",
+            "#[allow/** d */(clippy::disallowed_methods)]\nmod m {}\n",
+        ),
+        (
+            "a keyword that is only the start of a longer word",
+            "#[allowed (clippy::disallowed_methods)]\nmod m {}\n",
+        ),
+        (
+            "the attribute inside a string literal",
+            "const S: &str = \"# [allow (clippy::disallowed_methods)]\";\n",
+        ),
+        (
+            "the attribute inside a comment",
+            "// # ! [allow (clippy::disallowed_methods)]\n/* # [allow(clippy::disallowed_types)] */\n",
+        ),
+        (
+            "a `#` and a `[` with a literal between them",
+            "const S: &str = stringify!(# \"x\" [allow(clippy::disallowed_methods)]);\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(what, source)| (what, allows_as_read(source)))
+    .filter(|(_, read)| !read.is_empty())
+    .collect();
+    assert!(
+        read_as_an_allowance.is_empty(),
+        "each is no allowance rustc applies, and the placement census read one: \
+         {read_as_an_allowance:#?}"
+    );
+}
+
+#[test]
+fn the_placement_census_names_a_lint_as_clippy_does_and_no_further() {
+    for (entry, named) in [
+        ("clippy::disallowed_methods", Some("disallowed_methods")),
+        ("clippy :: disallowed_methods", Some("disallowed_methods")),
+        ("disallowed_types", Some("disallowed_types")),
+        ("clippy::r#disallowed_methods", Some("disallowed_methods")),
+        ("r#clippy::disallowed_types", Some("disallowed_types")),
+        ("r#clippy::r#disallowed_macros", Some("disallowed_macros")),
+        ("clippy::disallowed_method", Some("disallowed_methods")),
+        ("clippy::disallowed_type", Some("disallowed_types")),
+        ("clippy::r#disallowed_method", Some("disallowed_methods")),
+        ("clippy_all", Some("all")),
+        ("clippy_style", Some("style")),
+        ("r#clippy_all", Some("all")),
+        ("clippy::r#all", Some("all")),
+        ("clippy::r#style", Some("style")),
+        ("disallowed_method", None),
+        ("clippy::clippy_all", None),
+        ("clippy::DISALLOWED_METHODS", None),
+        ("clippy::disallowed_methods::x", None),
+        ("r# disallowed_methods", None),
+        ("clippy::too_many_arguments", None),
+    ] {
+        assert_eq!(normalize_lint(entry), named, "`{entry}`");
+        let read: Vec<String> = governed_allows(&format!("#[allow({entry})]\nmod m {{}}\n"))
+            .into_iter()
+            .flat_map(|allow| allow.lints)
+            .collect();
+        assert_eq!(
+            read,
+            named.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+            "`{entry}`: the placement census names what `normalize_lint` names"
+        );
+    }
+}
+
+#[test]
+fn the_module_walk_reads_an_attribute_whatever_rustc_reads_between_its_tokens() {
+    use crate::effects::census_domain::{ScanRefusal, scan_modules};
+
+    const ATTEMPT: &str = "src/engine/attempt.rs";
+    let attempt = fs::read_to_string(repo_root().join(ATTEMPT)).expect(ATTEMPT);
+    let refuses_the_path = |source: &str| {
+        matches!(
+            scan_modules(source),
+            Err(ScanRefusal::UnsupportedPathAttribute { .. })
+        )
+    };
+    let test_only = |source: &str| {
+        scan_modules(source).is_ok_and(|scanned| {
+            scanned.declared.len() == 1
+                && scanned
+                    .declared
+                    .iter()
+                    .all(|declared| declared.name == "rf_tests" && declared.test_only)
+        })
+    };
+    let refuses_the_inner_cfg = |source: &str| {
+        matches!(
+            scan_modules(source),
+            Err(ScanRefusal::UnsupportedInnerCfg { .. })
+        )
+    };
+
+    for (spelled, what) in [
+        ("#[path = \"elsewhere.rs\"]\nmod rf_child;\n", "joined"),
+        (
+            "#[r#path = \"elsewhere.rs\"]\nmod rf_child;\n",
+            "a raw name",
+        ),
+    ] {
+        assert!(
+            refuses_the_path(&format!("{attempt}\n{spelled}")),
+            "{what}: a `path` attribute sends rustc to another file than the walk reads, in \
+             {ATTEMPT}: {spelled:?}"
+        );
+    }
+    assert!(test_only("#[cfg(test)]\nmod rf_tests;\n"), "joined");
+    assert!(test_only("#[r#cfg(test)]\nmod rf_tests;\n"), "a raw name");
+    assert!(
+        refuses_the_inner_cfg("#![cfg(test)]\nmod rf_tests;\n"),
+        "joined"
+    );
+    assert!(
+        refuses_the_inner_cfg("#![r#cfg(test)]\nmod rf_tests;\n"),
+        "a raw name"
+    );
+
+    for (between, gap) in what_rustc_reads_between_tokens() {
+        for spelled in [
+            format!("#{gap}[path = \"elsewhere.rs\"]\nmod rf_child;\n"),
+            format!("#{gap}[{gap}path{gap}={gap}\"elsewhere.rs\"{gap}]\nmod rf_child;\n"),
+            format!("#{gap}[cfg_attr(all(), path = \"elsewhere.rs\")]\nmod rf_child;\n"),
+        ] {
+            assert!(
+                refuses_the_path(&format!("{attempt}\n{spelled}")),
+                "{between}: rustc reads this `path` attribute and the walk read a plain \
+                 declaration in {ATTEMPT}: {spelled:?}"
+            );
+        }
+        let gated = format!("#{gap}[cfg{gap}(test)]\nmod{gap}rf_tests;\n");
+        assert!(
+            test_only(&gated),
+            "{between}: the walk did not read the gate rustc applies: {gated:?}"
+        );
+        let inner = format!("#{gap}!{gap}[cfg(test)]\nmod rf_tests;\n");
+        assert!(
+            refuses_the_inner_cfg(&inner),
+            "{between}: an inner `cfg` gates the module it is written in, and the walk read \
+             none: {inner:?}"
+        );
+    }
+
+    let read_as_an_attribute: Vec<(&str, usize)> = [
+        (
+            "a doc comment between `#` and `[`, which rustc refuses",
+            "#/** d */[path = \"elsewhere.rs\"]\nmod rf_child;\n",
+        ),
+        (
+            "a `path` attribute quoted in a string",
+            "const S: &str = \"# [path = \\\"elsewhere.rs\\\"]\";\nmod rf_child;\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(what, source)| {
+        let plainly = scan_modules(source).map_or(0, |scanned| scanned.declared.len());
+        (what, plainly)
+    })
+    .filter(|(_, plainly)| *plainly != 1)
+    .collect();
+    assert!(
+        read_as_an_attribute.is_empty(),
+        "each is no attribute rustc applies, and the walk did not read one plain \
+         declaration: {read_as_an_attribute:#?}"
+    );
+}
+
+#[test]
+fn the_prologue_readers_read_an_inner_attribute_whatever_rustc_reads_between_its_tokens() {
+    use crate::effects::lint_levels::{
+        Resolution, file_level_lint_resolution, leading_inner_attributes,
+    };
+
+    const LINT: &str = "clippy::disallowed_methods";
+    let allowed = Resolution {
+        level: Some("allow"),
+        refused_downgrade: false,
+        undecided: false,
+    };
+    let refused = Resolution {
+        level: Some("forbid"),
+        refused_downgrade: true,
+        undecided: false,
+    };
+    let joined = "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]";
+    let source = format!("{joined}\nfn go() {{}}\n");
+    assert_eq!(leading_inner_attributes(&source), joined, "joined");
+    assert_eq!(file_level_lint_resolution(&source, LINT), allowed, "joined");
+
+    for (between, gap) in what_rustc_reads_between_tokens() {
+        for (level, wanted) in [("deny", allowed), ("forbid", refused)] {
+            let prologue = format!(
+                "#{gap}!{gap}[{level}(clippy::disallowed_methods)]\n\
+                 #{gap}!{gap}[allow{gap}(clippy::disallowed_methods)]"
+            );
+            let source = format!("{prologue}\nfn go() {{}}\n");
+            assert_eq!(
+                leading_inner_attributes(&source),
+                prologue,
+                "{between}: the prologue is both attributes"
+            );
+            assert_eq!(
+                file_level_lint_resolution(&source, LINT),
+                wanted,
+                "{between}: rustc applies the allow under `{level}` as it applies the joined \
+                 spelling: {source:?}"
+            );
+        }
     }
 }
 
@@ -6655,7 +7577,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
     enum Wants {
         Predicted(Resolution),
         Builds(bool),
-        Renamed(bool, Resolution),
+        AnotherLintsOldName(Resolution),
     }
 
     fn starts_the_file(prologue: &str) -> bool {
@@ -6694,13 +7616,7 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
                 "`{tag}` for `{lint}`: clippy-driver did built={built} fired={fired:?} \
                  E0453={rejected}; all diagnostics {diagnostics:?}"
             ),
-            Wants::Renamed(true, resolution) => assert!(
-                resolution.undecided && built && fired.is_empty() && !rejected,
-                "`{tag}` for `{lint}`: clippy applies the renamed allowance, which no census \
-                 here records, so the reader must not answer: {resolution:?}, built={built} \
-                 fired={fired:?}; all diagnostics {diagnostics:?}"
-            ),
-            Wants::Renamed(false, resolution) => assert!(
+            Wants::AnotherLintsOldName(resolution) => assert!(
                 resolution
                     == Resolution {
                         level: Some("deny"),
@@ -7033,55 +7949,55 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
              clippy::assign_ops, clippy::DISALLOWED_METHODS, rustdoc::disallowed_methods, \
              rustc::disallowed_methods)]\n",
         ),
-    ];
-
-    let unread: &[(&str, &str, bool)] = &[
         (
             "spaced_bang_allow",
             "#![deny(clippy::disallowed_methods)]\n# ![allow(clippy::disallowed_methods)]\n",
-            true,
         ),
         (
             "spaced_bracket_allow",
             "#![deny(clippy::disallowed_methods)]\n#! [allow(clippy::disallowed_methods)]\n",
-            true,
         ),
         (
             "commented_bracket_allow",
             "#![deny(clippy::disallowed_methods)]\n#!/**/[allow(clippy::disallowed_methods)]\n",
-            true,
         ),
         (
             "comment_separated_allow",
             "#![deny(clippy::disallowed_methods)]\n\
              #/**/!/**/[allow(clippy::disallowed_methods)]\n",
-            true,
         ),
         (
             "bang_and_bracket_on_two_lines_allow",
             "#![deny(clippy::disallowed_methods)]\n#!\n[allow(clippy::disallowed_methods)]\n",
-            true,
+        ),
+        (
+            "spaced_keyword_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![allow (clippy::disallowed_methods)]\n",
+        ),
+        (
+            "separated_by_marks_allow",
+            "#![deny(clippy::disallowed_methods)]\n\
+             #\u{200E}!\u{2029}[allow\u{000B}(clippy::disallowed_methods)]\n",
         ),
         (
             "raw_lint_name_allow",
             "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::r#disallowed_methods)]\n",
-            true,
         ),
         (
             "raw_group_allow",
             "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::r#all)]\n",
-            true,
         ),
         (
             "prefixless_group_alias_allow",
             "#![deny(clippy::disallowed_methods)]\n#![allow(clippy_all)]\n",
-            true,
         ),
         (
             "prefixless_group_alias_expect",
             "#![deny(clippy::disallowed_methods)]\n#![expect(clippy_style)]\n",
-            true,
         ),
+    ];
+
+    let unread: &[(&str, &str, bool)] = &[
         (
             "warnings_lowered_under_warn",
             "#![warn(clippy::disallowed_methods)]\n#![allow(warnings)]\n",
@@ -7447,11 +8363,12 @@ fn the_file_level_lint_reader_answers_what_rustc_does() {
         ] {
             let source = format!("#![deny({lint})]\n#![allow(clippy::{renamed})]\n{body}");
             let resolution = file_level_lint_resolution(&source, lint);
-            passes.push((
-                format!("renamed_{renamed}"),
-                source,
-                Wants::Renamed(to == bare, resolution),
-            ));
+            let wants = if to == bare {
+                Wants::Predicted(resolution)
+            } else {
+                Wants::AnotherLintsOldName(resolution)
+            };
+            passes.push((format!("renamed_{renamed}"), source, wants));
         }
 
         for (batch, rows) in [("passes", &passes), ("refused", &refused)] {

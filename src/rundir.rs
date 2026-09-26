@@ -20,11 +20,8 @@
 // Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 // carries this module's review clause -- effects only inside site-taking APIs,
 // no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -2392,24 +2389,18 @@ pub fn is_running(public: &Path) -> bool {
 }
 
 #[cfg(unix)]
+mod cleanup_scopes;
+
+#[cfg(unix)]
 mod cleanup {
+    use super::cleanup_scopes::ACTIVE;
     use super::{cleanup_lock_file, refused};
     use crate::error::UpstrokeError;
-    use std::cell::RefCell;
-    use std::collections::BTreeMap;
     use std::fs::File;
     use std::marker::PhantomData;
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-
-    thread_local! {
-        // v0.1 drives a run synchronously inside an explicit scope. Thread-
-        // local registration gives concurrent library/test runs the exact
-        // cleanup path for their own reapers instead of conservatively leasing
-        // every run active in the process.
-        static ACTIVE: RefCell<BTreeMap<PathBuf, usize>> = const { RefCell::new(BTreeMap::new()) };
-    }
 
     #[derive(Debug)]
     pub(super) struct CleanupLease {

@@ -42,7 +42,7 @@
 
 [[funnel]]
 path = "src/workspace_manager.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): named first in the funnel-module list"
 review = """
 Every effect is issued inside a `funnel` call taking an `EffectSiteId` by value \
@@ -164,7 +164,7 @@ thing actually providing it."""
 
 [[funnel]]
 path = "src/runner/host.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): src/runner/{host,container,invocation}.rs"
 review = """
 The Process funnel: `FunnelGroup::Process.module()` is this file. Process start \
@@ -207,7 +207,7 @@ rather than an accident of the module tree."""
 
 [[funnel]]
 path = "src/agent/proc.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): Process funnel primitives beneath src/runner/host.rs"
 review = """
 The Process supervision primitives. Spawn enters through an API taking \
@@ -325,7 +325,7 @@ CODING_STANDARDS.md §12's readiness protocol, moved out of line from \
 `src/agent/proc.rs` and given attributes of its own in the same commit -- \
 never inheriting one. A Rust lint level is scoped by the MODULE TREE and not by \
 the file, so this file would have inherited the Process funnel's \
-`#![allow(disallowed_methods, disallowed_types, disallowed_macros)]` silently: \
+file-scope `#![allow(..)]` silently: \
 that is `PR6-LANEF-004`, measured twice in the Container subtree, and this is \
 the first out-of-line child the Process funnel has ever had. \
 ALL THREE GOVERNED LINTS ARE DENIED AT FILE SCOPE, AND THE ALLOWANCE IS SIX \
@@ -362,7 +362,9 @@ functions return `std::io::Result<()>`, `Vec<String>` and `Waited`, and \
 `Producer::child` hands back the `&mut Child` its caller already owns. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are RE-DENIED here \
 rather than inherited, so a `std::process::Command`, a `std::fs::OpenOptions` \
-or a `println!` in this file is still a build error. \
+or a `println!` in this file is still a build error -- and since 2026-09-26 at \
+`forbid`, not `deny`: nothing in the file lowers either, so no attribute below \
+can reopen them, a macro-written or spelled-apart allow included. \
 `runner::container::tests::every_child_module_of_the_container_funnel_states_\
 its_own_lint_level` is the census that refuses a Process- or Container-funnel \
 child stating neither, and \
@@ -372,7 +374,7 @@ saying the same thing."""
 
 [[funnel]]
 path = "src/runner/container.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): src/runner/{host,container,invocation}.rs; `FunnelGroup::Container.module()`"
 review = """
 The Container funnel, added by PR6: `FunnelGroup::Container.module()` is this \
@@ -574,7 +576,7 @@ listed because the packet lists it."""
 
 [[funnel]]
 path = "src/rundir.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): the lock and run-directory funnels in src/rundir.rs"
 review = """
 Every run-directory, answer and lock effect is issued inside a `funnel` call \
@@ -767,7 +769,7 @@ shrink."""
 
 [[funnel]]
 path = "src/effects/tests.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.outputs, by attachment: the `#[cfg(test)] mod tests;` of src/effects.rs"
 review = """
 This layer's own test module. It compiles the build-refusal fixtures as \
@@ -895,7 +897,7 @@ shrinks_when = "immediately — it can be dropped from this list at any time wit
 
 [[legacy]]
 path = "src/workspace.rs"
-allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
 packet = "effect_site_inventory.mechanism (2): legacy branch/checkout/commit operations in src/workspace.rs"
 legacy_effect = """
 LEGACY-EFFECT: the schema-1..3 engine's Git operations — branch, checkout, \
