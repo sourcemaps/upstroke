@@ -73,6 +73,64 @@
 #                                a following option was consumed as the login and switched off
 #   MUT-REVIEWER-NULL-AUTHOR     the comment filter raised on a comment whose author is null, which
 #                                failed the whole page it was on and dropped every review with it
+#   MUT-REVIEWER-ANY-AUTHOR-READ a comment carrying a review's markers was parsed whoever wrote it,
+#                                so anybody who can comment on a pull request could write the
+#                                review the audit judges it by. The unit cases above run the
+#                                comment filter on a fixture; this one runs the WHOLE AUDIT with
+#                                the stub answering the listing by running the filter program the
+#                                audit itself hands it. Written by anyone but the trusted reviewer
+#                                the comment must be `no-review` and no merge call; written by the
+#                                trusted reviewer it must be READ. Drop the login predicate from
+#                                the filter and this row reaches READY and calls merge
+#   MUT-STRAY-READS-THE-WRITTEN-SPELLING  the two scans over a review's prose compared the
+#                                characters the comment is STORED as, where the reviewer writing it
+#                                and the person reading it both see what a renderer resolves them
+#                                to. Measured: the trusted reviewer prepending
+#                                `**VERDICT**: CHANGES_REQUIRED` to a generated `PASS` object -- an
+#                                ordinary bold correction -- was READY WITH ONE MERGE CALL, where
+#                                the same words written plainly were a refusal and none; `_P1_` was
+#                                READY where `P1` is MANUAL; and a CODE SPAN or a LINK wrapping the
+#                                label whole -- `` `VERDICT`: ``, `[VERDICT](url):` -- was READY
+#                                with one call where the plain label was a refusal. Sixteen rows,
+#                                each through the parser and through the whole audit
+#   MUT-PROSE-VERDICT-UNCHECKED  the contradiction check was asked of the WORKFLOW form only, and
+#                                the frontier form -- the one every review here is posted in --
+#                                never got it: a SHA-bound prose review saying `VERDICT: PASS` with
+#                                `**VERDICT**: CHANGES_REQUIRED` appended was READY WITH ONE MERGE
+#                                CALL. Its own two verdict lines are exempt, and the control is a
+#                                whole ordinary prose review that must stay READY
+#   MUT-STRAY-INTRAWORD-UNDERSCORE  the underscore rule was read as the stray token's BOUNDARY
+#                                rather than as the renderer's emphasis rule, so every review
+#                                citing a `findings/P1_...md` path went to a person; and a bracket
+#                                pair nothing defines is no link, or dropping its brackets loses a
+#                                token a reader sees. Eleven rows that must stay READY, and they
+#                                are what decides whether the rule above can ship at all
+#   MUT-SHOWN-RENDERING-OPTIONAL the two scans over a review's prose read the characters the comment
+#                                is stored as, where the reviewer writing it and the person reading
+#                                it both see what GITHUB'S RENDERER resolves them to. The reading is
+#                                GitHub's own now -- `body_html`, fetched beside the body -- and the
+#                                shape that would undo that is not a failed call but a call that
+#                                SUCCEEDS and carries nothing: `--jq '.body_html'` without the
+#                                rendering media type prints one newline and exits 0. Three shapes
+#                                through the whole audit -- whole, blank at exit 0, failed -- with a
+#                                control that merges, and the parser's own refusals beside them
+#   MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE  the reduction read a `<pre>` as prose, so the workflow
+#                                form's own verdict object reported its `"severity":"P1"` as a
+#                                severity written outside the findings -- every blocking review this
+#                                repository has ever had, sent to a person. A code block's content
+#                                is shown verbatim, so the comment's own characters are what a
+#                                reader sees there; the older BARE object, which a renderer shows as
+#                                a paragraph, is taken out by `bare_spans` instead
+#   MUT-SHOWN-FINDINGS-ARE-STRAY the frontier form's own numbered findings were read as stray
+#                                severities, and at most as many items as the parse recorded are
+#                                taken out -- so an item it did NOT record is still read
+#   MUT-SHOWN-TAG-UNCLASSIFIED   a tag was classified as neither a boundary nor a run, and both
+#                                wrong answers lose a token: `P<em>1</em>` is `P1` to a reader and
+#                                `P` and `1` to a reading that breaks at `em`, and
+#                                `<li>P1</li><li>P2</li>` is two lines to a reader and `P1P2` to one
+#                                that does not. Every tag GitHub put in any of the 685 comments this
+#                                repository held on 2026-09-21 is classified, and one in neither set
+#                                is a `manual:` blocker naming it
 #   MUT-REVIEW-LOOKUP-SUPPRESSED a failed comment lookup was reported as "no review", so the audit
 #                                judged whatever survived the failure and an older PASS could win
 #   MUT-TIMELINE-LOOKUP-SUPPRESSED  a failed timeline lookup was reported as "the base did not
@@ -257,9 +315,9 @@
 #   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
 #                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
 #                                spelling every witness in this family uses -- carried no `P1` for
-#                                it to find, and the one check standing between an object outside
-#                                the verdict block and READY found nothing. Both spellings are
-#                                read now, and a doubled backslash is still not an escape
+#                                it to find, and the net that exists to put such a review in front
+#                                of a person found nothing. Both spellings are read now, and a
+#                                doubled backslash is still not an escape
 #   MUT-JSON-REPEATED-NAME-CHOSEN  the verdict object was decoded with unrestricted
 #                                `json.loads`, which KEEPS THE LAST OCCURRENCE of a repeated
 #                                name: a `findings` array carrying a P1 followed by a second
@@ -302,7 +360,20 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$script_dir/../.." && pwd)"
 cd "$root"
 failed=0
-error() { echo "$*" >&2; failed=1; }
+# A FAILURE RECORDED INSIDE A COMMAND SUBSTITUTION IS STILL A FAILURE, and the variable cannot
+# carry it: `$( )` runs in a SUBSHELL, so `failed=1` set there is set in a copy and the parent
+# exits 0 with the error printed on stderr and nothing in the status. That is not a hypothetical
+# shape here: `rendering_of` is reached through `$( )` by 61 command substitutions -- every call of
+# `reader_rows`, `reader_audit` and `shown_run` that does not name a rendering itself -- and it is
+# where a missing recorded rendering is reported. Deleting a recording
+# printed two errors and then `test-pr-ready-audit: ok`, exit 0, at `7767c71c`, executed.
+#
+# The file is the parent's, opened by the parent, and a subshell's append reaches it. Both are
+# kept: `failed` is the ordinary path and reads without a `stat`, and the file is what survives a
+# subshell. The end of the run asks both.
+errors_seen="$(mktemp)"
+trap 'rm -f "$errors_seen"' EXIT
+error() { echo "$*" >&2; failed=1; printf 'x' >> "$errors_seen"; }
 expect() {  # expect <case> <got> <want>
   [[ "$2" == "$3" ]] || error "$1: got [$2], want [$3]"
 }
@@ -310,10 +381,31 @@ contains() {  # contains <case> <got> <want-substring>
   [[ "$2" == *"$3"* ]] || error "$1: got [$2], want it to contain [$3]"
 }
 command -v jq > /dev/null || { echo "test-pr-ready-audit: needs jq to run the comment filter" >&2; exit 1; }
+# Settled here rather than beside the parser cases below, because the stub `gh` scripts need it
+# too: the audit fetches one review comment as one JSON document now, and a stub that answers that
+# call has to build one.
+command -v python3 > /dev/null || command -v python > /dev/null \
+  || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
+parser_python="$(command -v python3 || command -v python)"
+# Exported, because the stub `gh` scripts below are written with a quoted here-document -- their
+# text is fixed, not expanded -- and they run as children of this shell.
+export STUB_PYTHON="$parser_python"
 
 PR_READY_AUDIT_LIBRARY=1 source scripts/pr-ready-audit.sh
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+# One trap, both files: a second `trap ... EXIT` REPLACES the first rather than adding to it, and
+# the failure marker above must outlive this one.
+trap 'rm -rf "$tmp"; rm -f "$errors_seen"' EXIT
+
+# A rendering with no severity, MUST or VERDICT token in it, and it is GitHub's rendering of the
+# one sentence named here rather than of any comment below. EVERY CASE THAT USES IT SAYS THE SAME
+# THING: its claim is about what the parser makes of THE COMMENT -- which block the verdict is read
+# from, what refuses, what the payload carries -- and not about what a reader sees, so the reading
+# of the rendering contributes nothing to it. The cases whose claim IS about what a reader sees
+# take `rendering_of`, which is GitHub's rendering of that exact document.
+nothing_shown="$tmp/nothing-shown.html"
+printf '%s' '<p dir="auto">A comment with nothing in it.</p>' > "$nothing_shown"
+
 
 # --- the lane table: every prefix in the vocabulary, not a sample ------------------------------
 # scripts/lane.sh is sourced by scripts/pr-ready-audit.sh, so sourcing the audit above defined it.
@@ -830,8 +922,28 @@ case "$*" in
   *timeline*)                 ;;                                 # no base change
   *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z ${STUB_REVIEW_ID:-5001}"
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
                               echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
@@ -854,7 +966,8 @@ esac
 GH
 chmod +x "$lookup/gh"
 run_lookup() {  # run_lookup: the audit's table line, with the comment fetch exiting $1
-  STUB_COMMENTS_STATUS="$1" PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
+  STUB_COMMENTS_STATUS="$1" STUB_NOTHING_SHOWN="$nothing_shown" PATH="$lookup:$PATH" \
+    bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
 }
 got="$(run_lookup 1)"
 contains MUT-REVIEW-LOOKUP-SUPPRESSED "$got" "NOT-READY"
@@ -885,7 +998,8 @@ got="$(STUB_REVIEW_BODY="$tmp/id-check-review.md" run_lookup 0)"
 
 run_stub() {  # run_stub ARG...: "<exit status>|<output, on one line>", against the stub above
   local out status=0
-  out="$(PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
+  out="$(STUB_NOTHING_SHOWN="$nothing_shown" PATH="$lookup:$PATH" \
+    bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
   printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
 }
 # A pull request whose own metadata could not be read is reported unaudited, not audited on the
@@ -1166,8 +1280,28 @@ case "$*" in
   *timeline*)                 ;;                                 # no base change
   *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z 5001"
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            echo "no ledger" ;;
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
                                 "${STUB_BRANCH:-feature/x}" "$head" "$head"
@@ -1183,7 +1317,8 @@ GH
 chmod +x "$apply_gh/gh"
 run_apply() {  # run_apply ARG...: "<exit status>|<output, on one line>", with --apply
   local out status=0
-  out="$(PATH="$apply_gh:$PATH" bash scripts/pr-ready-audit.sh --apply "$@" 2>&1)" || status=$?
+  out="$(STUB_NOTHING_SHOWN="$nothing_shown" PATH="$apply_gh:$PATH" \
+    bash scripts/pr-ready-audit.sh --apply "$@" 2>&1)" || status=$?
   printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
 }
 : > "$tmp/apply-edits.log"
@@ -1233,24 +1368,164 @@ contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "blockers=pr-lookup-failed"
 # Everything below runs `scripts/pr-review-parse.py`, which is what the audit runs. Two readings of
 # every case: the JSON rendering, which says what the parser decided, and the NUL rendering, which
 # is the payload the audit actually reads.
-command -v python3 > /dev/null || command -v python > /dev/null \
-  || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
-parser_python="$(command -v python3 || command -v python)"
-review_rows() {  # review_rows FILE: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
+# WHAT A READER IS SHOWN, RECORDED. `pr-review-parse.py review` takes TWO documents now: the
+# comment as GitHub stores it, and GITHUB'S OWN RENDERING of it -- `body_html`, which
+# `scripts/pr-ready-audit.sh` fetches beside the body and which the two scans over a review's prose
+# read. There is no renderer in this repository to produce one, and that is the point of the change
+# rather than a gap in it, so every rendering this file needs was CAPTURED FROM THE API and is
+# recorded here. A CI run reads the recording and talks to nothing.
+#
+# HOW THEY WERE CAPTURED. `gh api --method POST /markdown` with
+# `{"mode":"gfm","context":"sourcemaps/upstroke"}` renders a text as a comment on this repository
+# renders: the same renderer `body_html` comes out of, asked for a text that is not yet a comment.
+# Checked, not assumed -- over the 685 comments this repository held on 2026-09-21, this call's
+# answer and the comment's own `body_html` agree token for token, which is the measurement in the
+# pull request body.
+#
+# RE-RECORD after adding or changing any document that is rendered below:
+#
+#     UPSTROKE_RENDER_CAPTURE="$PWD/captured" bash .github/scripts/test-pr-ready-audit.sh
+#     python3 - "$PWD/captured" <<'PACK'
+#     import base64, glob, gzip, json, os, sys
+#     rows = {os.path.basename(p)[:-5]: open(p, encoding="utf-8").read()
+#             for p in glob.glob(os.path.join(sys.argv[1], "*.html"))}
+#     print(base64.b64encode(gzip.compress(
+#         json.dumps(rows, sort_keys=True).encode("utf-8"), 9, mtime=0)).decode("ascii"))
+#     PACK
+#
+# The first step needs `gh` and the network and writes one readable `<sha256>.html` per document;
+# the second prints the one line `recorded_renderings` is. `UPSTROKE_RENDER_DUMP=<dir>` writes the
+# recordings back out as files, so what is recorded can be read without either.
+#
+# A DOCUMENT WITH NO ROW IS A FAILED CASE naming its hash, never a case run against something else.
+recorded_renderings='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'
+renderings_dir="$tmp/renderings"
+mkdir -p "$renderings_dir"
+"$parser_python" - "$recorded_renderings" "$renderings_dir" <<'UNPACK'
+import base64, gzip, json, os, sys
+if sys.argv[1] and not sys.argv[1].startswith("RECORDED-"):
+    for digest, html in json.loads(gzip.decompress(base64.b64decode(sys.argv[1]))).items():
+        with open(os.path.join(sys.argv[2], digest + ".html"), "w", encoding="utf-8") as handle:
+            handle.write(html)
+UNPACK
+
+render_digest() {  # render_digest FILE: how a recorded rendering is keyed
+  "$parser_python" - "$1" <<'DIGEST'
+import hashlib, sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+DIGEST
+}
+capture_rendering() {  # capture_rendering FILE OUT: ask GitHub for FILE's rendering, into OUT
+  "$parser_python" - "$1" "$2" <<'CAPTURE'
+import json, os, subprocess, sys, tempfile
+with open(sys.argv[1], encoding="utf-8") as handle:
+    text = handle.read()
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+    json.dump({"text": text, "mode": "gfm", "context": "sourcemaps/upstroke"}, handle)
+    payload = handle.name
+try:
+    done = subprocess.run(["gh", "api", "--method", "POST", "/markdown", "--input", payload],
+                          capture_output=True, text=True)
+finally:
+    os.unlink(payload)
+if done.returncode != 0:
+    sys.exit("capture failed: %s" % done.stderr.strip()[:400])
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(done.stdout)
+CAPTURE
+}
+# THE TWO DRIVES FOR A CASE ABOUT WHAT A READER SEES: the parser, and the whole audit, each
+# handed GITHUB'S OWN RENDERING of the document rather than `nothing_shown`. Every row of every
+# section below that says what a reader sees goes through one of these, so a row that forgot the
+# rendering is a row that fails for want of a recording rather than a row that quietly asserts
+# less.
+reader_rows() {  # reader_rows FILE: review_rows, with GitHub's own rendering of FILE
+  review_rows "$1" "$(rendering_of "$1")"
+}
+reader_audit() {  # reader_audit FILE: the whole audit as the trusted reviewer, with that rendering
+  filtered_run eventloops "$1" "$(rendering_of "$1")"
+}
+rendering_of() {  # rendering_of FILE: the path to GitHub's own recorded rendering of FILE
+  local digest out
+  digest="$(render_digest "$1")"
+  out="$renderings_dir/$digest.html"
+  if [[ ! -s "$out" ]]; then
+    if [[ -n "${UPSTROKE_RENDER_CAPTURE:-}" ]]; then
+      mkdir -p "$UPSTROKE_RENDER_CAPTURE"
+      capture_rendering "$1" "$UPSTROKE_RENDER_CAPTURE/$digest.html"
+      cp "$UPSTROKE_RENDER_CAPTURE/$digest.html" "$out"
+    else
+      error "no recorded rendering for [$1] ($digest): re-record, see the top of this section"
+      printf '%s' "$nothing_shown"
+      return 0
+    fi
+  fi
+  [[ -n "${UPSTROKE_RENDER_DUMP:-}" ]] && { mkdir -p "$UPSTROKE_RENDER_DUMP"; cp "$out" "$UPSTROKE_RENDER_DUMP/"; }
+  printf '%s' "$out"
+}
+review_rows() {  # review_rows FILE [RENDERING]: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
   local out status=0
-  out="$("$parser_python" scripts/pr-review-parse.py review "$1" 2>/dev/null)" || status=$?
+  out="$("$parser_python" scripts/pr-review-parse.py review "$1" "${2:-$nothing_shown}" \
+    2>/dev/null)" || status=$?
   ((status == 0)) || { printf '%s|' "$status"; return 0; }
   printf '%s|%s' "$status" "$(
     printf '%s' "$out" | jq -j '"\(.kind)/\(.reviewed_sha//"-")/\(.verdict//"-")/\(.base_sha//"-")/\(.stray//"-")",
       ([.findings[] | ";\(.severity):\(.id//"-"):\(.flags)"] | add // "")'
   )"
 }
-parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT]: "<status>|<the payload, NULs shown as |>"
-  local out="${3:-$tmp/nul.out}" status=0
+parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT] [RENDERING]: "<status>|<payload, NULs as |>"
+  local out="${3:-$tmp/nul.out}" status=0 rendering=()
+  [[ "$1" == review ]] && rendering=("${4:-$nothing_shown}")
   : > "$out"
-  "$parser_python" scripts/pr-review-parse.py "$1" --nul --out "$out" "$2" 2>/dev/null || status=$?
+  "$parser_python" scripts/pr-review-parse.py "$1" --nul --out "$out" "$2" "${rendering[@]}" \
+    2>/dev/null || status=$?
   printf '%s|%s' "$status" "$(tr '\0' '|' < "$out")"
 }
+
+# --- a failure this file reports is a failure this file exits on --------------------------------
+# MUT-GATE-ERROR-IN-SUBSTITUTION, and it is a defect of THIS FILE rather than of what it tests.
+#
+# `rendering_of` reports a missing recorded rendering with `error` and then substitutes
+# `nothing_shown` so the run can go on. It is reached through `$( )` by 61 command substitutions
+# -- every call of `reader_rows`, `reader_audit` and `shown_run` that does not name a rendering
+# itself -- and `$( )` IS A SUBSHELL: `failed=1` set in it is set
+# in a copy that exits. At `7767c71c` the whole gate printed two `no recorded rendering` errors and
+# then `test-pr-ready-audit: ok`, EXIT 0, with an arithmetic fixture edited and not re-recorded.
+# So the advertised guarantee -- a document with no row is a failed case naming its hash -- was
+# unenforceable, and any fixture could be changed without its recording.
+#
+# The two halves are asserted separately, because the shape hid behind the second: the failure is
+# recorded where the PARENT can see it, and the substitution still returns a path so that one
+# missing recording does not stop the run at the first one. The record is redirected to a scratch
+# file for the length of the case -- this run has no missing recordings, and a case that proves it
+# can report one must not leave the report standing.
+unrecorded_marker="$tmp/unrecorded-marker"
+: > "$unrecorded_marker"
+printf 'A document no rendering was ever recorded for.\n' > "$tmp/unrecorded.md"
+# `UPSTROKE_RENDER_CAPTURE=` empty, so this case is the same case during a re-record run: with it
+# set, `rendering_of` would go and fetch a rendering for this document instead of reporting it.
+unrecorded_path="$(errors_seen="$unrecorded_marker" UPSTROKE_RENDER_CAPTURE= \
+  rendering_of "$tmp/unrecorded.md" 2> "$tmp/unrecorded.err")"
+[[ -s "$unrecorded_marker" ]] \
+  || error "MUT-GATE-ERROR-IN-SUBSTITUTION: a missing recorded rendering reported from inside a command substitution left no record the parent shell can read"
+contains "MUT-GATE-ERROR-IN-SUBSTITUTION [it says which document]" \
+  "$(cat "$tmp/unrecorded.err")" "no recorded rendering for [$tmp/unrecorded.md]"
+expect "MUT-GATE-ERROR-IN-SUBSTITUTION [it still substitutes, so the run reaches every case]" \
+  "$unrecorded_path" "$nothing_shown"
+# AND THE VARIABLE ALONE DOES NOT CARRY IT, which is the sentence the fix rests on and the one
+# nothing else here would catch if `errors_seen` were deleted as belt and braces. Both shapes are
+# driven in one child bash: the assignment inside `$( )` is lost, the append to a file is not.
+cat > "$tmp/subshell-probe.sh" <<'PROBE'
+set -euo pipefail
+marker="$1"
+lost=0
+report() { lost=1; printf 'x' >> "$marker"; }
+ignored="$(report; printf 'substituted')"
+printf '%s %s %s' "$lost" "$ignored" "$([[ -s "$marker" ]] && printf kept || printf lost)"
+PROBE
+expect "MUT-GATE-ERROR-IN-SUBSTITUTION [a variable set in a substitution is set in a copy]" \
+  "$(bash "$tmp/subshell-probe.sh" "$tmp/subshell-marker")" "0 substituted kept"
 
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
@@ -1578,8 +1853,9 @@ repeated_object() {  # repeated_object OBJECT FILE: OBJECT as the comment's one 
     printf '%s' "$1"
     printf '\n```\n'; } > "$2"
 }
-parse_why() {  # parse_why FILE: what one refused parse said on stderr, and nothing it said on stdout
-  "$parser_python" scripts/pr-review-parse.py review "$1" 2>&1 > /dev/null || true
+parse_why() {  # parse_why FILE [RENDERING]: what one refused parse said on stderr, and nothing else
+  "$parser_python" scripts/pr-review-parse.py review "$1" "${2:-$nothing_shown}" 2>&1 > /dev/null \
+    || true
 }
 # The shape the finding reported, and its control: valid head and base, `"verdict":"PASS"`, a
 # findings array carrying a P1, and then the second `findings` that erased it.
@@ -1864,7 +2140,7 @@ RUN EVERY INSTRUCTION AND TAKE EVERY BRANCH this module's file holds, concluding
 
     decode-probe.py MODULE REPORT-FILE DRIVE...
 
-Each DRIVE is `<argv prefix>|<document>`, the prefix defaulting to `review`: MODULE's own `main` is
+Each DRIVE is `<argv prefix>|<document>...`, the prefix defaulting to `review`: MODULE's `main` is
 run as `<prefix> --out <scratch> <document>` for each. The report is two lines, written to
 REPORT-FILE and never to stdout, which belongs to MODULE:
 
@@ -3417,10 +3693,13 @@ activity[0] = None
 
 
 def driving(index, one):
-    head, _, document = one.rpartition("|")
+    # `<prefix>|<document>...`, and a DRIVE WITH NO BAR AT ALL IS ONE DOCUMENT under the default
+    # prefix -- which is how the forty-nine stand-ins above are written, and reading their path as
+    # the subcommand made every one of them `raised:FileNotFoundError`.
+    pieces = one.split("|")
+    head, documents = (pieces[0], pieces[1:]) if len(pieces) > 1 else ("", pieces)
     argv = (head or "review").split() + ["--out", "driven%d" % index]
-    if document:
-        argv.append(os.path.abspath(document))
+    argv += [os.path.abspath(document) for document in documents if document]
 
     def replay():
         try:
@@ -6488,21 +6767,21 @@ probe_expect elsewhere \
   'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=- forced=0'
 # AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Eight real parses: the
 # workflow form in both renderings, the repeated name it must refuse, the same at three objects
-# down, the older bare object, the frontier form, the frontier form quoting a fenced example, and
-# the ledger subcommand. They are drives rather than assertions -- what the first seven return is
-# asserted by the families above, on these same shapes -- and their job here is that the parser's
-# own code runs, and every scan it makes is answered for. What they leave, the probe takes: a
-# handler the eight never enter is entered, and a branch they take one way only is turned --
-# measured when this was written, all 118 conditional branches in the 41 code objects of
-# `scripts/pr-review-parse.py` went both ways, over 109 altered runs -- and the verdict line below
-# asserts that every instruction in the file ran. A loop no document enters is the one thing
-# turning cannot reach -- `verdict_candidates` reads the bare object only inside one, which is why
-# the bare drive is here -- so if a change leaves one behind, give it a drive rather than a filter.
+# down, the older bare object with a rendering that SHOWS that object, the frontier form, the
+# frontier form quoting a fenced example, a frontier review whose RENDERING carries one of each
+# shape the reduction reads, and the ledger subcommand. They are drives rather than assertions --
+# what the first seven return is asserted by the families above, on these same shapes -- and their
+# job here is that the parser's own code runs, and every scan it makes is answered for. What they
+# leave, the probe takes: a handler the eight never enter is entered, and a branch they take one
+# way only is turned, and the verdict line below asserts that every instruction in the file ran. A
+# loop no document enters is the one thing turning cannot reach -- `verdict_candidates` reads the
+# bare object only inside one, which is why the bare drive is here -- so if a change leaves one
+# behind, give it a drive rather than a filter.
 #
 # THE QUOTED DRIVE IS THAT RULE, APPLIED. The parser reads a fence run inside a block's content only
 # inside a loop over that content, and resolves a reference in an info string only inside the
-# callback `rendered_language` hands `re.sub`. None of the other seven documents reaches either,
-# and with only those seven this line read
+# callback `rendered_language` hands `re.sub`. None of the other eight documents reaches either,
+# and with only the first seven this line read
 # `unproven=referable,rendered_language.<locals>.resolved,unresolved_material`. The example's nested
 # fence enters the loop, and without it `unresolved_material` stays unproven. Its info string holds
 # one of each path the callback takes: a backslash escape, a named reference, a name no table holds,
@@ -6519,14 +6798,90 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
     '\*&amp;&notareal;&#110;&#x6a;&#11;'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-quoted.md"
+# AND THE REDUCTION OF THE RENDERING IS DRIVEN THE SAME WAY, because it is the other half of what
+# runs on the merge path. `Rendering` is entered only by a document that HAS the tag it reads:
+# with the drives above and no rendering but `nothing_shown`, this line read
+# `unproven=Rendering.handle_endtag,Rendering.handle_startendtag,bare_spans,finding_spans,
+# narrowed`. So the document below is a frontier review with a numbered finding -- which is what
+# `finding_spans` and `narrowed` need -- and ITS RENDERING, written out here, carries one of each
+# shape that reduction has a rule for.
+#
+# THAT RENDERING IS NOT GITHUB'S RENDERING OF THAT DOCUMENT AND IS NOT RECORDED AS ONE. It is a
+# COVERAGE drive: what it is for is that every branch of the reduction runs, and a document GitHub
+# renders would carry a handful of tags rather than all of them. What the reduction DECIDES is
+# asserted against GitHub's own renderings, by the sections that take `rendering_of`.
+{ printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
+  printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
+} > "$tmp/probe-drive-shown.md"
+{ printf '<p>A <em>paragraph</em> with an inline tag, a void <br>one, a self-closing <br/>one,\n'
+  printf 'an <x-unknown>unclassified</x-unknown> one and a closing </b> nothing opened.</p>\n'
+  printf '<pre><code>A code block, which this reading does not read: P1 MUST VERDICT:\n</code></pre>\n'
+  printf '<ol>\n<li>\n<p><strong>P2 -- a finding.</strong> Detail, and a second line.<br>\nStill'
+  printf ' the same item.</p>\n</li>\n<li><p>An item that opens with no severity: P2 later.</p></li>\n'
+  printf '</ol>\n<ul><li>A bullet, which is not a numbered finding.</li></ul>\n'
+  printf '<p>A comment between two runs: VERDICT<!--split-->: and <strong>VERDICT</strong>: too,\n'
+  printf 'and one written whole, VERDICT: PASS.</p>\n'
+  printf '<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>P3</td></tr></tbody></table>\n'
+} > "$tmp/probe-drive-shown.html"
+# AND THE OLDER BARE FORM'S OBJECT IS SHOWN AS A PARAGRAPH, which is the one shape `bare_spans`
+# exists for: a FENCED verdict is inside a `<pre>` and is not in the reading at all, so nothing
+# takes it out; a bare one is ordinary prose to a renderer, and the scan must not read the review's
+# own findings out of it. Written here rather than recorded, for the reason above.
+"$parser_python" - "$tmp/one-bare.md" "$tmp/one-bare.html" <<'BAREHTML'
+import html, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lines = [line for line in handle.read().split("\n") if line.strip()]
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write("".join('<p dir="auto">%s</p>\n' % html.escape(line) for line in lines))
+BAREHTML
+
+# AND THE ANSWER SPLIT IS DRIVEN HERE TOO, because `comment` is a subcommand of this parser and
+# every instruction of it has to run under some drive or the census names it unproven. Seven
+# shapes: a whole answer, one that is not JSON, one that is not an object, one that names
+# something twice, one with no `created_at`, one with no `body`, and one with no `body_html` --
+# that last being the only one of the six wrong shapes that is not a refusal. An eighth drive
+# gives it the wrong number of documents.
+"$parser_python" - "$tmp/one-findings.md" "$nothing_shown" "$tmp" <<'PROBEANSWERS'
+import json, os, sys
+body, shown, out = sys.argv[1], sys.argv[2], sys.argv[3]
+whole = {"created_at": "2026-09-01T00:00:00Z", "id": 5001,
+         "body": open(body, encoding="utf-8").read(),
+         "body_html": open(shown, encoding="utf-8").read()}
+def write(name, text):
+    with open(os.path.join(out, name), "w", encoding="utf-8") as handle:
+        handle.write(text)
+write("probe-answer-whole.json", json.dumps(whole))
+write("probe-answer-notjson.json", "not a JSON document at all\n")
+# A repeated name is two readings and is built by hand, because no encoder writes one.
+write("probe-answer-twice.json",
+      '{"created_at": "2026-09-01T00:00:00Z", "body": %s, "body_html": %s, "body": "PASS"}'
+      % (json.dumps(whole["body"]), json.dumps(whole["body_html"])))
+write("probe-answer-notobject.json", json.dumps(["a list, not an object"]))
+for field in ("created_at", "body", "body_html"):
+    short = dict(whole)
+    del short[field]
+    write("probe-answer-no-%s.json" % field, json.dumps(short))
+PROBEANSWERS
+
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
 # parser with no decode left for the probe to watch satisfies every count and fails here.
 got="$(decode_probe scripts/pr-review-parse.py \
-  "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
-  "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
-  "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
+  "review|$tmp/one-findings.md|$nothing_shown" "review --nul|$tmp/one-findings.md|$nothing_shown" \
+  "review|$tmp/dup-findings.md|$nothing_shown" "review|$tmp/dup-deep.md|$nothing_shown" \
+  "review|$tmp/one-bare.md|$tmp/one-bare.html" \
+  "review|$tmp/probe-drive-prose.md|$nothing_shown" \
+  "review|$tmp/probe-drive-quoted.md|$nothing_shown" \
+  "review|$tmp/probe-drive-shown.md|$tmp/probe-drive-shown.html" \
+  "comment --nul|$tmp/probe-answer-whole.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-body_html.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-notjson.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-notobject.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-created_at.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-no-body.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-twice.json|$tmp/probe-split.md|$tmp/probe-split.html" \
+  "comment|$tmp/probe-answer-whole.json" \
   "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
@@ -6841,7 +7196,14 @@ contains MUT-GUARD-READS-THE-WRITTEN-SPELLING "$(parse_why "$tmp/enc-two-candida
 #
 # The case that needs it is the residue of the section above: a `text`-fenced object whose first
 # key is NOT `role_understanding` and whose content holds no `json` fence line is material to
-# neither new rule, so the stray scan is the whole of what is left standing between it and READY.
+# neither new rule, so the stray scan is the only thing left that reports this comment at all.
+# WHAT IT REPORTS IS `manual:`, a review put in front of a person -- and what it reports it of is
+# every spelling it reads. This comment's severity sits inside a FENCED BLOCK, where a renderer
+# resolves nothing at all, so what a reader of this one sees is `P\u0031` and what this scan
+# reports is `P1`: the scan is WIDER than the reader here, in the direction that costs a person a
+# look and cannot cost a merge. A round of #310 wrote the opposite -- that reader and scan agree
+# inside a code block -- and it was false when it was written, at this head and at every head
+# before it. PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES carries the measurement.
 { printf 'Reviewed head: %s\n\n```text\n' "$revived_head"; swallow_blocking
   printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-escaped.md"
 expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-escaped.md")" \
@@ -6934,12 +7296,24 @@ expect MUT-STRAY-TOKEN-ENCODED "$(parse_nul review "$tmp/stray-unresolvable.md")
 # rewriting clears. Measured, `markdown-it-py` 3.0.0 renders that fence `language-json&#133;x`; so
 # does `json&amp;#133;x`, byte for byte, and the two are read the same way here. `json&#11;x` is the
 # same defect at U+000B; a case here once required it to refuse, and it is asserted green below.
+# THESE TWO COMMITS ARE BYTE-STABLE, AND THAT IS NOT TIDINESS. Their ids are written into every
+# fixture comment below, so a comment's own bytes -- and therefore the sha256 the recorded
+# renderings are keyed by -- change with them. With the commit time left to `now`, every run built
+# documents no recording could match, and the gate answered `no recorded rendering` 215 times and
+# fell back to `nothing_shown` for each. An empty tree, a fixed parent, a fixed author and
+# committer and a fixed date give one id, every run, on every machine.
 enqueue_repo="$tmp/enqueue-repo"
+enqueue_when="2026-01-01T00:00:00+0000"
 git init -q "$enqueue_repo"
-git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+# `--date` and a `committer.date` config set the AUTHOR date and nothing else; the COMMITTER date
+# comes from the environment, and leaving it at `now` left the id moving by the second -- which two
+# runs a second apart do not show and a run a minute later does.
+GIT_AUTHOR_DATE="$enqueue_when" GIT_COMMITTER_DATE="$enqueue_when" \
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
   commit -q --allow-empty -m "the base the review was made against"
 enqueue_base="$(git -C "$enqueue_repo" rev-parse HEAD)"
-git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+GIT_AUTHOR_DATE="$enqueue_when" GIT_COMMITTER_DATE="$enqueue_when" \
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
   commit -q --allow-empty -m "the head the review read"
 enqueue_head="$(git -C "$enqueue_repo" rev-parse HEAD)"
 git -C "$enqueue_repo" remote add origin "$enqueue_repo"
@@ -6966,8 +7340,28 @@ case "$*" in
   *"/pulls?state=open"*)      exit 0 ;;
   *timeline*)                 ;;
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
-  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
-  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  # ONE ANSWER FOR ONE COMMENT. The audit fetches `created_at`, `body` and `body_html` together
+  # under `application/vnd.github.full+json` -- one call, one version -- so this stub builds the
+  # document. THE THREE SEPARATE `--jq` ANSWERS ARE HERE TOO, because GitHub still serves them:
+  # this stub answers what the API answers, and which of the two shapes the audit asks for is the
+  # audit's decision and not this file's. `STUB_ANSWER_RAW` hands a file over as the ANSWER
+  # instead, bytes and all, which is how an answer that is not a comment at all is modelled.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_SPLICE_HTML:-${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}}"
+            exit 0 ;;
+      esac
+      if [[ -n "${STUB_ANSWER_RAW:-}" ]]; then cat "$STUB_ANSWER_RAW"; else
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; fi ;;
   *"--json body"*)            echo "no ledger" ;;
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
@@ -6977,10 +7371,11 @@ case "$*" in
 esac
 GH
 chmod +x "$enqueue_gh/gh"
-merge_run() {  # merge_run FILE: "<status>|<output, on one line>|<gh pr merge calls>"
+merge_run() {  # merge_run FILE [RENDERING]: "<status>|<output, one line>|<gh pr merge calls>"
   local out status=0
   : > "$tmp/merge-calls.log"
   out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$1" \
+    STUB_REVIEW_HTML="${2:-$nothing_shown}" STUB_NOTHING_SHOWN="$nothing_shown" \
     PATH="$enqueue_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
     || status=$?
   printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
@@ -7148,6 +7543,1479 @@ for bytes in '\013' '\302\205' '\034' '\035' '\036' '\037'; do
     "$(parse_why "$tmp/no-rendering-point.md")" "2 places a verdict could be read from"
 done
 
+# --- one comment is read, and the trusted reviewer wrote it -------------------------------------
+# MUT-REVIEWER-ANY-AUTHOR-READ, which is the boundary the section after it is NOT.
+#
+# NEITHER PROSE SCAN IS A TRUST BOUNDARY, and the reading this audit rests on is a different one:
+# THE ONLY COMMENT IT EVER PARSES IS ONE THE TRUSTED REVIEWER WROTE. Someone who can write that
+# comment can write the verdict object and put anything in it; someone who cannot is not read at
+# all. That is the sentence this section executes, and it is why the section after it is about
+# what the reviewer's OWN ORDINARY WRITING does to those scans rather than about an attacker: an
+# author check cannot catch a comment contradicting itself, because the author is the same person.
+#
+# The unit cases near the top of this file run `review_comment_filter` on a fixture. These run THE
+# WHOLE AUDIT, against a stub whose comment listing answers by running the jq program the audit
+# itself handed it -- the program arrives in argv after `--jq`, exactly as `gh api` receives it,
+# and the login arrives in `UPSTROKE_AUDIT_REVIEWER`, which the audit sets for that one call. Drop
+# the login predicate from that program and another account's comment IS READ.
+#
+# AND WHICH ROW SAYS SO CHANGED WHEN THE TWO SCANS LEARNED TO READ. The witness row below hides a
+# `VERDICT:` line and a `P1` in character references; once those are read, dropping the predicate
+# leaves that comment MANUAL WITH ZERO CALLS -- executed 2026-09-21 by deleting exactly that
+# `select` line, which gave `manual:P1/VERDICT:-outside-the-verdict-object` -- so it no longer
+# shows a merge. The row that does is the CLEAN `PASS` after it, which the two scans are silent
+# about: attributed to `a-contributor` it must be `no-review` and no call, and with the predicate
+# gone it is READY and one. Both rows are kept: the first says the comment is not read, the second
+# says what being read would cost.
+filtered_gh="$tmp/filtered-gh"
+mkdir -p "$filtered_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$filtered_gh/gh"
+cat >> "$filtered_gh/gh" <<'GH'
+jq_program() {  # jq_program ARG...: the value of the --jq option this call was given
+  while (( $# )); do
+    if [[ "$1" == --jq ]]; then printf '%s' "${2-}"; return 0; fi
+    shift
+  done
+  return 1
+}
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;
+  "label create"*)            ;;
+  "pr edit"*)                 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG" ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) prog="$(jq_program "$@")" || { echo "GH-NO-JQ-PROGRAM $*" >&2; exit 96; }
+                              jq -r "$prog" "$STUB_COMMENTS_JSON" ;;
+  # One answer for one comment, as in every other stub here: `created_at`, `body` and `body_html`
+  # arrive together under `application/vnd.github.full+json`, and the three separate `--jq`
+  # answers GitHub also serves are here beside it.
+  *"/issues/comments/7001"*)
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "${STUB_REVIEW_BODY:-/dev/null}"; exit 0 ;;
+        *"--jq .body_html")
+            cat "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}"; exit 0 ;;
+      esac
+      "$STUB_PYTHON" -c 'import json, sys
+print(json.dumps({"created_at": sys.argv[1],
+                  "body": open(sys.argv[2], encoding="utf-8").read(),
+                  "body_html": open(sys.argv[3], encoding="utf-8").read()}))' \
+        2026-09-01T00:00:00Z "${STUB_REVIEW_BODY:-/dev/null}" \
+        "${STUB_REVIEW_HTML:-${STUB_NOTHING_SHOWN:-/dev/null}}" ;;
+  *"--json body"*)            echo "no ledger" ;;
+  *"--json headRefOid"*)      echo "$head" ;;
+  *"--json baseRefName"*)     echo master ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                feature/x "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$filtered_gh/gh"
+comments_page() {  # comments_page LOGIN BODY-FILE: the one page the audit's filter is run over
+  "$parser_python" - "$1" "$2" "$tmp/filtered-comments.json" <<'PY'
+import json, sys
+login, body_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(body_path, encoding="utf-8") as handle:
+    body = handle.read()
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump([{"created_at": "2026-09-01T00:00:00Z", "id": 7001,
+                "user": {"login": login}, "body": body}], handle)
+PY
+}
+filtered_run() {  # filtered_run LOGIN FILE [RENDERING]: "<status>|<output>|<gh pr merge calls>"
+  local out status=0
+  comments_page "$1" "$2"
+  : > "$tmp/merge-calls.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$2" \
+    STUB_REVIEW_HTML="${3:-$nothing_shown}" STUB_NOTHING_SHOWN="$nothing_shown" \
+    STUB_COMMENTS_JSON="$tmp/filtered-comments.json" \
+    PATH="$filtered_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
+    || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/merge-calls.log" || true)"
+}
+# THE HARNESS CONTROL FIRST, and it is the only reason a zero below is evidence: a clean review by
+# the trusted reviewer, through this stub and this filter, is READY and calls merge once. A count
+# that is zero for every input, the ones that must not be zero included, asserts nothing.
+got="$(filtered_run eventloops "$tmp/enqueue-clean.md")"
+contains "MUT-REVIEWER-ANY-AUTHOR-READ control" "$got" "enqueued #999"
+expect "MUT-REVIEWER-ANY-AUTHOR-READ control calls" "${got##*|}" 1
+expect "MUT-REVIEWER-ANY-AUTHOR-READ control status" "${got%%|*}" 0
+# One comment carrying both of the shapes the section after this one is about: a `VERDICT:` line
+# and a blocking severity, each spelled as a character reference, over a clean `PASS` object. A
+# reader of this comment sees `VERDICT: CHANGES_REQUIRED` and `P1`. At `a5bcc998` both scans read
+# the stored characters and were silent about both, and it reached READY with one merge call.
+prose_witness() {  # prose_witness VERDICT-SPELLING SEVERITY-SPELLING: one comment, both witnesses
+  printf 'Reviewed head: %s\n\n' "$enqueue_head"
+  printf '%s CHANGES_REQUIRED -- the blocker is %s and it is not in the object.\n\n' "$1" "$2"
+  printf '```json\n'; enqueue_pass; printf '\n```\n'
+}
+prose_witness 'VERDICT&#58;' '&#80;1'  > "$tmp/prose-witness.md"
+prose_witness 'VERDICT:'     '&#80;1'  > "$tmp/prose-witness-verdict-literal.md"
+prose_witness 'VERDICT&#58;' 'P1'      > "$tmp/prose-witness-stray-literal.md"
+# THE PROPERTY. The same comment, written by an account that is not the trusted reviewer, is not
+# read: `no-review`, and no merge call. This is what makes the two scans' blindness cost nothing,
+# and it is the row that moves if the filter's login predicate ever stops being applied.
+got="$(filtered_run a-contributor "$tmp/prose-witness.md")"
+# `blockers=no-review` and not `no-review`: `review-records-no-reviewed-sha` is a DIFFERENT blocker
+# that the bare substring also matches, and it is one a comment that WAS read can carry -- so the
+# bare form would be green on a run that read the comment and merely could not find a commit in it.
+contains MUT-REVIEWER-ANY-AUTHOR-READ "$got" "blockers=no-review"
+contains MUT-REVIEWER-ANY-AUTHOR-READ "$got" "NOT-READY"
+expect "MUT-REVIEWER-ANY-AUTHOR-READ merge calls" "${got##*|}" 0
+[[ "$got" == *"enqueued #999"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: another account's comment enqueued the pull request"
+[[ "$got" == *"verdict=PASS"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: another account's comment was read as the review"
+# The clean `PASS` the harness control above is READY on, written by the same outsider: this is
+# the row a filter that stops filtering costs A MERGE CALL, and it is the one that has to be a
+# comment the two prose scans say nothing about.
+got="$(filtered_run a-contributor "$tmp/enqueue-clean.md")"
+contains "MUT-REVIEWER-ANY-AUTHOR-READ [clean]" "$got" "blockers=no-review"
+contains "MUT-REVIEWER-ANY-AUTHOR-READ [clean]" "$got" "NOT-READY"
+expect "MUT-REVIEWER-ANY-AUTHOR-READ merge calls [clean]" "${got##*|}" 0
+[[ "$got" == *"enqueued #999"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ [clean]: another account's comment enqueued the pull request"
+# And the other direction, or a filter that matched nobody would pass the row above: the SAME
+# comment written by the trusted reviewer IS read. What it is then read as is the limit below, and
+# this assertion deliberately does not pin it -- any of the three directions the finding names
+# leaves this comment read and changes what it is read as.
+got="$(filtered_run eventloops "$tmp/prose-witness.md")"
+[[ "$got" == *"blockers=no-review"* ]] \
+  && error "MUT-REVIEWER-ANY-AUTHOR-READ: the trusted reviewer's own comment was not read: [$got]"
+# --- the spelling a reader sees is the spelling both scans read ---------------------------------
+# MUT-STRAY-READS-THE-WRITTEN-SPELLING.
+#
+# Both scans over a review's prose compared THE CHARACTERS THE COMMENT IS STORED AS. The reviewer
+# writing the comment and the person reading it both see WHAT GITHUB'S RENDERER RESOLVES THEM TO,
+# and in inline prose those are two documents. Measured at `a5bcc998`, through this file's own
+# `filtered_run`: the trusted reviewer posting the generated `PASS` object and then prepending
+# `**VERDICT**: CHANGES_REQUIRED` -- bold, and a correction, and nothing else -- was exit 0, PASS,
+# NO STRAY, READY AND ONE `gh pr merge` CALL, where the same words written plainly were exit 1 and
+# no call at all. `_P1_` did the same to the other scan: READY and one call, where `P1` is MANUAL
+# and none. THAT IS THE DEFECT, and it is an ordinary reviewer writing ordinary Markdown.
+#
+# AND SPELLING IS NOT ALL OF IT. A CODE SPAN AND A LINK WRAP A LABEL WHOLE rather than respelling
+# it, so `` `VERDICT`: CHANGES_REQUIRED `` and `[VERDICT](url): CHANGES_REQUIRED` prepended to the
+# same generated `PASS` were exit 0, PASS, no stray, READY AND ONE MERGE CALL at `d599216` as well
+# -- the plain label being exit 1 and none -- and formatting a field label as code or linking it to
+# the policy it comes from is ordinary reviewer writing by the same measure.
+#
+# GITHUB'S OWN RENDERING OF EACH COMMENT IS WHAT CLOSES ALL OF THEM, and these are its witnesses.
+# Rounds 2 to 5 closed them by transcribing a renderer's inline rules over the characters instead;
+# round 6 deleted that and reads `body_html`. EACH ROW IS DRIVEN THROUGH BOTH the parser and THE
+# WHOLE AUDIT, with the recorded rendering of that exact document, because the parser's `stray`
+# field is only half the claim: what must not happen is the MERGE, and `filtered_run` counts the
+# calls.
+#
+# THE TWO DIRECTIONS ARE DELIBERATELY NOT THE SAME. A literal `VERDICT:` outside the block is still
+# a REFUSAL and that is unchanged; a spelling only the reader sees is a `manual:` blocker, and the
+# review still parses. MANUAL costs a person's attention and a wrong READY costs a merge, and this
+# reading drops a delimiter run a renderer would sometimes have left written -- so what it adds
+# must be able to cost attention and must not be able to cost the review.
+reader_comment() {  # reader_comment PROSE: one comment carrying PROSE, then a clean PASS object
+  printf 'Reviewed head: %s\n\n%s\n\n' "$enqueue_head" "$1"
+  printf '```json\n'; enqueue_pass; printf '\n```\n'
+}
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+reader_closed=(
+  'bold verdict|**VERDICT**: CHANGES_REQUIRED -- correcting the generated review below.|VERDICT:'
+  'reference verdict|VERDICT&#58; CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'escaped verdict|VERDICT\: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'split verdict|V*ERDICT:* CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'underscore severity|The remaining issue is _P1_ and it is out of scope.|P1'
+  'underscore must|A _MUST_ deviation in touched code is out of scope.|MUST'
+  'reference severity|The blocker is &#80;1 and it is not in the object.|P1'
+  'split severity|The blocker is P**1** and it is not in the object.|P1'
+  'both encoded|VERDICT&#58; CHANGES_REQUIRED -- the blocker is &#80;1.|P1/VERDICT:'
+  'run a renderer keeps|The row is item*&#80;1 in the table and it is out of scope.|P1'
+  'code span verdict|`VERDICT`: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'linked verdict|[VERDICT](https://example.invalid/review-policy): CHANGES_REQUIRED here.|VERDICT:'
+  'link splits the verdict|VER[DICT:](https://example.invalid/x) CHANGES_REQUIRED, object says PASS.|VERDICT:'
+  'code span splits the severity|The blocker is P`1` and it is not in the object.|P1'
+  'link splits the severity|The blocker is P[1](https://example.invalid/x) and not in the object.|P1'
+  'code span before an undefined label|The cell is P`1`[a]x and nothing defines the label a.|P1'
+  'eight digit reference|The blocker is &#00000080;1 and it is not in the object.|P1'
+)
+for row in "${reader_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/reader-closed.md"
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [$reader_case]" \
+    "$(reader_rows "$tmp/reader-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/reader-closed.md")"
+  contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING audit status [$reader_case]" "${got%%|*}" 0
+done
+# AND THE LITERAL LINE IS STILL A REFUSAL, which is the outcome this round must not have changed.
+expect "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
+  "$(reader_rows "$tmp/prose-witness-verdict-literal.md")" '1|'
+contains "MUT-STRAY-READS-THE-WRITTEN-SPELLING [verdict literal]" \
+  "$(parse_why "$tmp/prose-witness-verdict-literal.md")" \
+  "a VERDICT: line outside the block its verdict is read from"
+
+# --- and an ordinary citation is still not a blocker --------------------------------------------
+# MUT-STRAY-INTRAWORD-UNDERSCORE, and it is the row that decides whether the rule above ships.
+#
+# `_P1_` and `findings/P1_security-trust_...md` differ in ONE renderer rule and nothing else:
+# CommonMark does not let an underscore between two word characters open or close emphasis, so a
+# reader sees the first as the severity and the second as the path it is part of. A rule that read
+# the token's boundary instead -- widening `STRAY_TOKEN`'s `\b` to stop at `_` -- catches `_P1_`
+# AND EVERY FINDING FILENAME ANY REVIEW EVER CITES, which is a `manual:` line on a large share of
+# ordinary reviews and is worse than the defect it closes.
+#
+# THE LAST TWO ROWS ARE THE SAME QUESTION ASKED OF A BRACKET PAIR. A reference link is a link only
+# where a definition defines its label, and a pair nothing defines is shown WITH ITS BRACKETS --
+# so reading every pair as a link both reports a label nobody linked and, by dropping brackets a
+# reader sees, JOINS the words either side of them and loses a token. Executed at `3fe68c37`: over
+# 400,000 random strings against `markdown-it-py` 3.0.0, reading every pair as a link hid a `P1`
+# that renderer shows. Nothing here decides that any more -- GitHub does, and its answer is in the
+# recorded rendering -- but the rows stay, because what they assert is the OUTCOME: THAT direction's
+# witness is the LAST ROW OF THE CLOSED TABLE ABOVE rather than one of these: ``P`1`[a]x`` must
+# report `P1`, and with the pair read as a link the reading is `P1ax` and reports nothing.
+#
+# So these rows are the guard, they are asserted through the WHOLE AUDIT as READY WITH ONE MERGE
+# CALL rather than only as a quiet `stray` field, and every one of them is quiet at `a5bcc998` too.
+# EXECUTED, not argued: replacing `STRAY_TOKEN` with
+# `(?<![0-9A-Za-z])(?:P[0-3]|MUST)(?![0-9A-Za-z])` -- the whole of the other repair -- reds
+# `[finding citation]` and `[must filename]` here, at the parser AND at the audit, each MANUAL with
+# ZERO merge calls where one is required. No other case in this file moves.
+reader_quiet=(
+  'finding citation|See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.'
+  'must filename|See standards/07_MUST_policy.md and the MUST_NOT case in src/x.rs.'
+  'snake case prose|The helpers some_long_name_here and another_one_p1_like are unchanged.'
+  'arithmetic|The budget is 2 * 3 * 4 and no more.'
+  'emphasis elsewhere|This is *important* and so is _this_ one.'
+  'escaped reference|A literal \&#80;1 in the text, which renders as itself.'
+  'code span citation|See `findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md` for it.'
+  'linked citation|See [the finding](findings/P1_security-trust_202609211100_the-prose-scans-cannot-see.md) for it.'
+  'undefined label|A bare [VERDICT] with nothing defining it renders as its brackets.'
+  'adjacent labels|The cells are [P][1] and nothing defines either label.'
+)
+for row in "${reader_quiet[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  reader_comment "$reader_prose" > "$tmp/reader-quiet.md"
+  expect "MUT-STRAY-INTRAWORD-UNDERSCORE [$reader_case]" \
+    "$(reader_rows "$tmp/reader-quiet.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/-"
+  got="$(reader_audit "$tmp/reader-quiet.md")"
+  contains "MUT-STRAY-INTRAWORD-UNDERSCORE audit [$reader_case]" "$got" "enqueued #999"
+  expect "MUT-STRAY-INTRAWORD-UNDERSCORE merge calls [$reader_case]" "${got##*|}" 1
+done
+
+# --- the frontier form gets the contradiction check too, with its own verdict line exempt --------
+# MUT-PROSE-VERDICT-UNCHECKED.
+#
+# The contradiction check was asked of the WORKFLOW form only, and the frontier form -- the form
+# every review in this repository is posted in -- never got it. Measured at `d599216` through
+# `filtered_run`: a SHA-bound prose review carrying `VERDICT: PASS` with
+# `**VERDICT**: CHANGES_REQUIRED` appended was exit 0, PASS, no stray, READY AND ONE MERGE CALL.
+# That is the same ordinary bold correction the section above closes, in the other supported form.
+#
+# AND THE EXEMPTION IS WHAT MAKES IT SHIPPABLE. This form's verdict IS a `VERDICT:` line and its
+# template writes TWO of them -- a bold summary near the top and the authoritative one at the end.
+# Asking "does a reader see such a line" would report EVERY REVIEW EVER POSTED: measured over the
+# 685 comments this repository held on 2026-09-21, 250 carry this form's marker, 241 of them write
+# exactly two `VERDICT:` lines and 8 more write three or more. So what is reported is A LINE A READER SEES
+# AND THE COMMENT DOES NOT WRITE -- more of them in some reading than in the characters -- and the
+# control below is a whole ordinary prose review, two verdict lines and all, that must stay READY
+# with one merge call.
+prose_review() {  # prose_review PROSE: a frontier-form review of this head, carrying PROSE
+  printf '<!-- upstroke-frontier-review pr=999 head=%s -->\n' "$enqueue_head"
+  printf '## Frontier review of `%s` (gpt-5.6-sol, max effort)\n\n' "${enqueue_head:0:7}"
+  printf '**VERDICT: PASS**\n\nI found nothing in the diff that blocks.\n\n%sVERDICT: PASS\n' "$1"
+}
+# THE CONTROL FIRST: the form's own two verdict lines are not a contradiction, and a review that
+# carries nothing else is READY and calls merge once.
+prose_review '' > "$tmp/prose-control.md"
+expect "MUT-PROSE-VERDICT-UNCHECKED control" "$(reader_rows "$tmp/prose-control.md")" \
+  "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-control.md")"
+contains "MUT-PROSE-VERDICT-UNCHECKED control" "$got" "enqueued #999"
+expect "MUT-PROSE-VERDICT-UNCHECKED control calls" "${got##*|}" 1
+expect "MUT-PROSE-VERDICT-UNCHECKED control status" "${got%%|*}" 0
+# And each correction a reader sees and the comment does not write: MANUAL, and no call.
+prose_corrections=(
+  'bold|**VERDICT**: CHANGES_REQUIRED -- correcting my own review above.'
+  'code span|`VERDICT`: CHANGES_REQUIRED -- correcting my own review above.'
+  'linked|[VERDICT](https://example.invalid/review-policy): CHANGES_REQUIRED here.'
+  'reference|VERDICT&#58; CHANGES_REQUIRED -- correcting my own review above.'
+)
+for row in "${prose_corrections[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  prose_review "$reader_prose
+" > "$tmp/prose-correction.md"
+  expect "MUT-PROSE-VERDICT-UNCHECKED [$reader_case]" \
+    "$(reader_rows "$tmp/prose-correction.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+  got="$(reader_audit "$tmp/prose-correction.md")"
+  # The prose form names its own place: this blocker is `outside-the-numbered-findings`, which is
+  # where this form's stray scan reads, and not the workflow form's `outside-the-verdict-object`.
+  contains "MUT-PROSE-VERDICT-UNCHECKED audit [$reader_case]" "$got" \
+    "manual:VERDICT:-outside-the-numbered-findings"
+  contains "MUT-PROSE-VERDICT-UNCHECKED audit [$reader_case]" "$got" MANUAL
+  expect "MUT-PROSE-VERDICT-UNCHECKED merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-PROSE-VERDICT-UNCHECKED audit status [$reader_case]" "${got%%|*}" 0
+done
+# A THIRD LINE THE COMMENT DOES WRITE IS NOT ONE OF THESE, and this row is the exemption's own
+# boundary: a prose review may say `VERDICT:` as often as it likes in its own characters, and the
+# last one is the one read (MUT-PROSE-LAST-VERDICT). Only a reading seeing MORE than are written
+# reports anything.
+prose_review 'Quoting the protocol: the line is VERDICT: CHANGES_REQUIRED when it blocks.
+' > "$tmp/prose-third.md"
+expect "MUT-PROSE-VERDICT-UNCHECKED [third written line]" \
+  "$(reader_rows "$tmp/prose-third.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-third.md")"
+expect "MUT-PROSE-VERDICT-UNCHECKED merge calls [third written line]" "${got##*|}" 1
+
+# --- a link's extent is the renderer's, and an exemption names the occurrence it exempts ---------
+# MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS and MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY.
+#
+# ONE SENTENCE HOLDS BOTH, and it is the sentence the two sections above are for: NO SEQUENCE IN
+# WHICH AN ORDINARY REVIEWER, WRITING ORDINARY MARKDOWN, PRODUCES A MERGE THAT THE SAME WORDS
+# WRITTEN PLAINLY WOULD HAVE BLOCKED. Those sections close the code span and the link. These are
+# the two ways THE CODE THAT CLOSED THEM left the sentence false, each reproduced through the
+# whole audit at `3fe68c37` and each found by all three lenses of one review.
+#
+# 1. A REFERENCE DEFINITION'S DESTINATION MAY STAND ON THE LINE AFTER THE COLON -- CommonMark
+#    0.31.2 4.7, and `markdown-it-py` 3.0.0 reads it there. `[VERDICT][policy]:` with `[policy]:`
+#    and its destination wrapped onto the next line renders `VERDICT: CHANGES_REQUIRED` and was no
+#    definition to `LINK_DEFINITION`, so the pair was no link, so the brackets stayed written and
+#    the correction carried no token at all. `The blocker is P[1][policy].` hid a severity the
+#    same way.
+# 2. A `)` INSIDE A QUOTED TITLE IS NOT THE END OF THE LINK.
+#    `[VERDICT](https://example.invalid/policy "4) Review"):` renders that same correction, and
+#    delimiting the destination by balancing parentheses ended the link at the `)` in `4)`,
+#    leaving `Review"):` written in the prose where the token is not.
+# 3. THE EXEMPTION WAS COUNTED AND NOT IDENTIFIED. The frontier form's own verdict lines have to
+#    be exempt, and round three exempted them by COMPARING HOW MANY a reading shows against how
+#    many the comment writes. A `VERDICT:` inside a LINK TITLE is written and shown to nobody, so
+#    a review citing the review format with such a title and then appending a `` `VERDICT`: ``
+#    correction shows three where it writes three -- one occurrence disappearing as the link is
+#    consumed, another appearing as the code span is -- and a real blocking correction cancelled
+#    against an occurrence no reader has ever seen.
+#
+# 4. AND THE LABEL FOLD WAS A NEAR ONE. `folded_label` used `casefold()` where that renderer's
+#    `normalizeReference` uses `.lower().upper()`; they agree on every code point but U+0131.
+#    Found by comparing the two over the whole range rather than by a lens, and it is the same
+#    shape as 1 reached by a different rule. **ROUND SIX MOVED THAT ROW, because GitHub agrees with
+#    NEITHER: it does not fold DOTLESS I to `i` at all, so the pair is no link and a reader sees
+#    the brackets. The row is in the settled table below at the value GitHub gives it, and the
+#    control -- the same label spelled `i`, which IS a link to all three -- stays here.**
+#
+# EVERY ROW BELOW IS DRIVEN THROUGH THE PARSER AND THE WHOLE AUDIT. The first four merged at
+# `3fe68c37` -- exit 0, PASS, no stray, READY and ONE `gh pr merge` call -- and the last three are
+# the same corrections written the way that head already caught, which is what says the difference
+# is the Markdown and not the words.
+
+wrapped_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]:
+  https://example.invalid/review-policy'
+wrapped_severity='The blocker is P[1][policy] and it is not in the object.
+
+[policy]:
+  https://example.invalid/review-policy'
+oneline_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: https://example.invalid/review-policy'
+# AND THE LABEL FOLD WAS THAT RENDERER'S TOO, AND THAT WAS THE WRONG RENDERER TO FOLLOW.
+# `normalizeReference` is `.lower().upper()`, which merges U+0131 DOTLESS I with `I` and `i` where
+# `casefold()` keeps them apart -- so a definition spelling its label `i` and a use spelling it
+# dotless was a link there and no link at `3fe68c37`, brackets and all: exit 0, PASS, no stray,
+# READY and ONE merge call through the whole audit, where the same correction using `[i]` was
+# MANUAL with none. **GITHUB DOES NOT FOLD THEM EITHER**, measured on 2026-09-21 through
+# `POST /markdown`: it renders `[VERDICT][<U+0131>]:` with its brackets written. So the dotless row
+# is quiet here and stands in the settled table below; the `[i]` control is a link to every
+# renderer asked and stays in this one.
+#
+# THE CHARACTER IS BUILT FROM ITS BYTES AND NOT WRITTEN, so what this row asserts cannot be changed
+# by a re-encoding of this file. ROUND FOUR SAID "THIS FILE STAYS ASCII" HERE AND WROTE THE
+# CHARACTER ITSELF ON THE NEXT LINE, which is a claim about the file contradicted by the line under
+# it; `LC_ALL=C grep -c '[^ -~<tab>]'` over this file answers 7, in prose comments and in two
+# fixture bodies that hold an em dash on purpose. The sentence that is true is the narrow one: the
+# bytes of this row are written as bytes.
+dotless_verdict="$(printf '[VERDICT][\xc4\xb1]: CHANGES_REQUIRED -- correcting the review below.')
+$(printf '\n[i]: https://example.invalid/review-policy')"
+dotless_control='[VERDICT][i]: CHANGES_REQUIRED -- correcting the review below.
+
+[i]: https://example.invalid/review-policy'
+
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+round4_closed=(
+  "wrapped definition verdict|$wrapped_verdict|VERDICT:"
+  "wrapped definition severity|$wrapped_severity|P1"
+  'titled link verdict|[VERDICT](https://example.invalid/policy "4) Review"): CHANGES_REQUIRED.|VERDICT:'
+  "one-line definition verdict|$oneline_verdict|VERDICT:"
+  'plainly titled link verdict|[VERDICT](https://example.invalid/policy "Review"): CHANGES_REQUIRED.|VERDICT:'
+  "same label spelled i|$dotless_control|VERDICT:"
+)
+
+for row in "${round4_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  # The workflow form: the correction in front of a generated `PASS` object.
+  reader_comment "$reader_prose" > "$tmp/round4-closed.md"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case]" \
+    "$(reader_rows "$tmp/round4-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/round4-closed.md")"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit status [$reader_case]" "${got%%|*}" 0
+  # And the frontier form, where the same correction stands in a review that writes its own
+  # verdict line -- the form every review in this repository is posted in.
+  prose_review "$reader_prose
+" > "$tmp/round4-closed-prose.md"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS [$reader_case] prose" \
+    "$(reader_rows "$tmp/round4-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(reader_audit "$tmp/round4-closed-prose.md")"
+  contains "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS audit [$reader_case] prose" "$got" \
+    "manual:$reader_want-outside-the-numbered-findings"
+  expect "MUT-STRAY-LINK-EXTENT-IS-THE-RENDERERS merge calls [$reader_case] prose" "${got##*|}" 0
+done
+# THE EXEMPTION, MATCHED RATHER THAN COUNTED. A review that cites the review format with a titled
+# link and then appends a code-formatted correction: three `VERDICT:` occurrences written, three
+# seen in the reading that consumes both, and the correction lost. At `3fe68c37`: exit 0, PASS,
+# no stray, READY and ONE merge call.
+prose_review 'See [review format](https://example.invalid/policy "VERDICT: PASS") for the shape.
+
+`VERDICT`: CHANGES_REQUIRED -- correcting my own review above.
+' > "$tmp/prose-cancelled.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY" \
+  "$(reader_rows "$tmp/prose-cancelled.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+got="$(reader_audit "$tmp/prose-cancelled.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" \
+  "manual:VERDICT:-outside-the-numbered-findings"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY audit" "$got" MANUAL
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls" "${got##*|}" 0
+# AND THE EXEMPTION STILL EXEMPTS, which is the half that keeps it shippable and the half a
+# stricter rule breaks. An occurrence THE COMMENT WRITES is exempt wherever it stands -- including
+# where a reader never sees it, and including where the reading that shows it had to move it --
+# so each of these is quiet, READY and ONE merge call, here and at `3fe68c37`.
+exempt_quiet=(
+  'verdict in a link title|See [review format](https://example.invalid/policy "VERDICT: PASS") for it.'
+  'verdict in a code span|A code span `VERDICT: PASS` quoted whole, which this comment writes.'
+  'verdict in a padded code span|A span ` VERDICT: PASS ` padded at both ends, which it writes.'
+)
+for row in "${exempt_quiet[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  prose_review "$reader_prose
+" > "$tmp/prose-exempt.md"
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" \
+    "$(reader_rows "$tmp/prose-exempt.md")" "0|prose/$enqueue_head/PASS/-/-"
+  got="$(reader_audit "$tmp/prose-exempt.md")"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [$reader_case]" "$got" "enqueued #999"
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [$reader_case]" "${got##*|}" 1
+done
+# AND THE EXEMPTION NAMES THE OCCURRENCE AND NOT ITS SPELLING. MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT,
+# round seven's second, and it is the class round four closed by identity arriving back as text.
+#
+# Round six asked whether the comment writes that LINE ANYWHERE. So a review that QUOTES the
+# protocol's blocking line while discussing it, ends `VERDICT: PASS`, and then appends its
+# correction in a spelling only a reader sees, cancelled the correction against its own earlier
+# quotation: at `7767c71c` exit 0, PASS, no stray, READY and ONE `gh pr merge` call, where the
+# same review WITHOUT the quotation was MANUAL and none. Both halves are driven, because the
+# second is what says the quotation is what did it.
+#
+# The occurrences are matched in order now: the quotation is spent on the occurrence a reader sees
+# IN it, and the correction after it has only `VERDICT\:` left to match against.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`.
+
+VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-with.md"
+prose_review 'VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-without.md"
+for quoted in with without; do
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [$quoted the quotation]" \
+    "$(reader_rows "$tmp/prose-quoted-$quoted.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+  got="$(reader_audit "$tmp/prose-quoted-$quoted.md")"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT audit [$quoted the quotation]" "$got" \
+    "manual:VERDICT:-outside-the-numbered-findings"
+  contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT audit [$quoted the quotation]" "$got" MANUAL
+  expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [$quoted the quotation]" "${got##*|}" 0
+done
+# AND THE QUOTATION ON ITS OWN IS STILL QUIET, which is the half a stricter rule breaks: a review
+# that quotes the protocol and corrects nothing is READY and calls merge once.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`.
+' > "$tmp/prose-quoted-only.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [the quotation on its own]" \
+  "$(reader_rows "$tmp/prose-quoted-only.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-quoted-only.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [the quotation on its own]" "$got" "enqueued #999"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [the quotation on its own]" "${got##*|}" 1
+# AND THE SAME LINE TWICE IN THE READING NEEDS TWO OF THEM IN THE COMMENT, which is what "in
+# order" buys and what a match anywhere could not say. Two quotations and one correction: the
+# correction has nothing left, and it is reported.
+prose_review 'A blocking review ends in `VERDICT: CHANGES_REQUIRED`, and again
+`VERDICT: CHANGES_REQUIRED` for emphasis.
+
+VERDICT\: CHANGES_REQUIRED
+' > "$tmp/prose-quoted-twice.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [two quotations and one correction]" \
+  "$(reader_rows "$tmp/prose-quoted-twice.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+# AND THE ONE SHAPE THIS DOES NOT CLOSE, FIXTURED AT WHAT IT DOES. It is
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES's open row and the row says which direction was
+# chosen, so a change that closes it fails here and updates this with the finding.
+#
+# An occurrence THE COMMENT WRITES AND NO READER SEES -- inside a link reference definition's
+# TITLE -- can be spent on a correction a reader does see, when its line is the correction's line
+# and it stands AFTER it. Ordering does not tell them apart: the only thing that would is knowing
+# which written characters the renderer dropped, which is a Markdown parse, which is the thing
+# this design exists not to do. Round three's COUNT could not tell them apart either, and for the
+# same reason -- one written occurrence disappears as the definition is rendered and one appears
+# as the reference is resolved, so the two cancel exactly.
+#
+# Executed at `7767c71c` AND here, and the answer is the same at both: `stray=-`, verdict PASS.
+# This is not a regression of round seven's and not a repair of it. The merge it costs is asserted
+# rather than described, because a `-` is a claim about a merge.
+prose_review 'VERDICT&#58; CHANGES_REQUIRED
+
+[ref]: https://example.invalid/x "VERDICT: CHANGES_REQUIRED"
+' > "$tmp/prose-title-after.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title after the correction]" \
+  "$(reader_rows "$tmp/prose-title-after.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-title-after.md")"
+contains "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title after the correction]" "$got" \
+  "enqueued #999"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT merge calls [OPEN: a title after the correction]" \
+  "${got##*|}" 1
+# WHERE THE TITLE STANDS DOES NOT MATTER, only that it stands after the occurrence the exemption
+# last spent -- which in this form's template is anywhere after the opening verdict line. The row
+# above has it after the correction and this one has it before, and both are quiet: the sentence
+# the finding records is "an occurrence the comment writes and NO READER SEES can be spent on one
+# a reader does", not "an occurrence that follows it".
+prose_review '[ref]: https://example.invalid/x "VERDICT: CHANGES_REQUIRED"
+
+VERDICT&#58; CHANGES_REQUIRED
+' > "$tmp/prose-title-before.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-TEXT [OPEN: a title before the correction]" \
+  "$(reader_rows "$tmp/prose-title-before.md")" "0|prose/$enqueue_head/PASS/-/-"
+# And the correction with NO such occurrence anywhere IS reported, which is what says the title is
+# what does it: the same review without the definition is MANUAL and calls merge none.
+# The row that needs a newline inside the span, so it is built rather than tabulated: a code span
+# crossing a line ending shows the ending AS A SPACE, and `VERDICT: PASS` on the two sides of it
+# is still eight characters the comment wrote in one run. What makes it exempt is that the
+# comparison folds every run of whitespace to one space on BOTH sides: a line ending the comment
+# stores is not a different document to a reader who sees a space.
+prose_review 'A span crossing a line `VERDICT:
+PASS` which this comment writes.
+' > "$tmp/prose-exempt-crossed.md"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY [verdict across a line ending]" \
+  "$(reader_rows "$tmp/prose-exempt-crossed.md")" "0|prose/$enqueue_head/PASS/-/-"
+got="$(reader_audit "$tmp/prose-exempt-crossed.md")"
+expect "MUT-PROSE-VERDICT-EXEMPTION-BY-IDENTITY merge calls [verdict across a line ending]" \
+  "${got##*|}" 1
+
+# --- a block prefix comes off first, a raw HTML tag is markup, and a definition is a grammar -----
+# MUT-STRAY-BLOCK-PREFIX-STRIPPED, MUT-STRAY-HTML-TAG-IS-MARKUP and
+# MUT-STRAY-DEFINITION-IS-THE-RENDERERS.
+#
+# THE SAME SENTENCE AS THE SECTION ABOVE, and these are the three ways the code that closed the
+# link left it false. Each row below was measured through the WHOLE AUDIT at `196ecd1a` -- exit 0,
+# PASS, no stray, READY and ONE `gh pr merge` call -- and each renders as the correction it is to
+# `markdown-it-py` 3.0.0, checked on 2026-09-21.
+#
+# 1. A RENDERER PARSES BLOCK STRUCTURE FIRST AND ITS INLINE RULES SEE THE BLOCK'S CONTENT. Inside
+#    a blockquote they never see the `>` that opens each line; inside a list item they never see
+#    the indentation. This reading is run over the comment AS GITHUB STORES IT, so every rule that
+#    spans a line ending answered differently: a citation wrapped across two lines inside a quote
+#    met the second line's `>` where a title had to stand, and a QUOTED reference definition failed
+#    `LINK_DEFINITION`'s own `^ {0,3}` anchor. Round five answered that with four more readings of
+#    the comment, each line's prefix taken off; ROUND SIX DELETED ALL OF IT, because GitHub's
+#    rendering has already had the block pass run over it. The rows stay: what they assert is the
+#    outcome, and the outcome is the same.
+# 2. INLINE RAW HTML IS MARKUP AND THE TEXT BETWEEN TWO TAGS IS TEXT. `<strong>VERDICT</strong>:`
+#    and `<code>VERDICT</code>:` render to the same characters as `**VERDICT**:` and
+#    `` `VERDICT`: `` -- asserted below by rendering BOTH spellings of one correction and reading
+#    the same stray out of each -- and were READY with one merge call where the Markdown spellings
+#    were MANUAL with none. Round five transcribed that renderer's `html_inline` rule; round six
+#    reads the tags GitHub actually emitted.
+# 3. WHETHER A REFERENCE PAIR IS A LINK IS SCANNED BOTH WAYS, because the two renderers that could
+#    answer DISAGREE and neither answer is safe on its own. Round four let a definition's
+#    destination wrap onto the next line by asking only that SOMETHING follow the colon, which
+#    INVENTED definitions `markdown-it-py` refuses -- an unbalanced `(unfinished`, a `javascript:`
+#    URL, rubbish after the destination -- and a pair naming an invented label has its brackets
+#    consumed, which JOINS the words either side and loses the severity between them. Round five
+#    first answered that by transcribing that renderer's `reference` rule, `parseLinkDestination`
+#    and `validateLink` included, AND THEN PUT EACH SHAPE TO GITHUB, which is the renderer that
+#    renders these comments. Executed against `POST /markdown` (`mode: gfm`) on 2026-09-21, over
+#    `[VERDICT][policy]:` beside `[policy]:` and each destination:
+#
+#        destination                     GitHub shows          markdown-it-py shows
+#        https://example.invalid/x       VERDICT:              VERDICT:
+#        <>                              VERDICT:              VERDICT:
+#        a title after it                VERDICT:              VERDICT:
+#        wrapped onto the next line      VERDICT:              VERDICT:
+#        (unfinished                     VERDICT:              [VERDICT][policy]:
+#        javascript:alert(1)             VERDICT:              [VERDICT][policy]:
+#        rubbish after the destination   [VERDICT][policy]:    [VERDICT][policy]:
+#        two blank lines before it       [VERDICT][policy]:    [VERDICT][policy]:
+#
+#    TWO OF THE EIGHT, AND THE TRANSCRIPTION MISSED THE CORRECTION GITHUB SHOWS IN BOTH. A
+#    destination `parseLinkDestination` refuses and a protocol `validateLink` refuses are both
+#    definitions to GitHub: it strips the `href` and shows the label's text all the same. Round
+#    five answered that by reading a reference pair BOTH WAYS and taking the union; ROUND SIX ASKS
+#    GITHUB, so there is one answer and it is the right one. Two of the rows this paragraph closed
+#    have MOVED to the settled table below, because GitHub links what `markdown-it-py` does not and
+#    a reader then sees `P1policy`, which carries no token.
+#
+# THE CONTROLS ARE THE SAME CORRECTIONS THE HEAD BEFORE THIS ONE ALREADY CAUGHT, which is what says
+# the difference is the Markdown and not the words.
+
+quoted_wrap='> [VERDICT](https://example.invalid/policy
+> "Review"): CHANGES_REQUIRED -- correcting the review below.'
+quoted_defn='> [VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+>
+> [policy]: https://example.invalid/review-policy'
+quoted_severity='> The blocker is P[1][policy] and it is not in the object.
+>
+> [policy]: https://example.invalid/review-policy'
+listed_defn='- [VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+- [policy]: https://example.invalid/review-policy'
+unquoted_wrap='[VERDICT](https://example.invalid/policy
+"Review"): CHANGES_REQUIRED -- correcting the review below.'
+malformed_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]:
+  (unfinished'
+unbalanced_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]:
+  (unfinished'
+refused_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: javascript:alert(1)'
+rubbish_verdict='[VERDICT][policy]: CHANGES_REQUIRED -- correcting the review below.
+
+[policy]: https://example.invalid/x and rubbish'
+refused_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]: javascript:alert(1)'
+garbage_defn='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]: https://example.invalid/x and rubbish'
+
+# <case>|<the prose, which a renderer shows the token in>|<the stray field the review must carry>
+round5_closed=(
+  "quoted wrapped citation|$quoted_wrap|VERDICT:"
+  "quoted definition verdict|$quoted_defn|VERDICT:"
+  "quoted definition severity|$quoted_severity|P1"
+  "listed definition verdict|$listed_defn|VERDICT:"
+  'quoted bold verdict|> **VERDICT**: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html bold verdict|<strong>VERDICT</strong>: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html code verdict|<code>VERDICT</code>: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'html emphasis severity|The blocker is P<em>1</em> and it is not in the object.|P1'
+  'html split verdict|VER<span>DICT:</span> CHANGES_REQUIRED, and the object says PASS.|VERDICT:'
+  'html attributed verdict|<span data-x="[a](b)">VERDICT</span>: CHANGES_REQUIRED here.|VERDICT:'
+  'html quoted bold verdict|> <strong>VERDICT</strong>: CHANGES_REQUIRED here.|VERDICT:'
+  "invented definition, rubbish after it|$garbage_defn|P1"
+  "unquoted wrapped citation|$unquoted_wrap|VERDICT:"
+  'markdown bold verdict|**VERDICT**: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'markdown code verdict|`VERDICT`: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  # ROUND FIVE'S OWN TWO P1s, AS DOCUMENTS RATHER THAN AS A CLAIM. Round six's fix-check lens
+  # moved `br` from BLOCK_HTML to INLINE_HTML in an isolated copy and the first of these went
+  # back to PASS with no stray while the gate stayed green: the row that was supposed to guard it
+  # asserted tag MEMBERSHIP, which is not what the classification does to a token. Both wrong
+  # answers LOSE one -- a reading that joins across `br` reads `P1Still`, and one that breaks at
+  # `em` reads `P` and `1` -- so what is driven is the token, through the parser and the audit.
+  'boundary taken by a break|The blocker is P[1](https://example.invalid/u)<br>Still reproducible.|P1'
+  'boundary kept across emphasis|The unresolved issue is _P1_~_P2_ depending on input size.|P1/P2'
+)
+for row in "${round5_closed[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  # The workflow form: the correction in front of a generated `PASS` object.
+  reader_comment "$reader_prose" > "$tmp/round5-closed.md"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case]" \
+    "$(reader_rows "$tmp/round5-closed.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/round5-closed.md")"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [$reader_case]" "${got##*|}" 0
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit status [$reader_case]" "${got%%|*}" 0
+  # And the frontier form, where the same correction stands in a review that writes its own
+  # verdict line -- the form every review in this repository is posted in.
+  prose_review "$reader_prose
+" > "$tmp/round5-closed-prose.md"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [$reader_case] prose" \
+    "$(reader_rows "$tmp/round5-closed-prose.md")" "0|prose/$enqueue_head/PASS/-/$reader_want"
+  got="$(reader_audit "$tmp/round5-closed-prose.md")"
+  contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [$reader_case] prose" "$got" \
+    "manual:$reader_want-outside-the-numbered-findings"
+  expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [$reader_case] prose" "${got##*|}" 0
+done
+# THE TWO SPELLINGS OF ONE CORRECTION READ THE SAME, which is the whole claim behind reading a tag
+# as markup rather than as writing: `<strong>VERDICT</strong>:` and `**VERDICT**:` are the same
+# eight characters to a reader, so a rule that catches one and not the other catches a SPELLING and
+# not a correction. Asserted as an equality between two rows of the table above rather than as two
+# separate expectations, so neither can drift away from the other.
+reader_comment '<strong>VERDICT</strong>: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-html.md"
+reader_comment '**VERDICT**: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-markdown.md"
+expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike]" \
+  "$(reader_rows "$tmp/round5-html.md")" "$(reader_rows "$tmp/round5-markdown.md")"
+reader_comment '<code>VERDICT</code>: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-html.md"
+reader_comment '`VERDICT`: CHANGES_REQUIRED -- correcting the review below.' \
+  > "$tmp/round5-markdown.md"
+expect "MUT-STRAY-HTML-TAG-IS-MARKUP [the two spellings read alike, code]" \
+  "$(reader_rows "$tmp/round5-html.md")" "$(reader_rows "$tmp/round5-markdown.md")"
+# AND THE OTHER DIRECTION IS PINNED AGAINST ROUND FIVE'S OWN INTERMEDIATE STATE, which is where
+# it was found. These three were `stray=VERDICT:` and MANUAL at `196ecd1a`, went SILENT under the
+# `reference`-rule transcription round five wrote first -- exit 0, PASS, no stray, READY, ONE
+# `gh pr merge` call -- and are MANUAL again here. Two of them are corrections GitHub SHOWS and
+# `markdown-it-py` does not; the third is one NEITHER shows, and it is reported because the loose
+# rule reads it as a link. That third row is the over-read this design pays for the other two, and
+# it is here so the price is asserted rather than described.
+intermediate_rows=(
+  "GitHub links an unbalanced destination|$unbalanced_verdict|VERDICT:"
+  "GitHub links a refused protocol|$refused_verdict|VERDICT:"
+)
+for row in "${intermediate_rows[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-intermediate.md"
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
+    "$(reader_rows "$tmp/round5-intermediate.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/round5-intermediate.md")"
+  contains "MUT-STRAY-DEFINITION-IS-THE-RENDERERS audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS merge calls [$reader_case]" "${got##*|}" 0
+done
+# AND A DEFINITION A RENDERER DOES ACCEPT IS STILL ACCEPTED, which is the half a stricter rule
+# breaks and the half round four bought with the two it lost: the wrapped destination, the titled
+# one and the angled one each still make their pair a link, so the correction between the brackets
+# still reaches a person.
+accepted_defn=(
+  'wrapped destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]:
+  https://example.invalid/review-policy'
+  'titled destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: https://example.invalid/review-policy "the policy"'
+  'angled destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: <https://example.invalid/review policy>'
+  'image data destination|[VERDICT][policy]: CHANGES_REQUIRED here.
+
+[policy]: data:image/png;base64,AA'
+)
+for row in "${accepted_defn[@]}"; do
+  reader_case="${row%%|*}"; reader_prose="${row#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-accepted.md"
+  expect "MUT-STRAY-DEFINITION-IS-THE-RENDERERS [$reader_case]" \
+    "$(reader_rows "$tmp/round5-accepted.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/VERDICT:"
+done
+# THE FALSE-POSITIVE GUARD, WHICH IS WHAT THIS WHOLE FAMILY IS PAID FOR IN. A review citing a
+# finding file by name -- `findings/P1_security-trust_...md` -- writes `P1` between underscores and
+# is not a severity outside the object. It was quiet at every head this family has had and it is
+# quiet here, through the whole audit: READY, and ONE merge call.
+reader_comment 'See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
+  > "$tmp/round5-citation.md"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [finding citation stays quiet]" \
+  "$(reader_rows "$tmp/round5-citation.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+got="$(reader_audit "$tmp/round5-citation.md")"
+contains "MUT-STRAY-BLOCK-PREFIX-STRIPPED audit [finding citation stays quiet]" "$got" "enqueued #999"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [finding citation stays quiet]" "${got##*|}" 1
+# AND A QUOTED ONE, because the reading that takes the `>` off is the one this round added and it
+# must not turn an ordinary citation into a blocker either.
+reader_comment '> See findings/P1_security-trust_202609211100_the-prose-scans-cannot-see-what-a-reader-sees.md for the rest.' \
+  > "$tmp/round5-citation.md"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED [quoted finding citation stays quiet]" \
+  "$(reader_rows "$tmp/round5-citation.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+got="$(reader_audit "$tmp/round5-citation.md")"
+expect "MUT-STRAY-BLOCK-PREFIX-STRIPPED merge calls [quoted finding citation stays quiet]" \
+  "${got##*|}" 1
+
+# --- and the two GitHub reads differently from CommonMark ----------------------------------------
+# MUT-STRAY-GITHUB-STRIKETHROUGH and MUT-STRAY-CRLF-BLANK-LINE.
+#
+# EVERY RULE ABOVE IS `markdown-it-py` 3.0.0's, AND THE COMMENT IS RENDERED BY GITHUB. Two places
+# where that difference is the whole answer, both found by asking what this repository's comments
+# are actually made of rather than by a lens:
+#
+# 1. `~~VERDICT~~: CHANGES_REQUIRED` IS A CORRECTION STRUCK THROUGH, and striking a line out is
+#    ordinary writing. Strikethrough is a GFM extension: cmark-gfm has it, GitHub renders it, and
+#    CommonMark does not, so a reading that takes `*` and `_` runs and not `~` runs showed the token
+#    to a reader and none of it to this scan. At `196ecd1a`: stray none, READY and ONE `gh pr merge`
+#    call, where `**VERDICT**:` in its place was MANUAL with none.
+# 2. GITHUB'S OWN EDITOR STORES `\r\n` -- 7 of the 685 comments this repository held on
+#    2026-09-21. `BLANK_LINE` asked for `\n[ \t]*\n`, which no such comment holds, so one had NO
+#    BLANK LINE AT ALL to this reading and every rule that stops at one ran to the end of it. THAT
+#    WAS HARMLESS AT `196ecd1a`, WHOSE DEFINITION PATTERN COULD CROSS ONE LINE ENDING AND NO MORE,
+#    AND ROUND 5 MADE IT COST A SEVERITY: its definition rule skipped whitespace up to this
+#    boundary, so with no boundary a `[policy]:` whose destination stands TWO blank lines below it
+#    became a definition, ``P`1`[policy]`` became the link `P1policy`, and the severity went.
+#    Round six reads no line endings of its own at all -- GitHub did the block pass. Executed
+#    mid-round, before the push: the same words were `stray=P1` with `\n` endings and none with
+#    `\r\n` ones. The row below is therefore a regression test against ROUND 5's own intermediate
+#    state and not against `196ecd1a`, where both spellings already answered `P1` -- six shapes
+#    chosen to cross a blank line were executed at `3fe68c37`, at `196ecd1a` and here with both
+#    endings without finding one that differs at either of those two heads.
+strike_rows=(
+  'struck verdict|~~VERDICT~~: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'struck severity|The blocker is P~~1~~ and it is not in the object.|P1'
+  'single tilde verdict|~VERDICT~: CHANGES_REQUIRED -- correcting the review below.|VERDICT:'
+  'struck quoted verdict|> ~~VERDICT~~: CHANGES_REQUIRED here.|VERDICT:'
+)
+for row in "${strike_rows[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/round5-strike.md"
+  expect "MUT-STRAY-GITHUB-STRIKETHROUGH [$reader_case]" \
+    "$(reader_rows "$tmp/round5-strike.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/round5-strike.md")"
+  contains "MUT-STRAY-GITHUB-STRIKETHROUGH audit [$reader_case]" "$got" MANUAL
+  expect "MUT-STRAY-GITHUB-STRIKETHROUGH merge calls [$reader_case]" "${got##*|}" 0
+done
+# AND A `~` THAT IS NOT A DELIMITER STAYS WRITTEN, which is the other half: a home directory and an
+# approximation are what `~` is in this repository's reviews, and neither makes a token.
+reader_comment 'Run it from ~/bin, it takes ~5 seconds, and nothing here is a severity.' \
+  > "$tmp/round5-strike.md"
+expect "MUT-STRAY-GITHUB-STRIKETHROUGH [an ordinary tilde stays quiet]" \
+  "$(reader_rows "$tmp/round5-strike.md")" "0|json/$enqueue_head/PASS/$enqueue_base/-"
+# THE SAME WORDS WITH EACH LINE ENDING, and the assertion is that they read ALIKE. A comment whose
+# severity survives only because it was typed in an editor that writes `\n` is a comment the merge
+# path reads by accident.
+crlf_prose='The blocker is P`1`[policy] and it is not in the object.
+
+[policy]:
+
+https://example.invalid/review-policy'
+reader_comment "$crlf_prose" > "$tmp/round5-lf.md"
+"$parser_python" - "$tmp/round5-lf.md" "$tmp/round5-crlf.md" <<'CRLF' || error "MUT-STRAY-CRLF-BLANK-LINE: could not build the CRLF copy"
+import sys
+with open(sys.argv[1], encoding="utf-8", newline="") as handle:
+    body = handle.read()
+with open(sys.argv[2], "w", encoding="utf-8", newline="") as handle:
+    handle.write(body.replace("\r\n", "\n").replace("\n", "\r\n"))
+CRLF
+expect "MUT-STRAY-CRLF-BLANK-LINE [line feeds]" \
+  "$(reader_rows "$tmp/round5-lf.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+expect "MUT-STRAY-CRLF-BLANK-LINE [carriage returns read alike]" \
+  "$(reader_rows "$tmp/round5-crlf.md")" "$(reader_rows "$tmp/round5-lf.md")"
+got="$(reader_audit "$tmp/round5-crlf.md")"
+contains "MUT-STRAY-CRLF-BLANK-LINE audit" "$got" MANUAL
+expect "MUT-STRAY-CRLF-BLANK-LINE merge calls" "${got##*|}" 0
+
+# --- the structure pass is bounded, and a comment cannot make it run for seconds ------------------
+# MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED.
+#
+# THE AUDIT PARSES THE REVIEW SYNCHRONOUSLY ON THE MERGE PATH, so a comment that makes this parser
+# run for half a minute is a denial of service against the queue and not a slow test. Two shapes did:
+#
+#   * `'[' * n + 'x' + ']' * n` -- every closing bracket folded a prospective SHORTCUT label a
+#     little longer than the last, with no definitions anywhere. 0.364s at 32 KB at `3fe68c37`,
+#     0.460s at `196ecd1a`, and **29.33 seconds** over the 256 KB document built below. Round five
+#     closed it by deciding nameability off the last bracket its walk had passed; ROUND SIX HAS NO
+#     SUCH WALK, because there is no label reading left in the file at all.
+#   * `[policy]:` followed by a long run of spaces and then a blank line -- `LINK_DEFINITION`'s two
+#     whitespace repetitions either side of an optional line ending partitioned that run again and
+#     again. 0.012s at 32 KB at `3fe68c37` and **85.85 seconds** at `196ecd1a` over the 128 KB
+#     document below, which round four introduced. Closed by parsing the definition instead of
+#     matching it.
+#
+# Both are **0.10 and 0.05 seconds** here, measured on 2026-09-21. THE BOUND BELOW IS A CEILING ON A
+# QUADRATIC AND NOT A BENCHMARK: fifteen seconds is 150 and 300 times what this head takes and less
+# than half and a sixth of what `196ecd1a` took, so a machine several times slower than this one
+# still separates them. A row that starts failing here has changed the SHAPE of the pass.
+bounded_document() {  # bounded_document FILE PROSE
+  { printf 'Reviewed head: %s\n\n' "$enqueue_head"; printf '%s\n\n' "$2"
+    printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$1"
+  # AND A RENDERING OF THE SAME SIZE, because the reduction of the rendering is on the merge path
+  # too and these four cases are the only ones that measure TIME. IT IS NOT GITHUB'S RENDERING OF
+  # THIS DOCUMENT and is not recorded as one: these documents are 128 and 256 KB of one character,
+  # what they assert is a CEILING ON A QUADRATIC, and what a reduction costs is a function of the
+  # size and the tag count rather than of what the tags say. Every case that asserts a TOKEN takes
+  # `rendering_of` instead.
+  # THROUGH A FILE AND NOT THROUGH ARGV: these documents are 128 and 256 KB, and an argument list
+  # that long is `/usr/bin/python3: Argument list too long` rather than a rendering.
+  printf '%s' "$2" > "$1.prose"
+  "$parser_python" - "$1.prose" "$1.html" <<'BOUNDEDHTML'
+import html, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    prose = source.read()
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write('<p dir="auto">%s</p>\n' % html.escape(prose))
+BOUNDEDHTML
+}
+bounded_case() {  # bounded_case NAME FILE
+  local started elapsed status=0
+  started="$(date +%s)"
+  "$parser_python" scripts/pr-review-parse.py review --out "$tmp/bounded.json" "$2" "$2.html" \
+    > /dev/null 2>&1 || status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect "MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED status [$1]" "$status" 0
+  ((elapsed <= 15)) || error \
+    "MUT-STRAY-STRUCTURE-PASS-IS-BOUNDED [$1]: $(wc -c < "$2") bytes took ${elapsed}s, want 15s or less"
+}
+bounded_brackets="$(printf '%0.s[' $(seq 1 128000))x$(printf '%0.s]' $(seq 1 128000))"
+bounded_document "$tmp/bounded-brackets.md" "$bounded_brackets"
+bounded_case 'a nest of brackets' "$tmp/bounded-brackets.md"
+# AND THE DESTINATIONLESS DEFINITION IS DESTINATIONLESS, which this fixture was not. It appended
+# `and nothing that could be a destination follows it.` after ONE line ending, and that line IS a
+# destination to the regex the row exists to pin: the match SUCCEEDS on its first attempt and the
+# expensive failure path is never entered. Measured on 2026-09-21: the document as it stood took
+# **0.04s** at `196ecd1a`, where the shape this comment describes -- the spaces, then a BLANK LINE
+# -- takes **84.82s**, and 0.06s here. A fixture that cannot fail pins nothing, and this one was
+# green against the very code it names.
+bounded_document "$tmp/bounded-definition.md" \
+  "[policy]:$(printf '%0.s ' $(seq 1 128000))"
+bounded_case 'a definition with no destination' "$tmp/bounded-definition.md"
+# AND THE TWO ROUND FOUR CLOSED, kept here because a repair of one shape has twice re-opened
+# another. Over the 128 KB documents built below, measured on 2026-09-21: `'[x](' * 32000` took
+# 144.20 seconds at `3fe68c37`, 0.53 at `196ecd1a` and 0.52 here, and `'[a][' * 32000` took 157.23
+# seconds at `3fe68c37`, 0.06 at `196ecd1a` and 0.06 here.
+bounded_document "$tmp/bounded-opens.md" "$(printf '%0.s[x](' $(seq 1 32000))"
+bounded_case 'destinations that never close' "$tmp/bounded-opens.md"
+bounded_document "$tmp/bounded-labels.md" "$(printf '%0.s[a][' $(seq 1 32000))"
+bounded_case 'labels that never close' "$tmp/bounded-labels.md"
+
+# --- what the rendering settles, and the one thing it does not --------------------------------
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES, which is still the finding for what is LEFT.
+#
+# SIX OF THESE ROWS WERE THE OPEN ONES AND THE RENDERING CLOSED ALL SIX, which is the measurement
+# this round's design was chosen on. Each was `reader_open` at `b0c8b8c9`, each is asserted here at
+# the value GITHUB'S OWN RENDERING gives it, and the values moved in both directions:
+#
+#   * `Deferred: __&#80;1**and__ the rest of it.` was the ONE UNDER-READ LEFT -- a sentence whose
+#     two delimiter runs a renderer answers differently, which no pair of unpaired readings can
+#     reach. GitHub renders `<strong>P1**and</strong>`, so a reader sees `P1`, and it is reported.
+#     It was `-` at `b0c8b8c9`, READY with ONE merge call; it is MANUAL with none here;
+#   * and five were OVER-READ -- a reference or an underscore run inside a CODE SPAN or a CODE
+#     BLOCK, where a renderer resolves nothing; an UNPAIRED run, which a renderer leaves written; a
+#     LINK REFERENCE DEFINITION, which a reader is not shown at all; and a bracket pair NESTED in a
+#     link's text, which a renderer leaves written because links do not nest. Each cost a `manual:`
+#     line at `b0c8b8c9` and none here, because GitHub shows no token in any of them.
+#
+# AND FOUR MORE MOVED, EACH BECAUSE GITHUB IS NOT `markdown-it-py` 3.0.0 AND THE ROWS THAT NAMED
+# THEM WERE MEASURED AGAINST THAT RENDERER. Each was a row of an earlier round's closed table, each
+# is here at the value GitHub's own rendering gives it, and each is now quiet:
+#
+#   * `[VERDICT][<U+0131>]:` over `[i]: <url>` -- round four's LABEL FOLD row. `markdown-it-py`
+#     normalises a reference label with `.lower().upper()`, which merges DOTLESS I with `i`, so the
+#     pair is a link there and the correction is shown. GITHUB DOES NOT FOLD THEM: it shows
+#     `[VERDICT][<U+0131>]:`, brackets and all, and there is no `VERDICT:` for a reader to see. The
+#     control beside it -- the same label spelled `i` -- IS a link to both, and it is still
+#     `VERDICT:` in the table above;
+#   * `[VERDICT][policy]:` over `[policy]: <url> and rubbish` -- the row round five kept as the
+#     price of reading a reference pair both ways. Neither renderer makes that a definition, so the
+#     brackets stay written and a reader sees no `VERDICT:`. It was an over-read and it is gone;
+#   * and the two `` P`1`[policy] `` rows, which GitHub LINKS and `markdown-it-py` does not: a
+#     reader sees `P1policy`, which is the boundary case below.
+#
+# WHAT IS LEFT IS NOT A READING ERROR AND IT IS HERE SO IT IS NOT MISTAKEN FOR ONE. `STRAY_TOKEN`
+# asks for a severity at a WORD BOUNDARY, and a renderer can JOIN the severity to the word after
+# it: `` The blocker is P`1`[policy]. `` with `[policy]:` defined renders `P1policy`, which carries
+# no token -- and neither does `P1policy` written plainly, so the sentence this family is paid for
+# still holds. GitHub defines that label where `markdown-it-py` 3.0.0 does not, which is why these
+# two rows were `P1` at `b0c8b8c9` and are `-` here: that head was reading the other renderer.
+rendering_settled=(
+  'two runs answered differently|Deferred: __&#80;1**and__ the rest of it.|P1'
+  'code span reference|The blocker is `&#80;1` here.|-'
+  'code span underscore|The blocker is `_P1_` here.|-'
+  'unpaired star|The class is P*1 in the table.|-'
+  'link reference definition|[VERDICT]: https://example.invalid/review-policy|-'
+  'nested bracket pair|Note [a [b](https://example.invalid/u) P](https://example.invalid/v)1 here.|-'
+  'joined by a definition|The blocker is P`1`[policy].
+
+[policy]:
+  (unfinished|-'
+  'joined by a refused protocol|The blocker is P`1`[policy].
+
+[policy]: javascript:alert(1)|-'
+  "joined by an unbalanced definition|$malformed_defn|-"
+  "joined by a refused protocol, in the object's words|$refused_defn|-"
+  "a label GitHub does not fold|$dotless_verdict|-"
+  "a definition with rubbish after it|$rubbish_verdict|-"
+)
+for row in "${rendering_settled[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/settled-$reader_case.md"
+  expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [$reader_case]" \
+    "$(reader_rows "$tmp/settled-$reader_case.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+done
+# The code block row needs newlines, so it is built rather than tabulated. A `text` block is not a
+# code span and it is the same class: a renderer resolves nothing inside either, and the readings
+# that used to leave the delimiters written resolved everything everywhere.
+{ printf 'Reviewed head: %s\n\n' "$enqueue_head"
+  printf '```text\nThe blocker is _P1_ here.\n```\n\n'
+  printf '```json\n'; enqueue_pass; printf '\n```\n'; } > "$tmp/settled-fence.md"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES [code block underscore]" \
+  "$(reader_rows "$tmp/settled-fence.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+# THE ONE THAT WAS UNDER-READ GOES THROUGH THE WHOLE AUDIT, because that is the one that could
+# cost a merge and a `stray` field is not that claim: MANUAL, and no call, where `b0c8b8c9` was
+# READY with one.
+got="$(reader_audit "$tmp/settled-two runs answered differently.md")"
+contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [two runs answered differently]" \
+  "$got" "manual:P1-outside-the-verdict-object"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [two runs]" "${got##*|}" 0
+# AND THE TWO THE RENDERING JOINS GO THROUGH IT TOO, because `-` is a claim about a merge: these
+# are READY with one call, and the row above is what says the difference is the rendering.
+got="$(reader_audit "$tmp/settled-joined by a definition.md")"
+contains "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES audit [joined by a definition]" \
+  "$got" "enqueued #999"
+expect "PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES merge calls [joined]" "${got##*|}" 1
+
+# --- the rendering is fetched, and without it the audit refuses ---------------------------------
+# MUT-SHOWN-RENDERING-OPTIONAL, MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE, MUT-SHOWN-FINDINGS-ARE-STRAY
+# and MUT-SHOWN-TAG-UNCLASSIFIED.
+#
+# THE PROSE THE TWO SCANS READ IS GITHUB'S OWN RENDERING OF THE COMMENT, fetched beside the body by
+# `scripts/pr-ready-audit.sh` and handed to the parser as a second document. Four rounds derived it
+# instead, by transcribing a renderer's inline rules over the characters the comment stores, and
+# each round's repair introduced defects of its own -- two in round three, one in round four, three
+# in round five. These are the cases the fetched reading needs and the derived one did not.
+#
+# 1. WITHOUT IT, NOTHING PROCEEDS. The shape that would undo the change is not a failed call: it is
+#    a call that SUCCEEDS and carries nothing. `gh api --jq '.body_html'` against an answer with no
+#    such field -- the media type dropped, the endpoint changed -- prints ONE NEWLINE and exits 0,
+#    which a reading of the characters alone would take for a comment showing no tokens. Both ends
+#    refuse: the audit blocks on a rendering that is blank, and the parser refuses a comment that
+#    has text and renders to nothing.
+# 2. A CODE BLOCK THE COMMENT WRITES IS READ WHERE THE COMMENT WRITES IT, AND ONE IT DOES NOT IS
+#    READ HERE. The workflow form's verdict is a fenced object, and a reader sees every character
+#    of it -- so a reading that took `<pre>` as prose without qualification would report the
+#    review's own `"severity": "P1"` as a severity written outside the findings, on every blocking
+#    review this repository has ever had. Round six answered that by skipping `<pre>` entirely, on
+#    the premise that its content is shown VERBATIM. THE PREMISE IS FALSE FOR RAW HTML, and the
+#    rows below are the two executions that say so. What is skipped is a block the comment WRITES:
+#    its characters are already scanned, and `quoted_code` is the test.
+# 3. NOR ARE THE FRONTIER FORM'S NUMBERED FINDINGS. A reader sees no `1.` and no `**`: a numbered
+#    finding is an ordered list item opening with a severity, and the scan reads the prose outside
+#    them. AT MOST AS MANY AS THE PARSE RECORDED, which is the bound `finding_spans` takes and
+#    which the last row here is for: an item the parse did not record IS read, so a finding written
+#    in a spelling `NUMBERED_FINDING` does not match still reaches a person.
+# 4. AND A TAG THE REDUCTION CANNOT PLACE IS REPORTED. Every tag is one a reader sees a boundary at
+#    or one a reader sees none at, and BOTH wrong answers lose a token: `P<em>1</em>` is `P1` to a
+#    reader and `P` and `1` to a reading that breaks at `em`, and `<li>P1</li><li>P2</li>` is two
+#    lines to a reader and `P1P2` -- which carries no severity at all -- to one that does not break
+#    at `li`. Round five lost a severity the second way. So a tag in neither set is a `manual:`
+#    blocker naming it, never a guess.
+shown_gh="$tmp/shown-gh"
+mkdir -p "$shown_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$shown_gh/gh"
+cat >> "$shown_gh/gh" <<'GH'
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;
+  "label create"*)            ;;
+  "pr edit"*)                 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG" ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
+  # THE ONE ANSWER THIS STUB EXISTS FOR, and it is now ONE ANSWER: `created_at`, `body` and
+  # `body_html` arrive together. `STUB_SHOWN_MODE` says which shape it comes back in -- the whole
+  # document; one with NO `body_html` AT ALL, which is what the media type being dropped or the
+  # endpoint changing looks like now that the rendering is a field of the answer; one whose
+  # rendering is BLANK; an answer that is not JSON; or a call that fails.
+  #
+  # AND THE THREE SEPARATE `--jq` ANSWERS ARE STILL HERE, because GitHub still serves them and
+  # because the splice case needs them: `STUB_SPLICE_HTML` is a DIFFERENT VERSION'S rendering, so
+  # an audit that fetches the body and the rendering separately gets one of each. Every call for
+  # this comment is logged, which is how "one fetch" is asserted as a count rather than read.
+  *"/issues/comments/5001"*)
+      [[ -n "${STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$STUB_CALL_LOG"
+      case "$*" in
+        *"--jq .created_at") echo 2026-09-01T00:00:00Z; exit 0 ;;
+        *"--jq .body")       cat "$STUB_REVIEW_BODY"; exit 0 ;;
+        *"--jq .body_html")
+            # The same five shapes, as the separate fetch produced them: a `--jq` for a field the
+            # answer does not carry prints ONE NEWLINE and exits 0.
+            case "${STUB_SHOWN_MODE:-whole}" in
+              missing|blank) printf '\n' ;;
+              notjson) printf 'not a JSON document at all\n' ;;
+              failed)  exit 22 ;;
+              *)       cat "${STUB_SPLICE_HTML:-$STUB_REVIEW_HTML}" ;;
+            esac
+            exit 0 ;;
+      esac
+      case "${STUB_SHOWN_MODE:-whole}" in
+        notjson) printf 'not a JSON document at all\n' ;;
+        failed)  exit 22 ;;
+        *)  "$STUB_PYTHON" -c 'import json, sys
+answer = {"created_at": sys.argv[1], "body": open(sys.argv[2], encoding="utf-8").read()}
+if sys.argv[4] == "whole":
+    answer["body_html"] = open(sys.argv[3], encoding="utf-8").read()
+elif sys.argv[4] == "blank":
+    answer["body_html"] = "\n"
+print(json.dumps(answer))' \
+              2026-09-01T00:00:00Z "$STUB_REVIEW_BODY" "$STUB_REVIEW_HTML" \
+              "${STUB_SHOWN_MODE:-whole}" ;;
+      esac ;;
+  *"--json body"*)            echo "no ledger" ;;
+  *"--json headRefOid"*)      echo "$head" ;;
+  *"--json baseRefName"*)     echo master ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                feature/x "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$shown_gh/gh"
+shown_run() {  # shown_run MODE FILE [HTML]: the whole audit with the rendering fetch in MODE
+  local out status=0 html="${3:-}"
+  [[ -n "$html" ]] || html="$(rendering_of "$2")"
+  : > "$tmp/merge-calls.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$2" \
+    STUB_REVIEW_HTML="$html" STUB_SHOWN_MODE="$1" \
+    PATH="$shown_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/merge-calls.log" || true)"
+}
+# THE CONTROL FIRST, and it is the only reason the two refusals below are evidence: the same pull
+# request, the same clean verdict, the rendering arriving whole, is READY and calls merge once.
+reader_comment 'Nothing in this review is a blocker.' > "$tmp/shown-clean.md"
+got="$(shown_run whole "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL control" "$got" "enqueued #999"
+expect "MUT-SHOWN-RENDERING-OPTIONAL control calls" "${got##*|}" 1
+expect "MUT-SHOWN-RENDERING-OPTIONAL control status" "${got%%|*}" 0
+# AN ANSWER THAT CARRIES NO RENDERING blocks, and does not fall back to the characters. That is
+# what the media type being dropped or the endpoint changing looks like: the call SUCCEEDS and the
+# field is not there. It was one newline at exit 0 while the rendering was fetched by a `--jq` of
+# its own; it is a missing field of the one answer now, and it is the same blocker.
+got="$(shown_run missing "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [an answer with no rendering at exit 0]" "$got" "review-rendering-missing"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [an answer with no rendering at exit 0]" "$got" "NOT-READY"
+expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [no rendering]" "${got##*|}" 0
+# And a fetch that FAILS is the other blocker, told apart from the first.
+got="$(shown_run failed "$tmp/shown-clean.md")"
+contains "MUT-SHOWN-RENDERING-OPTIONAL [a failed rendering fetch]" "$got" "review-fetch-failed"
+expect "MUT-SHOWN-RENDERING-OPTIONAL merge calls [failed]" "${got##*|}" 0
+# The parser's own half of it, with no audit around it: a comment with text in it whose rendering
+# shows none is a refusal, and the message says which document was empty.
+printf '' > "$tmp/shown-empty.html"
+expect "MUT-SHOWN-RENDERING-OPTIONAL [the parser refuses a blank rendering]" \
+  "$(review_rows "$tmp/shown-clean.md" "$tmp/shown-empty.html")" '1|'
+contains "MUT-SHOWN-RENDERING-OPTIONAL [the parser refuses a blank rendering]" \
+  "$(parse_why "$tmp/shown-clean.md" "$tmp/shown-empty.html")" \
+  "its rendering shows none"
+# And a `review` given one document is a refusal too, so a caller that forgets the rendering gets
+# no result rather than a reading of the characters alone.
+one_document_status=0
+"$parser_python" scripts/pr-review-parse.py review --out "$tmp/one-document.json" \
+  "$tmp/shown-clean.md" > /dev/null 2>&1 || one_document_status=$?
+expect "MUT-SHOWN-RENDERING-OPTIONAL [review takes two documents]" "$one_document_status" 1
+
+# 2. THE VERDICT OBJECT IS NOT PROSE. A blocking review with a P1 in its own findings array, with
+# GitHub's rendering of it, carries no stray token -- and the same object written as the older BARE
+# form, which a renderer shows as an ordinary paragraph rather than as a code block, carries none
+# either. The second is what `bare_spans` is for; without it the review's own finding is reported.
+{ printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BLOCKER","severity":"P1","failing_test":"a_test"}]}' \
+    "$enqueue_head" "$enqueue_base"
+  printf '\n```\n'; } > "$tmp/shown-blocking.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [a fenced verdict]" \
+  "$(reader_rows "$tmp/shown-blocking.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:BLOCKER:1"
+printf 'Reviewed head: %s\n\n{"role_understanding":"x","reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BARE","severity":"P1"}]}\n' \
+  "$enqueue_head" "$enqueue_head" "$enqueue_base" > "$tmp/shown-bare.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [a bare verdict]" \
+  "$(reader_rows "$tmp/shown-bare.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:BARE:0"
+# AND A CODE BLOCK THAT IS NOT THE VERDICT IS STILL SCANNED, from the comment's own characters:
+# what a reader sees inside one is what the comment writes, and the scan reads that.
+{ printf 'Reviewed head: %s\n\n```text\nThe blocker is P1 in this example.\n```\n\n```json\n' \
+    "$enqueue_head"; enqueue_pass; printf '\n```\n'; } > "$tmp/shown-other-block.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [another block is still scanned]" \
+  "$(reader_rows "$tmp/shown-other-block.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+# AND AN INDENTED VERDICT FENCE IS STILL NOT REPORTED. CommonMark strips the opening fence's
+# indentation from the content, so a block written over SEVERAL LINES behind an indent is shown
+# with every line de-indented and is then no substring of the comment at all -- the rule "a block
+# the comment writes" does not reach it. Its content is passed to `quoted_code` as a document of
+# its own, and this row is what says so.
+#
+# THE OBJECT IS WRITTEN OVER FOUR LINES AND THAT IS THE POINT. A one-line object behind an indent
+# is still a substring of the comment -- the indent is before it, not inside it -- so a one-line
+# row passes with that argument deleted and asserts nothing. Measured: with
+# `quoted_code(shown, text)` in place of `quoted_code(shown, text, block.content)` this document
+# is `stray=P1`, the review reporting its own finding, and the one-line form is `stray=-` either
+# way.
+{ printf 'Reviewed head: %s\n\n  ```json\n' "$enqueue_head"
+  printf '  {"reviewed_sha":"%s",\n   "base_sha":"%s",\n   "verdict":"CHANGES_REQUIRED",\n   "findings":[{"id":"INDENTED","severity":"P1","failing_test":"a_test"}]}\n' \
+    "$enqueue_head" "$enqueue_base"
+  printf '  ```\n'; } > "$tmp/shown-indented.md"
+expect "MUT-SHOWN-CODE-BLOCK-READ-AS-PROSE [an indented verdict fence]" \
+  "$(reader_rows "$tmp/shown-indented.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:INDENTED:1"
+
+# 2b. AND A `<pre>` THE COMMENT DOES NOT WRITE IS WHAT A READER SEES AND NOTHING ELSE READS.
+# MUT-SHOWN-RAW-PRE-UNREAD, and it is the first of round seven's four.
+#
+# GitHub PASSES RAW HTML THROUGH, `<pre>` included, with the tags inside it still operative and
+# its character references still resolved -- captured, not assumed: the recorded rendering of the
+# first document below is `<pre class="notranslate"><strong>VERDICT</strong>: CHANGES_REQUIRED
+# </pre>`, so a reader sees the correction and the comment writes no such eight characters
+# anywhere. At `7767c71c` both of these were exit 0, PASS, NO STRAY, READY and ONE `gh pr merge`
+# call; each is MANUAL with none here. A trusted reviewer pasting a preformatted correction with a
+# bold field label is normal use, and no outsider is needed.
+raw_pre=(
+  'raw pre verdict|<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>|VERDICT:'
+  'raw pre severity|<pre>The blocker is &#80;1 here.</pre>|P1'
+)
+for row in "${raw_pre[@]}"; do
+  reader_case="${row%%|*}"; rest="${row#*|}"
+  reader_prose="${rest%%|*}"; reader_want="${rest#*|}"
+  reader_comment "$reader_prose" > "$tmp/raw-pre-$reader_case.md"
+  expect "MUT-SHOWN-RAW-PRE-UNREAD [$reader_case]" \
+    "$(reader_rows "$tmp/raw-pre-$reader_case.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/$reader_want"
+  got="$(reader_audit "$tmp/raw-pre-$reader_case.md")"
+  contains "MUT-SHOWN-RAW-PRE-UNREAD audit [$reader_case]" "$got" \
+    "manual:$reader_want-outside-the-verdict-object"
+  contains "MUT-SHOWN-RAW-PRE-UNREAD audit [$reader_case]" "$got" MANUAL
+  expect "MUT-SHOWN-RAW-PRE-UNREAD merge calls [$reader_case]" "${got##*|}" 0
+done
+# And the same correction in the FRONTIER form, which is the form every review in this repository
+# is posted in: the comment writes its own two verdict lines and this is a third a reader sees.
+prose_review '<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>
+' > "$tmp/raw-pre-prose.md"
+expect "MUT-SHOWN-RAW-PRE-UNREAD [raw pre verdict] prose" \
+  "$(reader_rows "$tmp/raw-pre-prose.md")" "0|prose/$enqueue_head/PASS/-/VERDICT:"
+got="$(reader_audit "$tmp/raw-pre-prose.md")"
+contains "MUT-SHOWN-RAW-PRE-UNREAD audit [raw pre verdict] prose" "$got" \
+  "manual:VERDICT:-outside-the-numbered-findings"
+expect "MUT-SHOWN-RAW-PRE-UNREAD merge calls [raw pre verdict] prose" "${got##*|}" 0
+# THE CONTROL THAT KEEPS THE OTHER HALF HONEST: a `<pre>` holding exactly what the comment writes
+# is quiet, because it is scanned where the comment writes it and `\bP1\b` does not match inside
+# `_P1_`. Reading it twice would change nothing; reading it INSTEAD of the characters would.
+reader_comment '<pre>The blocker is _P1_ here.</pre>' > "$tmp/raw-pre-verbatim.md"
+expect "MUT-SHOWN-RAW-PRE-UNREAD [a raw pre the comment writes]" \
+  "$(reader_rows "$tmp/raw-pre-verbatim.md")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/-"
+
+# 3. THE FRONTIER FORM'S OWN FINDINGS ARE NOT STRAY SEVERITIES. Three numbered findings, rendered
+# as an ordered list, report nothing; the review is READY on this harness's clean head and calls
+# merge once. Reading the items as prose reports three severities and every blocking prose review
+# in this repository goes to a person.
+{ printf '<!-- upstroke-frontier-review pr=999 head=%s -->\n' "$enqueue_head"
+  printf '## Frontier review of `%s` (gpt-5.6-sol, max effort)\n\n' "${enqueue_head:0:7}"
+  printf '**VERDICT: PASS**\n\nI found nothing that blocks; these are recorded and deferred.\n\n'
+  printf '1. **P2 -- the first.** Detail of the first.\n'
+  printf '2. **P3 -- the second.** Detail of the second.\n'
+  printf '3. **P3 -- the third.** Detail of the third.\n\nVERDICT: PASS\n'
+} > "$tmp/shown-findings.md"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY [three numbered findings]" \
+  "$(reader_rows "$tmp/shown-findings.md")" \
+  "0|prose/$enqueue_head/PASS/-/-;P2:-:0;P3:-:0;P3:-:0"
+# Through the whole audit, the claim is that NO FINDING OF ITS OWN IS A STRAY SEVERITY. The review
+# still blocks -- a PASS carrying findings is `pass-with-findings`, and findings with no id are
+# `manual:` lines of a different rule -- and neither is what this case is about, so what is
+# asserted is the blocker this reading would add and does not.
+got="$(reader_audit "$tmp/shown-findings.md")"
+[[ "$got" == *"outside-the-numbered-findings"* ]] \
+  && error "MUT-SHOWN-FINDINGS-ARE-STRAY: a review's own numbered findings were read as stray severities: [$got]"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY merge calls" "${got##*|}" 0
+# AND AN ITEM THE PARSE DID NOT RECORD AS A FINDING IS READ, which is the bound. `1. __P1 -- x__`
+# is no finding to `NUMBERED_FINDING`, which asks for `**`, and `\bP1\b` does not match inside
+# `__P1` either -- so if the rendering's item were taken away as well, that severity would be
+# reported by nothing at all. Under the bound it is over the count, so it is read: MANUAL, and no
+# merge call.
+{ printf '<!-- upstroke-frontier-review pr=999 head=%s -->\n' "$enqueue_head"
+  printf '**VERDICT: PASS**\n\nNothing blocks.\n\n'
+  printf '1. __P1 -- written the other way.__ Detail.\n\nVERDICT: PASS\n'
+} > "$tmp/shown-unrecorded.md"
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY [an item the parse did not record]" \
+  "$(reader_rows "$tmp/shown-unrecorded.md")" "0|prose/$enqueue_head/PASS/-/P1"
+got="$(reader_audit "$tmp/shown-unrecorded.md")"
+contains "MUT-SHOWN-FINDINGS-ARE-STRAY audit [an item the parse did not record]" "$got" MANUAL
+expect "MUT-SHOWN-FINDINGS-ARE-STRAY merge calls [unrecorded]" "${got##*|}" 0
+
+# 4. EVERY TAG IS CLASSIFIED, AND ONE THAT IS NOT IS REPORTED. The census is every tag GitHub's
+# renderer put in any of the 685 comments this repository held on 2026-09-21T20:49:34Z, counted by
+# `html.parser` over each one's `body_html`; the pull request body carries the command. A tag in
+# NEITHER set would be a reading this program cannot make, and a tag in BOTH would be two readings.
+# THESE 28 ARE WHAT THE FETCH FOUND, and not one more: `h4`, `h5` and `h6` are classified in
+# `BLOCK_HTML` beside `h1`-`h3` and NO COMMENT USED THEM, so they are not in this list. A census
+# that quietly holds tags nobody measured is the claim this file keeps catching in other people's
+# prose.
+shown_census=(a blockquote br code details div em g-emoji h1 h2 h3 hr li
+  markdown-accessiblity-table ol p pre span strong summary table tbody td th thead tr tt ul)
+shown_status=0
+"$parser_python" - scripts/pr-review-parse.py "${shown_census[@]}" \
+  > "$tmp/shown-census.out" 2>&1 <<'CENSUS' || shown_status=$?
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("upstroke_parse_census", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+both = sorted(module.INLINE_HTML & module.BLOCK_HTML)
+missing = sorted(tag for tag in sys.argv[2:]
+                 if tag not in module.INLINE_HTML and tag not in module.BLOCK_HTML)
+print("in both: %s" % (",".join(both) or "-"))
+print("unclassified: %s" % (",".join(missing) or "-"))
+CENSUS
+expect "MUT-SHOWN-TAG-UNCLASSIFIED probe status" "$shown_status" 0
+expect "MUT-SHOWN-TAG-UNCLASSIFIED" "$(cat "$tmp/shown-census.out")" \
+  "$(printf 'in both: -\nunclassified: -')"
+# AND THE REPORT ITSELF, driven rather than described: a rendering carrying a tag in neither set is
+# a `manual:` blocker naming that tag, and the review does not merge.
+printf '<p dir="auto">A review with nothing in it.</p>\n<x-unclassified>text</x-unclassified>\n' \
+  > "$tmp/shown-unknown.html"
+expect "MUT-SHOWN-TAG-UNCLASSIFIED [a tag in neither set]" \
+  "$(review_rows "$tmp/shown-clean.md" "$tmp/shown-unknown.html")" \
+  "0|json/$enqueue_head/PASS/$enqueue_base/unreadable-html:x-unclassified"
+got="$(shown_run whole "$tmp/shown-clean.md" "$tmp/shown-unknown.html")"
+contains "MUT-SHOWN-TAG-UNCLASSIFIED audit [a tag in neither set]" "$got" \
+  "manual:unreadable-html:x-unclassified-outside-the-verdict-object"
+expect "MUT-SHOWN-TAG-UNCLASSIFIED merge calls" "${got##*|}" 0
+
+# --- one fetch, so the characters and the rendering are one version -----------------------------
+# MUT-REVIEW-TWO-VERSIONS-SPLICED and MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL.
+#
+# ROUND SIX'S OWN P1. The audit fetched the comment's `body` and its `body_html` in two calls. A
+# reviewer editing the comment between them gives it VERSION A'S CHARACTERS AND VERSION B'S
+# RENDERING -- and that pair passes where each version alone blocks, because each scan reads the
+# document the other version does not have.
+#
+#   * A is `_P1_` in prose above a clean `PASS` object: the characters carry no severity at a word
+#     boundary and GitHub's rendering of A shows `P1`, so A alone is MANUAL;
+#   * B moves that finding INTO the object and says CHANGES_REQUIRED, so B alone is NOT-READY;
+#   * A's body beside B's rendering is a clean `PASS` whose prose shows nothing: PASS, READY and
+#     ONE `gh pr merge` call, executed at `7767c71c` with this exact stub.
+#
+# `application/vnd.github.full+json` returns `created_at`, `body` and `body_html` TOGETHER, so
+# there is one version and no pair to disagree. The stub still answers the three separate `--jq`
+# calls, with `STUB_SPLICE_HTML` serving B's rendering to the second of them, so an audit that
+# asks for them separately still gets the splice -- and the count of calls this comment costs is
+# asserted, because "one fetch" is the whole of the fix and a second one would restore the defect
+# in silence.
+reader_comment 'The blocker is _P1_ and it is not in the object.' > "$tmp/splice-a.md"
+{ printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"MOVED","severity":"P1","failing_test":"a_test"}]}' \
+    "$enqueue_head" "$enqueue_base"
+  printf '\n```\n'; } > "$tmp/splice-b.md"
+# Each version alone first, and they are the reason the splice means anything.
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [version A alone]" \
+  "$(reader_rows "$tmp/splice-a.md")" "0|json/$enqueue_head/PASS/$enqueue_base/P1"
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [version B alone]" \
+  "$(reader_rows "$tmp/splice-b.md")" \
+  "0|json/$enqueue_head/CHANGES_REQUIRED/$enqueue_base/-;P1:MOVED:1"
+# And the splice, through the WHOLE audit against a stub serving both versions. `STUB_SPLICE_HTML`
+# is B's rendering; the one answer is A's, whole. A is MANUAL, so no merge call -- at `7767c71c`,
+# with the same stub, this line was `enqueued #999` and one call.
+: > "$tmp/merge-calls.log"
+: > "$tmp/splice-calls.log"
+splice_out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" \
+  STUB_CALL_LOG="$tmp/splice-calls.log" \
+  STUB_REVIEW_BODY="$tmp/splice-a.md" STUB_REVIEW_HTML="$(rendering_of "$tmp/splice-a.md")" \
+  STUB_SPLICE_HTML="$(rendering_of "$tmp/splice-b.md")" \
+  PATH="$shown_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1 | tr '\n' ' ')"
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [the splice is not available]" "$splice_out" \
+  "manual:P1-outside-the-verdict-object"
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [the splice is not available]" "$splice_out" MANUAL
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED merge calls" \
+  "$(grep -c . "$tmp/merge-calls.log" || true)" 0
+# ONE CALL FOR THE COMMENT, counted. Three is the shape that made the splice possible.
+expect "MUT-REVIEW-TWO-VERSIONS-SPLICED [one fetch for the comment]" \
+  "$(grep -c . "$tmp/splice-calls.log" || true)" 1
+contains "MUT-REVIEW-TWO-VERSIONS-SPLICED [and it asks for the whole answer]" \
+  "$(cat "$tmp/splice-calls.log")" "application/vnd.github.full+json"
+[[ "$(cat "$tmp/splice-calls.log")" == *"--jq"* ]] \
+  && error "MUT-REVIEW-TWO-VERSIONS-SPLICED: the audit took a field out of the comment with a separate call: [$(cat "$tmp/splice-calls.log")]"
+
+# AND THE SPLIT IS THE PARSER'S. `comment` takes GitHub's whole answer and writes the two
+# documents `review` reads: a body that reached the parse SHORT is a comment with a different
+# verdict in it, and bash has no write whose count anybody reads -- which is the whole reason this
+# program exists rather than being a shell pipeline.
+splice_answer() {  # splice_answer BODY-FILE HTML-FILE [DROP]: GitHub's answer for one comment
+  "$parser_python" - "$1" "$2" "${3:-}" <<'ANSWER'
+import json, sys
+body, shown, drop = sys.argv[1], sys.argv[2], sys.argv[3]
+answer = {"created_at": "2026-09-01T00:00:00Z", "id": 5001,
+          "body": open(body, encoding="utf-8").read(),
+          "body_html": open(shown, encoding="utf-8").read()}
+if drop:
+    del answer[drop]
+print(json.dumps(answer))
+ANSWER
+}
+split_rows() {  # split_rows ANSWER-FILE: "<status>|<created_at>|<body sha>|<rendering sha>"
+  local status=0
+  "$parser_python" scripts/pr-review-parse.py comment --nul --out "$tmp/split.out" \
+    "$1" "$tmp/split-body.md" "$tmp/split-shown.html" 2> /dev/null || status=$?
+  ((status == 0)) || { printf '%s|' "$status"; return 0; }
+  printf '%s|%s|%s|%s' "$status" "$(tr '\0' '|' < "$tmp/split.out")" \
+    "$(render_digest "$tmp/split-body.md")" "$(render_digest "$tmp/split-shown.html")"
+}
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" > "$tmp/answer-whole.json"
+# The two documents come out BYTE FOR BYTE, which is what the digests say: a split that dropped a
+# trailing newline is a different comment to a parse that reads the last line of it.
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [the answer splits into its two documents]" \
+  "$(split_rows "$tmp/answer-whole.json")" \
+  "0|comment|2026-09-01T00:00:00Z|0||$(render_digest "$tmp/splice-a.md")|$(render_digest "$(rendering_of "$tmp/splice-a.md")")"
+# And `review` over what it wrote is the same result as `review` over the originals.
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [and the review reads the same]" \
+  "$(review_rows "$tmp/split-body.md" "$tmp/split-shown.html")" \
+  "$(reader_rows "$tmp/splice-a.md")"
+# EVERY SHAPE THAT IS NOT ONE COMMENT IS A REFUSAL, and the caller blocks on the status.
+printf 'not a JSON document at all\n' > "$tmp/answer-notjson.json"
+printf '["a list, not an object"]\n' > "$tmp/answer-notobject.json"
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" created_at \
+  > "$tmp/answer-noat.json"
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" body > "$tmp/answer-nobody.json"
+# A NAME THE ANSWER REPEATS IS TWO READINGS. `json.loads` keeps the last, so an answer carrying
+# the review's body and then a second `"body"` would hand the parse a body nobody posted -- the
+# same rule the verdict object is read under, applied to the document that carries it.
+{ printf '{"created_at": "2026-09-01T00:00:00Z", "body": '
+  "$parser_python" -c 'import json,sys; sys.stdout.write(json.dumps(open(sys.argv[1], encoding="utf-8").read()))' \
+    "$tmp/splice-a.md"
+  printf ', "body_html": "<p>x</p>", "body": "PASS"}\n'; } > "$tmp/answer-twice.json"
+for answer_case in notjson notobject noat nobody twice; do
+  expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [$answer_case]" \
+    "$(split_rows "$tmp/answer-$answer_case.json")" '1|'
+done
+# A RENDERING THAT IS NOT A STRING IS WRITTEN AS NOTHING, which is the caller's
+# `review-rendering-missing` and not a reading of the characters alone. The split SUCCEEDS and the
+# rendering it wrote is empty; the audit's own half of it is the `missing` mode below.
+splice_answer "$tmp/splice-a.md" "$(rendering_of "$tmp/splice-a.md")" body_html \
+  > "$tmp/answer-nohtml.json"
+printf '' > "$tmp/split-empty"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer with no rendering in it]" \
+  "$(split_rows "$tmp/answer-nohtml.json")" \
+  "0|comment|2026-09-01T00:00:00Z|0||$(render_digest "$tmp/splice-a.md")|$(render_digest "$tmp/split-empty")"
+# And the audit blocks on the two shapes the section above does not already drive. An answer with
+# NO `body_html` at all is `missing` there; these are one whose rendering is blank, and one that is
+# not a comment -- told apart from each other and from a fetch that failed.
+got="$(shown_run blank "$tmp/shown-clean.md")"
+contains "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer whose rendering is blank]" "$got" \
+  "review-rendering-missing"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL merge calls [blank rendering]" "${got##*|}" 0
+got="$(shown_run notjson "$tmp/shown-clean.md")"
+contains "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL [an answer that is not a comment]" "$got" \
+  "review-document-unreadable"
+expect "MUT-REVIEW-ANSWER-SPLIT-IN-THE-SHELL merge calls [not a comment]" "${got##*|}" 0
+
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
 <!-- upstroke-frontier-review pr=145 head=c3a6665000000000000000000000000000000003 -->
@@ -7244,7 +9112,7 @@ expect MUT-PARSE-WRITE-UNCHECKED "$(review_rows "$tmp/prose-numbered-p1.md")" \
 write_status=0
 ( trap '' XFSZ; ulimit -f 0
   "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/denied.out" \
-    "$tmp/prose-numbered-p1.md" 2>/dev/null ) || write_status=$?
+    "$tmp/prose-numbered-p1.md" "$nothing_shown" 2>/dev/null ) || write_status=$?
 ((write_status != 0)) \
   || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result could not be written reported success"
 expect MUT-PARSE-WRITE-UNCHECKED "$(wc -c < "$tmp/denied.out")" 0
@@ -7287,7 +9155,7 @@ mkdir -p "$tmp/unwritable"
 chmod a-w "$tmp/unwritable"
 out_status=0
 "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/unwritable/out" \
-  "$tmp/prose-numbered-p1.md" 2>/dev/null || out_status=$?
+  "$tmp/prose-numbered-p1.md" "$nothing_shown" 2>/dev/null || out_status=$?
 chmod u+w "$tmp/unwritable"
 if ((EUID != 0)); then    # root writes into a directory with no write bit, so the case is not one
   ((out_status != 0)) \
@@ -7297,7 +9165,7 @@ fi
 # The rendering the gate itself reads, to stdout, held to the same rule.
 write_status=0
 "$parser_python" scripts/pr-review-parse.py review --nul "$tmp/prose-numbered-p1.md" \
-  > /dev/full 2>/dev/null || write_status=$?
+  "$nothing_shown" > /dev/full 2>/dev/null || write_status=$?
 ((write_status != 0)) \
   || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result went nowhere reported success"
 
@@ -7318,7 +9186,7 @@ for rendering in --nul --json; do
   # the control first: with no limit the whole payload is written and the parse exits 0
   whole_status=0
   "$parser_python" scripts/pr-review-parse.py review "$rendering" "$tmp/many-findings.md" \
-    > "$tmp/many.whole" 2>/dev/null || whole_status=$?
+    "$nothing_shown" > "$tmp/many.whole" 2>/dev/null || whole_status=$?
   expect "MUT-PARSE-SHORT-WRITE [$rendering] control" "$whole_status" 0
   whole="$(wc -c < "$tmp/many.whole")"
   ((whole > 1024)) \
@@ -7326,7 +9194,7 @@ for rendering in --nul --json; do
   short_status=0
   ( trap '' XFSZ; ulimit -f 1
     PYTHONUNBUFFERED=1 "$parser_python" scripts/pr-review-parse.py review "$rendering" \
-      "$tmp/many-findings.md" > "$tmp/many.short" 2>/dev/null ) || short_status=$?
+      "$tmp/many-findings.md" "$nothing_shown" > "$tmp/many.short" 2>/dev/null ) || short_status=$?
   ((short_status != 0)) \
     || error "MUT-PARSE-SHORT-WRITE [$rendering]: a result whose write stopped part way reported success"
   # and the write really did stop part way, so the case is about the count and not about a refusal
@@ -7397,12 +9265,18 @@ got="$(review_rows "$tmp/not-utf8.md")"
 [[ "$got" == 0\|* ]] \
   && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE/MUT-PROSE-READ-SUPPRESSED: bytes that are not UTF-8 parsed as a review, got [$got]"
 # Through main, because the helper refusing is only half of it: the audit must block on the status
-# rather than reading whatever the file holds.
-got="$(STUB_REVIEW_BODY="$tmp/not-utf8.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
-contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-parse-failed"
+# rather than reading whatever the answer holds. A comment's characters reach the audit inside
+# GitHub's own JSON answer now, so bytes that are not UTF-8 are an ANSWER that is not one -- and
+# that is a blocker of its own, told apart from a review the parse could not read. Both halves are
+# asserted: the answer is refused, and no verdict comes out of it.
+#   (`review-parse-failed` through main is asserted by MUT-VERDICT-REVIVED-BY-TRUNCATION, which
+#   drives a whole answer whose BODY the review parse refuses.)
+got="$(STUB_ANSWER_RAW="$tmp/not-utf8.md" STUB_REVIEW_BODY="$tmp/not-utf8.md" \
+  STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-document-unreadable"
 contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "NOT-READY"
 [[ "$got" == *"verdict=PASS"* ]] \
-  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of a review the parser refused"
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of an answer the parser refused"
 # The same review readable is judged by the JSON parser and blocks on its P1, so the case above is
 # about the refusal and not about the review.
 got="$(STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
@@ -7414,7 +9288,8 @@ contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "open-P1:CRITICAL"
 # input and at a failed read alike, so the audit cannot tell the two apart by looking; it checks
 # what arrived against the record count the parser computed. Truncating the payload after the
 # first finding is what a short read looks like from inside the loop.
-"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/short.payload" "$tmp/json.md"
+"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/short.payload" \
+  "$tmp/json.md" "$nothing_shown"
 truncate -s 60 "$tmp/short.payload"
 short_status=0
 ( fields=(); read_parser_fields "$tmp/short.payload" review 7 3 ) || short_status=$?
@@ -7422,7 +9297,8 @@ short_status=0
   || error "MUT-REVIEW-PARSE-TRUNCATED: a payload that stopped arriving was read as a whole one"
 # The whole payload passes the same check, so the case above is about the truncation.
 expect MUT-REVIEW-PARSE-TRUNCATED "$(
-  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/whole.payload" "$tmp/json.md"
+  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/whole.payload" \
+    "$tmp/json.md" "$nothing_shown"
   fields=(); read_parser_fields "$tmp/whole.payload" review 7 3 && echo "${#fields[@]}"
 )" 22
 # A payload of another kind, and one whose declared count does not match what it carries, are both
@@ -7869,7 +9745,10 @@ got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_s
 [[ "$got" == *ledger-lookup-failed* ]] \
   && error "MUT-LEDGER-LOOKUP-SUPPRESSED: a readable body was reported unreadable"
 
-if ((failed)); then
+# BOTH, because one of them cannot see a failure reported from inside a command substitution and
+# the other cannot be read by a `((` test. `-s` is the question: the marker file is created empty
+# and every `error` appends to it.
+if ((failed)) || [[ -s "$errors_seen" ]]; then
   echo "test-pr-ready-audit: FAILED" >&2
   exit 1
 fi

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """pr-review-parse.py: the whole of a review, or nothing at all.
 
-    scripts/pr-review-parse.py review [--nul] [--out FILE] COMMENT-BODY-FILE
+    scripts/pr-review-parse.py review [--nul] [--out FILE] COMMENT-BODY-FILE RENDERED-HTML-FILE
+    scripts/pr-review-parse.py comment [--nul] [--out FILE] ANSWER-FILE BODY-OUT RENDERING-OUT
     scripts/pr-review-parse.py ledger [--nul] [--out FILE] PULL-REQUEST-BODY-FILE
 
-Each subcommand reads one file and has exactly two outcomes. Either it builds the whole result,
+Each subcommand reads its inputs and has exactly two outcomes. Either it builds the whole result,
 writes it, confirms the write, and exits 0; or it writes no result at all, says why on stderr, and
 exits non-zero. There is no third outcome and no partial one, and that is the entire point of this
 program existing.
+
+`comment` is the one that also writes files the next step reads: GitHub's answer for one comment,
+fetched WHOLE so that the characters and the rendering are one version of it, split into the two
+documents `review` takes. `comment_result` carries why that is not the shell's job.
 
 WHY THIS IS A PROGRAM AND NOT A SHELL PIPELINE
 ----------------------------------------------
@@ -92,7 +97,12 @@ refusal:
     accounted for, and let a `PASS` appended after it stand as the only candidate. What such a
     block holds is material, on the same terms as what lies outside one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
-    stands outside it. Not "nothing this program recognises as a block" -- nothing;
+    stands outside it. Not "nothing this program recognises as a block" -- nothing. That line is
+    matched AS THE COMMENT SPELLS IT, and a reviewer correcting a generated review writes
+    `**VERDICT**: CHANGES_REQUIRED` as readily as the plain form: the spellings only a READER of
+    the comment sees are found in GITHUB'S OWN RENDERING of it and reported as a stray token, so
+    the comment reaches a person rather than a merge. Two outcomes, and the exact match gets the
+    harder one;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
     the LAST occurrence of a repeated name, so an object carrying a `findings` array with a P1 in
     it and then a second `"findings":[]` deserialises to a clean PASS with no findings -- one
@@ -134,6 +144,7 @@ and after to establish that it changed none.
 
 import collections
 import html.entities
+import html.parser
 import json
 import os
 import re
@@ -229,6 +240,69 @@ DECIMAL_REFERENCE = re.compile(r"#([0-9]{1,8})")
 HEX_REFERENCE = re.compile(r"#x([a-f0-9]{1,8})", re.IGNORECASE)
 NAMED_REFERENCE = {name.rstrip(";"): chars for name, chars in html.entities.html5.items()}
 
+# AND THE TEXT GITHUB SHOWS A READER, WHICH IS NOT A SPELLING OF THE COMMENT AT ALL. The two scans
+# below -- the one that catches the trusted reviewer's comment contradicting itself, and the net
+# that sends a review to a person -- ask their question of the PROSE A READER SEES. Four rounds
+# answered that by transcribing a renderer's inline rules over the characters the comment is stored
+# as: delimiter runs, an entity table, code spans, links, reference definitions, block prefixes and
+# raw HTML tags, each added because the round before it had missed something. The rate is the
+# measurement: round three shipped two defects of its own, round four one, round five three, and
+# round five's own report called it "a Markdown implementation by instalments".
+#
+# SO THE RENDERING IS NOT DERIVED HERE ANY MORE. IT IS FETCHED. `scripts/pr-ready-audit.sh` already
+# reads the review comment by id; the same endpoint returns `body_html` -- GitHub's own rendering of
+# that comment, the bytes a reader's browser is given -- and this program is handed it beside the
+# comment. What is left to do is reduce HTML to text: take what stands between the tags, and know
+# which tags a reader sees a BOUNDARY at. That is `Rendering` below, and it is the whole of the
+# reading these two scans use.
+#
+# MEASURED BEFORE IT WAS TAKEN, over the 685 comments this repository held on 2026-09-21T20:49:34Z:
+# the reduction and the transcription report THE SAME severity and MUST tokens on every one -- 0
+# the transcription finds that the rendering does not show, 0 the rendering shows that it misses --
+# and the three defects round five's own review found are closed by it with none of round five's
+# code. The alternative that needs no rendering at all is to refuse any prose carrying a character
+# a renderer could act on: 462 of those 684 comments (67.5%) carry one AND a severity, MUST or
+# VERDICT token, so two thirds of this repository's reviews would go in front of a person.
+#
+# ITS COST IS THE ONE THE AUDIT PAYS, and it was chosen deliberately: the merge path now depends on
+# one more API call, and an outage BLOCKS rather than merges. A rendering this program cannot read
+# is a refusal below, not a quiet fall back to the stored characters -- that fall back IS the defect
+# this whole change is about, and `gh api --jq '.body_html'` WITHOUT the rendering's Accept header
+# prints one newline and exits 0, which is exactly the shape that would restore it in silence.
+#
+# THE TWO SETS ARE WHERE A READER SEES A BOUNDARY AND WHERE A READER SEES NONE, and getting one
+# wrong is a token LOST in either direction: `P<em>1</em>` is `P1` to a reader and `P` and `1` to a
+# reading that breaks at `em`, and `<li>P1</li><li>P2</li>` is two lines to a reader and `P1P2` --
+# which carries no severity at all -- to one that does not break at `li`. Round five lost a severity
+# the second way, by consuming a `<br>` as markup. So the classification is written out, both ways,
+# and A TAG IN NEITHER SET IS REPORTED: the reduction does not know what a reader sees there, and a
+# review it cannot read goes to a person. Measured over the 685 comments above, every tag GitHub's
+# renderer put in any of them is in one of these two sets, and the census is
+# .github/scripts/test-pr-ready-audit.sh's.
+INLINE_HTML = frozenset("""
+    a abbr acronym b bdi bdo big cite code data del dfn em font g-emoji i ins kbd mark nobr q rp
+    rt ruby s samp small span strike strong sub sup time tt u var wbr
+""".split())
+BLOCK_HTML = frozenset("""
+    address article aside audio blockquote body button canvas caption center col colgroup dd
+    details dir div dl dt embed fieldset figcaption figure footer form frame frameset h1 h2 h3 h4
+    h5 h6 head header hgroup hr html iframe img input legend li main map marquee menu meta nav
+    noscript object ol optgroup option output p param picture pre progress script section select
+    source style summary table tbody td template textarea tfoot th thead title tr track ul video
+    br circle defs g line polygon polyline path rect svg symbol text use
+    details-menu include-fragment markdown-accessiblity-table relative-time task-lists tool-tip
+""".split())
+# The elements that never close, so the reduction does not wait for an end tag it will not get.
+# `html.parser` reports each of these through `handle_starttag` alone.
+VOID_HTML = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+# A severity at the start of an ordered list item, which is what a NUMBERED FINDING looks like to a
+# reader: `NUMBERED_FINDING` is the same shape in the characters the comment writes.
+ITEM_SEVERITY = re.compile(r"P[0-3](?![0-9A-Za-z])")
+# What is kept of a tag name when it is reported. Everything a tag name is made of, and nothing a
+# protocol field should carry.
+TAG_NAME = re.compile(r"[^a-z0-9-]")
+
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -247,6 +321,58 @@ MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
 PROSE_MARKER = re.compile(r"<!-- upstroke-frontier-review")
 # The prose form's verdict, looked for OUTSIDE a workflow verdict block. No workflow-form review in
 # the repository carries one, and one that did would be a comment saying two different things.
+#
+# WHAT THIS SCAN IS FOR. It detects THE TRUSTED REVIEWER'S COMMENT CONTRADICTING ITSELF -- a
+# verdict object and a verdict line in the one comment -- so that this program refuses instead of
+# choosing between them. THE VERDICT OBJECT IS THE AUTHORITY for what a workflow-form review says;
+# this scan adds nothing to it and decides no verdict of its own.
+#
+# THE ORDINARY WAY THAT HAPPENS IS A CORRECTION, and that is why this is not a hypothetical rule.
+# A review is generated and posted; the reviewer then reads it, disagrees, and prepends a line
+# saying so, leaving the object underneath. Written plainly this scan finds it and the parse
+# refuses, which is right: the comment says two things.
+#
+# AND IT IS MATCHED AS THE COMMENT SPELLS IT, WHICH IS HALF OF THE ANSWER. `**VERDICT**:` is how
+# the same correction gets written by anyone who reaches for bold, and it carries no `VERDICT:` at
+# all in the stored characters. That was exit 0, PASS, READY and one `gh pr merge` call, measured
+# through the whole audit at `a5bcc998`, where the plain spelling was exit 1 and no call --
+# ordinary Markdown, the trusted reviewer's own account, and a merge the same words would have
+# blocked. The other half is in `stray_summary`: the spellings only a READER sees are found in
+# GITHUB'S OWN RENDERING of the comment and REPORTED AS A STRAY TOKEN, so the comment goes in front
+# of a person.
+#
+# THE TWO OUTCOMES ARE DIFFERENT ON PURPOSE. This pattern is exact, so what it finds is exactly a
+# contradiction and a refusal is right. The rendering is a SECOND DOCUMENT, fetched from GitHub
+# beside the comment, and a review the audit cannot obtain one for is blocked rather than read from
+# the characters -- but where it is obtained, what only a reader sees is a `manual:` blocker and
+# never a refusal. A refusal costs the reviewer the review; a `manual:` blocker costs a person a
+# look.
+#
+# IT IS NOT A TRUST BOUNDARY, and nothing here should be read as one. `scripts/pr-ready-audit.sh`
+# parses exactly one comment and it is one the account named as the trusted reviewer wrote --
+# `review_comment_filter`'s login predicate, which .github/scripts/test-pr-ready-audit.sh asserts
+# on the filter program itself (MUT-REVIEWER-JQ-INJECTION, MUT-REVIEWER-CASE-MISMATCH) and through
+# the whole audit (MUT-REVIEWER-ANY-AUTHOR-READ). An account that can write this line can write
+# the object instead and put anything in it. THAT IS WHY THE FIX IS NOT AN ENUMERATION OF
+# SPELLINGS: what was wrong was not that an attacker could hide a line, it was that the reviewer's
+# own ordinary writing did.
+#
+# AND IT IS ASKED OF BOTH FORMS, AS ONE QUESTION. What is reported is a line A READER SEES AND THE
+# COMMENT DOES NOT WRITE, in those characters, at that place: the workflow form writes no verdict
+# LINE of its own, so any a reader sees outside its object is reported; the FRONTIER form's
+# verdict IS such a line and its template writes two of them, and those are exempt BY BEING
+# WRITTEN. `unwritten_verdict` carries the rule, the merge that comparing COUNTS instead cost at
+# `3fe68c37`, and the measurement over this repository's own reviews that made an exemption
+# necessary at all.
+
+#
+# WHAT IS STILL NOT READ IS ONE THING AND IT IS NOT A CONSTRUCT: A SENTENCE WHOSE TWO DELIMITER RUNS
+# A RENDERER ANSWERS DIFFERENTLY. Runs are not paired, and scanning the text with every run dropped
+# AND again with every run kept is every answer a renderer gives when it answers both the same way;
+# `Deferred: __&#80;1**and__ the rest of it.` is one it does not, measured with `markdown-it-py`
+# 3.0.0 on 2026-09-21 and pinned as a fixture in .github/scripts/test-pr-ready-audit.sh.
+# PR286-PROSE-SCANS-CANNOT-SEE-WHAT-A-READER-SEES under `findings/` owns that class and the ten
+# places these readings are wider than a renderer.
 PROSE_VERDICT = re.compile(r"VERDICT:")
 
 # The older bare form's object opener, with whatever a writer left between the brace and the key.
@@ -349,7 +475,10 @@ VERDICT_RUN = re.compile(r"VERDICT:\**:? *" + NOT_SPACE + r"*")
 VERDICT_WHOLE = re.compile(r"VERDICT:[*]*:? *([A-Z_]+)[*]*\Z")
 NUMBERED_FINDING = re.compile(r"[0-9]+\. \*\*(P[0-3])")
 
-USAGE = "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE"
+USAGE = ("usage: pr-review-parse.py review [--nul] [--out FILE] COMMENT-FILE RENDERED-FILE\n"
+         "       pr-review-parse.py comment [--nul] [--out FILE] ANSWER-FILE"
+         " COMMENT-FILE RENDERED-FILE\n"
+         "       pr-review-parse.py ledger [--nul] [--out FILE] BODY-FILE")
 
 
 class Unparsed(Exception):
@@ -464,6 +593,23 @@ def rendered_language(info):
     `markdown-it-py` 3.0.0. That renderer reads a NUL as U+FFFD before it parses a line, so this
     does too; neither is whitespace and neither is a letter, so it decides nothing.
     """
+    words = unescaped_all(info.replace("\0", "\ufffd")).split(None, 1)
+    return words[0] if words else ""
+
+
+def unescaped_all(text):
+    """TEXT with every backslash escape and character reference resolved: `markdown-it-py` 3.0.0's
+    `unescapeAll`, which is the function that renderer reads a DESTINATION and an INFO STRING with.
+
+    IT IS THE ONE TRANSCRIPTION LEFT IN THIS FILE, and the reason it stays is that its consumer is
+    not a reader: what reads an info string is the FENCE RECOGNISER, which decides which block a
+    verdict may be read from, and no rendering of the comment says which fenced block the recogniser
+    should have taken. `rendered_language` was measured against that renderer over every code point
+    on 2026-09-14, and against cmark-gfm besides, so the name it gives a fence is the union of what
+    two renderers give it -- which is the refusing direction. The reader's side of the file was
+    transcription too until round six replaced it with GitHub's own rendering; this is what was
+    still needed afterwards.
+    """
     def resolved(match):
         if match.group(1):
             return match.group(1)
@@ -479,24 +625,486 @@ def rendered_language(info):
         if point is not None and referable(point):
             return chr(point)
         return match.group(0)
-    words = INFO_ESCAPE.sub(resolved, info.replace("\0", "\ufffd")).split(None, 1)
-    return words[0] if words else ""
+    return INFO_ESCAPE.sub(resolved, text)
 
 
-def stray_summary(outside):
-    """The severity and MUST tokens found outside the findings, as one field, or None.
+# What a reader is shown: the text, the PIECES it is made of -- each either a run GitHub took out
+# of the comment or a boundary this reduction put in -- the offsets the ordered list items start
+# at, the SPANS ITS CODE BLOCKS OCCUPY, the tags this reduction could not classify, and whether the
+# rendering showed ANY text at all.
+#
+# THE LAST IS NOT THE SAME QUESTION AS "IS THE TEXT EMPTY", and reading it as one refused a review.
+# `anything` is what the rendering SHOWED, and it is what says a rendering arrived; `text` is what
+# the two scans read, and a narrowing takes the verdict out of it.
+Shown = collections.namedtuple("Shown", "text parts items code unreadable anything")
+
+
+# Every run of ASCII whitespace, which `folded` writes as one space. Spelled out rather than
+# written `\\s`, which is every Unicode space: a NO-BREAK SPACE is a character a renderer shows and
+# a reader sees, not a boundary, and folding one away would compare two documents that differ.
+WHITESPACE_RUN = re.compile(r"[ \t\n\r\f\v]+")
+
+
+def folded(text):
+    """TEXT with every run of whitespace written as one space, FOR COMPARING and never for reading.
+
+    WHITESPACE IS NOT WHAT DECIDES WHETHER A COMMENT WRITES A VERDICT LINE. A code span crossing a
+    line ending shows that ending AS A SPACE -- `` `VERDICT:\\nPASS` `` is `VERDICT: PASS` to a
+    reader -- and GitHub's editor stores `\\r\\n` where its HTML writes `\\n`. Both are one run of
+    characters the comment wrote and two documents to `find`, and neither is a correction.
+
+    Nothing scanned for a token is passed through this. It changes lengths, so an offset taken
+    before it does not survive it, and `unwritten_verdict` takes every offset it compares with in
+    this spelling rather than in the reading's.
+    """
+    return WHITESPACE_RUN.sub(" ", text)
+
+
+def one_line_endings(text):
+    """TEXT with every spelling of a line ending written as one, FOR COMPARING and never for
+    reading.
+
+    GitHub's editor stores `\\r\\n` -- 7 of the 685 comments this repository held on 2026-09-21 --
+    and its rendering of a code block writes `\\n`. The two are one document to a reader and two
+    documents to `in`, and what this is used for is asking whether the comment writes a block it
+    shows. Nothing scanned for a token is passed through it: a substitution that changes lengths
+    moves every offset taken before it, which is a defect round six had to fix once already.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class Rendering(html.parser.HTMLParser):
+    """GitHub's HTML for one comment, reduced to the text it shows and where that text came from.
+
+    THE TEXT IS WHAT STANDS BETWEEN THE TAGS. A tag in `INLINE_HTML` is dropped and the runs either
+    side of it join, because a reader sees one word: `P<em>1</em>` is `P1` and `<strong>VERDICT
+    </strong>:` is `VERDICT:`. Every other tag ENDS A LINE, because a reader sees a boundary there:
+    a `<br>`, a list item, a table cell, a paragraph. A tag in neither set is recorded in
+    `unreadable` -- this reduction does not know which of the two a reader sees, and both answers
+    can lose a token, so the comment goes to a person rather than being read wrong in silence.
+
+    THE PIECES ARE KEPT, AND EACH SAYS WHETHER GITHUB TOOK IT OUT OF THE COMMENT. A piece marked
+    written is one text node: a run of characters the renderer copied from the comment with no tag
+    inside it. A piece marked otherwise is a line ending this reduction inserted where a tag was.
+    `unwritten_verdict` is the whole reason for the distinction -- `**VERDICT**: x` shows
+    `VERDICT: x` and writes no such eight characters anywhere, and what says so is that the
+    occurrence a reader sees STRADDLES TWO PIECES.
+
+    A CODE BLOCK IS READ HERE LIKE EVERYTHING ELSE, AND THE SPAN IT OCCUPIES IS RECORDED. Round
+    six skipped `<pre>` on the premise that its content is shown VERBATIM, so the comment's own
+    characters were already what a reader sees there. **That premise is false for raw HTML**:
+    `<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>` written in a comment is passed through
+    by GitHub with the `<strong>` still operative, and a reader sees a verdict line the comment
+    does not write; `<pre>The blocker is &#80;1 here.</pre>` shows `P1` the same way. Both were
+    PASS, READY and one `gh pr merge` call at `7767c71c`, executed.
+
+    So the reduction reads what the rendering shows there too, and `quoted_code` is what keeps the
+    workflow form's own verdict object from being reported as a severity written outside the
+    findings: a code block whose shown text THE COMMENT WRITES is already scanned where the comment
+    writes it, and is taken out of this reading; one the comment does not write is what a reader
+    sees and nothing else reads.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.items = []
+        self.regions = []
+        self.unreadable = set()
+        self.at = 0
+        self.open = []
+        self.lists = []
+        self.item = False
+        self.code = 0
+        self.code_from = 0
+        self.anything = False
+
+    def emit(self, piece, written):
+        """Add PIECE to the reading.
+
+        ONE WRITTEN PIECE IS ONE `handle_data` CALL, and it is never joined to the one before it.
+        What separates two of them is a tag, a comment or a processing instruction, and each of
+        those is a place the comment did not write the two runs in a row -- which is the whole of
+        what `unwritten_verdict` asks. Joining across an INLINE tag reported 6 of the 352 reviews
+        this repository holds: a `VERDICT:` inside a code span is written and is shown, and the
+        paragraph around it carries other code spans whose backticks the rendering does not, so the
+        joined run was in no comment. The TEXT still joins -- an inline tag emits no boundary -- so
+        `P<em>1</em>` is still `P1` to the scan above.
+        """
+        self.parts.append((piece, written, self.at))
+        self.at += len(piece)
+
+    def boundary(self):
+        """End the line, unless it has already ended. Runs of tags do not stack up line endings."""
+        if self.parts and self.parts[-1][0].endswith("\n"):
+            return
+        self.emit("\n", False)
+
+    def breaks(self, tag):
+        """Whether a reader sees a boundary at TAG, recording a tag this reduction cannot place."""
+        if tag in INLINE_HTML:
+            return False
+        if tag not in BLOCK_HTML:
+            self.unreadable.add(tag)
+        return True
+
+    def handle_starttag(self, tag, attributes):
+        if self.breaks(tag):
+            self.boundary()
+        if tag in VOID_HTML:
+            return
+        if tag == "pre":
+            # THE OUTERMOST `<pre>` IS THE BLOCK. A nested one -- GitHub writes none, and a
+            # comment's own raw HTML may -- is inside the region already open, and opening a
+            # second region for it would record the same characters twice.
+            if not self.code:
+                self.code_from = self.at
+            self.code += 1
+        if tag in ("ol", "ul"):
+            self.lists.append(tag)
+        if tag == "li" and self.lists and self.lists[-1] == "ol":
+            self.item = True
+        self.open.append(tag)
+
+    def handle_startendtag(self, tag, attributes):
+        # `<br/>`: the element opens and closes in one tag, so nothing is pushed and nothing waits.
+        if self.breaks(tag):
+            self.boundary()
+
+    def handle_endtag(self, tag):
+        # An end tag with no start tag open is not a reason to unwind the stack: the document is
+        # GitHub's own and well formed, and unwinding on a stray `</b>` would take a `<pre>` or an
+        # `<li>` off with it and read a code block as prose.
+        if tag in self.open:
+            while self.open:
+                closed = self.open.pop()
+                if closed == "pre":
+                    self.code = max(0, self.code - 1)
+                    if not self.code:
+                        self.regions.append((self.code_from, self.at))
+                if closed in ("ol", "ul") and self.lists:
+                    self.lists.pop()
+                if closed == "li":
+                    self.item = False
+                if closed == tag:
+                    break
+        if self.breaks(tag):
+            self.boundary()
+
+    def handle_data(self, data):
+        # WHERE AN ORDERED LIST ITEM'S TEXT BEGINS, which is not where its tag does: GitHub writes
+        # a line ending between `<li>` and the `<p>` inside it, and that is a text node too. The
+        # item's first text is its first NON-BLANK one, and taking the blank one instead read every
+        # numbered finding's line as empty, so no finding was ever recognised: measured over the
+        # 685 comments this repository held on 2026-09-21, 152 of them carry numbered findings
+        # whose rendered items this reading takes out, and every one of those reported its own
+        # findings as stray severities until the blank text node stopped counting as the first.
+        if self.item and data.strip():
+            self.item = False
+            if not self.code:
+                self.items.append(self.at)
+        self.anything = self.anything or bool(data.strip())
+        self.emit(data, True)
+
+
+def shown_reading(body_html):
+    """The reading of one comment's HTML: `Shown`, whole or an exception.
+
+    `html.parser` never raises on malformed markup -- it has no such answer -- so what can fail
+    here is the decode above this and the one check below it.
+
+    A `<pre>` THAT NEVER CLOSES IS STILL A CODE BLOCK, and its region runs to the end of the
+    document. The alternative is a region nobody recorded, which is a code block `quoted_code`
+    cannot take out of the reading and `bare_spans` reads as prose.
+    """
+    reading = Rendering()
+    reading.feed(body_html)
+    reading.close()
+    regions = list(reading.regions)
+    if reading.code:
+        regions.append((reading.code_from, reading.at))
+    return Shown("".join(piece for piece, _, _ in reading.parts), reading.parts,
+                 reading.items, regions, frozenset(reading.unreadable), reading.anything)
+
+
+def narrowed(shown, spans):
+    """SHOWN with every span in SPANS taken out of it, the pieces still saying what they said.
+
+    The pieces are cut, not rebuilt: what is left of a written piece is still a run GitHub took out
+    of the comment, so `unwritten_verdict` asks exactly the question it asks of an uncut one. A cut
+    can only END an occurrence early, and an occurrence that is no longer whole is reported, which
+    is the direction a narrowing is allowed to be wrong in.
+    """
+    if not spans:
+        return shown
+    kept = []
+    for piece, written, start in shown.parts:
+        end = start + len(piece)
+        cuts = sorted((max(a, start), min(b, end)) for a, b in spans if a < end and b > start)
+        at = start
+        for first, last in cuts:
+            if first > at:
+                kept.append((piece[at - start:first - start], written, at))
+            at = max(at, last)
+        if at < end:
+            kept.append((piece[at - start:], written, at))
+    # NO ITEMS AND NO REGIONS: both are offsets into the reading this narrowing has just cut, and
+    # the callers take every span they need from the whole one, in one call, before any of it.
+    return Shown("".join(piece for piece, _, _ in kept), kept, [], [], shown.unreadable,
+                 shown.anything)
+
+
+def finding_spans(shown, allowed):
+    """The first lines of the ordered list items a reader sees as NUMBERED FINDINGS, at most
+    ALLOWED of them.
+
+    `parse_prose_review` scans the comment's prose OUTSIDE its numbered findings, and in the
+    characters the comment writes that is every line `NUMBERED_FINDING` does not match. A reader
+    sees no `1.` and no `**`: a numbered finding is an ordered list item whose first line opens
+    with a severity, and its first line is where the corresponding line ends -- a soft line ending
+    inside the item is a `<br>` and a boundary here, exactly as it is a new line there.
+
+    AND AT MOST AS MANY AS THE PARSE RECORDED, which is what ALLOWED is for and it is not a
+    tidiness rule. A finding written `1. __P1 -- x__` is no finding to `NUMBERED_FINDING`, which
+    asks for `**`, so the comment's own line stays in the scanned text -- and `\\bP1\\b` does not
+    match inside `__P1`, so the characters carry no severity for the scan to find either. If this
+    took the item away as well, that severity would be reported by nothing. Under the bound it
+    cannot: an item the parse did not record as a finding is over the count, so it is read.
+    """
+    spans = []
+    for at in shown.items:
+        if len(spans) >= allowed:
+            break
+        # The item's first line, taken as an expression rather than as a search that might not
+        # find one: a reading whose last item is not followed by a boundary is a case no document
+        # produces, and a branch no document can enter is a branch nothing can hold to account.
+        line = shown.text[at:].split("\n", 1)[0]
+        if ITEM_SEVERITY.match(line.lstrip()):
+            spans.append((at, at + len(line)))
+    return spans
+
+
+def quoted_code(shown, *writings):
+    """The spans of SHOWN's code blocks whose text one of WRITINGS writes, which the scan must not
+    read TWICE.
+
+    THIS IS WHAT LETS `<pre>` BE READ AT ALL. A code block a reader sees is either one the comment
+    writes -- a fenced block, whose content a renderer shows verbatim -- or one it does not, which
+    is raw HTML GitHub rendered: `<pre><strong>VERDICT</strong>: CHANGES_REQUIRED</pre>` shows
+    eight characters no part of the comment spells. The first is already scanned WHERE THE COMMENT
+    WRITES IT, so reading it here as well would report the workflow form's own verdict object as a
+    severity written outside the findings, on every blocking review this repository has ever had.
+    The second is read by nothing else, and was PASS, READY and one `gh pr merge` call.
+
+    So the first is taken out of this reading and the second is left in it, and NOTHING IS LOST
+    EITHER WAY: a block taken out is one whose characters `stray_summary`'s first two readings
+    hold. The one document that is in neither is the verdict block, and it is taken out of both --
+    out of the comment by `outside_block`, and out of this reading here, which is why the block's
+    own content is one of WRITINGS. It is passed separately because `without_indent` de-indents it
+    and an indented fence's content is then no substring of the comment at all.
+
+    Line endings are compared as one, because a block shown with `\\n` may be stored with `\\r\\n`
+    and the question is whether the comment writes it, not how it spells a boundary.
+    """
+    written = [one_line_endings(one) for one in writings if one]
+    spans = []
+    for start, end in shown.code:
+        piece = one_line_endings(shown.text[start:end])
+        if not piece.strip():
+            # Nothing to report and nothing to exempt. `"" in anything` is True, so an empty
+            # block would be "written" by a comment that writes nothing at all.
+            continue
+        if any(piece in one or piece.strip() == one.strip() for one in written):
+            spans.append((start, end))
+    return spans
+
+
+def bare_spans(shown):
+    """The spans the older bare verdict form's object occupies in SHOWN, which the scan must not
+    read.
+
+    `outside_block` takes the verdict out of the COMMENT by position. The rendering is a different
+    document and has no such position, so the object is found in it the same way it was found in
+    the comment: `bare_object_openers` reads an opener whose first key decodes to
+    `role_understanding`, and the object runs from there to the last `}`.
+
+    A CODE BLOCK IS NOT WHERE THE BARE FORM'S OBJECT IS, and since round seven reads `<pre>` this
+    has to be said rather than assumed. The bare form has no fence -- that is the whole of what
+    makes it the bare form -- so an opener inside a code block is not it. And the closing brace
+    matters as much as the opener: `the_verdict_block` refuses a comment with anything but
+    whitespace after the block its verdict is read from, so on a FENCED review the object's own
+    last `}` is the last one in the reading, and a search that took it would run from a bare
+    opener somewhere in the prose to the end of the comment -- narrowing away every line between
+    them, unscanned. The code blocks are therefore blanked before the search, at their own lengths,
+    so the offsets this returns are still the reading's own.
+    """
+    prose = shown.text
+    for start, end in shown.code:
+        # A filler that is not whitespace, not a brace and not a quote: `OBJECT_OPEN` allows
+        # whitespace between the brace and the key, so blanking with spaces would let an opener
+        # span a code block that stands between the two.
+        prose = prose[:start] + "\x00" * (end - start) + prose[end:]
+    close = prose.rfind("}")
+    return [(at, close + 1) for at in bare_object_openers(prose) if close >= at]
+
+
+def unwritten_verdict(shown, written):
+    """Whether SHOWN carries a `VERDICT:` line WRITTEN does not write, in those characters.
+
+    THE EXEMPTION NAMES THE OCCURRENCE IT EXEMPTS, and that is the whole of this function.
+    COMPARING HOW MANY a reader sees against how many the comment writes was round three's rule and
+    it lost a merge at `3fe68c37`: a `VERDICT:` inside a LINK TITLE is written and shown to nobody,
+    so a review that cites the review format with such a title and then appends a
+    `` `VERDICT`: CHANGES_REQUIRED `` correction shows three where it writes three -- the title's
+    occurrence disappears as the link is rendered, the correction's appears as the code span is --
+    and the correction cancelled against an occurrence no reader has ever seen. Exit 0, PASS, no
+    stray, READY and ONE `gh pr merge` call, where the same review without the title was MANUAL and
+    none. A COUNT CANNOT SAY WHICH ONE DISAPPEARED.
+
+    WHAT IS EXEMPT IS AN OCCURRENCE GITHUB TOOK OUT OF THE COMMENT WHOLE. Two questions, and a
+    `no` to either reports it:
+
+      * does it stand inside ONE PIECE the renderer copied? `**VERDICT**: x` is `<strong>VERDICT
+        </strong>: x`, so a reader's `VERDICT:` straddles the piece inside the tag and the piece
+        after it, and the comment writes no such eight characters anywhere. So do `` `VERDICT`: ``,
+        `[VERDICT](url):`, `V*ERDICT:*` and `~~VERDICT~~:` -- every correction this family has
+        cost a merge over;
+      * and does the comment WRITE that piece, AT THIS POINT IN IT? `VERDICT&#58; x` and
+        `VERDICT\\: x` are one piece each, `VERDICT: x`, and the comment spells neither of them
+        that way. The test is the piece in the comment's own characters, which is what makes this
+        an IDENTITY and not a count: the frontier form's own two verdict lines are written exactly
+        as they are shown, and a third one the comment quotes is written too.
+
+    AT THIS POINT IN IT, AND THAT IS ROUND SEVEN'S CORRECTION. Round six asked whether the comment
+    writes that line ANYWHERE, which is a question about the line's SPELLING and not about the
+    occurrence: a review that quotes `` `VERDICT: CHANGES_REQUIRED` `` while discussing the
+    protocol, ends `VERDICT: PASS`, and then appends `VERDICT\\: CHANGES_REQUIRED` as its
+    correction, cancelled the correction against its own earlier quotation -- exit 0, PASS, no
+    stray, READY and ONE `gh pr merge` call, where the same review without the quotation was
+    MANUAL and none. THE SAME CLASS ROUND FOUR CLOSED BY IDENTITY, REINTRODUCED BY TEXT.
+
+    So the occurrences are matched IN ORDER. A renderer copies the runs it copies in the order the
+    comment writes them, so the k-th occurrence a reader sees stands at or after the source of the
+    one before it: `cursor` is just past the characters the last exempt occurrence was matched to,
+    and each line is looked for FROM THERE. An occurrence with no match left is reported. The
+    earlier quotation is spent on the occurrence a reader sees in it, and the correction after it
+    has only `VERDICT\\:` to match against, which is not those eight characters.
+
+    Which of two indistinguishable occurrences a greedy match blames is not the question either,
+    and it cannot be: what the caller asks is whether ANY occurrence is unwritten. A rendering
+    holding more of them than the comment writes in order has one with nothing left to match,
+    whichever one that turns out to be.
+
+    It is also strictly stronger than the count it replaces. Every comment that count reported is
+    reported here -- a reading holding more occurrences than the characters do must hold one that
+    is not a written piece of them -- and the two it could not tell apart are told apart.
+    """
+    # LINE ENDINGS ARE NOT THE QUESTION, so the comparison is made LINE BY LINE and no line ending
+    # is ever inside what is compared. GitHub's editor stores `\r\n` -- 7 of the 685 comments this
+    # repository held on 2026-09-21 -- and its HTML writes a line ending of its own between two
+    # block tags, which arrives here as text; a run of either side of the occurrence is not what
+    # decides whether the comment writes it.
+    pieces = iter(shown.parts)
+    began, ended, piece = 0, 0, ""
+    # The comment as the comparison reads it, folded once rather than once per occurrence, and
+    # `cursor` -- just past the characters the last exempt occurrence was matched to -- counts in
+    # it. The cursor only ever moves forward, and an occurrence REPORTED does not move it: what is
+    # reported is not spent.
+    writing, cursor = folded(written), 0
+    for found in PROSE_VERDICT.finditer(shown.text):
+        at, end = found.span()
+        # The piece this occurrence ENDS in. It is always one the renderer copied: the only pieces
+        # this reading inserts are line endings, and `VERDICT:` holds none, so an occurrence can
+        # never end inside one. What it may do is BEGIN before the piece it ends in, and that is
+        # the straddle.
+        while ended < end:
+            piece, _, _ = next(pieces)
+            began, ended = ended, ended + len(piece)
+        if began > at:
+            return True
+        # The line of the piece this occurrence stands in, cut at either spelling of a line ending
+        # and in the piece's OWN offsets -- rewriting the piece first would move them.
+        opens = max(piece.rfind("\n", 0, at - began), piece.rfind("\r", 0, at - began)) + 1
+        closes = min([found for found in (piece.find("\n", end - began),
+                                          piece.find("\r", end - began)) if found >= 0]
+                     or [len(piece)])
+        line = piece[opens:closes]
+        if not line.strip():
+            return True
+        # And the comment must write THAT line, at or after the last one it wrote. Both sides are
+        # compared with whitespace folded, because a line ending the comment stores is a SPACE
+        # inside a code span a reader sees across one and `\r\n` where the HTML writes `\n`:
+        # `folded` says why that is a comparison rule and not a transcription of a renderer.
+        # `find` from `cursor` is what makes the exemption name the OCCURRENCE -- the same
+        # characters twice in the reading need two of them in the comment.
+        wrote = writing.find(folded(line), cursor)
+        if wrote < 0:
+            return True
+        # Past this occurrence and no further, so a second one on the same written line is still
+        # matched against that line's remainder rather than against the line after it. The offset
+        # is measured in the folded spelling, which is the one `cursor` counts in.
+        cursor = wrote + len(folded(line[:at - began - opens])) + (end - at)
+    return False
+
+
+def stray_summary(outside, shown, contradicting_verdict=False):
+    """The tokens found outside the findings, as one field, or None.
 
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
 
-    BOTH SPELLINGS ARE SCANNED -- what the comment writes and what a decoder reads -- and the two
-    are not the same text. Reading both is the safe direction for this scan, the same direction
-    `re.ASCII` is chosen for above: every token it finds is a blocker that sends the review to a
-    person, so one found in both spellings costs nothing and one found in neither is the defect.
+    THREE READINGS ARE SCANNED: what the comment writes, what a JSON decoder reads out of it, and
+    WHAT GITHUB SHOWS A READER. The first two are the characters and `decoded_spelling`; the third
+    is `Shown`, and it is why `_P1_`, `&#80;1`, `P**1**`, `P~~1~~`, `P<em>1</em>`,
+    ``P`1`[policy]`` and `> P[1][policy]` -- each `P1` to the person who wrote the comment and to
+    the person reading it -- are `P1` here. A token in ANY of the three is reported, which is the
+    safe direction for a net: every token it finds sends the review to a person, so one found in
+    three readings costs what one found in one costs, and one found in none is the defect.
+
+    THIS IS A NET, AND WHAT IT CATCHES GOES TO A PERSON. A token found here is reported, and
+    `scripts/pr-ready-audit.sh` turns it into a `manual:` blocker; it decides no verdict. THE
+    VERDICT OBJECT IS THE AUTHORITY, and a severity written outside it is read by nothing else in
+    this program.
+
+    AND THE NET IS WHERE THE CONTRADICTING VERDICT LINE IS CAUGHT TOO, which is the whole of
+    CONTRADICTING_VERDICT. `the_verdict_block` refuses a comment whose prose carries a literal
+    `VERDICT:` line outside the block its verdict is read from, because such a comment says two
+    things. A reader sees that same line in spellings the literal pattern carries none of --
+    `**VERDICT**:`, `VERDICT&#58;`, `VERDICT\\:`, `V*ERDICT:*`, `` `VERDICT`: `` and
+    `[VERDICT](url):`, all six fixtured -- and the first of them is the trusted reviewer prepending
+    an ordinary bold correction to a generated `PASS`. Those reach A PERSON rather than a refusal:
+    the refusal is exact because the literal line is exact. REPORTED IN THIS FIELD AND NOT AS A NEW
+    ONE, so the shell's field count and its "whole result or nothing" reading are untouched.
+
+    The two callers differ in one thing and `unwritten_verdict` carries it: the WORKFLOW form's
+    verdict is an object, so it writes no verdict line and every occurrence a reader sees is
+    reported; the PROSE form's verdict IS a line and its own template writes two, and each of those
+    is exempt BY BEING WRITTEN. Measured over the 685 comments this repository held on
+    2026-09-21, 250 carry that form's marker, 241 of them write exactly two `VERDICT:` lines and 8
+    more write three or more; reporting the mere presence of one would report every one of them.
+
+    AND A TAG THIS READING CANNOT PLACE IS REPORTED TOO. `Rendering` classifies each tag as one a
+    reader sees a boundary at or one a reader sees none at, and it has no third answer that is a
+    reading -- both wrong answers LOSE a token. So a tag in neither set is a token of its own here:
+    the review goes to a person, and the person is told which tag it was.
     """
-    tokens = sorted(set(STRAY_TOKEN.findall(outside))
-                    | set(STRAY_TOKEN.findall(decoded_spelling(outside))))
-    return "/".join(tokens) if tokens else None
+    tokens = set()
+    for reading in (outside, decoded_spelling(outside)):
+        tokens |= set(STRAY_TOKEN.findall(reading))
+    tokens |= set(STRAY_TOKEN.findall(shown.text))
+    # A TAG NAME IS NAMED IN THE BLOCKER THE AUDIT PRINTS, so it is narrowed to what a tag name is
+    # before it travels: `html.parser` lowercases the name but stops it at a space or a `/` rather
+    # than at a character class, and this field is a protocol field. Nothing in the rendering
+    # chooses what these bytes are.
+    tokens |= {"unreadable-html:" + (TAG_NAME.sub("", tag)[:32] or "?") for tag in shown.unreadable}
+    # THE READING ONLY, for this one, and MATCHED rather than counted. A `VERDICT:` the comment
+    # spells literally is either already a refusal or already this form's own verdict by the time
+    # this runs, and a JSON escape of one of its letters is not a spelling of it anywhere a person
+    # reads: `json.loads` resolves that inside the verdict object, and nothing resolves it in
+    # prose, where a reader sees the backslash.
+    if contradicting_verdict and unwritten_verdict(shown, outside):
+        tokens.add("VERDICT:")
+    return "/".join(sorted(tokens)) if tokens else None
 
 
 # ---- the review ---------------------------------------------------------------------------------
@@ -800,7 +1408,12 @@ def the_verdict_block(text, candidates):
     The two checks after the count are the same rule pointed outwards. Nothing but WHITESPACE may
     follow the block -- not "nothing this program recognises as a block", which is the enumeration
     that failed; and no `VERDICT:` may stand outside it, because a comment carrying a verdict object
-    and a verdict line says two things and this program would be choosing between them.
+    and a verdict line says two things and this program would be choosing between them. That second
+    check reads the line AS THE COMMENT SPELLS IT, and it is deliberately the only one of the two
+    readings that refuses: the spellings only a reader of the comment sees -- `**VERDICT**:` among
+    them, which is what an ordinary correction looks like -- are found in GitHub's own rendering by
+    `unwritten_verdict` and sent to a person as a stray token instead. `PROSE_VERDICT` states why
+    the two outcomes differ.
     """
     if len(candidates) != 1:
         raise Unparsed(
@@ -863,7 +1476,7 @@ def one_reading(pairs):
     return dict(pairs)
 
 
-def parse_json_review(text, candidates):
+def parse_json_review(text, candidates, shown):
     """The workflow form: the comment's one verdict object, and it is the only source.
 
     Anything in the comment outside that object which looks like a finding is for a person, and is
@@ -893,7 +1506,8 @@ def parse_json_review(text, candidates):
             "reviewed_sha": None,
             "verdict": None,
             "base_sha": None,
-            "stray": stray_summary(text),
+            "stray": stray_summary(text, narrowed(shown, bare_spans(shown)
+                                                  + quoted_code(shown, text))),
             "findings": [{"severity": "ERR", "id": "unparsed", "flags": 0}],
         }
     outside = outside_block(text, block)
@@ -902,16 +1516,36 @@ def parse_json_review(text, candidates):
         "reviewed_sha": matching(verdict.get("reviewed_sha"), SHA),
         "verdict": matching(verdict.get("verdict"), VERDICT_WORD),
         "base_sha": matching(verdict.get("base_sha"), SHA),
-        "stray": stray_summary(outside),
+        # AND THE CONTRADICTING VERDICT LINE IS ASKED FOR HERE WITH NOTHING EXEMPT. This form's
+        # verdict is its object's, so it writes no verdict LINE of its own and any a reader sees
+        # outside that object is a comment saying two things, which belongs in front of a person.
+        # `parse_prose_review` asks the same question with the lines that form does write exempted;
+        # `stray_summary` carries why the two callers differ.
+        # AND THE VERDICT OBJECT IS TAKEN OUT OF THE RENDERING TOO. It is a code block, code
+        # blocks are read since round seven, and `outside_block` takes this one out of the
+        # comment: leaving it in here would report its own `"severity": "P1"` as a severity
+        # written outside the findings on every blocking review this repository has ever had.
+        # Its content is passed to `quoted_code` beside the comment because an INDENTED fence's
+        # content is de-indented, and so is no substring of the comment.
+        "stray": stray_summary(outside,
+                               narrowed(shown, bare_spans(shown)
+                                        + quoted_code(shown, text, block.content)),
+                               contradicting_verdict=True),
         "findings": [finding(one) for one in verdict["findings"]],
     }
 
 
-def parse_prose_review(text):
+def parse_prose_review(text, shown):
     """The frontier form, read conservatively: numbered `N. **P<n>` findings and the last VERDICT.
 
     A severity written any other way -- a heading, a sentence -- is a stray token and sends the
     review to a person. The prose form records no base commit, and says so with a null.
+
+    AND A VERDICT LINE A READER SEES THAT THIS FORM DID NOT WRITE is a stray token too, which is
+    this form's half of the contradiction check: `VERDICT: PASS` with an appended
+    `**VERDICT**: CHANGES_REQUIRED` is the reviewer correcting their own review, and it was exit 0,
+    PASS, READY and one `gh pr merge` call at `d599216` where the plain words were
+    CHANGES_REQUIRED and none.
     """
     head = None
     first = HEAD_RUN.search(text)
@@ -942,7 +1576,25 @@ def parse_prose_review(text):
         "reviewed_sha": head,
         "verdict": verdict,
         "base_sha": None,
-        "stray": stray_summary(outside),
+        # AND THE CONTRADICTING VERDICT LINE IS ASKED FOR HERE TOO, WITH THIS FORM'S OWN LINES
+        # EXEMPTED. This form's verdict is a `VERDICT:` line and its template writes two of them,
+        # so asking merely whether a reader sees such a line would report every prose review ever
+        # posted. What is reported is A LINE A READER SEES AND THE COMMENT DOES NOT WRITE:
+        # `VERDICT: PASS` with `**VERDICT**: CHANGES_REQUIRED` appended is a line written and a
+        # line seen, and that is an ordinary bold correction of a review in the form this
+        # program's own reviews arrive in. It was exit 0, PASS, READY and one `gh pr merge` call
+        # at `d599216`.
+        #
+        # AND THE EXEMPTION NAMES THE OCCURRENCE. Round three asked this by COUNTING -- more seen
+        # in some reading than written in the characters -- and an occurrence a reader never sees
+        # offset one it does: `unwritten_verdict` carries the merge that cost and what replaced
+        # it. The argument is `outside` and not `text` for the same reason it always was: that is
+        # the text the readings are taken of, so a `VERDICT:` written on a numbered finding line
+        # is neither scanned nor exempted.
+        "stray": stray_summary(outside,
+                               narrowed(shown, finding_spans(shown, len(numbered))
+                                        + quoted_code(shown, text)),
+                               contradicting_verdict=True),
         "findings": numbered,
     }
 
@@ -969,9 +1621,17 @@ def review_result(args):
         from the recogniser -- one leading space, a `> ` before the fence -- became the
         `VERDICT: PASS` line written outside it.
     """
-    if len(args) != 1:
-        raise Unparsed("review takes one file")
+    if len(args) != 2:
+        raise Unparsed("review takes the comment and GitHub's rendering of it")
     text = read_input(args[0])
+    # THE RENDERING IS READ FIRST AND CHECKED, because the shape that would undo this whole change
+    # is a rendering that arrives EMPTY and is read as a comment showing nothing: `gh api --jq
+    # '.body_html'` without the rendering's Accept header prints one newline and exits 0, and the
+    # two scans below would then read the characters alone and report nothing, silently, on every
+    # review. A comment with text in it does not render to nothing.
+    shown = shown_reading(read_input(args[1]))
+    if text.strip() and not shown.anything:
+        raise Unparsed("the comment has text in it and its rendering shows none")
     blocks = fenced_blocks(text)
     stale = unresolved_material(text, blocks)
     if stale:
@@ -986,11 +1646,79 @@ def review_result(args):
                 "the review carries the prose form's marker and %d verdict block(s)"
                 % len(candidates)
             )
-        result = parse_prose_review(text)
+        result = parse_prose_review(text, shown)
     else:
-        result = parse_json_review(text, candidates)
+        result = parse_json_review(text, candidates, shown)
     result["tag"] = "review"
     return result
+
+
+def comment_result(args):
+    """comment ANSWER BODY-OUT RENDERING-OUT: ONE VERSION OF ONE COMMENT, SPLIT INTO TWO FILES.
+
+    WHY THIS EXISTS AT ALL, AND IT IS A P1 ROUND SIX INTRODUCED. `scripts/pr-ready-audit.sh` used
+    to fetch the comment's `body` and its `body_html` in two calls. A reviewer editing the comment
+    between them gives the audit VERSION A'S CHARACTERS AND VERSION B'S RENDERING, and the pair
+    passes where each version alone blocks: A carrying `_P1_` in prose over a clean `PASS` is
+    MANUAL, B with that finding moved into the object and the verdict changed to
+    CHANGES_REQUIRED is NOT-READY, and A's body beside B's HTML was PASS, READY and ONE
+    `gh pr merge` call -- executed, with neither the comment id nor the reviewed sha changing.
+
+    `Accept: application/vnd.github.full+json` returns `created_at`, `body` and `body_html`
+    TOGETHER, so one fetch is one version and there is no pair to disagree. It is also the FEWEST
+    calls this has ever cost: ONE addressed to the comment id, where `b0c8b8c9` made two and round
+    six made three. (The listing that finds the id is a call of its own and is unchanged.)
+
+    THE SPLIT IS HERE RATHER THAN IN THE SHELL because what is split is the review itself. A body
+    that reached the parser SHORT is a comment with a different verdict in it -- the class this
+    whole program exists to end -- and bash has no write whose count anybody reads. Each file is
+    written by `write_result`: a staging file this invocation created, flushed, `fsync`ed, closed
+    and renamed, every step of which raises rather than returning a status a caller could forget.
+    Both are written only after every check below has passed.
+
+    A RENDERING THAT IS NOT A STRING IS WRITTEN AS NOTHING, and that is not a gap. It is what the
+    media type being dropped or the endpoint changing looks like, the caller's own check reads an
+    empty rendering as `review-rendering-missing` and BLOCKS, and that is the same answer by the
+    same route as the one newline `--jq '.body_html'` printed at exit 0 for the same cause. A body
+    that is not a string is a refusal, because a comment with no characters is not a review.
+    """
+    if len(args) != 3:
+        raise Unparsed(
+            "comment takes GitHub's answer and the two files to split it into"
+        )
+    answer = read_input(args[0])
+    try:
+        document = json.loads(answer, object_pairs_hook=one_reading)
+    except RepeatedName as exc:
+        # THE SAME RULE AS THE VERDICT OBJECT'S, and for the same reason: `json.loads` keeps the
+        # LAST occurrence of a repeated name, so an answer carrying the review's body and then a
+        # second `"body"` has two readings and this would be choosing one. The hook is the
+        # object's CONSTRUCTOR, so the object is never built at any depth.
+        raise Unparsed("GitHub's answer for the comment %s, so it has two readings" % exc)
+    except ValueError as exc:
+        raise Unparsed("GitHub's answer for the comment is not whole: %s" % exc)
+    if not isinstance(document, dict):
+        raise Unparsed("GitHub's answer for the comment is not an object")
+    at = clean(document.get("created_at"))
+    if at is None or not isinstance(document.get("created_at"), str):
+        raise Unparsed("GitHub's answer for the comment records no created_at")
+    body = document.get("body")
+    if not isinstance(body, str):
+        raise Unparsed("GitHub's answer for the comment carries no body")
+    shown = document.get("body_html")
+    write_result(body.encode("utf-8"), args[1])
+    write_result(shown.encode("utf-8") if isinstance(shown, str) else b"", args[2])
+    return {"tag": "comment", "created_at": at}
+
+
+def comment_fields(result):
+    """The comment as flat fields: three, the last of which is the record count.
+
+    It is always `0` and it is not decoration: `read_parser_fields` checks the array it filled
+    against the count the payload declares, and a payload with no count has no such check. This
+    one carries no records, so the count it declares is none.
+    """
+    return ["comment", result["created_at"], "0"]
 
 
 def review_fields(result):
@@ -1070,6 +1798,7 @@ def ledger_fields(result):
 
 SUBCOMMANDS = {
     "review": (review_result, review_fields),
+    "comment": (comment_result, comment_fields),
     "ledger": (ledger_result, ledger_fields),
 }
 
