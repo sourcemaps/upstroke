@@ -221,7 +221,7 @@ One legacy-scoped gate identity. `TaskKey(0)`, attempt 1, gate `n` —
 the packet's first form with the legacy engine's generation
 (`InvocationId::legacy_attempt`).
 
-## `mod tests` › `fn temp_repo(tag: &str) -> PathBuf {`
+## `mod tests` › `fn temp_repo(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
 
 `git init` through
 [`without_ambient_replacement_controls`](../../src/workspace_manager/fixture.rs),
@@ -455,7 +455,7 @@ observer's rule, not the one a reviewer named — the same assertion is in
 
 Shell-complex commands are the shell's business, not pre-flight's.
 
-## `fn resolution_enforces_simple_commands_and_skips_shelly_ones() {` › `resolve_programs(&[gate("echo hello", 30)], &root, &mut warnings).expect("builtin ok");`
+## `fn resolution_enforces_simple_commands_and_skips_shelly_ones() {` › `resolve_programs(&[gate("echo hello", 30)], root, &mut warnings).expect("builtin ok");`
 
 Builtins are legal starters.
 
@@ -467,7 +467,7 @@ Workspace-relative scripts resolve against the workspace root.
 
 PowerShell cmdlets downgrade to a warning.
 
-## `fn derive_recognizes_project_markers()` › `let node_placeholder = temp_dir("derive-node-placeholder");`
+## `fn derive_recognizes_project_markers()` › `let tree = temp_dir("derive-node-placeholder");`
 
 npm init's always-failing placeholder must not become a gate.
 

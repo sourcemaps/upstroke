@@ -72,29 +72,43 @@ const PID: u32 = 4242;
 
 /// A scratch repository and a scratch authorized private root `R`.
 ///
-/// `Drop` reclaims the whole tree through `RunDir.RemovePublicHusk`, which
-/// removes every entry and then the directory itself. The suite leaks nothing:
-/// on this project's build box a fixture leaked per test is inode exhaustion,
-/// which `df -h` reports as 72% full while every write fails.
+/// Both live in one tree the fixture acquired, and its guard reclaims the
+/// whole tree when the fixture drops, on a normal return and on an unwind.
+/// The suite leaks nothing: on this project's build box a fixture leaked per
+/// test is inode exhaustion, which `df -h` reports as 72% full while every
+/// write fails.
 struct Fixture {
     root: PathBuf,
     repo: PathBuf,
     git_dir: PathBuf,
     private_root: PathBuf,
     repo_key: RepoKey,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = rundir::remove_public_husk(&self.root, &mut rundir::NoHooks);
-    }
+    /// The guard over the tree [`Fixture::new`] acquired, declared last so it
+    /// drops after everything else the fixture holds.
+    _tree: crate::rundir::scratch_tree::ScratchTree,
 }
 
 impl Fixture {
+    /// The root was `temp_dir()/upstroke-startup-census-<name>`, one name for
+    /// every process, and this opened by removing whatever tree stood there
+    /// as "a previous run of this test that died before its `Drop`". The
+    /// other thing that stands there is the same test in a second suite
+    /// running at the same time, and the removal deleted its live fixture
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`); the `Drop` that reclaimed the
+    /// tree discarded its result (`PR7-SCRATCH-FIXTURE-LEAK`). `acquire`
+    /// refuses an occupied root instead of emptying it, names the root with a
+    /// ULID so two processes never share one, and reclaims it on drop.
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("upstroke-startup-census-{name}"));
-        // A previous run of this test that died before its `Drop`.
-        let _ = rundir::remove_public_husk(&root, &mut rundir::NoHooks);
+        let parent = std::env::temp_dir();
+        let tag = format!("startup-census-{name}");
+        let tree = match crate::rundir::scratch_tree::acquire(&parent, &tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        };
+        let root = tree.path().to_path_buf();
         let hooks = &mut rundir::NoHooks;
         let repo = root.join("repo");
         let git_dir = repo.join(".git");
@@ -112,6 +126,7 @@ impl Fixture {
             git_dir,
             private_root,
             repo_key,
+            _tree: tree,
         }
     }
 
@@ -1907,16 +1922,6 @@ impl rundir::RunDirHooks for ExportedErrorAt {
     }
 }
 
-/// A [`Fixture`] named after `name` and this process.
-///
-/// `Fixture::new` removes whatever tree stands at its name before it builds, so
-/// a test process running a witness under a fixed name removes the husk another
-/// process running the same witness has built, and that census finds nothing
-/// (#292's review round 5). The census witnesses below build under this name.
-fn fixture_of_this_process(name: &str) -> Fixture {
-    Fixture::new(&format!("{name}-{}", std::process::id()))
-}
-
 /// The husk a creator leaves when it dies after publishing its owner record: the
 /// marker published, `run.lock` taken at P2 and released by the death, the
 /// private half created and the owner record published. The lock file is part
@@ -1946,7 +1951,7 @@ fn husk_its_creator_left_after_taking_the_run_lock<'a>(
 /// directory with the marker last. No event log is involved.
 #[test]
 fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first() {
-    let fixture = fixture_of_this_process("private-refused-then-reclaimed");
+    let fixture = Fixture::new("private-refused-then-reclaimed");
     let husk =
         husk_its_creator_left_after_taking_the_run_lock(&fixture, "01PRIVREFUSED0000000000000");
     let private = tree_bytes(&husk.private());
@@ -2005,7 +2010,7 @@ fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_pri
 /// runs directory a removal emptied. No event log is involved.
 #[test]
 fn a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census() {
-    let fixture = fixture_of_this_process("public-removed-then-erred");
+    let fixture = Fixture::new("public-removed-then-erred");
     let run_id = "01PUBREMOVED00000000000000";
     let husk = husk_its_creator_left_after_taking_the_run_lock(&fixture, run_id);
 
@@ -2067,7 +2072,7 @@ fn a_creation_prefix_with_a_released_run_lock_is_reclaimed_public_only(
     construct: impl FnOnce(&Husk<'_>) -> HookHarness,
     coordinate: (EffectSiteId, HookPhase),
 ) {
-    let fixture = fixture_of_this_process(run_id);
+    let fixture = Fixture::new(run_id);
     let husk = Husk::at_p0(&fixture, run_id)
         .stage_marker()
         .publish_marker();
@@ -2171,7 +2176,7 @@ fn a_creation_stopped_after_writing_its_plan_leaves_a_husk_the_census_reclaims_p
 {
     let run_id = "01PLANWRITTEN0000000000000";
     let plan: &[u8] = b"{\"tasks\":[]}\n";
-    let fixture = fixture_of_this_process(run_id);
+    let fixture = Fixture::new(run_id);
     let coordinate = (
         EffectSiteId::RunDir(RunDirSite::WritePlan),
         HookPhase::After,

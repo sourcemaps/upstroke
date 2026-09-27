@@ -698,6 +698,12 @@ entirely — strictly worse than the self-review being avoided.
 The alternative is opportunistic, so its probe may fail without
 taking the run down; everything else is load-bearing.
 
+## `mod tests` › `fn review_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
+
+The one place this module's tests take a temporary root from. Four of them were
+`temp_dir()/upstroke-review-<what>-<pid>`, created over whatever stood at that name and removed
+with a discarded result (`PR7-SCRATCH-FIXTURE-LEAK`).
+
 ## `mod tests` › `fn scratch_config(name: &str, body: &str) -> Config {`
 
 ---------------------------------------------------------------------

@@ -1235,7 +1235,7 @@ cannot give:
   that resolution defeats renaming;
 * the shapes are counted, so a deleted fixture is loud.
 
-## `fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {` › `let (ok, diagnostics) = lint_fixture(&scratch, "control", DENIAL_CONTROL);`
+## `fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {` › `let (ok, diagnostics) = lint_fixture(scratch, "control", DENIAL_CONTROL);`
 
 The control first. If this does not compile clean, nothing below means
 anything -- `PR5-C-DOCTEST-FIXTURES-NEVER-RAN` is the ledger entry for

@@ -1066,7 +1066,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const RUN_ID: &str = "01EXPORTTEST00000000000000";
 
@@ -1167,16 +1166,21 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         public: PathBuf,
+        _tree: crate::rundir::scratch_tree::ScratchTree,
     }
 
     impl Fixture {
         fn new(tag: &str, events: Vec<Value>, tasks: Vec<Value>) -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "upstroke-export-{tag}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            let parent = std::env::temp_dir();
+            let tag = format!("export-{tag}");
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, &tag) {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `{tag}` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let root = tree.path().to_path_buf();
             let public = rundir::public_dir(&root, RUN_ID);
             fs::create_dir_all(&public).expect("run directory");
             fs::write(
@@ -1196,7 +1200,11 @@ mod tests {
                 .join("\n")
                 + "\n";
             fs::write(public.join("events.jsonl"), log).expect("write event log");
-            Self { root, public }
+            Self {
+                root,
+                public,
+                _tree: tree,
+            }
         }
 
         fn loaded(&self) -> Loaded {
@@ -1205,12 +1213,6 @@ mod tests {
 
         fn rows(&self) -> Vec<Row> {
             self.loaded().rows
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 

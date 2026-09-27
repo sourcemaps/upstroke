@@ -109,7 +109,7 @@ agreeing with whatever the writer happens to produce.
 Out of range is refused rather than silently clamped — the operator
 meant a specific option.
 
-## `fn an_empty_answer_is_refused_rather_than_written()` › `let repo = scratch("empty").join("repo");`
+## `fn an_empty_answer_is_refused_rather_than_written()` › `let tree = scratch("empty");`
 
 At a prompt, empty means "leave it parked". Written to a file it
 would instead be ingested as an answer that changes nothing.
