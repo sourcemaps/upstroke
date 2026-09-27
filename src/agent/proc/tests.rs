@@ -1137,12 +1137,15 @@ fn timeout_kills_the_process_tree_quickly() {
 #[cfg(unix)]
 #[test]
 fn timeout_kills_a_background_grandchild_before_it_can_escape() {
-    let marker = std::env::temp_dir().join(format!(
-        "upstroke-proc-tree-{}-{}.marker",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed")
-    ));
-    let _ = std::fs::remove_file(&marker);
+    let parent = std::env::temp_dir();
+    let tree = match crate::rundir::scratch_tree::acquire(&parent, "proc-tree") {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `proc-tree` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let marker = tree.path().join("marker");
 
     let mut command = shell("(sleep 1; printf leaked > \"$UPSTROKE_MARKER\") & wait");
     command.env("UPSTROKE_MARKER", &marker);
@@ -1151,7 +1154,6 @@ fn timeout_kills_a_background_grandchild_before_it_can_escape() {
 
     thread::sleep(Duration::from_millis(1300));
     let leaked = marker.exists();
-    let _ = std::fs::remove_file(&marker);
     assert!(
         !leaked,
         "the timed-out process group's background grandchild survived"
@@ -2541,7 +2543,10 @@ extern "C" fn record_custom_aux_signal(_: libc::c_int) {
 #[cfg(unix)]
 struct SignalHelper {
     child: Child,
-    scratch: std::path::PathBuf,
+    /// The guard over the helper's own tree. Its `Drop` reclaims the tree,
+    /// so neither [`SignalHelper::complete`] nor [`SignalHelper`]'s `Drop`
+    /// removes anything itself.
+    scratch: crate::rundir::scratch_tree::ScratchTree,
     marker: std::path::PathBuf,
     finish: std::path::PathBuf,
     diagnostic: std::path::PathBuf,
@@ -2558,7 +2563,6 @@ impl SignalHelper {
 
     fn complete(&mut self) {
         self.active = false;
-        let _ = std::fs::remove_dir_all(&self.scratch);
     }
 
     fn diagnostic(&self) -> String {
@@ -2579,7 +2583,6 @@ impl Drop for SignalHelper {
         let _ = unsafe { libc::kill(-self.pid(), libc::SIGKILL) };
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.scratch);
     }
 }
 
@@ -2587,22 +2590,27 @@ impl Drop for SignalHelper {
 fn spawn_signal_helper(tag: &str, expect_return: bool, ignore_sighup: bool) -> SignalHelper {
     use std::os::unix::process::CommandExt;
 
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-proc-{tag}-{}-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed"),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch).expect("scratch dir");
-    let ready = scratch.join("ready");
-    let marker = scratch.join("leaked");
-    let finish = scratch.join("finish");
-    let diagnostic = scratch.join("helper.log");
-    let reaper_pid_path = scratch.join("reaper.pid");
+    // The helper here built
+    // `temp_dir()/upstroke-proc-<tag>-<pid>-<thread>-<nanos>` and pre-cleaned
+    // it with a discarded `remove_dir_all` before it had any claim on the name
+    // (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). `acquire` refuses an occupied
+    // root rather than emptying it, and the guard -- held by the
+    // `SignalHelper` below -- reclaims the tree however this helper's life
+    // ends (`PR7-SCRATCH-FIXTURE-LEAK`).
+    let parent = std::env::temp_dir();
+    let scratch = match crate::rundir::scratch_tree::acquire(&parent, &format!("proc-{tag}")) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `proc-{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let root = scratch.path();
+    let ready = root.join("ready");
+    let marker = root.join("leaked");
+    let finish = root.join("finish");
+    let diagnostic = root.join("helper.log");
+    let reaper_pid_path = root.join("reaper.pid");
     let diagnostic_stdout = std::fs::File::create(&diagnostic).expect("helper diagnostic");
     let diagnostic_stderr = diagnostic_stdout
         .try_clone()
@@ -2672,7 +2680,7 @@ fn spawn_signal_helper(tag: &str, expect_return: bool, ignore_sighup: bool) -> S
     }
     if tag == "crash-lease" {
         helper
-            .env("UPSTROKE_CLEANUP_PUBLIC", scratch.join("run"))
+            .env("UPSTROKE_CLEANUP_PUBLIC", scratch.path().join("run"))
             .env("UPSTROKE_TEST_CLEANUP_DELAY_MS", "700");
     }
     let child = helper.spawn().expect("spawn signal helper");
@@ -2947,7 +2955,7 @@ fn sigkill_of_upstroke_job_still_reaps_the_isolated_agent_group() {
 #[test]
 fn sigkill_keeps_resume_locked_out_until_agent_cleanup_finishes() {
     let mut helper = spawn_signal_helper("crash-lease", true, false);
-    let public = helper.scratch.join("run");
+    let public = helper.scratch.path().join("run");
     let helper_pgid = helper.pid();
     assert_eq!(unsafe { libc::kill(-helper_pgid, libc::SIGKILL) }, 0);
     wait_for_exit(&mut helper.child, Duration::from_secs(10))
@@ -3271,15 +3279,19 @@ fn unix_reaper_kills_labeled_containers() {
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
     const INCARNATION: &str = "01KZTAAAAAAAAAAAAAAAAAAAAA";
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "upstroke-reaper-containers-{tag}-{}-{}",
-            std::process::id(),
-            crate::ulid::ulid()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        dir
+    /// A scratch tree for one cell, guarded by the token that authorises its
+    /// deletion. The helper here pre-cleaned a name it had no claim on and
+    /// left the root behind (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`,
+    /// `PR7-SCRATCH-FIXTURE-LEAK`).
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 performs no delivery.
@@ -3319,7 +3331,8 @@ fn unix_reaper_kills_labeled_containers() {
             (false, true) => "path-dies",
             _ => "path-lives",
         };
-        let dir = scratch(cell);
+        let tree = scratch(cell);
+        let dir = tree.path();
         let stub = dir.join(STUB_NAME);
         let log = dir.join("argv.log");
         std::fs::write(
@@ -3356,7 +3369,7 @@ fn unix_reaper_kills_labeled_containers() {
             .args(["unix_reaper_container_helper", "--ignored", "--nocapture"])
             .env("UPSTROKE_REAPER_CONTAINERS", "1")
             .env("UPSTROKE_STUB", &named)
-            .env("UPSTROKE_STUB_DIR", &dir)
+            .env("UPSTROKE_STUB_DIR", dir)
             .env("UPSTROKE_ROOT", PRIVATE_ROOT)
             .env("UPSTROKE_INCARNATION", INCARNATION)
             .env("UPSTROKE_AGENT", &agent_path)
@@ -3366,7 +3379,7 @@ fn unix_reaper_kills_labeled_containers() {
             .stderr(Stdio::null());
         if bare {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
-            let mut search = vec![dir.clone()];
+            let mut search = vec![dir.to_path_buf()];
             search.extend(std::env::split_paths(&inherited));
             coordinator.env(
                 "PATH",
@@ -3390,7 +3403,6 @@ fn unix_reaper_kills_labeled_containers() {
                  settle path: {:?}",
                 std::fs::read_to_string(&log)
             );
-            let _ = std::fs::remove_dir_all(&dir);
             continue;
         }
 
@@ -3475,7 +3487,6 @@ fn unix_reaper_kills_labeled_containers() {
             let _ = libc::kill(agent_pid, libc::SIGKILL);
             let _ = libc::kill(-agent_pid, libc::SIGKILL);
         }
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             settled,
             "the container half replaced the process half: the agent group survived"

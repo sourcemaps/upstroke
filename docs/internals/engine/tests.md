@@ -364,7 +364,7 @@ override.
 
 Same task, no override — the implicit anti-self-review path.
 
-## `let repo = temp_engine_repo("secondopinion");`
+## `let (_tree, repo) = temp_engine_repo("secondopinion");`
 
 §11.3: both verdicts must pass. And the primary must NOT rebind here
 even though it matches the implementer — rebinding would resolve both
@@ -375,18 +375,18 @@ is worse than the self-review the rebind exists to prevent.
 
 Both reviewers' spend lands in the review column, not the worker's.
 
-## `let repo = temp_engine_repo("secondopinionfail");`
+## `let (_tree, repo) = temp_engine_repo("secondopinionfail");`
 
 The point of two passes: the one that says no decides, even when the
 first already approved.
 
-## `let repo = temp_engine_repo("shortcircuit");`
+## `let (_tree, repo) = temp_engine_repo("shortcircuit");`
 
 Passes short-circuit like gates do (§11.1): once one has said no, a
 second opinion on the same diff changes nothing and costs a frontier
 invocation to learn it.
 
-## `let repo = temp_engine_repo("selfreview");`
+## `let (_tree, repo) = temp_engine_repo("selfreview");`
 
 The item carried since step 6: both binders resolve `frontier`
 identically, so without the rebind the reviewer IS the implementer.
@@ -396,27 +396,27 @@ identically, so without the rebind the reviewer IS the implementer.
 The claude adapter's review script says FAIL and the copilot one says
 PASS, so a committed task proves which of them was actually asked.
 
-## `let repo = temp_engine_repo("noneedtorebind");`
+## `let (_tree, repo) = temp_engine_repo("noneedtorebind");`
 
 A mid-tier implementer judged by the frontier reviewer is already a
 genuine second look, so nothing rebinds. Triggering on family
 similarity instead of exact identity would send most of a run
 cross-vendor for no verification gain.
 
-## `let repo = temp_engine_repo("nosecondfamily");`
+## `let (_tree, repo) = temp_engine_repo("nosecondfamily");`
 
 Step-6 finding #10's posture: the operator asked for two model
 families on their blast-radius paths. Quietly giving them one is the
 failure that finding exists to prevent, so this refuses instead.
 
-## `let repo = temp_engine_repo("selfreviewwarn");`
+## `let (_tree, repo) = temp_engine_repo("selfreviewwarn");`
 
 The implicit rebind is upstroke's own idea, not the operator's, so a
 single-vendor machine loses the upgrade rather than the run — but it
 is told, because a verification property that quietly is not there is
 exactly what step 6 objected to.
 
-## `let repo = temp_engine_repo("brokencopilot");`
+## `let (_tree, repo) = temp_engine_repo("brokencopilot");`
 
 Installed but broken is different from absent, and the two probe
 classes have to agree about which is which: the opportunistic
@@ -429,12 +429,12 @@ shipped binary always has the Copilot adapter, so the only way the
 rebind really goes missing is a probe failure, and a warning that
 never fires for a real user is not a warning.
 
-## `let repo = temp_engine_repo("brokenrequired");`
+## `let (_tree, repo) = temp_engine_repo("brokenrequired");`
 
 Same machine, same breakage — but now a `second_opinion` names it, so
 it is load-bearing rather than opportunistic.
 
-## `let repo = temp_engine_repo("resumereviewers");`
+## `let (_tree, repo) = temp_engine_repo("resumereviewers");`
 
 Who judged this run is a fact about the run, not about today's
 machine — step-8 finding #8's lesson on `private_dir`. Re-deriving it
@@ -461,7 +461,7 @@ so the retry is judged by the model the run started with.
 today's Copilot pin before restoring the record, this refuses before
 the behavioral assertions below can run.
 
-## `let repo = temp_engine_repo("maxparallelrefusal");`
+## `let (_tree, repo) = temp_engine_repo("maxparallelrefusal");`
 
 The config refusal is only worth having if it lands before the run has
 done anything an operator must undo. Pre-flight loads the config ahead of
@@ -474,7 +474,7 @@ reports on in place of the real one.
 
 Where this repository's worktree lease file would be, held or not.
 
-## `let repo = temp_engine_repo("ceilingbeforelease");`
+## `let (_tree, repo) = temp_engine_repo("ceilingbeforelease");`
 
 The ordering claim itself, tested where cleanup cannot fake it.
 
@@ -504,7 +504,7 @@ two do:
 
 (b) Contended: the config error must still be the one that comes back.
 
-## `let (repo, run_id) = parked_run("resumeceilingbeforelocks");`
+## `let (_tree, repo, run_id) = parked_run("resumeceilingbeforelocks");`
 
 The same claim for the other write command, which takes two locks rather
 than one. `max_per_agent = 0` is the ceiling to test a resume's ordering
@@ -531,7 +531,7 @@ verbatim by every reading, it loads without refusing, and its value is
 visible on the `Analysis` — so "which bytes produced this analysis" has a
 direct answer rather than an inferred one.
 
-## `let repo = temp_engine_repo("confirmunderlease");`
+## `let (_tree, repo) = temp_engine_repo("confirmunderlease");`
 
 The pre-lock check answers "may this start", from files the worktree did
 not yet belong to this run. Adopting *that* analysis afterwards would
@@ -560,7 +560,7 @@ condition that the two captures agree about what it was reading.
     from a read taken beside them. It comes from the capture itself, so
     what is adopted is A whether or not B ever existed.
 
-## `let repo = temp_engine_repo("gatesunderlease");`
+## `let (_tree, repo) = temp_engine_repo("gatesunderlease");`
 
 The one input `analyze` still reads from the filesystem rather than out
 of the capture: `gates::derive` is handed a directory. So the derivation
@@ -708,7 +708,7 @@ record is as much an end as a finished one.
 
 Every one of the four is named, and only where it was written.
 
-## `let repo = temp_engine_repo("oldlogresume");`
+## `let (_tree, repo) = temp_engine_repo("oldlogresume");`
 
 `RunStarted.reviews` is #[serde(default)] so a step-8 log still
 parses — but the default is an EMPTY plan, which every later reader
@@ -724,7 +724,7 @@ A reviewer that rejects everything: if review still runs, nothing can
 commit. If the absent field read as "review disabled", it commits —
 verification gone without a word, which is step-6 finding #10.
 
-## `let repo = temp_engine_repo("outagerecord");`
+## `let (_tree, repo) = temp_engine_repo("outagerecord");`
 
 Step-6 finding #8's distinction, carried into the ledger: a judge
 that never ran said nothing about the code, and recording it as a
@@ -735,13 +735,13 @@ the diff.
 
 And the ladder treated it as an outage: deferred, then committed.
 
-## `let repo = temp_engine_repo("partialcost");`
+## `let (_tree, repo) = temp_engine_repo("partialcost");`
 
 The Copilot route bills nothing back (§13), so a two-pass review
 shows one reviewer's spend. Presenting that as the total is exactly
 what `render_ledger` says is worse than no ledger at all.
 
-## `let repo = temp_engine_repo("reviewtrail");`
+## `let (_tree, repo) = temp_engine_repo("reviewtrail");`
 
 An escalated task can be judged on one rung by one model and on the
 next by another. `review_cost_usd` sums every attempt, so a list
@@ -753,7 +753,7 @@ it does not cover.
 Mid fails review, escalates to frontier, which passes. The frontier
 rung is self-review, so its pass rebinds to the other family.
 
-## `let repo = temp_engine_repo("passtranscripts");`
+## `let (_tree, repo) = temp_engine_repo("passtranscripts");`
 
 Two reviewers, two records. The acceptance pass keeps the bare name
 it has had since step 6, so a run directory reads the same way
@@ -780,7 +780,7 @@ Present input: content is inlined.
 
 ---- step 7: the ladder in the engine ---------------------------------
 
-## `let repo = temp_engine_repo("resume");`
+## `let (_tree, repo) = temp_engine_repo("resume");`
 
 §21 definition-of-done (b). The gate demands a file only the second
 attempt writes, so recovery is real rather than scripted around.
@@ -790,7 +790,7 @@ attempt writes, so recovery is real rather than scripted around.
 §14: a resumed retry keeps the tree, so the commit carries BOTH
 attempts' work rather than only the last one's.
 
-## `let repo = temp_engine_repo("escalate");`
+## `let (_tree, repo) = temp_engine_repo("escalate");`
 
 §21 definition-of-done (c).
 
@@ -800,7 +800,7 @@ The adapter's own record, not just the report echoing what the
 engine intended: the second attempt really was dispatched to the
 higher rung's model.
 
-## `let repo = temp_engine_repo("park");`
+## `let (_tree, repo) = temp_engine_repo("park");`
 
 §21 definition-of-done (d) and invariant 6: t1 exhausts its chain
 and parks; the independent t3 must still commit.
@@ -837,13 +837,13 @@ Invocation order across the whole run, not just this task: t1 asks
 retries once the answer arrives (2). That interleaving is the point
 of invariant 6, so the retry is the third invocation.
 
-## `let repo = temp_engine_repo("ci");`
+## `let (_tree, repo) = temp_engine_repo("ci");`
 
 §12: `interaction = "never"` degrades questions to parked-task
 reporting, and the outcome is distinguishable from both a clean run
 and a halt.
 
-## `let repo = temp_engine_repo("noloop");`
+## `let (_tree, repo) = temp_engine_repo("noloop");`
 
 Without this the hard block spins: ask, get nothing, ask again.
 
@@ -1018,7 +1018,7 @@ attempt", and losing the timeout's transcript-tail feedback.
 
 A genuine question on a completed run still parks the task.
 
-## `let repo = temp_engine_repo("haltpark");`
+## `let (_tree, repo) = temp_engine_repo("haltpark");`
 
 t1 parks on a question, t2 fails terminally under the default halt
 policy. Asking about t1 afterwards spends the operator's attention
@@ -1121,7 +1121,7 @@ still replay identically and prove nothing about the shape this
 step introduced. Check the run did what the scenario claims
 before trusting the equality below.
 
-## `let repo = temp_engine_repo("abortlog");`
+## `let (_tree, repo) = temp_engine_repo("abortlog");`
 
 The engine dying between the agent's edits and a verdict is §19's
 "engine crash" row. Nothing gets to write a tidy ending, so the log
@@ -1154,7 +1154,7 @@ every value a cost can be.
 
 A report carrying nothing but the two cost columns.
 
-## `let repo = temp_engine_repo("livestatus");`
+## `let (_tree, repo) = temp_engine_repo("livestatus");`
 
 The settlement above, inverted. A run an engine is still driving has
 a dangling attempt at every instant, exactly like a killed one — so
@@ -1186,7 +1186,7 @@ The one the dependency-free pair could not catch: `t2` is waiting on
 a task that is working, which is what `Queued` means. Reading that as
 `Blocked` tells the operator a dependency failed when it is running.
 
-## `let repo = temp_engine_repo("resumetrunc");`
+## `let (_tree, repo) = temp_engine_repo("resumetrunc");`
 
 Decision 3, end to end: the attempt shows up in the ledger, the
 rung's allowance does not, and the task completes on the retry.
@@ -1205,7 +1205,7 @@ dead agent would have left it.
 
 The residue is gone and the branch is linear.
 
-## `let repo = temp_engine_repo("crashkill");`
+## `let (_tree, repo) = temp_engine_repo("crashkill");`
 
 The real thing: a separate process is driven into an attempt and
 dies inside it, exactly as `kill -9` or a power cut would.
@@ -1285,7 +1285,7 @@ The spawn itself was this module's own function until round 4. It is
 `src/workspace_manager/tests.rs` and `src/gates.rs`, because three copies of
 a door is three places a later repair can reach two of.
 
-## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {`
+## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> (ScratchTree, PathBuf) {`
 
 An engine repository carrying a replacement the run itself never touches.
 
@@ -1323,7 +1323,7 @@ shape — `Effect::NoEdit` parks the task before any gate runs, the answer is
 written by the CLI path, and the resumed attempt is the first one to reach
 a gate — because a resume of a completed run replays and runs nothing.
 
-## `let repo = temp_engine_repo("answerresume");`
+## `let (_tree, repo) = temp_engine_repo("answerresume");`
 
 §21's definition-of-done (d) across processes: the run ends parked,
 a person answers with `upstroke answer` while nothing is running, and
@@ -1338,7 +1338,7 @@ Nothing is running; the answer is written by the CLI path.
 This adapter is fresh for the resume, so its first invocation is
 t1's retry — the one the answer released. t2 runs after it.
 
-## `let repo = temp_engine_repo("midrun");`
+## `let (_tree, repo) = temp_engine_repo("midrun");`
 
 Invariant 6 at its most useful: the operator answers from elsewhere
 while other work is still going, and the task is released on the
@@ -1355,18 +1355,18 @@ Stands in for an operator running `upstroke answer` in another terminal
 while the run is still going: it writes the file and tells the engine
 nobody replied, so only the sweep can find it.
 
-## `let repo = temp_engine_repo("blocked");`
+## `let (_tree, repo) = temp_engine_repo("blocked");`
 
 The chain is listed backwards on purpose: a single pass in plan
 order would settle `late` before `mid` was known to be blocked, and
 report it as merely skipped.
 
-## `let repo = temp_engine_repo("unblock");`
+## `let (_tree, repo) = temp_engine_repo("unblock");`
 
 Blocked is a *view*, not recorded state — which is what lets an
 answer make a whole chain runnable again on resume.
 
-## `let repo = temp_engine_repo("terminate");`
+## `let (_tree, repo) = temp_engine_repo("terminate");`
 
 The drain loop's termination argument, executed: an adapter that
 never succeeds, a pool that never returns, and a channel nobody
@@ -1381,12 +1381,12 @@ answers. Every branch of the loop fires and the run still ends.
 The base config every parked-run fixture starts from: one rung, one
 attempt, no interaction — so a task that cannot pass parks immediately.
 
-## `fn parked_run(tag: &str) -> (PathBuf, String) {`
+## `fn parked_run(tag: &str) -> (ScratchTree, PathBuf, String) {`
 
 A run that ends parked — the resumable shape every refusal test starts
 from, so each one isolates exactly the thing it breaks.
 
-## `fn parked_run_with_config(tag: &str, config: &str) -> (PathBuf, String) {`
+## `fn parked_run_with_config(tag: &str, config: &str) -> (ScratchTree, PathBuf, String) {`
 
 As [`parked_run`], with the config spelled out — for the tests that need
 a `[[gates]]` section in the record.
@@ -1395,17 +1395,17 @@ One recipe, not two: the chains check runs before anything gate-related,
 so a copy whose `[routing]` line drifted from the original would fail
 these tests on "routing has changed" and point at the wrong thing.
 
-## `let (repo, run_id) = parked_run("headmoved");`
+## `let (_tree, repo, run_id) = parked_run("headmoved");`
 
 §15's HEAD check. Something committed after the run stopped, so the
 log no longer describes what is on the branch.
 
-## `let (repo, run_id) = parked_run("chainmoved");`
+## `let (_tree, repo, run_id) = parked_run("chainmoved");`
 
 `Progress.rung` is an index into the chain; re-resolving a different
 chain would point it at another tier without saying so.
 
-## `fn parked_run_with_gate(tag: &str, cmd: &str) -> (PathBuf, String) {`
+## `fn parked_run_with_gate(tag: &str, cmd: &str) -> (ScratchTree, PathBuf, String) {`
 
 [`parked_run`], with one `[[gates]]` entry — the resumable shape for the
 gate tests, which need a recorded gate to diverge from.
@@ -1419,7 +1419,7 @@ gate tests, which need a recorded gate to diverge from.
 Resume and answer the question the parked task is waiting on, so the
 task actually runs again and its gates actually execute.
 
-## `let (repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("gaterecorded", "git --version");`
 
 The load-bearing test for the whole gate record, and behavioural
 rather than textual: the recorded gate passes, today's config would
@@ -1448,7 +1448,7 @@ than concluding the gate is broken when it never ran.
 
 The report describes the gates that ran, not the ones on disk.
 
-## `let (repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("gate_record_lenient", "git --version");`
 
 `design/15`: gates are taken from the record, not re-derived — and not
 refused over. Today's file has changed since the run started, and
@@ -1463,7 +1463,7 @@ then executes. Pass 2 on PR #150 showed a parser-only downgrade wrong
 in both directions; this test and its twin below are the two
 directions.
 
-## `let (repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("gate_record_absent", "git --version");`
 
 The other direction. A log from before the gate record has nothing to
 substitute: this resume settles the run's gates from today's file, so
@@ -1480,7 +1480,7 @@ Refused before any effect: the log is byte-identical to what it was.
 And with the key spelt right the same log resumes and, having no
 record, settles today's gate and runs it.
 
-## `let (repo, run_id) = parked_run_with_gate("gatelabel", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("gatelabel", "git --version");`
 
 `gates` came from the record but `gates_from_config` did not, so the
 run's own report and a later `status` disagreed about the same list:
@@ -1497,7 +1497,7 @@ derivation empty — the temp repo has no project marker.
 
 The other half of the same promise: a reader replaying the log agrees.
 
-## `let (repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("gateunmoved", "git --version");`
 
 The success path, with a non-empty gate list — the direction a false
 positive would break. Every other gate test edits the config, so
@@ -1543,7 +1543,7 @@ and is not a program at all under cmd.
 Same gates, different order: a difference worth a line, but not the
 same claim as a changed command.
 
-## `let (repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("oldgatelog", "git --version");`
 
 A v0.1 log recorded gate names and nothing else. Refusing would
 strand every run written before the record over a field it could
@@ -1556,7 +1556,7 @@ not a suspicion, and the warning says which.
 Re-derivation must be a real re-derivation, or this test would pass
 against a resume that ignored today's config entirely.
 
-## `let (repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");`
+## `let (_tree, repo, run_id) = parked_run_with_gate("oldgateestablish", "git --version");`
 
 Without this, the pre-record population never gains a record: every
 resume re-derives, so a gate weakened between two of them is adopted
@@ -1589,7 +1589,7 @@ adopted this.
 And it is an ordinary record-bearing resume now: it warns about the
 difference rather than about the log's age.
 
-## `let (repo, run_id) = parked_run("oldgatelessslog");`
+## `let (_tree, repo, run_id) = parked_run("oldgatelessslog");`
 
 The run recorded no gates and none resolve today, so no command can
 have hidden behind an unchanged name. A warning here would fire on
@@ -1620,7 +1620,7 @@ leaves the outcome above alone. A live run is covered by
 `a_live_run_reads_as_running_rather_than_halted`, which truncates the
 log so that the run genuinely has somewhere left to go.
 
-## `let repo = temp_engine_repo("private");`
+## `let (_tree, repo) = temp_engine_repo("private");`
 
 The §15 split, and the reason the private root cannot be inside the
 repo: §14's rollback is `git clean -fd`, which would delete it.
@@ -1668,7 +1668,7 @@ killed at that instant leaves behind.
 Rewind a log through the named event — the shape a process killed
 immediately after its durable transition leaves behind.
 
-## `let repo = temp_engine_repo("adoptcommit");`
+## `let (_tree, repo) = temp_engine_repo("adoptcommit");`
 
 §14 commits, reads the sha back, scrubs the tree, and only then
 appends `task_committed`. A process killed inside those three git
@@ -1687,11 +1687,11 @@ Model an earlier answered question whose DesignDefect append was
 interrupted. It is unrelated to the later successful settlement,
 but resume still owes the repair after closing that settlement.
 
-## `let repo = temp_engine_repo("adoptforeign");`
+## `let (_tree, repo) = temp_engine_repo("adoptforeign");`
 
 Exact object identity, not a plausible subject, is the authority.
 
-## `let repo = temp_engine_repo("privatedir");`
+## `let (_tree, repo) = temp_engine_repo("privatedir");`
 
 Which private root a run used is a fact about that run. Recomputing
 it from today's environment — another HOME, a service account, the
@@ -1708,7 +1708,7 @@ a real process would still retain.
 
 No override, so the resume has to read the location off the record.
 
-## `let repo = temp_engine_repo("stalepayload");`
+## `let (_tree, repo) = temp_engine_repo("stalepayload");`
 
 The engine emits `question_answered` and then rewrites the payload
 beside it. A crash in between leaves a file that still reads as
@@ -1725,7 +1725,7 @@ question with the first one answered in the log.
 
 Rewind the payload to what a crash mid-ingest leaves.
 
-## `let repo = temp_engine_repo("husk");`
+## `let (_tree, repo) = temp_engine_repo("husk");`
 
 Nothing is on the record until the first event lands. A failure in
 that window would otherwise leave a run directory with no
@@ -1745,7 +1745,7 @@ An operator working a backlog: they answer some other parked question
 out of band, reply to this one at the prompt, and then walk away — so a
 dropped answer never gets a second chance.
 
-## `let repo = temp_engine_repo("backlog");`
+## `let (_tree, repo) = temp_engine_repo("backlog");`
 
 Both channels can produce an answer on one scheduler turn. The sweep
 must not swallow the reply the operator typed: it closed a different
@@ -1756,7 +1756,7 @@ wrote — words nothing will ask for again.
 
 Both tasks fail into a question, then both succeed once released.
 
-## `let repo = temp_engine_repo("nullanswer");`
+## `let (_tree, repo) = temp_engine_repo("nullanswer");`
 
 `sweep_answers` reports whether anything *changed*, and the drain
 loop trusts that to mean it made progress. A file the sweep reads
@@ -1770,7 +1770,7 @@ A regression here hangs this test rather than failing it.
 Holds a run's lock and lets go after a set number of sleeps — an engine
 that finishes while a follower is waiting on it.
 
-## `let repo = temp_engine_repo("followlive");`
+## `let (_tree, repo) = temp_engine_repo("followlive");`
 
 A whole attempt — the agent's thinking, its tool calls, the gates,
 the review — folds into one `attempt_finished`, so a healthy run
@@ -1794,7 +1794,7 @@ A pools file beside the repo — never `~/.upstroke`, which is the
 operator's, and never inside the workspace, where §14's `git clean -fd`
 would delete it.
 
-## `let repo = temp_engine_repo("budgetstop");`
+## `let (_tree, repo) = temp_engine_repo("budgetstop");`
 
 The one-fold property, on the branch step 10 added: the stop is an
 event, `RunState::apply` is what turns it into state, and a replay of
@@ -1820,12 +1820,12 @@ Nothing after t1 ran, and the untouched tasks settle as skipped.
 Fails on the first rung, so a second attempt is asked for — and
 refused, because this task has already spent past its own ceiling.
 
-## `let repo = temp_engine_repo("budgetresume");`
+## `let (_tree, repo) = temp_engine_repo("budgetresume");`
 
 D4's whole point: a budget stop is recoverable in one command,
 because budgets are re-derived at resume rather than inherited.
 
-## `let repo = temp_engine_repo("approvespend");`
+## `let (_tree, repo) = temp_engine_repo("approvespend");`
 
 D3, end to end. The engine escalates FIRST and then asks, so an
 approved task un-parks already standing on the frontier rung with a
@@ -1841,7 +1841,7 @@ allowance the escalation reset — not a re-run of the mid rung.
 Through `ingest_answer`'s existing Declined path — the one place that
 owns the halt policy, with no ApproveSpend special case beside it.
 
-## `let repo = temp_engine_repo("frontierstart");`
+## `let (_tree, repo) = temp_engine_repo("frontierstart");`
 
 §12's target is silent escalation. A task the operator deliberately
 routed to frontier in config was not escalated onto it silently, and
@@ -1857,7 +1857,7 @@ dollar column comes from.
 And §14's pre-flight snapshot is on the record — folding to nothing,
 which `assert_live_equals_replay` elsewhere is what proves.
 
-## `let repo = temp_engine_repo("poolexhausted");`
+## `let (_tree, repo) = temp_engine_repo("poolexhausted");`
 
 §13 source 1 made real: the signal is ground truth, and the estimator
 that reads it back must never let a self-metered figure talk it up.
@@ -1874,7 +1874,7 @@ signal is retired rather than standing forever. Reporting `exhausted`
 here — on the same line that reports the attempts it served — was the
 shape the review caught.
 
-## `let repo = temp_engine_repo("budgetflag");`
+## `let (_tree, repo) = temp_engine_repo("budgetflag");`
 
 `[budgets] run_usd = 0.0` is a hard error at load. The flag that
 overrides it must not be a way around that: zero and negative both
@@ -1885,7 +1885,7 @@ fired at all.
 
 And refused at pre-flight, before a branch or a run directory exists.
 
-## `let repo = temp_engine_repo("approvalfeedback");`
+## `let (_tree, repo) = temp_engine_repo("approvalfeedback");`
 
 Every other question's answer is guidance for the next attempt. An
 ApproveSpend answer is a yes/no about money whose meaning was already
@@ -1898,7 +1898,7 @@ billing decision.
 
 An Unblock answer still does, because there it really is guidance.
 
-## `let repo = temp_engine_repo("cannedoption");`
+## `let (_tree, repo) = temp_engine_repo("cannedoption");`
 
 The options a question carries are the engine's instructions to the
 operator: "retry this task with guidance you type below", "answer in
@@ -1928,7 +1928,7 @@ And nothing reached the judge as an operator decision either.
 
 Down for three attempts, then back.
 
-## `let repo = temp_engine_repo("budgetdirty");`
+## `let (_tree, repo) = temp_engine_repo("budgetdirty");`
 
 §14 keeps the working tree for a resumed same-rung retry, because
 that retry re-gates the *cumulative* diff. The ceiling is checked at
@@ -2037,7 +2037,7 @@ path. One reordering away, that file reads `t1: running now — attempt
 process that wrote it. So the invariant is stated where it is relied
 upon.
 
-## `let repo = temp_engine_repo("resumewindow");`
+## `let (_tree, repo) = temp_engine_repo("resumewindow");`
 
 `resume` takes the run's lock and then does a dozen git subprocesses
 — branch checks, a switch, a discard — before it writes
@@ -2050,7 +2050,7 @@ at a budget stop is running `status` to find.
 The lock answers who has claimed the run. Whether the run still has
 anywhere to go is a question only its log answers.
 
-## `let repo = temp_engine_repo("budgetjam");`
+## `let (_tree, repo) = temp_engine_repo("budgetjam");`
 
 Handing back a clean tree was added *before* the ceiling was
 recorded, with a `?` on it. So a `git reset --hard` that failed for
@@ -2069,7 +2069,7 @@ ordinary gate residue to pierce the new workspace isolation.
 
 And it says so rather than leaving the operator to find the mess.
 
-## `let repo = temp_engine_repo("budgetdecline");`
+## `let (_tree, repo) = temp_engine_repo("budgetdecline");`
 
 A decline routes through `fail_task`, which sets `halted_at`, and
 halted outranks budget in `outcome()`. A decline sitting on disk when
@@ -2562,8 +2562,8 @@ witness both). Before #292's review round 6 they were `upstroke-engine-<tag>-<pi
 `-home` in the temporary directory, which nothing removed.
 
 The kill child is given the tree as its temporary directory too (`TMPDIR`, and the `TMP` and
-`TEMP` Windows reads), so the pools file `options` makes it through `no_pools`, named for the
-child's process, lies inside the tree (#292's review round 7: it was
+`TEMP` Windows reads), so the pools file `options` makes it through `no_pools`, one tree per
+process, lies inside the tree (#292's review round 7: it was
 `upstroke-engine-nopools-<pid>` in the temporary directory, which the child's abort left there).
 
 ## `fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {`

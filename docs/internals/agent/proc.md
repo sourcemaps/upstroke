@@ -2563,10 +2563,11 @@ so no other test in this process inherits a scope.
 (3) A name carrying a separator is a path and is used verbatim —
 exactly `execvp`'s own rule, and what `execv` already does correctly.
 
-## `mod tests` › `fn reaper_stub(tag: &str, script: &str) -> (std::path::PathBuf, ReaperContainers) {`
+## `mod tests` › `fn reaper_stub(`
 
-A scratch directory, a recording `docker` stub, and the rendered
-argument vectors that name it.
+A scratch tree, a recording `docker` stub in it, and the rendered
+argument vectors that name it. The tree's guard comes back with the
+vectors because it owns the stub.
 
 ## `fn reaper_stub` › `let scope = crate::runner::container::census::ReaperContainerScope::new(`
 
@@ -2631,7 +2632,7 @@ on — so a loop that could not end would turn "docker is wedged" into
 Second field held constant: the id set, which never changes; only
 the number of times the reaper is willing to ask about it moves.
 
-## `fn a_runtime_that_keeps_answering_the_same_listing_ends_the_loop` › `let (dir, rendered) = reaper_stub(`
+## `fn a_runtime_that_keeps_answering_the_same_listing_ends_the_loop` › `let (tree, rendered) = reaper_stub(`
 
 The stub answers with the same two ids twice and then with
 nothing. The third listing is what makes this fixture finite: an
@@ -2708,6 +2709,13 @@ message says so, not "closed with no report"). The last is the one
 this test could not see before it asserted how the wait ended: the
 message shape was the same after two seconds as after two
 milliseconds.
+
+## `fn run_a_stand_in_fixture(fixture: &str, variable: &str, shape: &str) {` › `let parent = std::env::temp_dir();`
+
+The record was `temp_dir()/upstroke-stand-in-<pid>-<fixture>-<shape>.pid`, opened by a
+discarded `remove_file` of a name a later process under a recycled pid computes again
+(`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). It is now in a tree this call acquired, whose guard
+reclaims it.
 
 ## `mod tests` › `fn a_helper_that_has_already_exited_ends_the_acknowledgement_wait_at_end_of_file() {`
 

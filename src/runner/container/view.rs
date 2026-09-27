@@ -413,25 +413,41 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), UpstrokeError> {
 
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::time::Duration;
 
     use crate::agent::ProcessOutput;
+    use crate::rundir::scratch_tree::ScratchTree;
     use crate::runner::host::HostRunner;
     use crate::runner::invocation::AttemptRole;
     use crate::runner::{CommandSpec, InvocationId, Runner, gate_request};
     use crate::topology::events::{AttemptNumber, GenerationId};
     use crate::topology::registry::TaskKey;
 
-    pub(crate) fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "upstroke-view-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        dir
+    /// A scratch tree for one test, guarded by the token that authorises its
+    /// deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-view-<tag>-<pid>-<thread>`
+    /// and pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`). A
+    /// thread id distinguishes two fixtures inside one process and nothing
+    /// else: a second process, or a second run of this one under a pid Windows
+    /// recycled, reaches the same name. `acquire` refuses an occupied root
+    /// rather than emptying it, keys on a ULID no recycled pid can supply, and
+    /// reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at
+    /// the end of that statement and deletes the fixture.
+    pub(crate) fn scratch(tag: &str) -> ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     pub(crate) fn git(cwd: &Path, args: &[&str]) -> ProcessOutput {
@@ -530,7 +546,8 @@ mod tests {
 
     #[test]
     fn a_linked_worktrees_three_git_directories_resolve_to_three_distinct_places() {
-        let root = scratch("layout");
+        let tree = scratch("layout");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let linked = root.join("tasks").join("k0-g0");
@@ -569,7 +586,8 @@ mod tests {
 
     #[test]
     fn a_workspace_with_no_repository_has_no_layout_and_still_gets_a_view() {
-        let root = scratch("no-repo");
+        let tree = scratch("no-repo");
+        let root = tree.path();
         let workspace = root.join("scratch");
         std::fs::create_dir_all(&workspace).expect("a workspace");
         assert_eq!(resolve(&workspace).expect("resolves"), None);
@@ -601,7 +619,8 @@ mod tests {
 
     #[test]
     fn the_view_carries_the_exact_detached_head_and_index_of_the_worktree() {
-        let root = scratch("exact");
+        let tree = scratch("exact");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, previous) = repository(&repo);
 
@@ -650,7 +669,8 @@ mod tests {
 
     #[test]
     fn a_symbolic_head_is_resolved_to_an_object_id_before_it_reaches_the_view() {
-        let root = scratch("symbolic");
+        let tree = scratch("symbolic");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let raw = std::fs::read_to_string(repo.join(".git").join("HEAD")).expect("HEAD");
@@ -697,7 +717,8 @@ mod tests {
 
     #[test]
     fn a_head_that_names_nothing_refuses() {
-        let root = scratch("unborn");
+        let tree = scratch("unborn");
+        let root = tree.path();
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).expect("the directory");
         git_ok(&repo, &["init", "-q"]);
@@ -718,7 +739,8 @@ mod tests {
 
     #[test]
     fn the_role_view_carries_no_engine_refs_and_no_link_back_into_the_repository() {
-        let root = scratch("no-refs");
+        let tree = scratch("no-refs");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let planted = engine_refs(&repo, &head);
@@ -768,7 +790,8 @@ mod tests {
 
     #[test]
     fn a_git_dependent_tool_reads_the_role_view_and_cannot_see_the_engines_refs() {
-        let root = scratch("git-tool");
+        let tree = scratch("git-tool");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let planted = engine_refs(&repo, &head);
@@ -851,7 +874,8 @@ mod tests {
 
     #[test]
     fn an_object_written_through_the_view_lands_in_the_view_and_not_in_the_repository() {
-        let root = scratch("disposable");
+        let tree = scratch("disposable");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let workspace = root.join("tasks").join("k0-g0");
@@ -935,7 +959,8 @@ mod tests {
 
     #[test]
     fn the_projection_names_the_paths_the_reader_will_see_and_not_the_hosts() {
-        let root = scratch("reader");
+        let tree = scratch("reader");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let workspace = root.join("tasks").join("k0-g0");
@@ -1002,7 +1027,8 @@ mod tests {
 
     #[test]
     fn the_dot_git_kind_is_read_from_the_worktree_and_takes_both_values() {
-        let root = scratch("dotgit-kind");
+        let tree = scratch("dotgit-kind");
+        let root = tree.path();
         let repo = root.join("repo");
         let (head, _) = repository(&repo);
         let linked = root.join("tasks").join("k0-g0");
@@ -1031,7 +1057,8 @@ mod split_index_tests {
     #[test]
     fn a_split_index_projects_with_the_shared_half_it_links_to() {
         for (label, split) in [("ordinary", false), ("split", true)] {
-            let root = scratch(&format!("split-index-{label}"));
+            let tree = scratch(&format!("split-index-{label}"));
+            let root = tree.path();
             let repo = root.join("repo");
             let (head, _) = repository(&repo);
             let workspace = root.join("tasks").join("k0-g0");
@@ -1114,8 +1141,6 @@ mod split_index_tests {
                 expected.contains("staged.txt"),
                 "[{label}] the fixture staged nothing, so the comparison above is vacuous"
             );
-
-            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }

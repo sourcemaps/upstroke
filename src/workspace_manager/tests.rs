@@ -445,8 +445,9 @@ fn a_malformed_entry_is_refused_even_for_a_site_this_run_does_not_want() {
 /// scratch test on the guest, which asserted `is_err()` and passed.
 #[test]
 fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
-    let root = scratch("already-gone");
-    fs::create_dir_all(&root).expect("fixture root");
+    let tree = scratch("already-gone");
+    let root = tree.path();
+    fs::create_dir_all(root).expect("fixture root");
     let absent = root.join("no-such-tree");
     assert!(!absent.exists(), "the fixture must not create it");
     assert!(
@@ -459,12 +460,6 @@ fn removing_a_path_that_is_already_gone_is_convergence_not_failure() {
     fs::create_dir_all(present.join("nested")).expect("a tree to remove");
     assert!(remove_tree_once_handles_close(&present).is_ok());
     assert!(!present.exists(), "and it is actually gone");
-    // `scratch` has no `Drop` guard, so a test that does not remove its own
-    // root leaves one empty directory in the temp dir per process, forever.
-    // Three had already accumulated from this test alone before it was
-    // noticed -- the same leak recorded against `rundir.rs::scratch` in
-    // `reviews/FINDINGS.md`, reintroduced by the test that reported it.
-    fs::remove_dir_all(&root).expect("this test cleans up after itself");
 }
 
 /// Run `body`, returning its panic message if it panicked.
@@ -6424,7 +6419,8 @@ fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges()
 #[test]
 fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
     use std::os::unix::ffi::OsStringExt as _;
-    let root = scratch("byte-named-repository");
+    let tree = scratch("byte-named-repository");
+    let root = tree.path();
     let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
     match fs::create_dir_all(&repo) {
         Ok(()) => {}
@@ -6435,7 +6431,6 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
                  cannot exist here, and neither can the shape this test guards against",
                 error.raw_os_error()
             );
-            let _ = fs::remove_dir_all(&root);
             return;
         }
         Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
@@ -6476,7 +6471,6 @@ fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
         ObjectResidue::None,
         "an absent target in a byte-named repository is unregistered, as at the merge base"
     );
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -7667,7 +7661,8 @@ fn base_without_replacement_isolation() -> HostEnvironment {
 /// This is the half that depends on no list of names: an eighteenth mechanism
 /// costs this panic rather than a silent pass.
 fn assert_a_role_process_sees_replacements(tag: &str) {
-    let root = scratch(&format!("role-replacement-live-{tag}"));
+    let tree = scratch(&format!("role-replacement-live-{tag}"));
+    let root = tree.path();
     let repo = root.join("repo");
     create_dir(&repo);
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -7708,7 +7703,6 @@ fn assert_a_role_process_sees_replacements(tag: &str) {
          enumeration is missing a mechanism and closing it is the fix",
         ambient_replacement_controls()
     );
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// One `git` gate, run through the production runner in `workspace`.
@@ -8232,8 +8226,9 @@ fn probe_outcome(status: std::process::ExitStatus) -> String {
 /// is witnessed doing the work.
 #[test]
 fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
-    let root = scratch("replacement-controls");
-    let rows = hostile_replacement_environments(&root);
+    let tree = scratch("replacement-controls");
+    let root = tree.path();
+    let rows = hostile_replacement_environments(root);
     assert_eq!(
         rows.len(),
         12,
@@ -8293,8 +8288,6 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
         "no row is a control on the Git running this suite, so this grid \
          measured nothing at all"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// `GIT_CONFIG` captures a fixture's own configuration write, and the
@@ -8310,7 +8303,8 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
 /// and this is the measurement rather than the argument.
 #[test]
 fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
-    let root = scratch("git-config-redirect");
+    let tree = scratch("git-config-redirect");
+    let root = tree.path();
     let repo = root.join("repo");
     create_dir(&repo);
     // Neutralised, because `GIT_TEMPLATE_DIR` writes into a repository at
@@ -8391,8 +8385,6 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
         redirected, "",
         "the pin still reached the operator's file: {redirected}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].
@@ -10729,7 +10721,8 @@ fn a_kill_at_id_unread_leaves_a_gc_owned_object_nothing_adopts() {
 /// observe it is from outside.
 #[test]
 fn a_kill_at_id_unread_aborts_before_the_id_is_recorded() {
-    let record = scratch("id-unread-kill").join("record");
+    let tree = scratch("id-unread-kill");
+    let record = tree.path().join("record");
     let helper = Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",

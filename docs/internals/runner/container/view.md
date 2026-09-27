@@ -472,7 +472,7 @@ file to two of them — the sixth occurrence of `PR4-CENSUS-COMMENT-ORACLE` on
 this project, and the one that finally moved the blanking into the shared
 region instead of into each census.
 
-## `pub(crate) mod fixtures` › `pub(crate) fn scratch(tag: &str) -> PathBuf {`
+## `pub(crate) mod fixtures` › `pub(crate) fn scratch(tag: &str) -> ScratchTree {`
 
 A scratch directory, in the idiom of `runner::container::tests::scratch`.
 
