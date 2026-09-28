@@ -415,6 +415,158 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn the_includes_name_the_common_directory_exactly_under_each_posix_rule() {
+    let include = Path::new("/home/u/.upstroke/git/recorded-objects.gitconfig");
+    for (rule, keyword) in [
+        (GitdirRule::Posix, "gitdir:"),
+        (GitdirRule::PosixFoldingCase, "gitdir/i:"),
+    ] {
+        let repository =
+            ManagedRepository::new(Path::new(r"/srv/it's [x]*?\y/.git"), include, rule)
+                .expect("a path Git can read in a key");
+        let pattern = format!(r"{keyword}/srv/it'\''s \[x\]\*\?\\y/.git");
+        let value = "'/home/u/.upstroke/git/recorded-objects.gitconfig'";
+        assert_eq!(
+            repository.parameters(),
+            OsStr::new(&format!(
+                "'includeIf.{pattern}.path'={value} 'includeIf.{pattern}/worktrees/*.path'={value}"
+            )),
+            "{rule:?}: a glob character in the path is escaped, a quote is closed, escaped \
+             and reopened, and only the worktrees component is a glob"
+        );
+    }
+    let refused =
+        ManagedRepository::new(Path::new("/srv/new\nline/.git"), include, GitdirRule::Posix)
+            .expect_err("Git refuses a newline in a configuration key")
+            .to_string();
+    assert!(refused.contains("newline"), "{refused}");
+    for (common, included) in [
+        ("relative/.git", "/home/u/include"),
+        ("/srv/repo/.git", "relative/include"),
+    ] {
+        let refused =
+            ManagedRepository::new(Path::new(common), Path::new(included), GitdirRule::Posix)
+                .expect_err("Git reads neither a relative condition nor a relative include")
+                .to_string();
+        assert!(refused.contains("absolute"), "{refused}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn the_includes_name_the_common_directory_exactly_under_the_windows_rule() {
+    let repository = ManagedRepository::new(
+        Path::new(r"\\?\C:\Users\Me\it's [x]\.git"),
+        Path::new(r"C:\Users\Me\.upstroke\git\recorded-objects.gitconfig"),
+        GitdirRule::Windows,
+    )
+    .expect("a path Git can read in a key");
+    let pattern = r"gitdir/i:C:/Users/Me/it'\''s \[x\]/.git";
+    let value = "'C:/Users/Me/.upstroke/git/recorded-objects.gitconfig'";
+    assert_eq!(
+        repository.parameters(),
+        OsStr::new(&format!(
+            "'includeIf.{pattern}.path'={value} 'includeIf.{pattern}/worktrees/*.path'={value}"
+        ))
+    );
+}
+
+#[test]
+fn the_windows_rule_spells_a_path_as_git_for_windows_does() {
+    for (canonical, spelled) in [
+        (r"\\?\C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        (
+            r"\\?\UNC\server\share\repo\.git",
+            "//server/share/repo/.git",
+        ),
+        (r"C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        ("C:/Users/Me/repo/.git", "C:/Users/Me/repo/.git"),
+    ] {
+        assert_eq!(
+            GitdirRule::Windows.spelling(canonical.as_bytes()),
+            spelled.as_bytes(),
+            "{canonical}"
+        );
+    }
+    for rule in [GitdirRule::Posix, GitdirRule::PosixFoldingCase] {
+        assert_eq!(
+            rule.spelling(br"/srv/a\b/.git"),
+            br"/srv/a\b/.git".to_vec(),
+            "{rule:?}: a Unix path is spelled as it is"
+        );
+    }
+    assert_eq!(GitdirRule::Windows.keyword(), "gitdir/i:");
+    assert_eq!(GitdirRule::PosixFoldingCase.keyword(), "gitdir/i:");
+    assert_eq!(GitdirRule::Posix.keyword(), "gitdir:");
+    assert_eq!(
+        GitdirRule::native(),
+        if cfg!(windows) {
+            GitdirRule::Windows
+        } else if cfg!(target_os = "macos") {
+            GitdirRule::PosixFoldingCase
+        } else {
+            GitdirRule::Posix
+        }
+    );
+    assert_eq!(GitdirRule::ALL.len(), 3);
+}
+
+#[test]
+fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-include-gone")
+        .expect("a scratch tree");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let workspace = tree.path().join("ws");
+    std::fs::create_dir(&workspace).expect("a workspace");
+    let repository = ManagedRepository::new(
+        &tree.path().join("repo.git"),
+        &include,
+        GitdirRule::native(),
+    )
+    .expect("a scope");
+    let runner = HostRunner::for_legacy_workspace(repository);
+    let request = || {
+        crate::runner::gate_request(
+            native().spec("exit 0"),
+            workspace.clone(),
+            crate::config::DEFAULT_GATE_TIMEOUT,
+            gate_invocation(),
+        )
+    };
+    for (state, bytes) in [
+        ("missing", None),
+        (
+            "altered",
+            Some(b"[core]\n\tuseReplaceRefs = true\n".as_slice()),
+        ),
+        ("empty", Some(b"".as_slice())),
+    ] {
+        if let Some(bytes) = bytes {
+            std::fs::write(&include, bytes).expect("the include, altered");
+        }
+        let refused = runner
+            .run(&request())
+            .expect_err("a role without its include must not start");
+        assert_eq!(
+            refused.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{state}: {refused}"
+        );
+        let message = refused.source.to_string();
+        assert!(
+            message.contains("refusing to start a role process")
+                && message.contains(&include.display().to_string()),
+            "{state}: {message}"
+        );
+    }
+    std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include, whole");
+    runner
+        .run(&request())
+        .expect("with its include in place the role starts");
+}
+
 #[test]
 fn a_reserved_key_the_base_does_not_carry_is_not_supplied() {
     let environment =

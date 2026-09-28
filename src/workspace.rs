@@ -1821,6 +1821,190 @@ mod tests {
     }
 
     #[test]
+    fn a_git_older_than_the_floor_is_refused_by_name() {
+        for (reported, accepted) in [
+            ("git version 2.40.0", false),
+            ("git version 2.40.4\n", false),
+            ("git version 2.39.5 (Apple Git-154)", false),
+            ("git version 1.99.9", false),
+            ("git version 2.41.0", true),
+            ("git version 2.41.0.windows.1\r\n", true),
+            ("git version 2.43.0", true),
+            ("git version 2.45.GIT", true),
+            ("git version 3.0.0", true),
+            ("git version 2", false),
+            ("git version two", false),
+            ("", false),
+        ] {
+            let verdict = require_git_floor(reported);
+            assert_eq!(verdict.is_ok(), accepted, "{reported:?}: {verdict:?}");
+            if let Err(refused) = verdict {
+                let refused = refused.to_string();
+                assert!(
+                    refused.contains("Git 2.41 or newer is required")
+                        && refused.contains(reported.trim()),
+                    "{refused}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execution_prerequisites_ask_git_its_version_and_refuse_2_40() {
+        let status = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_GIT_FLOOR_WITNESS", "1")
+            .status()
+            .expect("spawn the helper");
+        assert!(
+            status.success(),
+            "the helper runs the execution prerequisites with a `git` on PATH that reports \
+             2.40.0, and ended {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if env::var_os("UPSTROKE_GIT_FLOOR_WITNESS").is_none() {
+            return;
+        }
+        let (_tree, repo) = temp_repo("git-floor");
+        let real = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("find git")
+                .stdout,
+        )
+        .expect("a UTF-8 path")
+        .trim()
+        .to_owned();
+        let bin = repo.with_file_name("bin");
+        fs::create_dir(&bin).expect("the stub's directory");
+        let asked = repo.with_file_name("asked");
+        let stub = bin.join("git");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
+                 case \" $* \" in *' version '*) echo 'git version 2.40.0'; exit 0;; esac\n\
+                 exec '{real}' \"$@\"\n",
+                asked.display()
+            ),
+        )
+        .expect("the stub");
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("an executable stub");
+        let path = format!("{}:{}", bin.display(), env::var("PATH").expect("a PATH"));
+        let out = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env("UPSTROKE_GIT_FLOOR_REPO", &repo)
+            .output()
+            .expect("spawn the child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let asked = fs::read_to_string(&asked).expect("what the stub was asked");
+        assert!(
+            asked.lines().any(|line| line.ends_with(" version")),
+            "the prerequisites asked the `git` on PATH for its version: {asked}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_child() {
+        let Some(repo) = env::var_os("UPSTROKE_GIT_FLOOR_REPO") else {
+            return;
+        };
+        let refused = Workspace::open(Path::new(&repo))
+            .expect("open")
+            .ensure_execution_prerequisites()
+            .expect_err("Git 2.40 is below the floor")
+            .to_string();
+        assert!(
+            refused.contains("Git 2.41 or newer is required")
+                && refused.contains("git version 2.40.0")
+                && refused.contains("merge-tree"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn the_recorded_objects_scope_names_the_repositorys_own_common_directory() {
+        let (tree, repo) = temp_repo("recorded-scope");
+        let private = tree.path().join("home");
+        let ws = Workspace::open(&repo).expect("open");
+        let scope = ws
+            .recorded_objects_scope(Some(&private))
+            .expect("the scope the v0.1 runner reads");
+        assert_eq!(
+            scope.common_dir(),
+            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+        );
+        let include = private.join("git").join("recorded-objects.gitconfig");
+        assert_eq!(scope.include(), include);
+        assert_eq!(
+            fs::read(&include).expect("the include"),
+            RECORDED_OBJECTS_INCLUDE
+        );
+        scope.verify_include().expect("the include verifies");
+
+        fs::write(&include, "[core]\n\tuseReplaceRefs = true\n").expect("an altered include");
+        ws.recorded_objects_scope(Some(&private))
+            .expect("a second scope");
+        assert_eq!(
+            fs::read(&include).expect("the include, written again"),
+            RECORDED_OBJECTS_INCLUDE,
+            "an altered include is replaced, never adopted"
+        );
+        let linked = tree.path().join("linked");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &linked.to_string_lossy(),
+            ],
+        );
+        assert_eq!(
+            Workspace::open(&linked)
+                .expect("open the linked worktree")
+                .recorded_objects_scope(Some(&private))
+                .expect("its scope")
+                .parameters(),
+            scope.parameters(),
+            "a linked worktree names the same repository"
+        );
+        let staged: Vec<_> = fs::read_dir(private.join("git"))
+            .expect("the include's directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
+    }
+
+    #[test]
     fn clean_detection_and_rollback() {
         let (_tree, repo) = temp_repo("clean");
         let ws = Workspace::open(&repo).expect("open");
