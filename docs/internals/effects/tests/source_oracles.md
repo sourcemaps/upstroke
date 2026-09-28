@@ -1233,38 +1233,88 @@ And a real attribute beside prose that quotes one is still found.
 ## `pub(super) mod oracles` › `struct AboveTheCut {`
 
 What [`read_above_the_cut`] read of one file: the truncating region, blanked;
-the whole file's region; and how many gates above the cut the reader read as
-test-only.
+the whole file's region; how many gates above the cut the reader read as
+test-only; and the gate, if there is one, whose element crosses the cut, as
+[`compare_above_the_cut`] finds it.
 
 ## `pub(super) mod oracles` › `fn read_above_the_cut(path: &str, source: &str) -> AboveTheCut {`
 
-The per-file assertions of `the_whole_region_contains_the_truncated_one`, so
-that the tree and the synthetic rows go through the same ones. The text above
-the cut is read with the `#[cfg(test)]` that makes the cut, because an
-attribute written above that gate belongs to the gate's element. Each gate
-above the cut is found as [`production_code`] finds it,
-[`next_test_only_attribute`], and its predicate read as the reader reads it,
-through `gate_predicate`.
+The two readings of one file that `the_whole_region_contains_the_truncated_one`
+compares: the whole file's region, and the text above the cut read with the
+`#[cfg(test)]` that makes the cut, because an attribute written above that
+gate belongs to the gate's element. [`compare_above_the_cut`] compares them,
+so the tree, the synthetic rows and the rows that hand it a misreading go
+through the same assertions.
 
-## `pub(super) mod oracles` › `const MOST_NAMES_EVALUATED: usize = 20;`
+## `pub(super) mod oracles` › `fn compare_above_the_cut(`
 
-A predicate naming more configuration names than this is refused rather than
-evaluated: the evaluation walks every assignment of them.
+The per-file assertions, over the text above the cut and the two readings of
+it. Each gate above the cut is found as [`production_code`] finds it,
+[`next_test_only_attribute`], its predicate read as the reader reads it,
+through `gate_predicate`, and confirmed by [`is_false_wherever_test_is`].
+
+Above the cut the two readings must agree, except over an element the text
+above the cut leaves open. A test-only element can enclose the cut:
+`#[cfg(all(unix, test))] pub fn helper() { #[cfg(test)] let _ = 0; }`, or a
+`const _` whose block holds the inner gate, written above `util::same_path`'s
+gate makes that inner `#[cfg(test)]` the file's first, and the text above the
+cut stops inside the element. The whole file's reading ends the element at its
+`}` or `;` and removes it; the text above the cut cannot end it, so the reader
+keeps its header there, as it keeps any element whose end it cannot find. So
+the first gate above the cut whose element that text leaves open -- the byte
+where the element starts, past the gate and any attributes stacked after it
+([`past_outer_attributes`]), is still there -- and which the whole reading
+removes from the gate to the cut, is where an element crosses the cut. The
+readings are compared above that gate; from it to the cut the whole reading
+has removed everything, and the gate's predicate is confirmed like any other.
+Until #325's sixth round the comparison ran to the cut, and a review of
+`598d7616` executed both shapes -- the `fn` and the `const _` -- against it:
+honest code, refused.
+
+The two conditions are what keep the comparison's purpose. An element the text
+above the cut *ends* is compared in full, so a whole reading that runs it on
+past the cut removes code that text keeps after its end, and fails. An element
+the whole reading does not remove to the cut is compared in full, so a whole
+reading that removes code inside an element it keeps fails too. Both rows that
+hand this function such a whole reading are after the tree walk. What neither
+condition can see is a tokeniser that misreads a group as open at the cut and a
+whole reading that closes it past the cut: the element then crosses the cut by
+the reader's own reading, as an honest enclosing element does, and nothing in
+this test tells the two apart.
 
 ## `pub(super) mod oracles` › `fn is_false_wherever_test_is(predicate: &Predicate) -> bool {`
 
 Whether no assignment of the names other than `test` makes the predicate hold
-while `test` is false -- [`entails_test`]'s question, answered by exhaustion
-rather than by its three-valued reading, so the reader's decision is checked
-by something it did not compute. The two differ only where the reader is
-incomplete: `all(unix, not(unix))` holds under no assignment, and the reader,
-which knows nothing of `unix`, keeps its element. The check never meets that
-case, since it runs over the gates the reader already removes an element for.
+while `test` is false -- [`entails_test`]'s question, decided exactly and for
+a predicate of any size: nothing here refuses one. The predicate's value under
+the names assigned so far is taken wherever those names fix it, and otherwise
+one name it still depends on is tried both ways. Three-valued evaluation is
+monotone -- a value it fixes under some names holds under every assignment of
+the rest -- so the answer is the one every assignment gives, reached without
+visiting the assignments the value does not depend on.
+
+At the root, with nothing assigned, the value is the three-valued reading
+[`entails_test`] makes, computed here by separate code. Every gate the reader
+removes an element for is decided there, in one pass over its predicate,
+however many names it has, and no name is tried. A name is tried only where
+that reading leaves the value open, which on the tree walk means the reader
+removed an element its own reading does not decide -- a defect, and then
+trying names finds the assignment under which the predicate holds. In the
+fixed rows it means a predicate the reader would keep and this decides:
+`all(unix, not(unix))` holds under no assignment, and the reader, which knows
+nothing of `unix`, keeps its element.
+
+Until #325's sixth round this enumerated every assignment of every name and
+refused a predicate naming more than 20, which refused honest code: a review
+of `598d7616` executed a test-only constant near the top of
+`src/agent/proc.rs` under `all(test, any(..))` naming 21 `target_os` values.
+
 Names are independent here; rustc relates some (`unix` and `windows`, say),
 and a predicate false under every assignment of independent names is false
 under every assignment rustc allows. The fixed rows after the tree walk pin
-both answers, `any(unix, test)` and `all()` among the ones that do not entail
-`test`.
+both answers: `any(unix, test)` and `all()` among the ones that do not entail
+`test`, the review's 21 names both ways, and four predicates over 1,000 names,
+three of which are decided only by trying names.
 
 ## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {`
 
@@ -1285,13 +1335,14 @@ truncating region keeps -- on this tree, `src/agent/proc.rs`'s and
 `cfg(all(target_os = "macos", test))` and `cfg(all(windows, test))` items --
 and it removes the attributes stacked on the cut's own gate, which stand above
 the cut. So three assertions replace the one, per file, in
-[`read_above_the_cut`]: the two readings of the prefix agree, which fails if an
-element's end depends on text past the cut; the prefix differs from the
-truncating region only where this one blanks, which fails if it ever keeps
-code the truncating region does not; and each gate the reader removes an
-element for above the cut is one [`is_false_wherever_test_is`] confirms. The
-classification census holds the two agent files' items against
-`effects/wrappers.toml` both ways.
+[`compare_above_the_cut`]: the two readings of the prefix agree -- above the
+gate of an element crossing the cut, where one does -- which fails if an
+element the text above the cut ends is read to a different end with the rest
+of the file; the prefix differs from the truncating region only where this one
+blanks, which fails if it ever keeps code the truncating region does not; and
+each gate the reader removes an element for above the cut is one
+[`is_false_wherever_test_is`] confirms. The classification census holds the two
+agent files' items against `effects/wrappers.toml` both ways.
 
 Round 4 read the text above the cut alone and named the files the two regions
 may differ in, `src/agent/proc.rs` and `src/agent/proc/ambient.rs`. The round-4
@@ -1310,6 +1361,25 @@ rather than widened: it could only name what the tree spells today. What
 replaces it asks of each gate whether removing its element is right, by an
 evaluation that is not the reader's. The rows after the tree walk hold both
 edits' shapes, and four more, whatever the tree comes to spell.
+
+Reading the text above the cut with its gate was necessary and not sufficient.
+A review of `598d7616` wrote a test-only item above `same_path`'s gate with its
+own `#[cfg(test)]` inside it -- a `pub fn` under `cfg(all(unix, test))` with a
+gated `let`, and a `const _` under the same gate with a gated `const` in its
+block -- so the file's first `#[cfg(test)]` stood inside the item. The whole
+file's reading removed the item; the text above the cut, read with that inner
+gate, could not end it and kept its header; the equality failed on honest code,
+both toolchains and both Clippy versions accepting the edit. The comparison now
+stops at the gate of an element crossing the cut (above). The rows after the
+tree walk hold both shapes, one with an attribute between its gate and its
+function, a test-only function inside a test-only module -- the first of the
+two crossing gates is the one compared up to, since the text above the cut
+keeps the module's header too -- an element ended above the cut followed by one
+crossing it, and a production function enclosing the cut, which crosses
+nothing; each row states whether an element crosses and exactly what the whole
+reading keeps between its neighbours. The same rows hold the review's other
+edit, a gate naming 21 `target_os` values, which this test used to refuse
+before deciding it ([`is_false_wherever_test_is`]).
 
 What carries the superset claim is the rest: `strictly_larger >= 8` and the
 `src/engine/coordinator.rs` membership check (a strict gain somewhere, by
@@ -1359,6 +1429,18 @@ eight `every_production_region_that_stops_early_stops_at_a_module` pins
 that still have code under the cut, plus the three test files carrying a
 `#[cfg(test)] mod this_file_is_test_only {}` marker whose whole purpose
 was to zero the truncating region.
+
+## `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {` › `fn blanked(text: &str, from: usize, to: usize) -> String {`
+
+Two rows hand [`compare_above_the_cut`] a whole-file reading that is wrong in
+each of the two ways its crossing rule must not excuse, and require the
+refusal: a test-only `static` the text above the cut ends at its `;`, read
+instead as running on past the cut, which takes the production function after
+it; and a function the text above the cut leaves open, which the whole
+reading keeps but removes a statement of. Each is first handed the honest
+reading, which it accepts with nothing crossing. Without the condition that
+the text above the cut leaves the element open, the first passes; without
+the condition that the whole reading removes it to the cut, the second does.
 
 ## `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {` › `const SENTINEL: &str = "\npub fn sentinel_below_every_configured_item() {}\n";`
 
