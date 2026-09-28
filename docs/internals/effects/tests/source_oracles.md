@@ -1326,7 +1326,14 @@ the cut, each a separate gap:
   reads a kept first byte as an element the text stopped inside, and it is one
   only where the reader had no other reason to keep it. The second test would
   not excuse it: the `)` that ends the header stands above the cut, so no
-  continuation changes what the reader does with the element.
+  continuation changes what the reader does with the element. Read from the
+  reader's paths, no item or statement rustc parses reaches such a reason; a
+  token tree it does not parse can. rustc accepts
+  `stringify!(#[cfg(all(unix, test))] fn t())`, and the reader keeps `fn t()`
+  in both readings, so honest code of that shape passes, and what the gap
+  costs is this test's power to catch a future reader defect there. No gate of
+  this tree or of the box's cargo registry reaches it, as #325's seventh round
+  measured. Filed as `PR325-A-SETTLED-KEPT-ELEMENT-READS-AS-LEFT-OPEN`.
 
 ## `pub(super) mod oracles` › `fn closers_after_the_cut(truncated: &str) -> String {`
 
