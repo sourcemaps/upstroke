@@ -111,13 +111,21 @@ each of them starts from, which reads the same constant and also passes
 `-c core.useReplaceRefs=false`: on Git 2.41 a configured `core.useReplaceRefs = true` outranks the
 variable, and a command-line setting outranks every configuration file. The runner the v0.1
 conductor installs keeps its gates, reviewers and implementers on the recorded graph of the
-repository the run manages, and of no other repository. For every role it appends two conditional
-includes to `GIT_CONFIG_PARAMETERS`, after every entry the role inherits or its overlay sets —
+repository the run manages. For every role it appends two conditional includes to
+`GIT_CONFIG_PARAMETERS`, after every entry the role inherits or its overlay sets —
 `includeIf.gitdir:<common dir>.path` and `includeIf.gitdir:<common dir>/worktrees/*.path` — both
-naming a file that holds `[core] useReplaceRefs = false`. Git reads `GIT_CONFIG_PARAMETERS` after
-every configuration file and after the counted `GIT_CONFIG_*` pairs, so in the managed repository's
-main worktree and in every linked one, the run's snapshots included, that setting comes last; a
-repository a role creates for itself matches neither condition and keeps its replacements. Nothing
+naming a file that holds `[core] useReplaceRefs = false`. Each component of those paths, `worktrees`
+included, is matched with case unless the directory holding it finds it under the other case, and
+then with either case of each ASCII letter; a letter outside ASCII is matched as the canonical path
+spells it. Git reads `GIT_CONFIG_PARAMETERS` after every configuration file and after the counted
+`GIT_CONFIG_*` pairs, so in the managed repository's main worktree and in every linked one, the
+run's snapshots included, that setting comes last wherever Git names the Git directory in a
+spelling those conditions match. A repository a role creates for itself matches neither condition
+and keeps its replacements. So does a repository whose path differs from the managed one's only in
+the ASCII case of components held by directories that keep case, unless such a directory also holds
+an alias of the managed path's component named with each ASCII letter's case swapped: a junction or
+a bind mount then makes that directory look as though it folds, and the conditions reach the other
+repository too (`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`, deferred). Nothing
 is written into any Git configuration: the file lives in the private root, at
 `<private root>/git/recorded-objects.gitconfig`, every run and resume writes it before its first
 role starts, and the runner refuses to start a role while it is missing or altered. Configuration is
