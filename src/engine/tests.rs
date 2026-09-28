@@ -10380,3 +10380,460 @@ fn v1_role_graph_helper() {
         "the task committed the bytes its worker wrote, not the replacement it installed"
     );
 }
+
+fn include_for(entry: &Path) -> PathBuf {
+    private_root_for(entry)
+        .join("git")
+        .join("recorded-objects.gitconfig")
+}
+
+fn write_probe_spec(probe: &Path, entry: &Path, spec: &str) {
+    for directory in ["fixtures", "log"] {
+        fs::create_dir_all(probe.join(directory)).expect("the probe's directories");
+    }
+    fs::write(
+        probe.join("spec"),
+        format!("include {}\n{spec}", include_for(entry).display()),
+    )
+    .expect("the probe's spec");
+}
+
+#[test]
+fn a_gate_that_replaces_objects_in_its_own_fixture_passes_under_the_v1_runner() {
+    let tree = temp_engine_scratch("v1-own-fixture");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_own_fixture_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child runs a v0.1 task in a repository with nothing under `refs/replace/`, \
+         whose worker, gate and reviewer each create a repository of their own, install a \
+         replacement in it and read it back, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_own_fixture_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-own-fixture");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let (_tree, repo) = temp_engine_repo("v1ownfixture");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    assert!(
+        git_in(&repo, &["replace", "-l"]).trim().is_empty(),
+        "the managed repository holds no replacement"
+    );
+    write_probe_spec(&probe, &repo, "");
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let report = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+    )
+    .expect("the run");
+    let (records, _) = take_role_and_operator_records(&probe);
+    assert_eq!(
+        report.outcome(),
+        RunOutcome::Complete,
+        "{report:?}\n{records:#?}"
+    );
+    assert_every_role_read_the_recorded_graph(&records, "the run");
+}
+
+#[test]
+fn a_refused_an_interrupted_and_a_resumed_v1_run_leave_git_configuration_as_they_found_it() {
+    let tree = temp_engine_scratch("v1-configuration");
+    let truthful = tree.path().join("true.gitconfig");
+    fs::write(&truthful, "[core]\n\tuseReplaceRefs = true\n").expect("a `true` for two scopes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_configuration_helper",
+        &challenge_every_scope(&truthful, tree.path()),
+    );
+    assert!(
+        status.success(),
+        "the child refuses a run over a dirty checkout, kills one inside its attempt and \
+         resumes it, comparing every Git configuration file after each, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_configuration_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let truthful = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").expect("the challenge"));
+    let (_tree, repo) = temp_engine_repo("v1configuration");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    write_probe_spec(&probe, &repo, &spec);
+    assert_every_scope_says_true(&repo);
+    let configuration = configuration_of(&repo, &[&truthful]);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+
+    fs::write(repo.join("stray.txt"), "stray\n").expect("a stray file");
+    let refused = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&OVERLAY_SAYS_TRUE)),
+    )
+    .expect_err("a checkout with a stray file is refused")
+    .to_string();
+    assert!(refused.contains("not clean"), "{refused}");
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "a refused run changed no Git configuration"
+    );
+    fs::remove_file(repo.join("stray.txt")).expect("the stray file, gone");
+
+    let died = Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "engine::tests::v1_interrupted_run_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_V1_INTERRUPTED_REPO", &repo)
+        .output()
+        .expect("spawn the run that dies");
+    assert_eq!(
+        died.status.code(),
+        Some(CRASH_EXIT_CODE),
+        "the run must die inside its attempt: {}",
+        String::from_utf8_lossy(&died.stderr)
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "an interrupted run changed no Git configuration"
+    );
+    let run_id = rundir::latest_run(&repo).expect("the interrupted run");
+
+    let include = include_for(&repo);
+    fs::remove_file(&include).expect("the include both runs wrote, gone before the resume");
+    let resumed = resume_with(
+        &resume_options(&repo, &run_id),
+        &fake(Effect::EditFile).probing_with(
+            RoleProbe::new(&OVERLAY_SAYS_TRUE).reading_as_the_operator(&probe.join("log"), &blob),
+        ),
+    )
+    .expect("the resume");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Complete,
+        "{resumed:?}\n{records:#?}"
+    );
+    assert_every_role_read_the_recorded_graph(&records, "the resume of an interrupted run");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "{operator:?}"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include the resume wrote again"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the resume changed no Git configuration"
+    );
+}
+
+#[test]
+#[ignore = "spawned by the configuration witness"]
+fn v1_interrupted_run_helper() {
+    let Some(repo) = std::env::var_os("UPSTROKE_V1_INTERRUPTED_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let _ = run_with(
+        &opts,
+        &fake(Effect::Exit).probing_with(RoleProbe::new(&OVERLAY_SAYS_TRUE)),
+    );
+    std::process::exit(0);
+}
+
+#[test]
+fn sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded() {
+    let tree = temp_engine_scratch("v1-siblings");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_siblings_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child starts two v0.1 runs at once, in two linked worktrees of one repository \
+         with replacements, over one private root with no include in it yet, and ended \
+         {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_siblings_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-siblings");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let (_tree, repo) = temp_engine_repo("v1siblings");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    let home = private_root_for(&repo);
+    assert!(!home.exists(), "no run has written an include yet");
+    let mut checkouts = Vec::new();
+    for sibling in ["a", "b"] {
+        let checkout = repo.with_file_name(format!("sibling-{sibling}"));
+        git_in(
+            &repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &format!("sibling-{sibling}"),
+                &checkout.to_string_lossy(),
+            ],
+        );
+        git_in(
+            &checkout,
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        );
+        assert_eq!(
+            private_root_for(&checkout),
+            home,
+            "both siblings' runs keep their private half, and the include, under one root"
+        );
+        let records = probe.join(format!("sibling-{sibling}"));
+        write_probe_spec(
+            &records,
+            &checkout,
+            &spec.replace("-candidate", &format!("-candidate-{sibling}")),
+        );
+        checkouts.push((sibling, checkout, records));
+    }
+    let configuration = configuration_of(&repo, &[]);
+    let children: Vec<_> = checkouts
+        .into_iter()
+        .map(|(sibling, checkout, records)| {
+            let child = Command::new(std::env::current_exe().expect("this test binary"))
+                .args([
+                    "--exact",
+                    "engine::tests::v1_sibling_run_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_V1_SIBLING_CHECKOUT", &checkout)
+                .env(ROLE_PROBE, &records)
+                .spawn()
+                .expect("spawn a sibling run");
+            (sibling, records, child)
+        })
+        .collect();
+    for (sibling, records, child) in children {
+        let out = child.wait_with_output().expect("a sibling run");
+        assert!(
+            out.status.success(),
+            "sibling {sibling} ended {:?}",
+            out.status
+        );
+        let (records, _) = take_role_and_operator_records(&records);
+        assert_every_role_read_the_recorded_graph(&records, &format!("sibling {sibling}"));
+    }
+    assert_eq!(
+        fs::read(home.join("git").join("recorded-objects.gitconfig")).expect("the shared include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[]),
+        configuration,
+        "two runs at once changed no Git configuration"
+    );
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "and the operator's Git still honours the replacements"
+    );
+}
+
+#[test]
+#[ignore = "spawned by the siblings witness"]
+fn v1_sibling_run_helper() {
+    let Some(checkout) = std::env::var_os("UPSTROKE_V1_SIBLING_CHECKOUT") else {
+        return;
+    };
+    let checkout = PathBuf::from(checkout);
+    let mut opts = options(&checkout);
+    opts.config_path = Some(checkout.join("upstroke.toml"));
+    let report = run_with(
+        &opts,
+        &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+    )
+    .expect("a sibling run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+}
+
+#[test]
+fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {
+    let tree = temp_engine_scratch("v1-shapes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_shapes_helper",
+        &[(ROLE_PROBE, tree.path().as_os_str().to_owned())],
+    );
+    assert!(
+        status.success(),
+        "the child runs a v0.1 task in repositories with replacements whose paths carry \
+         glob characters, spaces and a quote, that are entered through a symbolic link, \
+         keep their Git directory elsewhere or behind a link, are linked worktrees, or are \
+         spelled in another case, and ended {status:?}"
+    );
+}
+
+fn shaped_engine_repo(repo: &Path) {
+    git_in(repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(repo, &["config", "user.name", "upstroke tests"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    seed(
+        repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n{}",
+            role_probe_gates()
+        )),
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_shapes_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-shapes");
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let tree = temp_engine_scratch("v1shapes");
+    let root = tree.path();
+    let init = |repo: &Path, args: &[&str]| {
+        fs::create_dir_all(repo).expect("the repository's directory");
+        let mut all = vec!["init", "-q", "-b", "main"];
+        all.extend_from_slice(args);
+        git_in(repo, &all);
+    };
+    let mut shapes: Vec<(&str, PathBuf)> = Vec::new();
+
+    let spelled = if cfg!(windows) {
+        "glob [x] it's spaced"
+    } else {
+        "glob [x]*? it's spaced"
+    };
+    let repo = root.join(spelled).join("repo");
+    init(&repo, &[]);
+    shapes.push(("glob characters, spaces and a quote", repo));
+
+    let store = root.join("separate").join("store.git");
+    let repo = root.join("separate").join("repo");
+    init(&repo, &["--separate-git-dir", &store.to_string_lossy()]);
+    shapes.push(("a separate Git directory", repo));
+
+    let main = root.join("linked").join("main");
+    init(&main, &[]);
+    shaped_engine_repo(&main);
+    let repo = root.join("linked").join("repo");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            &repo.to_string_lossy(),
+        ],
+    );
+    shapes.push(("entered through a linked worktree", repo));
+
+    #[cfg(unix)]
+    {
+        let real = root.join("entered").join("real");
+        init(&real, &[]);
+        let link = root.join("entered").join("repo");
+        std::os::unix::fs::symlink(&real, &link).expect("a link to the repository");
+        shapes.push(("entered through a symbolic link", link));
+
+        let repo = root.join("gitdir-link").join("repo");
+        init(&repo, &[]);
+        let elsewhere = root.join("gitdir-link").join("elsewhere.git");
+        fs::rename(repo.join(".git"), &elsewhere).expect("the Git directory, moved");
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".git")).expect("a link to it");
+        shapes.push(("a Git directory behind a symbolic link", repo));
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        let repo = root.join("case").join("repo");
+        init(&repo, &[]);
+        shapes.push(("spelled in another case", root.join("case").join("REPO")));
+    }
+
+    for (shape, entry) in shapes {
+        if shape != "entered through a linked worktree" {
+            shaped_engine_repo(&entry);
+        }
+        let (blob, spec) = install_a_replaced_graph(&entry, &probe);
+        write_probe_spec(&probe, &entry, &spec);
+        let mut opts = options(&entry);
+        opts.config_path = Some(entry.join("upstroke.toml"));
+        let report = run_with(
+            &opts,
+            &fake(Effect::EditFile).probing_with(RoleProbe::new(&[])),
+        )
+        .unwrap_or_else(|error| panic!("{shape}: the run: {error}"));
+        let (records, _) = take_role_and_operator_records(&probe);
+        assert_eq!(
+            report.outcome(),
+            RunOutcome::Complete,
+            "{shape}: {report:?}\n{records:#?}"
+        );
+        assert_every_role_read_the_recorded_graph(&records, shape);
+        assert_eq!(
+            git_in(&entry, &["cat-file", "-p", &blob]).trim(),
+            "replacing-blob",
+            "{shape}: the operator's Git still honours the replacements"
+        );
+    }
+}
