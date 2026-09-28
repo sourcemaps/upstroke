@@ -20,8 +20,8 @@ pub(super) mod oracles {
     use crate::effects::{
         CLASSIFIED_MODULES, Predicate, RUSTC_WHITESPACE, TOPOLOGY_MODULES, attribute_open,
         blank_comments, blank_comments_and_strings, externally_reachable_fns, gate_predicate,
-        next_test_only_attribute, parse_predicate, production_code, production_region,
-        reachable_fn_multiplicity,
+        next_test_only_attribute, parse_predicate, past_outer_attributes, production_code,
+        production_region, reachable_fn_multiplicity,
     };
 
     fn declared_production_children(
@@ -2065,22 +2065,70 @@ pub(super) mod oracles {
         truncated: String,
         whole: String,
         gates: usize,
+        crossing: Option<usize>,
     }
 
     fn read_above_the_cut(path: &str, source: &str) -> AboveTheCut {
         const CUT: &str = "#[cfg(test)]";
         let region = production_region(source);
-        let truncated = blank_comments_and_strings(&region);
         let whole = production_code(source);
-        let prefix = whole.get(..truncated.len()).unwrap_or(&whole);
         let with_its_gate =
             production_code(source.get(..region.len() + CUT.len()).unwrap_or(source));
+        let (gates, crossing) = compare_above_the_cut(path, &region, &whole, &with_its_gate);
+        AboveTheCut {
+            truncated: blank_comments_and_strings(&region),
+            whole,
+            gates,
+            crossing,
+        }
+    }
+
+    fn compare_above_the_cut(
+        path: &str,
+        region: &str,
+        whole: &str,
+        with_its_gate: &str,
+    ) -> (usize, Option<usize>) {
+        let truncated = blank_comments_and_strings(region);
+        let prefix = whole.get(..truncated.len()).unwrap_or(whole);
         let above_the_cut = with_its_gate
             .get(..truncated.len())
-            .unwrap_or(&with_its_gate);
+            .unwrap_or(with_its_gate);
+        let mut gates = 0_usize;
+        let mut crossing = None;
+        let mut from = 0;
+        while let Some((hash, close)) = next_test_only_attribute(region, &truncated, from) {
+            let predicate = attribute_open(region, truncated.as_bytes(), hash)
+                .and_then(|(_, open)| gate_predicate(region, &truncated, open));
+            assert!(
+                predicate.as_ref().is_some_and(is_false_wherever_test_is),
+                "{path}: above the truncating cut, this region removes the element under `{}` as \
+                 test-only, and its predicate holds under some assignment of its names with \
+                 `test` false",
+                region.get(hash..=close).unwrap_or_default()
+            );
+            let element = past_outer_attributes(region, truncated.as_bytes(), close + 1);
+            let left_open = above_the_cut
+                .as_bytes()
+                .get(element)
+                .is_some_and(|byte| !byte.is_ascii_whitespace());
+            let removed_to_the_cut = prefix
+                .as_bytes()
+                .get(hash..)
+                .is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace));
+            if crossing.is_none() && left_open && removed_to_the_cut {
+                crossing = Some(hash);
+            }
+            gates += 1;
+            from = close + 1;
+        }
+        let compared = crossing.unwrap_or(truncated.len());
         assert_eq!(
-            prefix.replace(' ', ""),
-            above_the_cut.replace(' ', ""),
+            prefix.get(..compared).unwrap_or(prefix).replace(' ', ""),
+            above_the_cut
+                .get(..compared)
+                .unwrap_or(above_the_cut)
+                .replace(' ', ""),
             "{path}: above the truncating cut, this region reads the whole file differently \
              from the text above the cut read with the gate that makes the cut"
         );
@@ -2093,26 +2141,7 @@ pub(super) mod oracles {
             "{path}: the truncating region keeps code this one does not, other than code this \
              one removes as test-only"
         );
-        let mut gates = 0_usize;
-        let mut from = 0;
-        while let Some((hash, close)) = next_test_only_attribute(&region, &truncated, from) {
-            let predicate = attribute_open(&region, truncated.as_bytes(), hash)
-                .and_then(|(_, open)| gate_predicate(&region, &truncated, open));
-            assert!(
-                predicate.as_ref().is_some_and(is_false_wherever_test_is),
-                "{path}: above the truncating cut, this region removes the element under `{}` as \
-                 test-only, and its predicate holds under some assignment of its names with \
-                 `test` false",
-                region.get(hash..=close).unwrap_or_default()
-            );
-            gates += 1;
-            from = close + 1;
-        }
-        AboveTheCut {
-            truncated,
-            whole,
-            gates,
-        }
+        (gates, crossing)
     }
 
     fn is_false_wherever_test_is(predicate: &Predicate) -> bool {
@@ -2203,33 +2232,97 @@ pub(super) mod oracles {
              target_os = \"aix\"";
         let many_targets =
             format!("#[cfg(all(test, any({TARGETS})))]\nconst _: () = ();\n#[cfg(test)]\n");
-        for (what, above, gates) in [
-            ("the gate alone", "#[cfg(test)]\n", 0),
+        for (what, above, gates, crosses, kept) in [
+            ("the gate alone", "#[cfg(test)]\n", 0, false, ""),
             (
                 "an attribute above the gate that makes the cut",
                 "#[allow(dead_code)]\n#[cfg(test)]\n",
                 0,
+                false,
+                "",
             ),
             (
                 "attributes and a comment above the gate that makes the cut",
                 "#[inline]\n// a note\n#[allow(dead_code)]\n#[cfg(test)]\n",
                 0,
+                false,
+                "",
             ),
             (
                 "a spelling of the gate other than the one that cuts",
                 "#[cfg(all(test))]\n",
                 1,
+                false,
+                "",
             ),
             (
                 "an attribute above a compound gate",
                 "#[allow(dead_code)]\n#[cfg(all(unix, test))]\n",
                 1,
+                false,
+                "",
             ),
-            ("a gate that no build satisfies", "#[cfg(any())]\n", 1),
+            (
+                "a gate that no build satisfies",
+                "#[cfg(any())]\n",
+                1,
+                false,
+                "",
+            ),
             (
                 "a gate naming twenty-one configuration names",
                 many_targets.as_str(),
                 1,
+                false,
+                "",
+            ),
+            (
+                "a test-only function enclosing the cut",
+                "#[cfg(all(unix, test))]\npub fn reviewer_nested_test_helper() {\n    \
+                 #[cfg(test)]\n    let _ = 0;\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "",
+            ),
+            (
+                "a test-only constant enclosing the cut",
+                "#[cfg(all(unix, test))]\nconst _: () = {\n    #[cfg(test)]\n    \
+                 const _: () = ();\n};\n#[cfg(test)]\n",
+                1,
+                true,
+                "",
+            ),
+            (
+                "an attribute between the gate and the function enclosing the cut",
+                "#[cfg(all(unix, test))]\n#[allow(dead_code)]\nfn helper() {\n    \
+                 #[cfg(test)]\n    let _ = 0;\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "",
+            ),
+            (
+                "a test-only module and a test-only function in it enclosing the cut",
+                "#[cfg(all(unix, test))]\nmod enclosing {\n    #[cfg(all(windows, test))]\n    \
+                 pub fn helper() {\n        #[cfg(test)]\n        let _ = 0;\n    }\n}\n\
+                 #[cfg(test)]\n",
+                2,
+                true,
+                "",
+            ),
+            (
+                "a test-only function ended above the cut, then one enclosing it",
+                "#[cfg(all(unix, test))]\nfn ended() {}\n#[cfg(all(unix, test))]\n\
+                 fn helper() {\n    #[cfg(test)]\n    let _ = 0;\n}\n#[cfg(test)]\n",
+                2,
+                true,
+                "",
+            ),
+            (
+                "a production function enclosing the cut",
+                "pub fn production() {\n    #[cfg(test)]\n    let _ = 0;\n}\n#[cfg(test)]\n",
+                0,
+                false,
+                "pub fn production() { }",
             ),
         ] {
             let source = format!(
@@ -2237,10 +2330,75 @@ pub(super) mod oracles {
             );
             let read = read_above_the_cut(what, &source);
             assert_eq!(read.gates, gates, "{what}: {source:?}");
+            assert_eq!(read.crossing.is_some(), crosses, "{what}: {source:?}");
             assert!(
                 !read.whole.contains("same_path") && read.whole.contains("fn after()"),
                 "{what}: the element is not what the region removed: {:?}",
                 read.whole
+            );
+            let between = read
+                .whole
+                .split("fn before() {}")
+                .nth(1)
+                .and_then(|rest| rest.split("fn after()").next())
+                .unwrap_or_default();
+            assert_eq!(
+                between.split_whitespace().collect::<Vec<_>>().join(" "),
+                kept,
+                "{what}: {:?}",
+                read.whole
+            );
+        }
+
+        fn blanked(text: &str, from: usize, to: usize) -> String {
+            let bytes: Vec<u8> = text
+                .bytes()
+                .enumerate()
+                .map(|(at, byte)| {
+                    if (from..to).contains(&at) && byte != b'\n' {
+                        b' '
+                    } else {
+                        byte
+                    }
+                })
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        for (what, region, misread, to_the_cut) in [
+            (
+                "an element the text above the cut ends, read to past the cut",
+                "fn before() {}\n#[cfg(all(unix, test))]\nstatic S: u8 = 1;\nfn production() {}\n",
+                "#[cfg(all(unix, test))]",
+                true,
+            ),
+            (
+                "an element left open at the cut and kept, with code in it removed",
+                "fn before() {}\n#[cfg(all(unix, test))]\npub fn helper() {\n    let kept = 0;\n    ",
+                "let kept = 0;",
+                false,
+            ),
+        ] {
+            let with_its_gate = production_code(&format!("{region}#[cfg(test)]"));
+            let agreed = compare_above_the_cut(what, region, &with_its_gate, &with_its_gate);
+            assert_eq!(agreed, (1, None), "{what}");
+            let from = region
+                .find(misread)
+                .unwrap_or_else(|| panic!("{what}: the row names its own text"));
+            let removed = if to_the_cut {
+                blanked(&blank_comments_and_strings(region), from, region.len())
+            } else {
+                blanked(&with_its_gate, from, from + misread.len())
+            };
+            let refusal = panic_message(|| {
+                compare_above_the_cut(what, region, &removed, &with_its_gate);
+            });
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|message| message.contains("reads the whole file differently")),
+                "{what}: a whole-file reading that removes code the text above the cut keeps, \
+                 other than an element that text leaves open and the whole reading removes to \
+                 the cut, passed: {refusal:?}"
             );
         }
         let all_targets = format!("all(test, any({TARGETS}))");
