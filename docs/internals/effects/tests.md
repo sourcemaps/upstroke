@@ -1219,8 +1219,8 @@ parentheses, brackets or braces, an `impl`, a `trait`, an `enum` and a
 `struct` whose last generic parameter is test-only (which used to take the
 whole item out of the region), production code after a generic test-only
 function and after an item a compound gate removes, and an `impl` for a type
-whose name ends in `fn` (`Tfn`) or holds one after an underscore (`x_fn`),
-neither of which is a `fn` header. Accepted: a function body, a method body,
+whose name ends in `fn` (`Tfn`, `\u{c9}fn`) or holds one after an underscore
+(`x_fn`), none of which is a `fn` header. Accepted: a function body, a method body,
 a trait's default body, a function inside a `const _`, headers holding a
 const block -- one comparing inside it, too -- an array, a `where` clause
 with a higher-ranked bound and an arrow, qualifiers and an ABI, raw and
@@ -1229,8 +1229,25 @@ test-only functions with a comma in the header (two type parameters, a
 lifetime and a type, a two-argument return type, two `where` predicates, and
 this tree's `util::same_path` made generic), a `macro_rules!`, a
 `thread_local!` and a `const` initializer under a compound test-only gate, a
-keyword before a `!` outside a body, and unary `!`, `!=`, comments and
-strings that are not invocations at all.
+test-only `trait \u{c9}fn` and its `impl \u{c9}fn for u8` with a `line!()` in
+it (which `production_code` kept until #325's fifth round, reading the `fn`
+of `\u{c9}fn` as a function starting), a keyword before a `!` outside a body,
+and unary `!`, `!=`, comments and strings that are not invocations at all.
+
+## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {` › `const LATER_BLOCK: &str = "const WIDE: u32 = if usize::BITS > 16 {\n    const LINE: u32 = line!();\n    LINE + column!()\n} else {\n    0\n};\n";`
+
+The whole sequence a review of `b9b6faa3` executed, from each token tree a
+`fn` header can be written in with a `<` it never closes: a macro's
+parentheses, brackets and braces in a function body, and an attribute's
+arguments. The header's token tree ends; a later `>` in a module-level
+`const` would bring an angle count that ignored the tree's end back to zero;
+and the block after it holds an item and two invocations. Each row requires
+both invocations reported, and so does its twin with only the `<` removed:
+before #325's fifth round the twin reported both and the row neither, because
+the body search stopped at a closer only at depth zero and took the `if`
+block for the header's body. The assertion after the loop is the same
+question inside one tree: a `;` at a nonzero depth let the search reach
+`> { m!() }` inside an attribute's arguments.
 
 ## `fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {` › `assert_eq!(`
 

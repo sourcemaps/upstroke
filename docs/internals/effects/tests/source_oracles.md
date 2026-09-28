@@ -1230,6 +1230,42 @@ became invisible and the census passed.
 
 And a real attribute beside prose that quotes one is still found.
 
+## `pub(super) mod oracles` › `struct AboveTheCut {`
+
+What [`read_above_the_cut`] read of one file: the truncating region, blanked;
+the whole file's region; and how many gates above the cut the reader read as
+test-only.
+
+## `pub(super) mod oracles` › `fn read_above_the_cut(path: &str, source: &str) -> AboveTheCut {`
+
+The per-file assertions of `the_whole_region_contains_the_truncated_one`, so
+that the tree and the synthetic rows go through the same ones. The text above
+the cut is read with the `#[cfg(test)]` that makes the cut, because an
+attribute written above that gate belongs to the gate's element. Each gate
+above the cut is found as [`production_code`] finds it,
+[`next_test_only_attribute`], and its predicate read as the reader reads it,
+through `gate_predicate`.
+
+## `pub(super) mod oracles` › `const MOST_NAMES_EVALUATED: usize = 20;`
+
+A predicate naming more configuration names than this is refused rather than
+evaluated: the evaluation walks every assignment of them.
+
+## `pub(super) mod oracles` › `fn is_false_wherever_test_is(predicate: &Predicate) -> bool {`
+
+Whether no assignment of the names other than `test` makes the predicate hold
+while `test` is false -- [`entails_test`]'s question, answered by exhaustion
+rather than by its three-valued reading, so the reader's decision is checked
+by something it did not compute. The two differ only where the reader is
+incomplete: `all(unix, not(unix))` holds under no assignment, and the reader,
+which knows nothing of `unix`, keeps its element. The check never meets that
+case, since it runs over the gates the reader already removes an element for.
+Names are independent here; rustc relates some (`unix` and `windows`, say),
+and a predicate false under every assignment of independent names is false
+under every assignment rustc allows. The fixed rows after the tree walk pin
+both answers, `any(unix, test)` and `all()` among the ones that do not entail
+`test`.
+
 ## `pub(super) mod oracles` › `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {`
 
 The region keeps, file by file over the tree, everything [`production_region`]
@@ -1239,20 +1275,37 @@ the code below the cut.
 ### What each assertion here is worth, because they are not worth the same
 
 Above the truncating cut, the whole file's region must equal the region of
-the text above the cut read alone. Until #325's fourth round it was compared
-with the truncating region itself, and that could not fail: [`production_code`]
-removed only what followed a `#[cfg(test)]`, and the cut was the first one.
-Since that round it also removes an element under any other gate that entails
-`test`, so above the cut it can remove what the truncating region keeps -- in
-`src/agent/proc.rs` and `src/agent/proc/ambient.rs`, their
-`cfg(all(unix, test))`, `cfg(all(target_os = "macos", test))` and
-`cfg(all(windows, test))` items. So three assertions replace the one: the
-two readings of the prefix agree, which fails if an element's end depends on
-text past the cut; the prefix differs from the truncating region only where
-this one blanks, which fails if it ever keeps code the truncating region does
-not; and the files where the two differ are exactly those two, named. The
-classification census holds the same two files' items against
+the text above the cut read with the gate that makes the cut. Until #325's
+fourth round it was compared with the truncating region itself, and that could
+not fail: [`production_code`] removed only what followed a `#[cfg(test)]`, and
+the cut was the first one. Since that round it also removes an element under
+any other gate that entails `test`, so above the cut it can remove what the
+truncating region keeps -- on this tree, `src/agent/proc.rs`'s and
+`src/agent/proc/ambient.rs`'s `cfg(all(unix, test))`,
+`cfg(all(target_os = "macos", test))` and `cfg(all(windows, test))` items --
+and it removes the attributes stacked on the cut's own gate, which stand above
+the cut. So three assertions replace the one, per file, in
+[`read_above_the_cut`]: the two readings of the prefix agree, which fails if an
+element's end depends on text past the cut; the prefix differs from the
+truncating region only where this one blanks, which fails if it ever keeps
+code the truncating region does not; and each gate the reader removes an
+element for above the cut is one [`is_false_wherever_test_is`] confirms. The
+classification census holds the two agent files' items against
 `effects/wrappers.toml` both ways.
+
+Round 4 read the text above the cut alone and named the files the two regions
+may differ in, `src/agent/proc.rs` and `src/agent/proc/ambient.rs`. A review of
+`b9b6faa3` executed an edit to `util::same_path` that each of those refused and
+rustc accepts. With `#[allow(dead_code)]` written above its `#[cfg(test)]`, the
+whole file's reading removes the allow with the gate's element, and the text
+above the cut, read alone, keeps it -- nothing after it there is a gate; reading
+that text with the gate is the repair. With `#[cfg(all(test))]` in place of the
+`#[cfg(test)]`, the reader removes the function above the literal cut, a
+spelling it supports, and the named list refused `src/util.rs`. The list is
+gone rather than widened: it could only name what the tree spells today. What
+replaces it asks of each gate whether removing its element is right, by an
+evaluation that is not the reader's. The rows after the tree walk hold both
+edits' shapes, and four more, whatever the tree comes to spell.
 
 What carries the superset claim is the rest: `strictly_larger >= 8` and the
 `src/engine/coordinator.rs` membership check (a strict gain somewhere, by
@@ -1445,7 +1498,12 @@ later parameters of a closure, `let` and `if` statements, and the lists where
 struct-expression field that compares, an arm after a guarded or-pattern --
 which a reader that counted angle brackets there, or took any `|` for a
 closure's, would read past. Then malformed input, one row per give-up path and
-per member of each guard, each removing the attributes and nothing else. The
+per member of each guard, each removing the attributes and nothing else. Since
+#325's fifth round the first table also removes an `impl` of `\u{c9}fn` and a
+trait whose supertrait is `\u{c9}fn`, and the give-up rows include a header and
+an initializer that reach a `fn \u{e9}()`: [`starts_named_function_item`] read
+the byte before `fn` and a name's first byte as ASCII, so it took the `fn` of
+`\u{c9}fn` for a function starting and ran past `fn \u{e9}()`. The
 third is gates that remove nothing: production gates, `cfg_attr`, an inner
 gate, a raw name, predicates that do not parse, another attribute whose
 arguments read like a gate.

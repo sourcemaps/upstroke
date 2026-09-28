@@ -651,10 +651,19 @@ it stands in, whose start is behind it.
 ## `fn configures_test_only(source: &str, blanked: &str, open: usize) -> bool {`
 
 Whether the attribute whose `[` is at `open` is `cfg(P)` with `P` false
-wherever `test` is false. `P` goes through [`with_literal_identity`] --
-comments out, each literal a token of its value -- because
-[`parse_predicate`]'s splitter tracks a string only by toggling at `"`. A
-predicate that does not read that way is no gate here.
+wherever `test` is false, `P` as [`gate_predicate`] reads it. A predicate
+that does not read is no gate here.
+
+## `fn gate_predicate(source: &str, blanked: &str, open: usize) -> Option<Predicate> {`
+
+The predicate of the attribute whose `[` is at `open`, when that attribute
+is `cfg(P)`. `P` goes through [`with_literal_identity`] -- comments out,
+each literal a token of its value -- because [`parse_predicate`]'s splitter
+tracks a string only by toggling at `"`. Split out of
+[`configures_test_only`] in #325's fifth round so that
+`the_whole_region_contains_the_truncated_one` can evaluate the predicate
+this reader decided on, by its own exhaustive evaluation rather than by
+[`entails_test`].
 
 ## `fn past_outer_attributes(source: &str, bytes: &[u8], from: usize) -> usize {`
 
@@ -842,6 +851,16 @@ A named function begins at `at`: `fn`, whitespace, and a name -- so a
 function-pointer type (`fn(u8)`) is not one. It is how a header or an
 initializer that never ended is recognised: the next function starts.
 
+The byte before `fn` and the name's first byte are read with
+[`is_identifier_byte`], the test the macro-position reader's
+`function_bodies` applies to the same blanked view; the whitespace between
+is ASCII, as it is there. Until #325's fifth round both were ASCII tests. So
+the `fn` that ends `\u{c9}fn` in a test-only `impl \u{c9}fn for u8` read as a
+function starting, [`header_end`] gave up, the `impl` stayed in the region,
+and the macro-position census refused the `line!()` in it (executed by a
+review of `b9b6faa3`); and a header or an initializer that never ended ran on
+through a following `fn \u{e9}()`, where it stops at `fn kept()`.
+
 ## `struct Identifier<'a> {`
 
 An identifier in the blanked text, and whether it was written raw.
@@ -866,7 +885,8 @@ rustc's six non-ASCII separators are already spaces there
 identifier is a lexer error. Reading them as identifier bytes is what
 lets `\u{e9}!()` read as an invocation and `fn \u{e9}()` as a header, and
 what lets [`production_code`] read `fn \u{e9}<T, #[cfg(test)] U>` as a
-generic list; `is_ident_byte`, which the module walk uses, stops at them.
+generic list and [`starts_named_function_item`] read `\u{c9}fn` as one
+identifier; `is_ident_byte`, which the module walk uses, stops at them.
 Moved up from `census_domain` in #325's fourth round, so the macro-position
 reader and [`production_code`] share one definition.
 
@@ -2626,16 +2646,30 @@ and bracketed groups are skipped whole, and `<` and `>` are counted --
 except the `>` of `->`, the only other `>` a header writes outside a
 group -- so the body is the first `{` at angle depth zero. A const block
 inside angle brackets is skipped whole too, so a `<` or `>` in it counts
-for nothing. A `;` or an unmatched closer at depth zero ends a header that
-has no body: a declaration's `;`, and the `)`, `]` or `}` that closes a
-macro's arguments when a `fn` and a name are written inside them, where scanning on
-would take the next item's braces -- an associated `const`, an `impl` -- for
-a body and hide what is in them. Reading a const block as the body would
-put a real body's macros outside and a header's inside -- the two readings
-the fixtures `a header holding a const block` and `a const-generic default`
-pin -- and the two ends are pinned by the fixtures that put an associated
-`const` after a bodiless declaration and an `impl` after a `fn` written in
-a macro's arguments.
+for nothing. A `;` or an unmatched closer ends a header that has no body, at
+any depth: a declaration's `;`, and -- since the scan skips whole every group
+it opens -- the `)`, `]` or `}` that closes the token tree the header was
+written in, a macro's or an attribute's arguments holding a `fn` and a name.
+Scanning on would take a later item's braces -- an associated `const`, an
+`impl` -- for a body and hide what is in them. No header rustc accepts holds
+either outside a group: a `;` in a type is inside `[..]` or a const block.
+Reading a const block as the body would put a real body's macros outside and
+a header's inside -- the two readings the fixtures `a header holding a const
+block` and `a const-generic default` pin -- and the ends are pinned by the
+fixtures that put an associated `const` after a bodiless declaration and an
+`impl` after a `fn` written in a macro's arguments.
+
+Until #325's fifth round all four ended a header only at depth zero, so a
+`fn` header with a `<` that never closes -- `stringify!(fn x <)` in a
+function body, or `witness(fn x <)` in a `cfg_attr` that applies nothing --
+left its token tree, came back to depth zero at a later `>` (`usize::BITS >
+16` in a module-level `const`), and took the block after it for its body: the
+census then read every macro in that block as inside a function (executed by
+a review of `b9b6faa3`; pinned by the four `LATER_BLOCK` rows of
+`the_macro_position_reader_refuses_every_position_outside_a_function_body`).
+A `;` at a nonzero depth did the same inside one token tree: `witness(fn x <
+; > { m!() })` in an attribute took the braces for a body and dropped the
+`m!` there, which an attribute's arguments otherwise report.
 
 ## `pub(crate) mod census_domain` › `fn macro_bangs(bytes: &[u8]) -> Vec<(usize, String)> {`
 
