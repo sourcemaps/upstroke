@@ -305,7 +305,7 @@ fn managed_repository() -> (crate::rundir::scratch_tree::ScratchTree, ManagedRep
         "repo [x]*?"
     };
     let common = tree.path().join(name).join(".git");
-    std::fs::create_dir_all(&common).expect("a common directory the scope can look up");
+    std::fs::create_dir_all(common.join("refs")).expect("a common directory the scope can look up");
     let common = std::fs::canonicalize(&common).expect("its canonical path");
     let include = tree.path().join("recorded-objects.gitconfig");
     let repository = ManagedRepository::new(&common, &include, GitdirRule::native())
@@ -495,7 +495,7 @@ fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph()
     let include = tree.path().join("recorded-objects.gitconfig");
     let workspace = tree.path().join("ws");
     std::fs::create_dir(&workspace).expect("a workspace");
-    std::fs::create_dir(tree.path().join("repo.git")).expect("a common directory");
+    std::fs::create_dir_all(tree.path().join("repo.git").join("refs")).expect("a common directory");
     let repository = ManagedRepository::new(
         &tree.path().join("repo.git"),
         &include,

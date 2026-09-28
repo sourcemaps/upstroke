@@ -142,6 +142,12 @@ impl ManagedRepository {
             ));
         }
         let included = rule.spelling(&included);
+        let unmeasured = |why: String| {
+            refuse(&format!(
+                "it could not look the directories on that path up in another case ({why}), \
+                 so it cannot tell where Git must match the path with case and where without"
+            ))
+        };
         let mut common = Vec::new();
         let mut parent = PathBuf::new();
         for component in common_dir.components() {
@@ -152,13 +158,7 @@ impl ManagedRepository {
                 Component::Prefix(_) => matched(&mut common, &rule.spelling(&bytes), false),
                 Component::RootDir => common.push(b'/'),
                 Component::Normal(name) => {
-                    let folded = folds(&parent, name).map_err(|why| {
-                        refuse(&format!(
-                            "it could not look the directories on that path up in another \
-                             case ({why}), so it cannot tell where Git must match the path \
-                             with case and where without"
-                        ))
-                    })?;
+                    let folded = folds(&parent, name).map_err(unmeasured)?;
                     if common.last().is_some_and(|last| *last != b'/') {
                         common.push(b'/');
                     }
@@ -173,8 +173,12 @@ impl ManagedRepository {
             }
             parent.push(component);
         }
+        let mut linked = b"/".to_vec();
+        let folded = folds(common_dir, OsStr::new("refs")).map_err(unmeasured)?;
+        matched(&mut linked, b"worktrees", folded);
+        linked.extend_from_slice(b"/*");
         let mut parameters = Vec::new();
-        for suffix in [b"".as_slice(), b"/worktrees/*".as_slice()] {
+        for suffix in [b"".as_slice(), linked.as_slice()] {
             if !parameters.is_empty() {
                 parameters.push(b' ');
             }
@@ -493,10 +497,12 @@ fn upsert(into: &mut Vec<(OsString, OsString)>, case: KeyCase, key: OsString, va
 mod tests {
     use super::*;
 
-    fn entries(pattern: &str, include: &str) -> OsString {
+    const WORKTREES_FOLDED: &str = "[wW][oO][rR][kK][tT][rR][eE][eE][sS]";
+
+    fn entries(pattern: &str, worktrees: &str, include: &str) -> OsString {
         OsString::from(format!(
             "'includeIf.{pattern}.path'='{include}' \
-             'includeIf.{pattern}/worktrees/*.path'='{include}'"
+             'includeIf.{pattern}/{worktrees}/*.path'='{include}'"
         ))
     }
 
@@ -505,15 +511,24 @@ mod tests {
     fn each_component_is_matched_with_case_unless_its_directory_folds_it() {
         let common = Path::new(r"/srv/it's [x]*?\y/.git");
         let include = Path::new("/home/u/.upstroke/git/recorded-objects.gitconfig");
-        for (folding, pattern) in [
-            (&[][..], r"gitdir:/srv/it'\''s \[x\]\*\?\\y/.git"),
+        let exact = r"gitdir:/srv/it'\''s \[x\]\*\?\\y/.git";
+        for (folding, pattern, worktrees) in [
+            (&[][..], exact, "worktrees"),
             (
                 &[r"it's [x]*?\y"][..],
                 r"gitdir:/srv/[iI][tT]'\''[sS] \[[xX]\]\*\?\\[yY]/.git",
+                "worktrees",
             ),
             (
-                &["srv", r"it's [x]*?\y", ".git"][..],
+                &["srv", r"it's [x]*?\y", ".git", "refs"][..],
                 r"gitdir:/[sS][rR][vV]/[iI][tT]'\''[sS] \[[xX]\]\*\?\\[yY]/.[gG][iI][tT]",
+                WORKTREES_FOLDED,
+            ),
+            (&["refs"][..], exact, WORKTREES_FOLDED),
+            (
+                &[".git"][..],
+                r"gitdir:/srv/it'\''s \[x\]\*\?\\y/.[gG][iI][tT]",
+                "worktrees",
             ),
         ] {
             let mut asked = Vec::new();
@@ -525,15 +540,23 @@ mod tests {
                 .expect("a path Git can read in a key");
             assert_eq!(
                 repository.parameters(),
-                entries(pattern, &include.display().to_string()),
+                entries(pattern, worktrees, &include.display().to_string()),
                 "folding {folding:?}: a component its directory folds carries both cases of \
-                 each ASCII letter, every other byte is escaped as it was, and the keyword is \
-                 `gitdir:` whatever folds"
+                 each ASCII letter, every other byte is escaped as it was, the keyword is \
+                 `gitdir:` whatever folds, and `worktrees` folds where the common directory \
+                 finds `refs` in another case, whatever the component `.git` does"
             );
             assert_eq!(
                 asked,
-                ["/srv", r"/srv/it's [x]*?\y", r"/srv/it's [x]*?\y/.git"].map(PathBuf::from),
-                "each component is looked up in the directory that holds it, from the root"
+                [
+                    "/srv",
+                    r"/srv/it's [x]*?\y",
+                    r"/srv/it's [x]*?\y/.git",
+                    r"/srv/it's [x]*?\y/.git/refs",
+                ]
+                .map(PathBuf::from),
+                "each component is looked up in the directory that holds it, from the root, \
+                 and then `refs` in the common directory, which holds `worktrees`"
             );
         }
     }
@@ -542,21 +565,24 @@ mod tests {
     #[test]
     fn the_windows_rule_matches_its_prefix_as_spelled_and_each_component_by_its_directory() {
         let include = Path::new(r"C:\Users\Me\.upstroke\git\recorded-objects.gitconfig");
-        for (common, folding, pattern) in [
+        for (common, folding, pattern, worktrees) in [
             (
                 r"\\?\C:\Users\Me\it's [x]\.git",
                 &[][..],
                 r"gitdir:C:/Users/Me/it'\''s \[x\]/.git",
+                "worktrees",
             ),
             (
                 r"\\?\C:\Users\Me\it's [x]\.git",
                 &["Users", "Me"][..],
                 r"gitdir:C:/[Uu][sS][eE][rR][sS]/[Mm][eE]/it'\''s \[x\]/.git",
+                "worktrees",
             ),
             (
                 r"\\?\UNC\server\share\repo\.git",
-                &["repo", ".git"][..],
+                &["repo", ".git", "refs"][..],
                 r"gitdir://server/share/[rR][eE][pP][oO]/.[gG][iI][tT]",
+                WORKTREES_FOLDED,
             ),
         ] {
             let repository = ManagedRepository::matching(
@@ -570,6 +596,7 @@ mod tests {
                 repository.parameters(),
                 entries(
                     pattern,
+                    worktrees,
                     "C:/Users/Me/.upstroke/git/recorded-objects.gitconfig"
                 ),
                 "{common}, folding {folding:?}"
@@ -592,6 +619,25 @@ mod tests {
         assert!(
             refused.contains("could not look the directories on that path up in another case")
                 && refused.contains(" is gone"),
+            "{refused}"
+        );
+        let refused = ManagedRepository::matching(
+            &root.join("repo").join(".git"),
+            &include,
+            GitdirRule::native(),
+            |parent, name| {
+                if name == "refs" {
+                    Err(format!("{} is gone", parent.join(name).display()))
+                } else {
+                    Ok(false)
+                }
+            },
+        )
+        .expect_err("a `worktrees` whose directory nobody measured is never written")
+        .to_string();
+        assert!(
+            refused.contains("could not look the directories on that path up in another case")
+                && refused.contains("refs is gone"),
             "{refused}"
         );
         let refused = ManagedRepository::matching(
