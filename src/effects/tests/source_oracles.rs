@@ -2061,6 +2061,8 @@ pub(super) mod oracles {
         assert!(!region.contains("mod tests;"), "{region:?}");
     }
 
+    const CUT: &str = "#[cfg(test)]";
+
     struct AboveTheCut {
         truncated: String,
         whole: String,
@@ -2069,7 +2071,6 @@ pub(super) mod oracles {
     }
 
     fn read_above_the_cut(path: &str, source: &str) -> AboveTheCut {
-        const CUT: &str = "#[cfg(test)]";
         let region = production_region(source);
         let whole = production_code(source);
         let with_its_gate =
@@ -2094,6 +2095,17 @@ pub(super) mod oracles {
         let above_the_cut = with_its_gate
             .get(..truncated.len())
             .unwrap_or(with_its_gate);
+        let closed = production_code(&format!(
+            "{region}{CUT}{}",
+            closers_after_the_cut(&truncated)
+        ));
+        let closed_above_the_cut = closed.get(..truncated.len()).unwrap_or(closed.as_str());
+        let removed_from = |reading: &str, at: usize| {
+            reading
+                .as_bytes()
+                .get(at..)
+                .is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace))
+        };
         let mut gates = 0_usize;
         let mut crossing = None;
         let mut from = 0;
@@ -2112,11 +2124,10 @@ pub(super) mod oracles {
                 .as_bytes()
                 .get(element)
                 .is_some_and(|byte| !byte.is_ascii_whitespace());
-            let removed_to_the_cut = prefix
-                .as_bytes()
-                .get(hash..)
-                .is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace));
-            if crossing.is_none() && left_open && removed_to_the_cut {
+            let cut_short =
+                !removed_from(above_the_cut, hash) && removed_from(closed_above_the_cut, hash);
+            let removed_to_the_cut = removed_from(prefix, hash);
+            if crossing.is_none() && (left_open || cut_short) && removed_to_the_cut {
                 crossing = Some(hash);
             }
             gates += 1;
@@ -2142,6 +2153,34 @@ pub(super) mod oracles {
              one removes as test-only"
         );
         (gates, crossing)
+    }
+
+    fn closers_after_the_cut(truncated: &str) -> String {
+        let mut open = Vec::new();
+        for byte in truncated.bytes() {
+            match byte {
+                b'(' | b'[' | b'{' => open.push(byte),
+                b')' | b']' | b'}' => {
+                    let opener = match byte {
+                        b')' => b'(',
+                        b']' => b'[',
+                        _ => b'{',
+                    };
+                    if open.last() == Some(&opener) {
+                        open.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        open.iter()
+            .rev()
+            .map(|opener| match opener {
+                b'(' => "){}",
+                b'[' => "]{}",
+                _ => "}",
+            })
+            .collect()
     }
 
     fn is_false_wherever_test_is(predicate: &Predicate) -> bool {
@@ -2324,6 +2363,43 @@ pub(super) mod oracles {
                 false,
                 "pub fn production() { }",
             ),
+            (
+                "a test-only if statement starting a production function, the cut in its else block",
+                "pub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else {\n        #[cfg(test)]\n        \
+                 assert!(days >= 0);\n    }\n    days + 1\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "pub fn existing(days: i64) -> i64 { days + 1 }",
+            ),
+            (
+                "the same statement with the cut in the block of an else-if",
+                "pub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else if days == 0 {\n        \
+                 #[cfg(test)]\n        assert!(days == 0);\n    }\n    days + 1\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "pub fn existing(days: i64) -> i64 { days + 1 }",
+            ),
+            (
+                "the same statement with the cut in a call in the condition of an else-if",
+                "pub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else if i64::abs(#[cfg(test)] days) \
+                 > 0 {\n        assert!(days > 0);\n    }\n    days + 1\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "pub fn existing(days: i64) -> i64 { days + 1 }",
+            ),
+            (
+                "the same statement with the cut in a macro's arguments in the condition of an else-if",
+                "pub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else if \
+                 stringify!(#[cfg(test)]).is_empty() {\n        assert!(days > 0);\n    }\n    \
+                 days + 1\n}\n#[cfg(test)]\n",
+                1,
+                true,
+                "pub fn existing(days: i64) -> i64 { days + 1 }",
+            ),
         ] {
             let source = format!(
                 "fn before() {{}}\n{above}{SAME_PATH}fn after() {{}}\n#[cfg(test)]\nmod tests {{}}\n"
@@ -2377,6 +2453,23 @@ pub(super) mod oracles {
                 "let kept = 0;",
                 false,
             ),
+            (
+                "an if statement the text above the cut ends, in a function it leaves open, read to \
+                 past the cut",
+                "fn before() {}\npub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else {\n        \
+                 assert!(days >= 0);\n    }\n    let kept = days + 1;\n    ",
+                "#[cfg(all(unix, test))]",
+                true,
+            ),
+            (
+                "an if statement cut short in its else block and kept there, with code in it removed",
+                "fn before() {}\npub fn existing(days: i64) -> i64 {\n    #[cfg(all(unix, test))]\n    \
+                 if days < 0 {\n        assert!(days < 0);\n    } else {\n        \
+                 let kept = days + 1;\n        ",
+                "let kept = days + 1;",
+                false,
+            ),
         ] {
             let with_its_gate = production_code(&format!("{region}#[cfg(test)]"));
             let agreed = compare_above_the_cut(what, region, &with_its_gate, &with_its_gate);
@@ -2397,8 +2490,8 @@ pub(super) mod oracles {
                     .as_deref()
                     .is_some_and(|message| message.contains("reads the whole file differently")),
                 "{what}: a whole-file reading that removes code the text above the cut keeps, \
-                 other than an element that text leaves open and the whole reading removes to \
-                 the cut, passed: {refusal:?}"
+                 other than an element that text leaves open or cuts short and the whole reading \
+                 removes to the cut, passed: {refusal:?}"
             );
         }
         let all_targets = format!("all(test, any({TARGETS}))");
