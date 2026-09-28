@@ -2115,48 +2115,54 @@ pub(super) mod oracles {
         }
     }
 
-    const MOST_NAMES_EVALUATED: usize = 20;
-
     fn is_false_wherever_test_is(predicate: &Predicate) -> bool {
-        fn names<'a>(predicate: &'a Predicate, into: &mut BTreeSet<&'a str>) {
+        fn value<'a>(
+            predicate: &'a Predicate,
+            assigned: &BTreeMap<&'a str, bool>,
+        ) -> Result<bool, &'a str> {
             match predicate {
-                Predicate::Test => {}
-                Predicate::Other(name) => {
-                    into.insert(name);
-                }
-                Predicate::All(parts) | Predicate::Any(parts) => {
+                Predicate::Test => Ok(false),
+                Predicate::Other(name) => assigned.get(name.as_str()).copied().ok_or(name.as_str()),
+                Predicate::Not(inner) => value(inner, assigned).map(|held| !held),
+                Predicate::All(parts) => {
+                    let mut open = None;
                     for part in parts {
-                        names(part, into);
+                        match value(part, assigned) {
+                            Ok(false) => return Ok(false),
+                            Ok(true) => {}
+                            Err(name) => open = open.or(Some(name)),
+                        }
                     }
+                    open.map_or(Ok(true), Err)
                 }
-                Predicate::Not(inner) => names(inner, into),
+                Predicate::Any(parts) => {
+                    let mut open = None;
+                    for part in parts {
+                        match value(part, assigned) {
+                            Ok(true) => return Ok(true),
+                            Ok(false) => {}
+                            Err(name) => open = open.or(Some(name)),
+                        }
+                    }
+                    open.map_or(Ok(false), Err)
+                }
             }
         }
-        fn holds(predicate: &Predicate, set: &dyn Fn(&str) -> bool) -> bool {
-            match predicate {
-                Predicate::Test => false,
-                Predicate::Other(name) => set(name),
-                Predicate::All(parts) => parts.iter().all(|part| holds(part, set)),
-                Predicate::Any(parts) => parts.iter().any(|part| holds(part, set)),
-                Predicate::Not(inner) => !holds(inner, set),
+        fn holds_somewhere<'a>(
+            predicate: &'a Predicate,
+            assigned: &mut BTreeMap<&'a str, bool>,
+        ) -> bool {
+            match value(predicate, assigned) {
+                Ok(held) => held,
+                Err(name) => [true, false].into_iter().any(|each| {
+                    assigned.insert(name, each);
+                    let held = holds_somewhere(predicate, assigned);
+                    assigned.remove(name);
+                    held
+                }),
             }
         }
-        let mut found = BTreeSet::new();
-        names(predicate, &mut found);
-        let found: Vec<&str> = found.into_iter().collect();
-        assert!(
-            found.len() <= MOST_NAMES_EVALUATED,
-            "a predicate naming {} configuration names is refused rather than evaluated: {predicate:?}",
-            found.len()
-        );
-        (0..1_u32 << found.len()).all(|assignment| {
-            !holds(predicate, &|name| {
-                found
-                    .iter()
-                    .position(|each| *each == name)
-                    .is_some_and(|at| assignment >> at & 1 == 1)
-            })
-        })
+        !holds_somewhere(predicate, &mut BTreeMap::new())
     }
 
     pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {
@@ -2187,6 +2193,16 @@ pub(super) mod oracles {
 
         const SAME_PATH: &str =
             "pub(crate) fn same_path(left: &Path, right: &Path) -> bool {\n    left == right\n}\n";
+        const TARGETS: &str = "target_os = \"linux\", target_os = \"macos\", \
+             target_os = \"windows\", target_os = \"ios\", target_os = \"android\", \
+             target_os = \"freebsd\", target_os = \"dragonfly\", target_os = \"openbsd\", \
+             target_os = \"netbsd\", target_os = \"solaris\", target_os = \"illumos\", \
+             target_os = \"fuchsia\", target_os = \"redox\", target_os = \"haiku\", \
+             target_os = \"hermit\", target_os = \"wasi\", target_os = \"emscripten\", \
+             target_os = \"vxworks\", target_os = \"espidf\", target_os = \"horizon\", \
+             target_os = \"aix\"";
+        let many_targets =
+            format!("#[cfg(all(test, any({TARGETS})))]\nconst _: () = ();\n#[cfg(test)]\n");
         for (what, above, gates) in [
             ("the gate alone", "#[cfg(test)]\n", 0),
             (
@@ -2210,6 +2226,11 @@ pub(super) mod oracles {
                 1,
             ),
             ("a gate that no build satisfies", "#[cfg(any())]\n", 1),
+            (
+                "a gate naming twenty-one configuration names",
+                many_targets.as_str(),
+                1,
+            ),
         ] {
             let source = format!(
                 "fn before() {{}}\n{above}{SAME_PATH}fn after() {{}}\n#[cfg(test)]\nmod tests {{}}\n"
@@ -2222,6 +2243,8 @@ pub(super) mod oracles {
                 read.whole
             );
         }
+        let all_targets = format!("all(test, any({TARGETS}))");
+        let any_target = format!("any({TARGETS})");
         for (predicate, entails) in [
             ("test", true),
             ("all(unix, test)", true),
@@ -2233,9 +2256,29 @@ pub(super) mod oracles {
             ("all()", false),
             ("unix", false),
             ("test = \"x\"", false),
+            (all_targets.as_str(), true),
+            (any_target.as_str(), false),
         ] {
             let parsed = parse_predicate(predicate).unwrap_or_else(|refusal| panic!("{refusal}"));
             assert_eq!(is_false_wherever_test_is(&parsed), entails, "{predicate}");
+        }
+        let names: Vec<String> = (0..1000).map(|at| format!("name_{at}")).collect();
+        let listed = names.join(", ");
+        let negated: Vec<String> = names.iter().map(|name| format!("not({name})")).collect();
+        let negated = negated.join(", ");
+        for (predicate, entails) in [
+            (format!("all(test, any({listed}))"), true),
+            (format!("any({listed}, test)"), false),
+            (format!("all(any({listed}), not(any({listed})))"), true),
+            (format!("all(any({listed}), any({negated}))"), false),
+        ] {
+            let parsed = parse_predicate(&predicate).unwrap_or_else(|refusal| panic!("{refusal}"));
+            assert_eq!(
+                is_false_wherever_test_is(&parsed),
+                entails,
+                "a predicate naming {} configuration names",
+                names.len()
+            );
         }
 
         const SENTINEL: &str = "\npub fn sentinel_below_every_configured_item() {}\n";
