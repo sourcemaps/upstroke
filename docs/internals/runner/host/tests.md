@@ -162,27 +162,102 @@ constructor's own environment, over this process's base, ends with the includes.
 Witnessed failing with the includes placed before the inherited entries, and with
 the constructor back on `ObjectGraph::Recorded`.
 
-## `fn the_includes_name_the_common_directory_exactly_under_each_posix_rule() {`
+Its repository is a real directory under a scratch tree (`managed_repository`):
+since #326 round 5 the scope asks each directory on the path whether it folds
+case, and a path that is not there is refused.
 
-The two entries a `ManagedRepository` composes, byte for byte, for a common
-directory whose path holds a quote, `[x]*?` and a backslash: each glob character
-escaped, the quote closed, escaped and reopened, only the worktrees component a
-glob, and `gitdir/i:` under the folding rule. A newline in the path and a
-relative directory or include are refused. Unix-only, because a Unix absolute
-path is not absolute on Windows; the Windows twin below runs there.
+## `fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {`
+
+A newline in the path and a relative directory or include are refused before
+any directory is asked anything, and a common directory that is not there is
+refused because the scope cannot ask it whether it folds case. Unix-only,
+because a Unix absolute path is not absolute on Windows.
+
+Until #326 round 5 this test also pinned the entries byte for byte, for a path
+that did not exist. The entries now depend on what each directory on the path
+answers, so `src/runner/host/environment.rs`'s inline tests pin them, supplying
+the answers, and the Windows twin that stood beside this test moved there too.
 
 ## `fn the_windows_rule_spells_a_path_as_git_for_windows_does() {`
 
 `GitdirRule::Windows` over the shapes `std::fs::canonicalize` gives on Windows
 (`\\?\C:\…`, `\\?\UNC\server\share\…`) and over already-plain ones, on every
 platform: no prefix, forward slashes, `//server/share` for a share. Also that
-each rule's keyword and the native rule are what the notes say.
+the keyword is `gitdir:` under both rules, and that the native rule is `Windows`
+on Windows and `Posix` everywhere else, macOS included.
 
 ## `fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {`
 
 `HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
 holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
-runs it once the file holds the exact bytes.
+runs it once the file holds the exact bytes. Its common directory is created
+first, because the scope asks it whether it folds case.
+
+## `fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {`
+
+The negative witness for #326 round 5's blocking finding: the v0.1 include must
+not reach a repository whose path differs from the managed one only in case.
+The work is `v1_case_sibling_helper`'s, in a child whose environment
+`run_replacement_witness_child` has cleared of every ambient replacement
+control.
+
+Against `49243a24`, with this witness alone added, it failed on this box (exit
+101): under `PosixFoldingCase`, macOS's rule then, the gate in `Repo` read
+`recorded` from `repo`, which had installed a replacement, and with the rule
+list narrowed to `Windows` the same assertion failed under that rule. Both
+used `gitdir/i:`; `Posix`, which ran first, passed.
+
+## `fn case_git(dir: &Path, args: &[&str]) -> String {`
+
+The witness's own Git, in its own process rather than through the runner, with
+an identity and without auto-maintenance, so no background process outlives a
+commit in the scratch tree.
+
+## `fn replaced_repository(repo: &Path) -> String {`
+
+A repository whose committed blob `recorded` is replaced by `replacing`, checked
+live outside any run before anything is measured; it returns the blob's id.
+
+## `fn read_case_siblings(dir: &Path, include: &Path) -> bool {`
+
+One layout: `Repo` managed, and beside it `repo` and `rEPO`, the second being
+the spelling the scope itself looks up. When the directory keeps case they are
+repositories of their own with their own replacements; when it folds they are
+`Repo`, and creating them finds it there. For every rule this platform's Git
+reads (both on Unix; on Windows only `Windows`, since the `Posix` rule keeps a
+Windows path's backslashes and Git for Windows spells its Git directory with
+forward slashes), a scope over `Repo`'s canonical
+common directory and `HostRunner::for_legacy_workspace` run gates that read:
+
+- `Repo` and its linked worktree: `recorded`;
+- each sibling, from `Repo` and from the sibling itself: `replacing` when it is
+  a repository of its own, `recorded` when it is `Repo`;
+- when the directory folds, `Repo` through a Git directory named `REPO/.GIT`
+  under the layout's directory spelled in capitals: `recorded`. Given with
+  `--git-dir`, that spelling reaches Git's condition as spelled on Linux, whose
+  realpath does not look the case up; reached with `-C`, Git named the
+  repository in its stored case, as `pwd -P` does (both measured on a
+  case-folding ext4 mount), which is why the `-C` reads alone could not tell a
+  scope that never folds from one that does.
+
+It returns whether the directory kept case.
+
+## `fn v1_case_sibling_helper() {`
+
+Runs `read_case_siblings` in the temporary directory, and on Windows again in a
+directory `fsutil file setCaseSensitiveInfo` makes case-sensitive, inside the
+folding temporary directory. It prints which halves ran, in lines beginning
+`v1-case-sibling:`, so a CI log shows it.
+
+Where the leg declares `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` (macOS and Windows) the
+temporary directory must fold, or the declaration and the filesystem disagree;
+elsewhere its behaviour is observed, not required, as
+`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` treats
+the same declaration. So the case-sensitive half runs where the temporary
+directory keeps case, as on this box, and on Windows wherever `fsutil`
+succeeds; macOS runs the folding half only, since case sensitivity there is a
+property of a whole volume. A Windows machine where `fsutil` fails prints that
+and runs the folding half.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 

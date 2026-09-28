@@ -149,6 +149,19 @@ includes, and with `-c core.useReplaceRefs=false` too; from 2.41.0 it read
 the recorded commit. That is why the floor is 2.41
 (`src/workspace.rs`'s `require_git_floor`).
 
+**Which repository the conditions reach is decided by what each directory
+does, not by the platform** (#326 round 5). Until then macOS and Windows
+matched the whole path under `gitdir/i:`, which folds every component
+whatever the directory holding it does. On a case-sensitive directory the
+include therefore also reached a repository whose path differs from the
+managed one only in case, and a gate reading that repository got the
+recorded object where the repository had installed a replacement (the
+round-4 regression lens, which also reproduced it natively on Windows with
+NTFS case sensitivity enabled on one directory). Each component is now matched with
+case unless the directory holding it finds it under the other case;
+[`ManagedRepository::new`]'s section says how that is measured, and what it
+costs.
+
 **What it does not do.** A role's own `git -c core.useReplaceRefs=true`
 comes after the includes and wins, and a role that clears its environment
 before running Git loses them. Configuration is not an enforcement
@@ -199,34 +212,44 @@ How a canonical path is spelled for an `includeIf.gitdir` condition on
 this platform. A type rather than a `cfg!` at each use, for the reason
 [`KeyCase`] is one: `ALL` lets a grid on one machine cover every rule.
 
+It decides the spelling and nothing else. Whether a component is matched
+with case is not a property of the platform: a macOS volume or a Windows
+directory can be case-sensitive, and a Linux directory can fold case, so
+[`ManagedRepository::new`] asks each directory on the path. Until #326
+round 5 macOS had a rule of its own, `PosixFoldingCase`, and it and the
+Windows rule matched under `gitdir/i:`; the `keyword` section says why that
+went.
+
 ## `pub enum GitdirRule` › `Posix,`
 
-Linux and the other Unix targets: the path's own bytes, matched with case.
-
-## `pub enum GitdirRule` › `PosixFoldingCase,`
-
-macOS: the path's own bytes under `gitdir/i:`. The default volume folds
-case, Git's realpath there keeps the spelling it was handed, and the two
-sides of the match reach the common directory through different spellings
-(the engine's `-C` root, a worktree's `.git` file). Matching without case
-costs nothing on a folding volume; on a case-sensitive one it would also
-match a repository whose path differs only in case.
+Every Unix target, macOS included: the path's own bytes.
 
 ## `pub enum GitdirRule` › `Windows,`
 
 Git for Windows compares the realpath `GetFinalPathNameByHandleW` gives,
 with its `\\?\` prefix removed, `UNC\` turned into `//`, and every
 backslash a slash. `std::fs::canonicalize` is the same call, so its result
-spelled that way is Git's own text; `gitdir/i:` also covers the second,
-non-canonical spelling Git tries.
+spelled that way is Git's own text. The prefix, a drive letter or a UNC
+server and share, is matched as that call spells it, and each component
+below it by what the directory holding it does.
 
 ## `impl GitdirRule` › `pub const fn native() -> Self {`
 
-The rule this machine's Git follows.
+The spelling this machine's Git uses.
 
 ## `impl GitdirRule` › `pub const fn keyword(self) -> &'static str {`
 
-The condition's keyword: `gitdir:`, or `gitdir/i:` where case folds.
+The condition's keyword: `gitdir:`, under every rule.
+
+`gitdir/i:` folds every component whatever the directory holding it does.
+On a case-sensitive directory, then, it also matched a repository whose
+path differs from the managed one only in case, and kept that repository's
+gates off the replacements it had installed: the blocking finding of #326's
+round-4 regression review, which the case-sibling witness reproduces (it
+fails at `49243a24` under both rules that used `gitdir/i:`). Where a
+directory does fold case, the component is spelled with both cases of each
+ASCII letter instead, which reaches that component in any ASCII case and
+reaches no other component in any case but its own.
 
 ## `impl GitdirRule` › `pub fn spelling(self, path: &[u8]) -> Vec<u8> {`
 
@@ -247,24 +270,101 @@ The entries, for a canonical common directory `C`:
 'includeIf.gitdir:C.path'='<include>' 'includeIf.gitdir:C/worktrees/*.path'='<include>'
 ```
 
+- **Matched as each directory matches.** For each component of `C`,
+  [`folds_case`] asks the directory holding it whether it finds that name
+  under the other ASCII case. Where it does, each ASCII letter of the
+  component is spelled as a class of both cases (`Repo` becomes
+  `[Rr][eE][pP][oO]`); where it does not, the component is matched
+  exactly. So a path Git reaches through a folding directory in another
+  case still names the managed repository, and a repository beside it,
+  in a directory that keeps case, whose name differs only in case, does
+  not. Where nothing on the path folds, as on this box's ext4, the entries
+  are byte for byte what round 4 wrote; on a volume that folds case
+  throughout, every component is spelled in classes. The prefix of a
+  Windows path is matched
+  as spelled (the `Windows` rule's section), and so are letters outside
+  ASCII, which Git's own `gitdir/i:` does not fold either.
 - **Two conditions.** `C` is the main worktree's Git directory, and
   `C/worktrees/*` every linked worktree's, the gate and review snapshots
   among them. `*` does not cross a `/`, so the Git directory of a
   submodule, under `C/modules/`, is not matched, and neither is anything
   deeper. A bare `C/` would have matched both.
 - **Escaped.** The condition is a wildmatch pattern, so each `[`, `]`,
-  `*`, `?` and `\` of `C` is escaped; only the worktrees component is a
-  glob. Unescaped, a `[` silently matches nothing and a `*` matches other
-  repositories.
+  `*`, `?` and `\` of `C` is escaped, in a folding component as in any
+  other; the only globs are the worktrees component and the classes the
+  folding components are spelled with. Unescaped, a `[` silently matches
+  nothing and a `*` matches other repositories.
 - **Quoted.** Each key and value is single-quoted; a quote inside is
   closed, escaped and reopened (`'\''`), which is what Git's own
   `sq_dequote` reads.
 - **Refused, never approximated:** a relative common directory or include,
   which Git rejects from the command line; a newline in `C`, which Git
-  rejects in a key; and on Windows a path that is not valid Unicode, which
-  cannot reach Git for Windows through its environment. A pattern that
-  silently failed to match would put the roles back on the replaced graph
-  with nothing to say so.
+  rejects in a key; on Windows a path that is not valid Unicode, which
+  cannot reach Git for Windows through its environment; a `.` or `..`
+  component, which the realpath Git matches never holds; and a component
+  whose directory cannot be asked, which leaves no way to tell whether it
+  must be matched with case. A pattern that silently failed to match would
+  put the roles back on the replaced graph with nothing to say so, and one
+  that matched too much would take another repository's replacements away.
+
+**What the lookups cost, and what happens when one fails.** Two lookups for
+each component that holds an ASCII letter (two `lstat`s on Unix, two
+`std::fs::canonicalize` calls elsewhere), once per run and once per resume:
+`Workspace::recorded_objects_scope` builds the scope there, and no role
+repeats it. Measured on the build box through this constructor, over 10,000
+constructions each: six `statx` calls and 2.7 µs for `/srv/tactus/.git`,
+and 12.7 µs for a path of twelve components.
+
+A lookup that fails with anything but "not found" refuses the run before
+its first role, naming the path and the error (`UpstrokeError::Refused`, from
+`run` and `resume` alike); nothing falls back to either answer. On a folding
+directory the other spelling names the entry just found, and on a
+case-sensitive one it is not found unless a sibling bears exactly that
+spelling, which the identity check tells apart. None of the layouts measured
+for this change reached the refusal: a case-sensitive ext4 directory, a
+case-folding one, and a case-sensitive directory inside a case-folding one.
+A directory missing from the path does reach it
+(`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key`); by
+reasoning, not measurement, so would an I/O error, a directory removed
+between the two lookups, or on Windows a case-sibling the process may not
+open.
+
+**Each round-5 decision fails a test when it is undone** (Git 2.43.0, with
+`TMPDIR` on this box's ext4, which keeps case, and in a case-folding directory
+of a loop-mounted `mkfs.ext4 -O casefold` image; "ok" means the mutation
+survived that test on both, and a layout named means it failed there alone).
+The witness is
+`a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements`;
+the inline tests are this module's own; the host tests are
+`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key` and
+`the_windows_rule_spells_a_path_as_git_for_windows_does`:
+
+| mutation | witness | inline: exact entries | inline: refusals | host: refusals | host: rules |
+|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok |
+| `gitdir/i:` again under the `Windows` rule | FAILED (ext4) | ok | ok | ok | FAILED |
+| `gitdir/i:` under both rules | FAILED (ext4) | FAILED | ok | ok | FAILED |
+| every component folds | FAILED (ext4) | ok | ok | FAILED | ok |
+| no component folds | FAILED (case-folding) | ok | ok | FAILED | ok |
+| any entry under the other spelling counts as the same one | FAILED (ext4) | ok | ok | ok | ok |
+| a failed lookup reads as "keeps case" | ok | ok | FAILED | FAILED | ok |
+| a component takes the answer of the one before it | ok | FAILED | ok | ok | ok |
+
+The five v0.1 witnesses in `src/engine/tests.rs` survived every row on both
+layouts. On ext4 nothing folds. On the case-folding directory Git named the
+managed repository in its stored case whenever it found it from a working
+directory: `git -C <mnt>/ci/PROBE rev-parse --absolute-git-dir` printed
+`<mnt>/ci/Probe/.git`, as `pwd -P` there printed `Probe`, while
+`git --git-dir=<mnt>/ci/PROBE/.GIT` printed the path as given. The witness's
+read through a Git directory spelled in capitals is what catches "no component
+folds" there.
+
+## `impl ManagedRepository` › `fn matching(`
+
+[`Self::new`] with the lookup supplied, so the inline tests can pin the
+entries for any answer without a directory to measure. It walks `C` once,
+root first, and asks about each normal component with the path of the
+directory that holds it.
 
 ## `impl ManagedRepository` › `pub fn verify_include(&self) -> Result<(), UpstrokeError> {`
 
@@ -274,9 +374,40 @@ runner asks before every role it starts and does not start one on `Err`
 by `Workspace::recorded_objects_scope`, which every run and resume call
 before their first role.
 
-## `fn glob_escaped(path: &[u8]) -> Vec<u8> {`
+## `fn folds_case(parent: &Path, name: &OsStr) -> Result<bool, String> {`
 
-A backslash before each character wildmatch treats as syntax.
+Whether the directory `parent` finds `name` under the other ASCII case.
+It looks up `name` with the case of every ASCII letter swapped (`Repo` as
+`rEPO`) and compares what it finds with `name` itself: the same entry means
+the directory folds case, "not found" or a different entry means it keeps
+case, and any other error is the caller's refusal. A name with no ASCII
+letter has no other spelling to look up, and is matched exactly.
+
+## `fn in_the_other_case(name: &OsStr) -> Option<OsString> {`
+
+`name` with the case of every ASCII letter swapped, or `None` when it has
+none.
+
+## `const fn other_case(byte: u8) -> u8 {`
+
+The other ASCII case of a letter; any other byte as it is.
+
+## `fn same_entry(entry: &Path, other: &Path) -> Result<bool, String> {`
+
+Whether two spellings name one entry. On Unix by `(st_dev, st_ino)` of
+each, without following a final symbolic link: Linux's realpath does not
+correct case, so comparing canonical paths would call a folding directory
+case-sensitive there. Elsewhere by `std::fs::canonicalize`, which on Windows
+returns the name as the directory stores it: the standard library's file
+identity there, `MetadataExt::file_index`, is unstable on 1.85.0 and on
+1.97.1 alike (E0658, `windows_by_handle`). A second spelling that is not
+found is `false`; an error on either lookup is the caller's refusal.
+
+## `fn matched(into: &mut Vec<u8>, spelled: &[u8], folded: bool) {`
+
+One component of the condition: each ASCII letter as a class of both cases
+when the component folds, and every character wildmatch treats as syntax
+escaped with a backslash.
 
 ## `fn single_quoted(text: &[u8]) -> Vec<u8> {`
 
