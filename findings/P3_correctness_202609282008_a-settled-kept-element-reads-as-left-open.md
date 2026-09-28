@@ -42,12 +42,18 @@ Measured with such a whole reading forged, over `3c135f42`'s readers: both `be99
 `stringify!` edit below. The seventh round's other test, *cut short*, does not share the gap: it needs
 a second reading of the same text, with the groups left open at the cut closed after the gate, to
 remove everything from the gate to the cut, and the `)` that stops the element stands above the cut,
-so no appended text makes it do so -- 0 of 56 continuations, on both inputs.
+so no appended text makes it do so -- 0 of 56 continuations, on both inputs. That holds of a gate no
+test-only element crossing the cut encloses. Inside one, the cut-short test is decided over the span
+from the gate to the cut, which the second reading removes with the enclosing element, so it counts
+a gate there as cut short whatever its own element, once the first reading keeps anything after the
+gate: `PR325-A-NESTED-GATE-READS-AS-CUT-SHORT`, gap (d), filed by #325's filing pass.
 
-**Not an instance of the other two gaps the notes state.** Gap (a) is a tokeniser that reads a group
+**Not an instance of the other gaps the notes state.** Gap (a) is a tokeniser that reads a group
 as open at the cut when it is not; here the text is tokenised correctly and nothing is open. Gap (b) is
 a whole reading that removes code the text above the cut leaves undecided; here the text above the
-cut decides it. Each of the three needs a different repair.
+cut decides it. Gap (d), stated by #325's filing pass, is a gate nested inside an element crossing the
+cut, counted as cut short; here the left-open test counts the gate, and nothing need enclose it. Each
+of the four needs a different repair.
 
 ## Reachability
 
@@ -76,6 +82,13 @@ cut decides it. Each of the three needs a different repair.
   gates, 11 of them above a cut) and the 11,041 files of the build box's cargo registry (2,373 gates,
   166 above a cut), the whole reading keeps no gate's element whole and no gate above a cut is left
   open. The `stringify!` edit makes one of each. So the gap is reached by no file of either corpus.
+  These count gates, each test-only attribute once, as the reader finds them stepping past each one's
+  `]`, so a gate inside an element another gate removes is counted too; the gates above a cut are the
+  ones `compare_above_the_cut` checks. `docs/internals/effects.md`'s 184 and 2,364 count something
+  else: the elements `production_code` removes, one per step of its loop, which resumes at each
+  element's end and passes over a gate inside an element already removed. The tree has no such gate,
+  so its two counts agree; nine of the registry's gates, in five files, are such. Re-measured at
+  `141fae34`, whose readers are `3c135f42`'s, by #325's filing pass.
 
 ## What the change that takes this up should do
 
