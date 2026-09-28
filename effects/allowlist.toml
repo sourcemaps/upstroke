@@ -903,14 +903,22 @@ stage, commit, rollback — each a `std::process::Command` on the system git, pl
 the working-tree writes around them. `invariants_preserved[1]` requires this \
 module's behaviour untouched, AMENDED ONCE: to close \
 `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, by the route that finding's guard \
-names ("an owner decision to unfreeze the module for this one change"), every \
-Git child is built by `git_command`, which sets \
-`crate::workspace_manager::NO_REPLACEMENT_OBJECTS`, so these operations read \
-the objects the repository holds rather than whatever `refs/replace/*` points \
-at them. Each child's arguments are what they were; that variable is the whole \
-of the change, and every other behaviour of the module stays frozen. The \
-schema-4 equivalents live behind funnels in `crate::workspace_manager` and \
-nothing here calls them: the constant is read, and no funnel is called."""
+names ("an owner decision to unfreeze the module for this one change"). The \
+amendment is three things and no more. Every Git child is built by \
+`git_command`, which sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS` \
+and passes `-c core.useReplaceRefs=false` ahead of the child's own arguments, \
+which are otherwise what they were, so these operations read the objects the \
+repository holds rather than whatever `refs/replace/*` points at them: two \
+controls, because on Git 2.41 a configured `true` outranks the variable. \
+`Workspace::recorded_objects_scope` asks Git for the repository's common \
+directory and writes, under the private root and never into any Git \
+configuration, the include file through which the v0.1 runner keeps its role \
+processes on that graph. `ensure_execution_prerequisites` refuses a Git older \
+than 2.41 by name, the floor the owner raised on 2026-09-28 because Git 2.40's \
+`merge-tree` ignores the setting, and the `check-attr --source` refusal states \
+the same floor. Every other behaviour of the module stays frozen. The schema-4 \
+equivalents live behind funnels in `crate::workspace_manager` and nothing here \
+calls them: the constant is read, and no funnel is called."""
 shrinks_when = "the schema-4 engine replaces the legacy paths that call this module (PR7-PR11); the module goes with them."
 
 [[legacy]]
