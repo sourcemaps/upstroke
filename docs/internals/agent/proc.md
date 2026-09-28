@@ -48,7 +48,7 @@ macOS, where there is no unprivileged descendant-containment primitive.
 Within the host-runner contract, run ownership cannot be handed to a resume
 -- or appear suspended -- while an isolated agent group is running.
 
-## `#![allow(`
+## `#![allow(clippy::disallowed_methods, clippy::disallowed_types)]`
 
 PROCESS FUNNEL: this module is in the **funnel section** of
 `effects/allowlist.toml`. Its effectful entries take ProcessSite by value;

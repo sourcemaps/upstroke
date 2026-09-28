@@ -29,6 +29,26 @@ CLIs and writes the pools file, `capacity` and the dry-run preview estimate
 what is left and what each strategy *would* do, and budgets stop a run at a
 ceiling — but nothing routes on any of it. Capacity-driven binding is v0.2.
 
+## `#![forbid(non_local_definitions)]`
+
+The one lint level this file states, added on 2026-09-26 (PR #325). A macro
+invoked inside a function body can expand to an `impl` of a type or trait
+defined outside that body, and the methods it defines are then callable
+from anywhere in the crate under a name no source text spells, so no
+census reads it and its body is compiled under whatever allowance the
+invoking file carries. `non_local_definitions` is rustc's lint for that
+`impl`; it only warns by default, and an inner `#[allow]` -- which the
+macro can write itself -- lowers it below CI's `-D warnings`. `forbid`
+cannot be lowered by any inner attribute (`E0453`), so every module of the
+library is held to it without a reader recognising anything. Unlike a
+governed lint (below), this one has no allowance anywhere in the crate for
+a `forbid` here to collide with.
+
+It does not reach a module-level `const _` initializer, which rustc exempts
+from the lint; `effects::tests::every_crate_root_forbids_non_local_definitions`
+records what it does and does not refuse, measured, and pins this line in
+all three crate roots.
+
 ## Held to declarations
 
 This file declares the crate's modules and nothing else, and since #318's

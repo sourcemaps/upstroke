@@ -10,6 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::UpstrokeError;
 
 pub(crate) mod terminal;
+mod thread_barriers;
+
+use self::thread_barriers::THREAD_BARRIERS;
 
 pub fn tail(text: &str, max: usize) -> String {
     let trimmed = text.trim();
@@ -307,11 +310,6 @@ pub(crate) fn barriers_performed() -> u64 {
 pub struct BarrierCounts {
     pub file: u64,
     pub directory: u64,
-}
-
-thread_local! {
-    static THREAD_BARRIERS: std::cell::Cell<BarrierCounts> =
-        const { std::cell::Cell::new(BarrierCounts { file: 0, directory: 0 }) };
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

@@ -1093,7 +1093,7 @@ effect_free = [
 #     A read is not an effect on this denylist, which governs creation,
 #     writing, removal, rename and process start -- and that includes a denied
 #     primitive asked in a mode that mutates nothing, which is what
-#     `observe_child_group` (`waitid` with `WNOWAIT`) already records.
+#     `ambient_contains` (`OpenProcess` with query rights) already records.
 # A `_with` seam whose production instantiation is the entry point beside it is
 # classified as that entry point (`join_ambient_job_with` is the precedent).
 # The rule is NOT immediate-call-only. The first version of these rows exempted
@@ -1376,7 +1376,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
-shared = { deref = 2, drop = 5, fmt = 2 }
+shared = { deref = 2, drop = 5 }
 funnel = [
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
@@ -1444,29 +1444,20 @@ effect_free = [
     # `process_alive` open a handle with `PROCESS_QUERY_LIMITED_INFORMATION |
     # SYNCHRONIZE` and ask it (`IsProcessInJob`, `GetProcessTimes`, a
     # zero-timeout `WaitForSingleObject`), then close it: a denied primitive
-    # (`OpenProcess`) in a mode that mutates nothing, classified as
-    # `observe_child_group`'s `waitid` with `WNOWAIT` is below, and as the
+    # (`OpenProcess`) in a mode that mutates nothing, classified as the
     # `pub` wrappers over them in `src/agent/proc/ambient.rs` already are.
+    # The test-only group oracle this sentence used to cite,
+    # `observe_child_group`, is under `cfg(all(unix, test))` with the rest of
+    # its record, and since #325 `effects::production_code` reads that gate,
+    # so none of them is in this domain.
     "ambient_contains",
     "ambient_established",
-    # The test-only group oracle and its lifecycle record. `observe_child_group`
-    # asks `waitid` with `WNOWAIT`, `getpgid` and on macOS `proc_pidinfo`,
-    # every one a read of process-table state that reaps, signals and moves
-    # nothing; `await_exit_without_reaping` blocks in the same `WNOWAIT` wait
-    # on a helper thread and leaves the child for its owner to reap. The rest
-    # read the record.
-    "await_exit_without_reaping",
-    "child_leads_its_own_group",
     "deref",
     "deref_mut",
-    "exit_answer",
     "fmt",
-    "had_exited_before_the_look",
-    "leads_own_group",
     # A pure decision over a memoised `Result`: it clones a message or returns
     # `Ok`, and touches nothing.
     "memoised_outcome",
-    "observe_child_group",
     # See `ambient_contains`.
     "process_alive",
     "process_creation_time",
@@ -1533,18 +1524,13 @@ effect_free = [
     # `join_ambient_job` over an explicit join step, so the error arm can be
     # executed at all. Same classification as the entry point it implements.
     "join_ambient_job_with",
-    # `#[cfg(all(windows, test))]`: writes a value into a process-local
-    # `OnceLock` so a subprocess helper can carry a real ambient failure. No
-    # effect outside this process, and no production caller at all.
-    "poison_ambient_for_tests",
     "process_alive",
     "process_creation_time",
     # Writes a value into a process-local `OnceLock<Mutex<..>>` that every
     # cleanup reaper started afterwards renders into argv before its `fork`.
     # No effect outside this process: the reaper performs the effect, inside
     # `Container.Stop`/`Container.Remove`'s own primitives, and only after its
-    # coordinator has died. The same classification `poison_ambient_for_tests`
-    # carries, for the same reason.
+    # coordinator has died.
     "set_container_reclaim_scope",
 ]
 

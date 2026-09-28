@@ -80,7 +80,7 @@ independently droppable predicate, so [`launch`] and [`release`] perform
 them in one place and [`runtime::ContainerTrace`] records the sequence,
 which is what the tests assert on.
 
-## `#![allow(`
+## `#![allow(clippy::disallowed_methods, clippy::disallowed_types)]`
 
 Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 carries this module's review clause -- effects only inside site-taking APIs,

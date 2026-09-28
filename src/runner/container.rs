@@ -2,11 +2,8 @@
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause. `effect_site_inventory.mechanism` (2).
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 pub mod census;
 pub mod env;

@@ -9,6 +9,15 @@ as it is in the source, so the heading is the grep string that finds the code.
 Command and argument descriptions also remain in explicit Clap attributes in the source:
 they generate the installed CLI's short and long help. The notes preserve the longer prose.
 
+## `#![forbid(non_local_definitions)]`
+
+The binary crate's copy of the library root's line (see
+[`lib.md`](lib.md)): this file is the root of its own crate, and a lint
+level stated in `src/lib.rs` does not reach it. Added on 2026-09-26 (PR
+#325) and pinned by
+`effects::tests::every_crate_root_forbids_non_local_definitions`, which
+reads every target root `cargo metadata` reports.
+
 ## `#![allow(`
 
 upstroke — headless orchestration engine for AI coding agents.

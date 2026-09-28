@@ -2,11 +2,8 @@
 
 // LEGACY-EFFECT: this module is in the frozen legacy section of
 // `effects/allowlist.toml`, which carries its justification.
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};

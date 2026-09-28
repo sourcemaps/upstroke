@@ -56,11 +56,8 @@
 //! `File`, an `OpenOptions`, or a `Command` — the only handles that leave this
 //! module are paths, object ids, and values.
 
-#![allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    clippy::disallowed_macros
-)]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -427,7 +424,7 @@ pub enum Refusal {
          no object at all",
         .resolved.as_deref().unwrap_or("nothing"),
         .role.object_type(),
-        .found_type.as_deref().map_or_else(String::new, |found| format!(" (it names a {found})"))
+        .found_type.as_deref().map_or_else(String::new, names_a_type)
     )]
     SnapshotInputResolvesElsewhere {
         /// Which id of the input.
@@ -584,6 +581,12 @@ fn refuse_unplain_run_id(run_id: &str) -> Result<(), Refusal> {
         name: run_id.to_owned(),
         why,
     })
+}
+
+/// The ` (it names a …)` clause of [`Refusal::SnapshotInputResolvesElsewhere`]'s
+/// message, when the repository resolved the input to an object of another type.
+fn names_a_type(found: &str) -> String {
+    format!(" (it names a {found})")
 }
 
 // ---------------------------------------------------------------------------
