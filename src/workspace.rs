@@ -1252,11 +1252,11 @@ fn require_git_floor(reported: &str) -> Result<(), UpstrokeError> {
         Some(found) if found >= GIT_FLOOR => Ok(()),
         _ => Err(UpstrokeError::Refused {
             message: format!(
-                "Git {}.{} or newer is required, and `git version` reports `{reported}`: on \
-                 Git 2.40 `git merge-tree` reads what `git replace` substitutes for the \
-                 objects the repository records whatever the configuration says, and \
-                 upstroke keeps every Git command in the repository it runs on to the \
-                 recorded objects through configuration",
+                "Git {}.{} or newer is required, and `git version` reports `{reported}`: \
+                 upstroke keeps the Git commands its gates, reviewers and implementers run \
+                 in this repository on the objects it records through configuration, and \
+                 Git 2.40's `git merge-tree` reads what `git replace` substitutes for them \
+                 whatever the configuration says",
                 GIT_FLOOR.0, GIT_FLOOR.1
             ),
         }),
