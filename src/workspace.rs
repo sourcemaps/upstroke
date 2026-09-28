@@ -3344,6 +3344,106 @@ mod tests {
         );
     }
 
+    fn test_module_span(code: &str) -> Result<(usize, usize), String> {
+        let identifier = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        };
+        let bytes = code.as_bytes();
+        let modules: Vec<usize> = code
+            .match_indices("mod tests")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !identifier(bytes.get(at.wrapping_sub(1)))
+                    && !identifier(bytes.get(at + "mod tests".len()))
+            })
+            .collect();
+        let [module] = modules.as_slice() else {
+            return Err(format!(
+                "one test module, the only span this census does not read: {modules:?}"
+            ));
+        };
+        let attribute = code
+            .get(..*module)
+            .map(str::trim_end)
+            .filter(|before| before.ends_with("#[cfg(test)]"))
+            .map(|before| before.len() - "#[cfg(test)]".len())
+            .ok_or(
+                "the test module is not configured out of production by the attribute above it",
+            )?;
+        let after = module + "mod tests".len();
+        let rest = code.get(after..).unwrap_or_default();
+        let next = after + (rest.len() - rest.trim_start().len());
+        match bytes.get(next) {
+            Some(b';') => Ok((attribute, next)),
+            Some(b'{') => {
+                let mut depth = 0_usize;
+                for (at, byte) in bytes.iter().enumerate().skip(next) {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Ok((attribute, at));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err("the test module's body never closes".to_owned())
+            }
+            other => Err(format!(
+                "`mod tests` is followed by {:?}, which is neither an inline body nor the end \
+                 of a declaration whose body lives in another file",
+                other.map(|byte| char::from(*byte))
+            )),
+        }
+    }
+
+    #[test]
+    fn the_census_reads_past_a_test_module_declared_out_of_line() {
+        let span = |source: &str| {
+            let code = crate::effects::blank_comments_and_strings(source);
+            test_module_span(&code).map(|(start, end)| {
+                let mut kept = code.clone();
+                kept.replace_range(start..=end, "");
+                kept
+            })
+        };
+        let inline =
+            span("fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() { { } }\n}\nfn c() {}\n")
+                .expect("an inline test module");
+        assert!(
+            inline.contains("fn a()")
+                && inline.contains("fn c()")
+                && !inline.contains("fn b()")
+                && !inline.contains("mod tests"),
+            "an inline test module is taken out through the brace that closes it: {inline:?}"
+        );
+        let out_of_line = span(
+            "#[path = \"t.rs\"]\n#[cfg(test)]\nmod tests;\nfn helper() -> Command {\n    \
+             Command::new(\"git\")\n}\n",
+        )
+        .expect("a test module declared out of line");
+        assert!(
+            out_of_line.contains("fn helper()")
+                && out_of_line.contains("Command::new(")
+                && !out_of_line.contains("mod tests"),
+            "a test module declared out of line is taken out through its `;` alone, and the \
+             helper after it stays where the census reads it: {out_of_line:?}"
+        );
+        for malformed in [
+            "#[cfg(test)]\nmod tests\nfn helper() {}\n",
+            "#[cfg(test)]\nmod tests {\n    fn b() {}\n",
+            "mod tests {}\n",
+            "#[cfg(test)]\nmod tests {}\n#[cfg(test)]\nmod tests;\n",
+        ] {
+            assert!(
+                span(malformed).is_err(),
+                "a shape the census cannot place is refused, never read: {malformed:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {
         let source = include_str!("workspace.rs");
@@ -3354,49 +3454,8 @@ mod tests {
             "the blanking must keep every byte where it was, or the span taken out \
              below is not the test module's"
         );
-        let modules: Vec<usize> = code
-            .match_indices("mod tests")
-            .map(|(at, _)| at)
-            .filter(|at| {
-                !code
-                    .as_bytes()
-                    .get(at + "mod tests".len())
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            })
-            .collect();
-        assert_eq!(
-            modules.len(),
-            1,
-            "one test module, the only span this census does not read: {modules:?}"
-        );
-        let module = *modules.first().expect("the test module");
-        let attribute = code
-            .get(..module)
-            .map(str::trim_end)
-            .filter(|before| before.ends_with("#[cfg(test)]"))
-            .map(|before| before.len() - "#[cfg(test)]".len())
-            .expect("the test module is configured out of production by the attribute above it");
-        let body = module
-            + code
-                .get(module..)
-                .and_then(|rest| rest.find('{'))
-                .expect("the test module is inline");
-        let mut depth = 0_usize;
-        let mut end = None;
-        for (at, byte) in code.bytes().enumerate().skip(body) {
-            match byte {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(at);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let end = end.expect("the test module closes");
+        let (attribute, end) =
+            test_module_span(&code).expect("the one test module this census does not read");
         code.replace_range(attribute..=end, &" ".repeat(end + 1 - attribute));
 
         for present in [
