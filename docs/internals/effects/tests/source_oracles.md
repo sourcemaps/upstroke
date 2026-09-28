@@ -1298,11 +1298,11 @@ At the root, with nothing assigned, the value is the three-valued reading
 removes an element for is decided there, in one pass over its predicate,
 however many names it has, and no name is tried. A name is tried only where
 that reading leaves the value open, which on the tree walk means the reader
-removed an element its own reading does not decide -- a defect, and then
-trying names finds the assignment under which the predicate holds. In the
-fixed rows it means a predicate the reader would keep and this decides:
-`all(unix, not(unix))` holds under no assignment, and the reader, which knows
-nothing of `unix`, keeps its element.
+removed an element its own reading does not decide -- a defect -- and trying
+names then decides the predicate exactly, finding the assignment under which
+it holds if there is one. In the fixed rows it means a predicate the reader
+would keep and this decides: `all(unix, not(unix))` holds under no assignment,
+and the reader, which knows nothing of `unix`, keeps its element.
 
 Until #325's sixth round this enumerated every assignment of every name and
 refused a predicate naming more than 20, which refused honest code: a review
@@ -1368,18 +1368,18 @@ own `#[cfg(test)]` inside it -- a `pub fn` under `cfg(all(unix, test))` with a
 gated `let`, and a `const _` under the same gate with a gated `const` in its
 block -- so the file's first `#[cfg(test)]` stood inside the item. The whole
 file's reading removed the item; the text above the cut, read with that inner
-gate, could not end it and kept its header; the equality failed on honest code,
-both toolchains and both Clippy versions accepting the edit. The comparison now
-stops at the gate of an element crossing the cut (above). The rows after the
-tree walk hold both shapes, one with an attribute between its gate and its
-function, a test-only function inside a test-only module -- the first of the
-two crossing gates is the one compared up to, since the text above the cut
-keeps the module's header too -- an element ended above the cut followed by one
-crossing it, and a production function enclosing the cut, which crosses
-nothing; each row states whether an element crosses and exactly what the whole
-reading keeps between its neighbours. The same rows hold the review's other
-edit, a gate naming 21 `target_os` values, which this test used to refuse
-before deciding it ([`is_false_wherever_test_is`]).
+gate, could not end it and kept its header; the equality failed on honest code:
+`cargo fmt --check`, Clippy on rustc 1.97.1 and the 1.85.0 check all accept
+both edits. The comparison now stops at the gate of an element crossing the cut
+(above). The rows after the tree walk hold both shapes, one with an attribute
+between its gate and its function, a test-only function inside a test-only
+module -- the first of the two crossing gates is the one compared up to, since
+the text above the cut keeps the module's header too -- an element ended above
+the cut followed by one crossing it, and a production function enclosing the
+cut, which crosses nothing; each row states whether an element crosses and
+exactly what the whole reading keeps between its neighbours. The same rows hold
+the review's other edit, a gate naming 21 `target_os` values, which this test
+used to refuse rather than decide ([`is_false_wherever_test_is`]).
 
 What carries the superset claim is the rest: `strictly_larger >= 8` and the
 `src/engine/coordinator.rs` membership check (a strict gain somewhere, by
