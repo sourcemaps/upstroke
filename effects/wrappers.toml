@@ -864,15 +864,23 @@ effectful_unnameable = []
 effect_free = [
     "base",
     "case",
+    "common_dir",
     "compose",
     "current",
     "from_process",
+    "include",
+    "keyword",
     "lookup",
+    "native",
+    "new",
     "objects",
+    "parameters",
     "preflight",
     "reading",
     "reserved_values",
     "same_key",
+    "spelling",
+    "verify_include",
     "with_base",
 ]
 
@@ -1280,6 +1288,7 @@ effectful = [
     "Workspace::prepared_commit_matches",
     "Workspace::prepared_pin_target",
     "Workspace::ensure_run_exclusions",
+    "Workspace::recorded_objects_scope",
 ]
 effectful_unnameable = [
     "drop",

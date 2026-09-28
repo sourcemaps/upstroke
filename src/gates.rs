@@ -639,6 +639,10 @@ mod tests {
         );
 
         let ws = Workspace::open(repo).expect("open");
+        let private_root = temp_dir("legacy-replacement-private");
+        let repository = ws
+            .recorded_objects_scope(Some(private_root.path()))
+            .expect("the repository the v0.1 conductor's runner keeps on the recorded graph");
         let snapshot = ws
             .gate_snapshot_for_candidate(&parent, &recorded_tree)
             .expect("the v0.1 workspace's gate snapshot");
@@ -652,7 +656,7 @@ mod tests {
         let judge = gate("git diff --exit-code HEAD -- f.txt", 60);
         let legacy = judge
             .check(
-                &HostRunner::for_legacy_workspace(),
+                &HostRunner::for_legacy_workspace(repository),
                 gate_id(0),
                 snapshot.workspace(),
             )

@@ -55,7 +55,9 @@ pub fn run_with(
 }
 
 pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
-    run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
+    let repository =
+        Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
+    run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))
 }
 
 pub(super) fn run_harness_on(
@@ -84,10 +86,12 @@ pub(super) fn run_harness_inner(
     harness: &Harness<'_>,
 ) -> Result<(RunReport, RunState), UpstrokeError> {
     let contained = crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)?;
+    let repository =
+        Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
     run_harness_inner_on(
         opts,
         harness,
-        &crate::runner::host::HostRunner::for_legacy_workspace(),
+        &crate::runner::host::HostRunner::for_legacy_workspace(repository),
         &contained,
     )
 }

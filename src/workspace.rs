@@ -16,6 +16,7 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
+use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
 use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 pub struct Workspace {
@@ -88,6 +89,26 @@ impl Workspace {
             });
         }
         Ok(git_dir)
+    }
+
+    pub fn recorded_objects_scope(
+        &self,
+        private_root: Option<&Path>,
+    ) -> Result<ManagedRepository, UpstrokeError> {
+        let private_root =
+            private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
+        let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
+            path: common.clone(),
+            source,
+        })?;
+        let directory =
+            std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
+                path: private_root.to_path_buf(),
+                source,
+            })?;
+        let include = write_recorded_objects_include(&directory)?;
+        ManagedRepository::new(&common, &include, GitdirRule::native())
     }
 
     fn git_path(&self, args: &[&str]) -> Result<PathBuf, UpstrokeError> {
@@ -1456,6 +1477,44 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+const RECORDED_OBJECTS_INCLUDE_NAME: &str = "recorded-objects.gitconfig";
+
+fn write_recorded_objects_include(directory: &Path) -> Result<PathBuf, UpstrokeError> {
+    let include = directory.join(RECORDED_OBJECTS_INCLUDE_NAME);
+    let holds_it =
+        |path: &Path| fs::read(path).is_ok_and(|bytes| bytes == RECORDED_OBJECTS_INCLUDE);
+    if holds_it(&include) {
+        return Ok(include);
+    }
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| UpstrokeError::Io { path, source }
+    };
+    create_private_dir_all(directory).map_err(io(directory))?;
+    let staged = directory.join(format!(
+        "{RECORDED_OBJECTS_INCLUDE_NAME}.{}-{}.tmp",
+        std::process::id(),
+        crate::ulid::ulid()
+    ));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(RECORDED_OBJECTS_INCLUDE))
+        .map_err(io(&staged))?;
+    match fs::rename(&staged, &include) {
+        Ok(()) => Ok(include),
+        Err(source) => {
+            let _ = fs::remove_file(&staged);
+            if holds_it(&include) {
+                Ok(include)
+            } else {
+                Err(io(&include)(source))
+            }
+        }
+    }
 }
 
 fn remove_ephemeral_store(store: Option<&Path>) {

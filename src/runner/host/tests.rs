@@ -296,52 +296,121 @@ fn every_composed_environment_disables_replacement_objects() {
     );
 }
 
+fn managed_repository() -> ManagedRepository {
+    let (common, include) = if cfg!(windows) {
+        (
+            r"C:\srv\repo [x]*?\.git",
+            r"C:\Users\upstroke\.upstroke\git\recorded-objects.gitconfig",
+        )
+    } else {
+        (
+            "/srv/repo [x]*?/.git",
+            "/home/upstroke/.upstroke/git/recorded-objects.gitconfig",
+        )
+    };
+    ManagedRepository::new(Path::new(common), Path::new(include), GitdirRule::native())
+        .expect("a repository the runner can scope")
+}
+
 #[test]
-fn the_v1_conductors_environment_disables_replacement_objects() {
-    let legacy = HostRunner::for_legacy_workspace();
+fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {
+    let repository = managed_repository();
+    let legacy = HostRunner::for_legacy_workspace(repository.clone());
     assert_eq!(
         legacy.environment().objects(),
-        ObjectGraph::Recorded,
-        "the environment `engine::run` and `engine::resume` install must read \
-         the objects the repository holds, which is the graph `src/workspace.rs` \
-         writes the v0.1 workspace and its gate snapshots from"
+        &ObjectGraph::RecordedIn(repository.clone()),
+        "the environment `engine::run` and `engine::resume` install must read the objects \
+         the repository holds, which is the graph `src/workspace.rs` writes the v0.1 \
+         workspace and its gate snapshots from, and only in that repository"
     );
+    let ours = repository.parameters().to_owned();
+    let inherited = "'core.useReplaceRefs'='true'";
+    let overlaid = "'core.useReplaceRefs'='true' 'color.ui'='false'";
     let mut rows = 0_usize;
     for case in KeyCase::ALL {
-        let mut base = synthetic_base();
-        base.push((
-            os(NO_REPLACEMENT_OBJECTS.0),
-            os("whatever-the-operator-exported"),
-        ));
-        let environment =
-            HostEnvironment::with_base(base, *case).reading(legacy.environment().objects());
-        for role in ExecutionRole::all() {
-            let composed = environment
-                .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
-                .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
-            assert_eq!(
-                value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
-                Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
-                "{role} ({case:?}): a v0.1 child would read whatever `git replace` \
-                 points at the tree its own workspace wrote"
-            );
-            rows += 1;
+        let spelling = match case {
+            KeyCase::Sensitive => CONFIG_PARAMETERS.to_owned(),
+            KeyCase::Insensitive => CONFIG_PARAMETERS.to_ascii_lowercase(),
+        };
+        for (base_value, overlay_value, prefix) in [
+            (None, None, None),
+            (Some(""), None, None),
+            (Some(inherited), None, Some(inherited)),
+            (None, Some(overlaid), Some(overlaid)),
+            (Some(inherited), Some(overlaid), Some(overlaid)),
+        ] {
+            let mut base = synthetic_base();
+            if let Some(value) = base_value {
+                base.push((os(&spelling), os(value)));
+            }
+            let overlay: Vec<(String, String)> = overlay_value
+                .map(|value| vec![(CONFIG_PARAMETERS.to_owned(), value.to_owned())])
+                .unwrap_or_default();
+            let environment = HostEnvironment::with_base(base, *case)
+                .reading(legacy.environment().objects().clone());
+            for role in ExecutionRole::all() {
+                let composed = environment
+                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                let mut expected = prefix.map(OsString::from).unwrap_or_default();
+                if !expected.is_empty() {
+                    expected.push(" ");
+                }
+                expected.push(&ours);
+                assert_eq!(
+                    value(&composed, CONFIG_PARAMETERS, *case),
+                    Some(expected.as_os_str()),
+                    "{role} ({case:?}, base {base_value:?}, overlay {overlay_value:?}): the \
+                     includes must come after every inherited entry, because Git reads \
+                     `GIT_CONFIG_PARAMETERS` after the counted pairs and the last value wins"
+                );
+                assert_eq!(
+                    composed
+                        .iter()
+                        .filter(|(name, _)| case.same_key(name, OsStr::new(CONFIG_PARAMETERS)))
+                        .count(),
+                    1,
+                    "{role} ({case:?}): one variable, however the base spelled it"
+                );
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                    None,
+                    "{role} ({case:?}): the process-wide variable reaches every repository a \
+                     role creates, which is the regression this policy replaces"
+                );
+                rows += 1;
+            }
         }
     }
-    assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
+    assert_eq!(
+        rows,
+        5 * 5 * KeyCase::ALL.len(),
+        "every role, every source, both key cases"
+    );
+
+    let mut base = synthetic_base();
+    base.push((os(NO_REPLACEMENT_OBJECTS.0), os("the-operators-own")));
+    let composed = HostEnvironment::with_base(base, KeyCase::current())
+        .reading(legacy.environment().objects().clone())
+        .compose(&ExecutionRole::Gate, None, &[])
+        .expect("compose");
+    assert_eq!(
+        value(&composed, NO_REPLACEMENT_OBJECTS.0, KeyCase::current()),
+        Some(OsStr::new("the-operators-own")),
+        "an operator who exports the variable keeps it: the runner neither adds nor removes it"
+    );
     for role in ExecutionRole::all() {
         let composed = legacy
             .environment()
             .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
             .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
-        assert_eq!(
-            value(
-                &composed,
-                NO_REPLACEMENT_OBJECTS.0,
-                legacy.environment().case()
-            ),
-            Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
-            "{role}: the constructor's own environment, over this process's base"
+        let parameters = value(&composed, CONFIG_PARAMETERS, legacy.environment().case())
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            parameters.ends_with(&*ours.to_string_lossy()),
+            "{role}: the constructor's own environment, over this process's base, ends with \
+             the includes"
         );
     }
 }
