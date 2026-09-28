@@ -325,6 +325,7 @@ impl Workspace {
     }
 
     pub fn ensure_execution_prerequisites(&self) -> Result<(), UpstrokeError> {
+        require_git_floor(&self.git(&["version"])?)?;
         require_check_attr_source(self.git_output_with_input(
             &["check-attr", "--source=HEAD", "--stdin", "-z", "filter"],
             Vec::new(),
@@ -1237,10 +1238,35 @@ impl Workspace {
     }
 }
 
+const GIT_FLOOR: (u32, u32) = (2, 41);
+
+fn require_git_floor(reported: &str) -> Result<(), UpstrokeError> {
+    let reported = reported.trim();
+    let found = reported.strip_prefix("git version ").and_then(|version| {
+        let mut numbers = version.split(|character: char| !character.is_ascii_digit());
+        let major = numbers.next()?.parse::<u32>().ok()?;
+        let minor = numbers.next()?.parse::<u32>().ok()?;
+        Some((major, minor))
+    });
+    match found {
+        Some(found) if found >= GIT_FLOOR => Ok(()),
+        _ => Err(UpstrokeError::Refused {
+            message: format!(
+                "Git {}.{} or newer is required, and `git version` reports `{reported}`: on \
+                 Git 2.40 `git merge-tree` reads what `git replace` substitutes for the \
+                 objects the repository records whatever the configuration says, and \
+                 upstroke keeps every Git command in the repository it runs on to the \
+                 recorded objects through configuration",
+                GIT_FLOOR.0, GIT_FLOOR.1
+            ),
+        }),
+    }
+}
+
 fn require_check_attr_source(probe: Result<Vec<u8>, UpstrokeError>) -> Result<(), UpstrokeError> {
     probe.map(|_| ()).map_err(|error| UpstrokeError::Refused {
         message: format!(
-            "Git 2.40 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
+            "Git 2.41 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
         ),
     })
 }
@@ -1790,7 +1816,7 @@ mod tests {
         }))
         .expect_err("missing exact-tree attribute support must fail closed")
         .to_string();
-        assert!(error.contains("Git 2.40 or newer"), "{error}");
+        assert!(error.contains("Git 2.41 or newer"), "{error}");
         assert!(error.contains("check-attr --source"), "{error}");
     }
 
