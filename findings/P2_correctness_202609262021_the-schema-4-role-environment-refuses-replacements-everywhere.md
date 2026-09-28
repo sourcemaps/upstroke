@@ -1,24 +1,24 @@
 ---
 id: PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE
-severity: P1
+severity: P2
 disposition: deferred
 category: correctness
 pr: 326
 reviewed_sha: 915c0646c1e502c74df596586d6232ce2df7a6fe
-location: src/runner/host/environment.rs:145
-provenance: pre_existing   # found in #326 round 3, scoping the v0.1 instance #326's regression lens reproduced at 915c0646
+location: src/runner/host/environment.rs:345
+provenance: pre_existing   # found in #326 round 3; reclassified P1 -> P2 by the review of record of 6e3e618f (gpt-6-astra, max, 2026-09-27)
 first_bad: db8a525a8e3d2dc5dcec5ac81acd7829d537be90
-guard: the schema-4 change that scopes the isolation to the managed repository, in the shape #326 settles for v0.1
+guard: the change that activates the schema-4 topology conductor, which moves both runners onto the repository-scoped includes #326 built for v0.1 first
 ---
 
 ## Failure sequence
 
-1. A run on the schema-4 path, which engages only by explicit schema choice, has a gate whose own work creates a
-   fixture repository and uses `git replace` in it: the test suite of Git itself, of `git-filter-repo`, or of any
-   Git tooling.
+1. A run on the schema-4 path, which no supported configuration reaches on this head (Reachability, below), has
+   a gate whose own work creates a fixture repository and uses `git replace` in it: the test suite of Git itself,
+   of `git-filter-repo`, or of any Git tooling.
 2. Both schema-4 runners put `GIT_NO_REPLACE_OBJECTS=1` on every role, and put it last:
    - `HostEnvironment::compose`, under the `ObjectGraph::Recorded` reading `HostRunner::new()` installs
-     (`src/runner/host/environment.rs:145`);
+     (`src/runner/host/environment.rs:345`);
    - `ContainerEnvironment::compose`, unconditionally (`src/runner/container/env.rs:232`).
 3. The variable is process-wide. Every Git child of the gate takes it, in every repository, including the fixture
    the gate has just created.
@@ -32,48 +32,80 @@ Measured through the v0.1 runner at `915c0646`, which composed exactly what `Hos
   2.43.0.
 - An engine run with that gate parked on 2.43.0.
 - Neither the schema-4 topology engine nor the container runner was driven. The container's composition is read
-  from the source.
+  from the source. The review of record confirmed the cross-repository effect independently on Git 2.43.
 
-On Git 2.40 and 2.41 the same variable is also not final against a configured `core.useReplaceRefs = true`
-(`design/15`, "What an exact snapshot is exact against"). The scoping below closes that half for role processes
-too, against every configuration file.
+On Git 2.41 the same variable is also not final against a configured `core.useReplaceRefs = true`. (Git 2.40
+fails the same way, and is below the floor `README.md` states since #326 round 4.) The repository-scoped includes
+below close that half for role processes too: they come after a `true` in every configuration file, the
+worktree's own `config.worktree` among them, and after one in inherited `GIT_CONFIG_COUNT` or
+`GIT_CONFIG_PARAMETERS`.
 
 ## Reachability, against the owner's rule of 2026-09-11
 
-**Neither limb holds, and the reason differs from #326's.**
+**Reclassified from P1 to P2** by the review of record of `6e3e618f`: `gpt-6-astra` at `max`, 2026-09-27.
+`findings/README.md` reserves a severity change to a reviewer. Its reachability paragraph, verbatim:
 
-- **On the v0.1 path** the review's instance can happen in normal use: any v0.1 user whose tests exercise replace
-  refs meets it, with no unusual configuration. That is why it blocks #326.
-- **Schema 4 is opt-in.** The machinery "engages only by explicit schema choice" (`CLAUDE.md`), and no `0.2.0` tag
-  exists. So this cannot happen in normal use of what is released.
-- **No one without push access can trigger it:** choosing schema 4 is the operator's own configuration.
+> At `6e3e618fa0b45bdcd96ef9a00647cb32f2103df7`, this schema-4 defect is latent behind inactive production
+> activation. `TOPOLOGY_ACTIVATION` is hard-coded `Inactive`, the production reader ceiling is 3, and CLI run and
+> resume enter the legacy conductor. No supported flag, configuration, or recorded-schema choice activates the
+> topology conductor. Therefore neither ordinary use nor input from someone without push access reaches this
+> schema-4 failure on this head. Internal scaffolding can exercise the machinery; production activation requires
+> source changes. The reachable v0.1 instance is a separate merge blocker.
+
+Checked again at #326 round 4, which closes that v0.1 instance and leaves both schema-4 compositions as they were.
+`TOPOLOGY_ACTIVATION` is still `Inactive` (`src/topology/schema.rs:27`), and compile-time assertions at `:39` and
+`:41` pin it and the reader ceiling of 3. `src/main.rs:309` and `:323` still send run and resume to `engine::run`
+and `engine::resume`.
 
 ## What the change that takes this up should do
 
-**The fix shape is known:** scope the isolation to the managed repository instead of the process. #326's round 3
-measured two ways of doing it through the v0.1 call path, on Git 2.40.0, 2.41.0, 2.42.0 and 2.43.0. With either,
-the own-fixture gate passed, and so did the finding's original sequence: `git diff --exit-code HEAD` over an
-untouched snapshot of a replaced tree.
+**Reuse the v0.1 mechanism, and move both runners onto it before the topology conductor is activated.** #326
+round 4 built it for the v0.1 runner: `HostRunner::for_legacy_workspace(repository)` reads
+`ObjectGraph::RecordedIn(repository)`. For every role, that appends two conditional includes to
+`GIT_CONFIG_PARAMETERS`:
 
-- **`core.useReplaceRefs = false` in the repository's configuration.** Schema-4's task and merge worktrees are
-  detached linked worktrees of the operator's repository (`design/26`), and they read its common `.git/config`.
-  So this form writes the operator's own configuration, and the setting outlives the run.
-- **The same setting through the role environment.** `GIT_CONFIG_COUNT` pairs
-  `includeIf.gitdir:<common dir>.path` and `includeIf.gitdir:<common dir>/.path` name an engine-owned file
-  holding `[core] useReplaceRefs = false`, and nothing is written into the repository. What the implementation
-  has to get right, each measured on 2.43.0 unless it says otherwise:
-  - **Both patterns.** `<common dir>/` alone misses the main worktree's own gitdir.
-  - **Escaping.** The pattern is a glob, so `[`, `*`, `?` and `\` in the path must be escaped. Unescaped, a `[`
-    silently fails to match and a `*` matches other repositories as well.
-  - **The realpath.** The realpath matches where a symlinked spelling does not.
-  - **Appending.** The pairs go after an operator's own `GIT_CONFIG_COUNT` pairs, never over them.
-  - **Windows.** It needs `gitdir/i:` and forward slashes. Not measured.
+```
+includeIf.gitdir:<common dir>.path=<include>
+includeIf.gitdir:<common dir>/worktrees/*.path=<include>
+```
 
-**Neither is built into #326 yet.** Its choice between the two for the v0.1 path is pending with the owner's
-orchestrator, and whichever it takes is the shape to reuse here. The container runner needs the pattern in the
-container's own paths.
+The include holds `[core] useReplaceRefs = false`, and nothing is written into the repository.
+`Workspace::recorded_objects_scope` finds the common directory and writes the include. The schema-4 host runner
+needs the same, from the repository its conductor manages. The container runner needs the include inside the
+container, and the patterns spelled for the Git directory as the container sees it. #326 designed neither of
+those two.
 
-**Two limits both forms share:**
+**The entries go at the end of `GIT_CONFIG_PARAMETERS`, after every entry the role inherits or its overlay sets.**
+An earlier version of this row prescribed appending them to `GIT_CONFIG_COUNT`. That does not defeat an inherited
+override. Git reads `GIT_CONFIG_PARAMETERS` after the counted pairs, so an inherited
+`'core.useReplaceRefs'='true'` there still wins. The review reproduced that on Git 2.40.0, 2.41.0 and 2.43.0.
 
-- a later command-line `core.useReplaceRefs=true` still wins;
-- on Git 2.40.0, `git merge-tree` reads a replaced commit despite the setting. Git 2.41 fixed that.
+**The repository-configuration form does not work, on either count.**
+
+- `core.useReplaceRefs = false` in the repository's configuration changes the operator's common configuration. It
+  is visible from unrelated sibling worktrees, and it outlives completion, failure and snapshot removal.
+- It does not win either. `config.worktree`, inherited `GIT_CONFIG_COUNT` and inherited `GIT_CONFIG_PARAMETERS`
+  each outrank the repository file.
+
+The review reproduced both on 2.40.0, 2.41.0 and 2.43.0. This row's earlier claim that the form covered every
+configuration file missed `config.worktree`.
+
+**What the v0.1 implementation had to get right, each pinned by a #326 witness:**
+
+- **Two patterns.** `gitdir:<common dir>` for a main worktree, and `gitdir:<common dir>/worktrees/*` for every
+  linked one, the snapshots included. A bare `<common dir>/` would also reach the Git directories of submodules
+  under `modules/`.
+- **The canonical path, glob-escaped.** Each of `[`, `]`, `*`, `?` and `\` is escaped. A quote in the path is
+  closed, escaped and reopened inside the single-quoted key.
+- **Git for Windows's spelling.** On Windows the pattern is `gitdir/i:` with no `\\?\`, forward slashes, and
+  `//server/share` for a UNC path; macOS takes `gitdir/i:` too.
+- **An include that exists whenever a role starts.** #326 writes it at
+  `<private root>/git/recorded-objects.gitconfig` before a run's or resume's first role, and refuses to start a
+  role while it is missing or altered.
+
+**Limits the mechanism keeps:**
+
+- a later explicit `git -c core.useReplaceRefs=true` inside a role still wins, and a role that clears its
+  environment loses the include: configuration is not an enforcement boundary;
+- Git 2.40's `git merge-tree` ignores the setting altogether. The floor is 2.41 since #326 round 4, and a v0.1 run
+  refuses an older Git by name.
