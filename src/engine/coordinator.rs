@@ -151,9 +151,10 @@ pub(super) fn run_harness_inner_with_id(
             message: "working tree is not clean; commit or stash first (the engine refuses \
                       dirty trees). upstroke compares the checkout with the objects the \
                       repository records, never with what `git replace` substitutes for \
-                      them, so `git --no-replace-objects status` lists what it found; plain \
-                      `git status` can report the checkout clean when a replacement changes \
-                      what HEAD holds (`git replace -l` lists them)"
+                      them, so `git --no-replace-objects -c core.useReplaceRefs=false \
+                      status` lists what it found; plain `git status` can report the \
+                      checkout clean when a replacement changes what HEAD holds \
+                      (`git replace -l` lists them)"
                 .to_owned(),
         });
     }

@@ -5254,6 +5254,7 @@ fn a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run()
 }
 
 fn replace_head_with_a_sibling(repo: &Path) {
+    crate::workspace_manager::fixture::pin_replacement_refs_in(repo);
     let head = git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned();
     let parent = git_in(repo, &["rev-parse", "HEAD^"]).trim().to_owned();
     fs::write(repo.join("README.md"), "replaced\n").expect("the replacing content");
@@ -5280,9 +5281,20 @@ fn replace_head_with_a_sibling(repo: &Path) {
         "plain `git status` reads the replacement and reports the checkout clean"
     );
     assert_eq!(
-        git_in(repo, &["--no-replace-objects", "status", "--porcelain"]).trim(),
+        git_in(
+            repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "status",
+                "--porcelain"
+            ]
+        )
+        .trim(),
         "M  README.md",
-        "the command the refusal names lists what upstroke finds"
+        "the command the refusal names lists what upstroke finds, and the repository pins \
+         `core.useReplaceRefs = true`, which on Git 2.41 outranks the variable alone"
     );
 }
 
@@ -5308,7 +5320,7 @@ fn replaced_head_refusal_helper() {
         .to_string();
     for named in [
         "not clean",
-        "`git --no-replace-objects status`",
+        "`git --no-replace-objects -c core.useReplaceRefs=false status`",
         "`git replace -l`",
     ] {
         assert!(refused.contains(named), "`{named}` in: {refused}");
@@ -5346,7 +5358,7 @@ fn replaced_head_refusal_helper() {
     .to_string();
     for named in [
         "uncommitted changes",
-        "`git --no-replace-objects status`",
+        "`git --no-replace-objects -c core.useReplaceRefs=false status`",
         "`git replace -l`",
     ] {
         assert!(refused.contains(named), "`{named}` in: {refused}");
