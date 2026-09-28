@@ -1270,25 +1270,31 @@ the comparison recognises each:
 - It removes part of it. A test-only `if` whose first block closes above the
   cut, with the cut in its `else` block, in a later `else if`'s block or in a
   group of an `else if`'s condition, is one `if_end` cannot end from that
-  text, and [`configured_item_end`] falls back to ending the element after
-  its first block: the `if` and that block are removed and `else {` is kept.
-  Its first byte is gone, so the first test does not see it. The text above
-  the cut is read a second time, with its gate, followed by what
-  [`closers_after_the_cut`] returns, and the element was *cut short* when the
-  first reading keeps something between the gate and the cut and the second
-  removes all of it.
+  text, and [`configured_item_end`] falls back to ending the element after its
+  first block: the `if` and that block are removed and `else {` is kept. Its
+  first byte is gone, so the first test does not see it. The text above the
+  cut is read a second time, with its gate, followed by what
+  [`closers_after_the_cut`] returns, and the gate counts as *cut short* when
+  the first reading keeps something between the gate and the cut and the
+  second removes all of it. That test reads the span from the gate to the cut,
+  not the gate's own element: the second reading removes the span when the
+  closers let the reader end this element past the cut, as with the `if`, and
+  also when they let it end an element enclosing this one. So a gate inside an
+  element that crosses the cut counts as cut short whatever its own element
+  is, one the text above the cut ends included, once the first reading keeps
+  anything after it -- gap (d) below.
 
-So the first gate above the cut whose element that text leaves open or cuts
-short, and which the whole reading removes from the gate to the cut, is where
-the comparison stops. The readings are compared above that gate; from it to
-the cut the whole reading has removed everything, and the gate's predicate is
-confirmed like any other. Until #325's sixth round the comparison ran to the
-cut, and a review of `598d7616` executed the `fn` and the `const _` against
-it; until its seventh, an element was taken for one crossing the cut only when
-it was left open, and a review of `be993da5` executed a test-only `if` under
-`cfg(all(unix, test))` at the start of a function body, with a redundant
-`#[cfg(test)]` in its `else` block, against that. Honest code, refused, both
-times.
+So the first gate above the cut whose element that text leaves open, or which
+counts as cut short, and from which the whole reading removes everything to
+the cut, is where the comparison stops. The readings are compared above that
+gate; from it to the cut the whole reading has removed everything, and the
+gate's predicate is confirmed like any other. Until #325's sixth round the
+comparison ran to the cut, and a review of `598d7616` executed the `fn` and
+the `const _` against it; until its seventh, an element was taken for one
+crossing the cut only when it was left open, and a review of `be993da5`
+executed a test-only `if` under `cfg(all(unix, test))` at the start of a
+function body, with a redundant `#[cfg(test)]` in its `else` block, against
+that. Honest code, refused, both times.
 
 Why the second reading cannot excuse what the comparison is for. The reader
 removes a byte only inside a test-only element whose attributes start before
@@ -1300,33 +1306,48 @@ the cut settles as production -- is kept by every reading of that text,
 whatever is appended after the gate, and a second reading that removes
 everything from a gate to the cut shows that no such byte lies between them.
 
-The conditions are what keep the comparison's purpose. An element the text
-above the cut *ends* is compared in full, so a whole reading that runs it on
-past the cut removes code that text keeps after its end, and fails. An element
-the whole reading does not remove to the cut is compared in full, so a whole
-reading that removes code inside an element it keeps fails too, whether that
-element was left open or cut short. Four rows after the tree walk hand this
-function such a whole reading.
+That premise is not true of the fallback the second item above describes. An
+`if` whose chain the text above the cut does not finish is ended after its
+first block, before the cut, and, read with the closers after the gate, it is
+ended past the cut; so an end found before the cut can depend on what follows
+the gate, and `else {`, which the first reading places after the end of every
+test-only element starting before it, is what the second reading removes --
+the case the cut-short test exists for. As written, the argument does not
+establish its conclusion. Filed as
+`PR325-THE-SECOND-READING-ARGUMENT-CONTRADICTS-THE-FALLBACK`.
 
-Three things this comparison cannot tell apart from an honest element crossing
+The conditions are what keep the comparison's purpose, where no test-only gate
+stands inside an element that crosses the cut. An element the text above the
+cut *ends* is compared in full, so a whole reading that runs it on past the
+cut removes code that text keeps after its end, and fails -- unless that
+element is nested inside one that crosses the cut, gap (d). An element the
+whole reading does not remove to the cut is compared in full, so a whole
+reading that removes code inside an element it keeps fails too, whether that
+element was left open or cut short -- unless a test-only gate stands in it
+above the code removed and the reading removes everything from that gate to
+the cut, gap (d) again. Four rows after the tree walk hand this function such
+a whole reading; none of them puts a gate inside the element it misreads.
+
+Four things this comparison cannot tell apart from an honest element crossing
 the cut, each a separate gap:
 
-- A tokeniser that misreads a group as open at the cut, with a whole reading
-  that closes it past the cut: the element then crosses the cut by the
+- (a) A tokeniser that misreads a group as open at the cut, with a whole
+  reading that closes it past the cut: the element then crosses the cut by the
   reader's own reading, left open or cut short by it, as an honest enclosing
   element is.
-- A whole reading that removes, from a gate to the cut, code the text above
-  the cut leaves unsettled -- inside an element that text does not end -- and
-  that the rest of the file, read honestly, would have the reader keep.
-- An element the reader keeps for a reason the text above the cut settles,
+- (b) A whole reading that removes, from a gate to the cut, code the text
+  above the cut leaves unsettled -- inside an element that text does not end
+  -- and that the rest of the file, read honestly, would have the reader keep.
+- (c) An element the reader keeps for a reason the text above the cut settles,
   not because that text stops inside it, looks left open. In
   `f(#[cfg(all(unix, test))] fn t()) {}`, which is not Rust, a `)` ends the
   header before any body; a whole reading that removes the element and the
   code after it to the cut is compared only above its gate. The first test
   reads a kept first byte as an element the text stopped inside, and it is one
   only where the reader had no other reason to keep it. The second test would
-  not excuse it: the `)` that ends the header stands above the cut, so no
-  continuation changes what the reader does with the element. Read from the
+  not excuse it outside an element that crosses the cut: the `)` that ends the
+  header stands above the cut, so no continuation changes what the reader does
+  with the element. Inside such an element, (d) can excuse it. Read from the
   reader's paths, no item or statement rustc parses reaches such a reason; a
   token tree it does not parse can. rustc accepts
   `stringify!(#[cfg(all(unix, test))] fn t())`, and the reader keeps `fn t()`
@@ -1334,6 +1355,28 @@ the cut, each a separate gap:
   costs is this test's power to catch a future reader defect there. No gate of
   this tree or of the box's cargo registry reaches it, as #325's seventh round
   measured. Filed as `PR325-A-SETTLED-KEPT-ELEMENT-READS-AS-LEFT-OPEN`.
+- (d) A gate nested inside an element that crosses the cut. The cut-short test
+  reads the span from a gate to the cut, and the second reading removes that
+  span with the enclosing element, so the nested gate counts as cut short
+  whatever its own element is. A whole reading that keeps the enclosing
+  element and removes everything from the nested gate to the cut is compared
+  only above that gate, and passes. With `#[cfg(all(unix, test))] pub fn
+  helper() { #[cfg(all(windows, test))] let inner = 0; let kept = 0;` above
+  the cut, that reading runs `let inner = 0;` on past the cut and removes
+  `let kept = 0;` from a function it keeps; the same `let` pair in the `else`
+  block of a cut-short `if`, and a test-only `fn` in a test-only `mod` left
+  open at the cut, pass the same way. Round 6's rule refused all three
+  readings: the nested gate's element is not left open and the reading keeps
+  the enclosing one, so nothing crossed and it compared to the cut. It is not
+  (b): the nested element is one the text above the cut ends, the case the
+  conditions above compare in full, and what the reading excuses lies inside
+  the enclosing test-only element, which an honest whole reading removes too
+  -- so no production code. Nor (c): nothing is kept for a settled reason.
+  What it costs is this test's power to catch a future reader defect in an
+  element nested inside one that crosses the cut. No gate above the cut of any
+  file of this tree, at `141fae34` or at `daa09b1e`, or of the box's cargo
+  registry is left open or counts as cut short, as #325's filing pass
+  measured. Filed as `PR325-A-NESTED-GATE-READS-AS-CUT-SHORT`.
 
 ## `pub(super) mod oracles` › `fn closers_after_the_cut(truncated: &str) -> String {`
 
@@ -1347,13 +1390,17 @@ closers alone, the rows whose cut is in a call or a macro's arguments in an
 `else if` condition keep the partial reading and fail. A closer that does not
 match the innermost open group is passed over.
 
-Nothing appended here can make the comparison excuse code the text above the
-cut settles as production (the argument is under [`compare_above_the_cut`]),
-so what this returns decides only which honest crossings are recognised. Two
-of its choices decide nothing on this test's rows: closing the outermost group
-first changed no row's result, since the reader finds a group's close by
-counting its own kind of bracket, and neither did reading the text without the
-gate at the cut before the closers.
+What this returns was meant to decide only which honest crossings are
+recognised, and it decides more: a closer that lets the reader end an element
+crossing the cut makes a gate inside that element count as cut short whatever
+its own element, gap (d) there. That it cannot make the comparison excuse code
+the text above the cut settles as production is argued under
+[`compare_above_the_cut`], on a premise the `if` fallback contradicts, and
+measured by #325's seventh round over its rows, this tree and the box's cargo
+registry. Two of its choices decide nothing on this test's rows: closing the
+outermost group first changed no row's result, since the reader finds a
+group's close by counting its own kind of bracket, and neither did reading the
+text without the gate at the cut before the closers.
 
 ## `pub(super) mod oracles` › `fn is_false_wherever_test_is(predicate: &Predicate) -> bool {`
 
@@ -1397,12 +1444,12 @@ the code below the cut.
 
 ### What each assertion here is worth, because they are not worth the same
 
-Above the truncating cut, the whole file's region must equal the region of
-the text above the cut read with the gate that makes the cut. Until #325's
-fourth round it was compared with the truncating region itself, and that could
-not fail: [`production_code`] removed only what followed a `#[cfg(test)]`, and
-the cut was the first one. Since that round it also removes an element under
-any other gate that entails `test`, so above the cut it can remove what the
+Above the truncating cut, the whole file's region must equal the region of the
+text above the cut read with the gate that makes the cut. Until #325's fourth
+round it was compared with the truncating region itself, and that could not
+fail: [`production_code`] removed only what followed a `#[cfg(test)]`, and the
+cut was the first one. Since that round it also removes an element under any
+other gate that entails `test`, so above the cut it can remove what the
 truncating region keeps -- on this tree, `src/agent/proc.rs`'s and
 `src/agent/proc/ambient.rs`'s `cfg(all(unix, test))`,
 `cfg(all(target_os = "macos", test))` and `cfg(all(windows, test))` items --
@@ -1411,11 +1458,13 @@ the cut. So three assertions replace the one, per file, in
 [`compare_above_the_cut`]: the two readings of the prefix agree -- above the
 gate of an element crossing the cut, where it recognises one -- which fails if
 an element the text above the cut ends is read to a different end with the
-rest of the file; the prefix differs from the truncating region only where
-this one blanks, which fails if it ever keeps code the truncating region does
-not; and each gate the reader removes an element for above the cut is one
-[`is_false_wherever_test_is`] confirms. The classification census holds the
-two agent files' items against `effects/wrappers.toml` both ways.
+rest of the file, unless that element stands inside one crossing the cut (gap
+(d) under [`compare_above_the_cut`]); the prefix differs from the truncating
+region only where this one blanks, which fails if it ever keeps code the
+truncating region does not; and each gate the reader removes an element for
+above the cut is one [`is_false_wherever_test_is`] confirms. The
+classification census holds the two agent files' items against
+`effects/wrappers.toml` both ways.
 
 Round 4 read the text above the cut alone and named the files the two regions
 may differ in, `src/agent/proc.rs` and `src/agent/proc/ambient.rs`. The round-4
@@ -1514,12 +1563,18 @@ the whole of why the blanking moved into the region.
 ## `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {` › `assert!(`
 
 And it is a *strict* superset somewhere, or the two regions are the same
-function and the comparison above proves nothing. Eleven files gain today,
+function and the comparison above proves nothing. Thirteen files gain, at
+`141fae34` and at `daa09b1e` alike, each read by its own commit's readers,
 and they are the ones holding code below their first `#[cfg(test)]`: the
 eight `every_production_region_that_stops_early_stops_at_a_module` pins
-that still have code under the cut, plus the three test files carrying a
+that still have code under the cut; the three test files carrying a
 `#[cfg(test)] mod this_file_is_test_only {}` marker whose whole purpose
-was to zero the truncating region.
+was to zero the truncating region; and two whose first gate is on a module
+with code after it -- `src/observations.rs`, whose test-only `mod export`
+stands above its `cfg(not(test))` twin, and `src/topology/fold/tests.rs`,
+whose first gate declares a child module above the file's own code. Until
+#325's filing pass this paragraph said eleven and named neither of the
+last two; the assertion holds only that eight gain.
 
 ## `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {` › `fn blanked(text: &str, from: usize, to: usize) -> String {`
 
@@ -1542,6 +1597,16 @@ The first is the one with nothing open at its cut, so its second reading
 appends nothing; the third is the same run past the cut with a function left
 open, where the second reading appends its closer and still keeps the
 production statement.
+
+The second and fourth rows state a standard -- a whole reading that keeps an
+element left open or cut short and removes code inside it is refused -- that
+the comparison meets only where no test-only gate stands in that element above
+the code removed. Put a test-only `let` ahead of the statement either row
+removes and the row's own misreading passes: with that `let` removed, as the
+text above the cut removes it, the misreading leaves nothing between the
+`let`'s gate and the cut, and that gate counts as cut short (gap (d) under
+[`compare_above_the_cut`], measured by #325's filing pass and filed as
+`PR325-A-NESTED-GATE-READS-AS-CUT-SHORT`). No row here holds that case.
 
 ## `pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {` › `const SENTINEL: &str = "\npub fn sentinel_below_every_configured_item() {}\n";`
 

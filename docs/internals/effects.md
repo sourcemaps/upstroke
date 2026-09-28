@@ -725,17 +725,23 @@ part of a test-only element and cannot lose production code: a test-only
 field `f: HashMap<K, V>,` still ends at the comma inside its type and leaves
 `V>,` behind. A census over the region can match more, never less.
 
-**The give-up paths return `start`, not `bytes.len()`.** They are reached
-only when the blanked text does not parse -- an unbalanced group, a header or
-an initializer with no end before the next function or the end of the file --
-and none is reached on this tree or in the registry (measured at #325's fourth
-round: none of 184 elements here, none of 2,364 there). What decides the value
-is the *direction* they fail in. `bytes.len()` reads "the item is the rest of
-the file" and blanks it, so a tokeniser that has lost phase silently removes
-every production item below the attribute from every census that consults
-this region — which is exactly what [`char_literal_end`]'s desync used to
-buy. Returning `start` blanks the attributes and nothing else, so what
-follows reads as production and the censuses go **loud** instead.
+**The give-up paths return `start`, not `bytes.len()`.** They are reached only
+when the blanked text does not parse -- an unbalanced group, a header or an
+initializer with no end before the next function or the end of the file -- and
+none is reached on this tree or in the registry (measured at #325's fourth
+round: none of the 184 elements [`production_code`] removes here, none of the
+2,364 it removes there). Those count elements, one per step of its loop, which
+resumes at each element's end and so passes over a gate inside an element
+already removed. Re-measured at `141fae34` by #325's filing pass: 184 and
+2,364 elements, none of them ended at `start`; counted gate by gate instead,
+the test-only gates number 184 and 2,373, nine of the registry's standing
+inside an element another gate removes. What decides the value is the
+*direction* they fail in. `bytes.len()` reads "the item is the rest of the
+file" and blanks it, so a tokeniser that has lost phase silently removes every
+production item below the attribute from every census that consults this
+region — which is exactly what [`char_literal_end`]'s desync used to buy.
+Returning `start` blanks the attributes and nothing else, so what follows
+reads as production and the censuses go **loud** instead.
 
 ## `enum Position {`
 
@@ -822,11 +828,17 @@ is an element.
 
 ## `fn if_end(bytes: &[u8], from: usize) -> Option<usize> {`
 
-An `if` with every `else if` and `else` after it. Its block is the first `{`
-outside a group, because rustc refuses a struct literal in a condition unless
-it is parenthesised. An `if let` whose pattern is a braced struct pattern ends
-at the pattern's `}`, early, and leaves the rest -- the direction the element
-rule leaves in.
+An `if` with every `else if` and `else` after it. Its block is taken to be the
+first `{` outside a group. rustc refuses a struct literal in a condition
+unless it is parenthesised, but not every brace: a condition that is or holds
+a `match`, an `unsafe` block or a block expression --
+`if match x { .. } { .. }` -- has its own `{` first, and the element ends at
+that expression's `}`, early, leaving the `if`'s block and its `else` chain in
+the region. An `if let` whose pattern is a braced struct pattern ends at the
+pattern's `}` the same way. Each leaves test code in -- the direction the
+element rule leaves in. Until #325's filing pass this note gave the struct
+literal as the reason the first `{` is the block; the rule is filed as
+`PR325-IF-END-TAKES-A-BRACED-CONDITION-FOR-THE-BLOCK`.
 
 ## `fn first_block_brace(bytes: &[u8], from: usize) -> Option<usize> {`
 
