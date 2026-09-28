@@ -8,7 +8,7 @@ reviewed_sha: e94cef9e41b02386d15e80b92c76df859576cc1a
 location: src/agent/proc.rs:2776
 provenance: pre_existing
 first_bad: 17a2870a891c2164b71ca4327b747d857dce8f37
-guard: project owner / the change that next opens agent::proc's Unix group supervision, with a controlled macOS environment to measure it; until then the round-4 v0.1 role witnesses of PR 326 fail on macos-latest with this fingerprint
+guard: project owner / the change that next opens agent::proc's Unix group supervision, with a controlled macOS environment to measure it; the round-4 v0.1 role witnesses of PR 326 avoid its trigger by passing -c maintenance.autoDetach=false on their own fixture commits (owner ruling 2026-09-28), so nothing in the suite reproduces it now
 ---
 
 ## Failure sequence
@@ -62,6 +62,15 @@ members at start and every step against a millisecond clock.
 `36401788004`) and at `e94cef9e` (run `36408891723`), with twelve gates ending `exit code: None`
 in each. At `283d7be3` those gates' stderr was empty, and the attempts they ended lasted 209 to
 483 ms against a 600 s gate timeout.
+
+## Reproduction
+
+The round-4 v0.1 role witnesses reproduce it with one argument removed. Each probe's fixture commit
+(`probe_fixture` in `src/engine/tests.rs`) passes `-c maintenance.autoDetach=false`. That works around
+this finding on the owner's ruling of 2026-09-28, so the witnesses avoid the trigger; the defect is
+still there. Delete that pair of arguments and run the witnesses on `macos-latest`, or on any macOS
+machine with a Git whose `git commit` detaches its auto-maintenance, and the probes die as described
+above. The workaround stays until the change that takes this up lands.
 
 ## Not established
 
