@@ -139,7 +139,6 @@ Rust 1.85+ (edition 2024), Git 2.41+, and
 supported: its `git merge-tree` reads what `git replace` substitutes for the objects a repository
 records, whatever the configuration says, and a run refuses it by name. The
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
-[GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
 and the Codex CLI are optional and unlock cross-family review. Windows, macOS and Linux are all
 first-class.
 
