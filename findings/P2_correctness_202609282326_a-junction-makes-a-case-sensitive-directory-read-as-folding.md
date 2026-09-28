@@ -67,11 +67,12 @@ letter's case swapped, resolving to the component itself; and have, beside the m
 another repository whose name differs from that component only in ASCII case, with replacements
 installed.
 
-- On Windows the alias is a junction (`mklink /J`, which needs no privilege) or a directory symbolic
-  link (`mklink /D`, which needs the privilege or developer mode), in a directory
-  `fsutil file setCaseSensitiveInfo` has made case-sensitive. An ordinary Windows directory folds
-  case, and there `repo` is `Repo`.
-- On Linux the alias is a bind mount, which needs root. A symbolic link does not reach it.
+- On Windows the alias is a junction (`mklink /J`) or a directory symbolic link (`mklink /D`), in a
+  directory `fsutil file setCaseSensitiveInfo` has made case-sensitive. Windows documents the
+  symbolic-link privilege, or developer mode, as needed for the second and not for the first; that is
+  not measured here. An ordinary Windows directory folds case, and there `repo` is `Repo`.
+- On Linux the alias is a bind mount, which needs root, or a mount namespace the run itself is started
+  in (not measured here); this measurement used `sudo`. A symbolic link does not reach it.
 - The alias can stand at any component of the canonical common directory's path, and the repository
   it exposes is the one beside that component. Since #326 round 6 the scope also asks the common
   directory about `refs`: an alias `REFS` → `refs` inside a common directory that keeps case spells
@@ -90,8 +91,8 @@ which is why this is a P2 and not a merge blocker on the owner's ruling of 2026-
    when the other spelling resolves to the entry and no entry of the directory is named with that
    spelling. A junction, a symbolic link and a bind mount's mount point are each listed under their
    own name, and a folding directory lists only one. On Windows, reading the other spelling's stored
-   name (`FindFirstFileW`) gives the same answer. Refusing the scope when the other spelling is a
-   reparse point or a mount point is the narrower alternative.
+   name (`FindFirstFileW`) should give the same answer; neither is measured. Refusing the scope when
+   the other spelling is a reparse point or a mount point is the narrower alternative.
 2. **Give the case-sibling witness an alias half.** On Windows, a junction `rEPO` → `Repo` in the
    directory `fsutil` makes case-sensitive, beside an independent `repo`, which must still read
    `replacing`. On Linux, a bind mount where the runner has root, or no half.
