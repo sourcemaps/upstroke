@@ -634,6 +634,10 @@ fn read_case_siblings(dir: &Path, include: &Path) -> bool {
             &linked.to_string_lossy(),
         ],
     );
+    let id = PathBuf::from(case_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+        .file_name()
+        .map(|id| id.to_string_lossy().into_owned())
+        .expect("the linked worktree's own Git directory");
     let common = std::fs::canonicalize(managed.join(".git")).expect("the common directory");
     let rules = GitdirRule::ALL
         .iter()
@@ -703,6 +707,26 @@ fn read_case_siblings(dir: &Path, include: &Path) -> bool {
                  Git keeps as spelled wherever its realpath does not look the case up",
                 respelled.display()
             );
+            let stored = managed.join(".git");
+            for (spelled, how) in [
+                (stored.join("worktrees").join(&id), "as Git stores it"),
+                (
+                    stored.join("WORKTREES").join(&id),
+                    "with `worktrees` in capitals",
+                ),
+                (
+                    respelled.join("WORKTREES").join(id.to_ascii_uppercase()),
+                    "in capitals",
+                ),
+            ] {
+                assert_eq!(
+                    read_as(&linked, "--git-dir", &spelled, &managed_blob),
+                    "recorded",
+                    "{rule:?}: a gate names its linked worktree's Git directory {how}, as {}, \
+                     which Git keeps as spelled wherever its realpath does not look the case up",
+                    spelled.display()
+                );
+            }
         }
     }
     separate
