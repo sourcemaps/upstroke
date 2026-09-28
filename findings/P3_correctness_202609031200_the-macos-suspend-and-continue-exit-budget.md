@@ -22,3 +22,24 @@ Owner, as the ledger records it: project owner / the slice that next opens `src/
 **Deferred; nondeterministic on that runner, cause not established.** **The failure.** Run `33798030529`, attempt 1, job `100790356980`, at `4094c57973ffd7f76a9868d634296be8b0f9a3f1` (PR #119). A normal assertion failure with a `failures:` section and a `test result:` line, so not the `PR43-MACOS-PROC-SIGNAL-FINGERPRINT` shape (`exit status: 143`, a different test) and not the C-004 SIGTERM shape. **The rerun.** `gh run rerun 33798030529 --failed` re-ran only the failed job at the byte-identical head: attempt 2, job `100810497995`, `test (macos-latest)` **success**, the test `ok`, `1807 passed; 0 failed; 34 ignored; finished in 288.63s`. One failed and one green attempt at one head prove nondeterminism on that runner and nothing else: not the absence of a defect in the head, and not its origin. That pair is not promoted to a rate. **What failed.** Not the suspension assertion the test exists for, which passed, but the test's own ten-second exit budget after `SIGCONT` (`wait_for_exit(&mut helper.child, Duration::from_secs(10))`, `src/agent/proc.rs:8201` at that head), which spans the helper's `SIGCONT` handler, a monitor thread polling every 10 ms, the worker's 50 ms poll of the `finish` file, the helper's own reap of it, and the helper's exit as a `cargo test` harness. On a `macos-latest` runner whose suite took 242 s, a fixed budget over that chain can expire under load; that is a reading of the code, not a measurement, and the cause is not established. **What addresses it: nothing yet.** Nothing in PR #119 touches `src/agent/`, and PR #125 changes only the forked helpers' startup `READY` waits, not this post-continue exit wait or the shutdown chain behind it; a helper can report `READY` promptly, pass the suspension assertions, and still take over ten seconds to exit. The test's exit budget is owed a load-tolerant fix of its own, by whoever next opens `src/agent/proc.rs`, and a measured rate is what would show whether that fix worked. **The guard is this row.** Whether the tests PR #119 adds to the same executable altered the scheduling this budget depends on is not argued either way.
 
 Filed into `reviews/FINDINGS.md` §2 from the PR #119 sweep as an unexplained macOS observation. The row carried no severity label; **P3** here is this migration's judgement from the consequence described above, not the reviewer's own word.
+
+---
+
+**2026-09-25: a second sighting, and the first pass/fail pair at one head that was not produced by a
+targeted rerun.** PR #322 at `530360b6061585ae8b1d2c7286d4665729195c66`: `test (macos-latest)` **passed** in run
+`36161615585` (job `108159324582`, 13m35s) and **failed** in run `36163224693` (job
+`108164638316`, 12m45s) — two independent full runs of the same workflow at the byte-identical
+head, one green and one red, rather than an attempt-2 rerun of the failed job.
+
+The failure is this row's shape and no other: `agent::proc::tests::
+terminal_suspend_and_continue_cover_the_isolated_tree`, panicking on `continued helper completes
+normally`, at the exit wait after `SIGCONT` and not at the suspension assertions. It now reports at
+`src/agent/proc/tests.rs:3064` rather than `src/agent/proc.rs:8202` — the module split moved the
+line, and the `location` field above still names the pre-split path.
+`test result: FAILED. 2752 passed; 1 failed; 70 ignored; finished in 643.66s`, against the 242 s
+suite the row was filed on: the runner is now taking more than twice as long for the same fixed
+ten-second budget, which is the direction the row's reading predicts.
+
+**Still no rate.** Two sightings and one same-head pair are not one. What this adds is that the
+nondeterminism survives a suite two and a half times longer, and that the pair no longer depends on
+the rerun mechanism to produce it.

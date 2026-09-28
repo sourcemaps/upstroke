@@ -2700,14 +2700,26 @@ mod tests {
     }
 
     struct RunFixture {
+        /// The guard over the acquired root, kept for the fixture's whole
+        /// life so the tree is reclaimed when it drops. The root was
+        /// `temp_dir()/upstroke-registry-<tag>-<pid>`, created and never
+        /// removed (`PR7-SCRATCH-FIXTURE-LEAK`).
+        _tree: crate::rundir::scratch_tree::ScratchTree,
         root: PathBuf,
         public: PathBuf,
     }
 
     impl RunFixture {
         fn new(tag: &str, plan: &Plan, log: &[Event]) -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("upstroke-registry-{tag}-{}", std::process::id()));
+            let parent = std::env::temp_dir();
+            let tree = match crate::rundir::scratch_tree::acquire(&parent, tag) {
+                Ok(tree) => tree,
+                Err(refusal) => panic!(
+                    "a scratch tree for `{tag}` under {}: {refusal:?}",
+                    parent.display()
+                ),
+            };
+            let root = tree.path().to_path_buf();
             let public = crate::rundir::public_dir(&root, RUN_ID);
             let hooks = &mut crate::rundir::NoHooks;
             crate::rundir::create_public_dir(&public, hooks).expect("run directory");
@@ -2729,7 +2741,11 @@ mod tests {
                     )
                     .expect("append");
             }
-            Self { root, public }
+            Self {
+                _tree: tree,
+                root,
+                public,
+            }
         }
 
         fn reproject(&self, plan: &Plan) {

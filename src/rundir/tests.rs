@@ -25,6 +25,7 @@ use super::*;
 // assertion changes and no body moves; these two lines are the whole of what the
 // extraction owes this file.
 use super::classify::*;
+use super::scratch_tree::ScratchTree;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
@@ -33,18 +34,464 @@ use crate::agent::proc::test_support::readiness;
 #[cfg(unix)]
 use crate::workspace_manager::fixture::{rest_within, say_on_stderr};
 
-/// A scratch tree for one test.
+/// A scratch tree for one test, guarded by the token that authorises its
+/// deletion.
 ///
 /// `pub(crate)` for the sibling suite in `discovery.rs`: the fixtures live here
 /// because this file carries the funnel allowance that `std::fs::create_dir_all`
 /// and `std::fs::write` need, and `discovery.rs` denies all three governed
-/// lints and takes no allowlist row. What crosses the boundary is a built
+/// lints and takes no allowlist row. What crosses the boundary is a guarded
 /// directory, never a primitive.
-pub(crate) fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("upstroke-rundir-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+///
+/// # What this replaces, and why none of it is left
+///
+/// The helper here built `temp_dir()/upstroke-rundir-<tag>-<pid>`, opened with
+/// `let _ = fs::remove_dir_all(&dir)` and then created the root over whatever
+/// survived. Four defects in five lines, and [`scratch_tree::acquire`] closes
+/// all four at once:
+///
+/// * the recursive deletion ran **before** any ownership claim, on a name
+///   another holder could be using, so it deleted that holder's content
+///   (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). `acquire` never deletes: an
+///   occupied root and an undecidable one are both refusals;
+/// * the deletion's result was discarded, so a removal that failed left the
+///   test running against a fixture that was not fresh and said nothing.
+///   Nothing is discarded here — acquisition returns a refusal and this
+///   function panics on it, and the reclaim's result is matched by
+///   `ScratchTree`'s `Drop`;
+/// * the name was keyed on the process id, and Windows recycles pids, so a
+///   "fresh" fixture could be another process's leftovers. The ULID in
+///   `acquire`'s name is not something a recycled pid can supply; and
+/// * the root was returned as a bare `PathBuf` that nothing ever reclaimed
+///   (`PR7-SCRATCH-FIXTURE-LEAK`, measured at roughly 45.7 million leaked
+///   inodes on the build box). The guard reclaims on the normal return and on
+///   an unwind alike.
+///
+/// # Bind the return value to a live local
+///
+/// [`scratch_tree::ScratchTree`] is an RAII guard. `let tree = scratch("x");`
+/// keeps the tree for the rest of the scope; `let _ = scratch("x");` drops the
+/// guard at the end of that statement and deletes the fixture before the
+/// test's first assertion. Bind it, then take `tree.path()`.
+///
+/// # Panics
+///
+/// If the root cannot be acquired. A refusal is not recoverable here: the
+/// caller asked for a tree it owns, and nothing this helper could do next
+/// would give it one without deleting somebody else's.
+pub(crate) fn scratch(tag: &str) -> ScratchTree {
+    scratch_with(scratch_tree::acquire, tag)
+}
+
+/// [`scratch`] over an injectable acquisition.
+///
+/// The one thing a test cannot arrange for itself is a **refusal**, and a
+/// helper that answered a refusal with anything usable would make every
+/// fixture in this suite a gate that cannot fail. The seam exists for
+/// `a_refused_acquisition_panics_and_names_what_it_refused` and for nothing
+/// else; the suite reaches [`scratch`].
+fn scratch_with(acquire: Acquire, tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
+}
+
+/// The shape of [`scratch_tree::acquire`], so a witness can supply a
+/// refusing one.
+type Acquire = fn(&Path, &str) -> Result<ScratchTree, scratch_tree::ScratchAcquireRefusal>;
+
+// =======================================================================
+// The scratch helper's own witnesses
+//
+// `PR64-CLEANUP-003-SCRATCH-PRECLEAN` and `PR7-SCRATCH-FIXTURE-LEAK` were
+// both defects of [`scratch`], not of the authority it now calls:
+// `scratch_tree`'s own suite already pins that an occupied root refuses and
+// keeps its bytes, that one tag twice draws two ULID-named roots, that an
+// undecidable answer refuses, and that a guard reclaims on an unwind. What
+// those tests cannot say is which of the two the *fixtures* reach. These
+// four do, one per defect, and each fails against the helper this replaced.
+// =======================================================================
+
+/// The exact root the helper this replaced would have built for `tag`.
+///
+/// Not a guess at its shape: `temp_dir()/upstroke-rundir-<tag>-<pid>` is
+/// what `d724fb16`'s five lines computed, and the witnesses below plant at
+/// this path so that the old body would have deleted what they planted.
+fn the_root_the_old_helper_would_have_taken(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("upstroke-rundir-{tag}-{}", std::process::id()))
+}
+
+/// A directory this test planted, with an owner that is not [`scratch`].
+///
+/// It exists so that the witnesses have something to lose. Its `Drop`
+/// restores any permission a witness changed and removes it, so a witness
+/// that fails still leaves nothing -- the defect it is testing for.
+struct PlantedRoot {
+    root: PathBuf,
+    /// The child [`PlantedRoot::lock_a_child`] made unreadable, whose mode
+    /// the drop restores before it removes the tree.
+    #[cfg(unix)]
+    locked: Option<PathBuf>,
+}
+
+impl PlantedRoot {
+    /// Create the root **exclusively**, so the witness refuses rather than
+    /// adopting a path some other holder is already using. The tag carries
+    /// a ULID for the same reason: two suites on one box can draw the same
+    /// pid, and a witness that raced one would be a flake.
+    fn at(root: PathBuf) -> Self {
+        fs::create_dir(&root).unwrap_or_else(|error| {
+            panic!(
+                "the witness must own the root it plants, and {} was not free: {error}",
+                root.display()
+            )
+        });
+        Self {
+            root,
+            #[cfg(unix)]
+            locked: None,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// Plant an **empty** child at mode `0o000`: `remove_dir_all` fails on it
+    /// with `EACCES`, because it opens every child directory to recurse into
+    /// it, and nothing else about the root changes.
+    ///
+    /// Not `0o500` on the root, which is what this witness first used: a
+    /// process killed between that `chmod` and this type's drop left a root
+    /// no `rm -rf` can remove, and the build box's out-of-tree sweeper runs
+    /// exactly that on every `upstroke-*` root, so it would fail on it every
+    /// hour for good. `rm -rf` removes an empty directory it cannot read.
+    #[cfg(unix)]
+    fn lock_a_child(&mut self, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let child = self.root.join(name);
+        fs::create_dir(&child).expect("the child a failing removal leaves behind");
+        self.locked = Some(child.clone());
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o000))
+            .expect("a child no removal can open");
+        child
+    }
+}
+
+impl Drop for PlantedRoot {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(child) = &self.locked {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = fs::set_permissions(child, fs::Permissions::from_mode(0o755));
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// **Defect 1, the helper finding's whole sequence.** A root another owner
+/// holds is not deleted, and the helper's own root is not one that owner's
+/// name could have predicted.
+///
+/// At `d724fb16` the helper opened with `let _ = fs::remove_dir_all(&dir)`
+/// on exactly this path, so the sentinel is gone before `scratch` returns
+/// and the returned root *is* the planted one. Both assertions fail there.
+#[test]
+fn the_scratch_helper_deletes_nothing_on_its_way_in() {
+    let tag = format!("preclean-{}", crate::ulid::ulid());
+    let planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
+    let sentinel = planted.path().join("another-holders-content");
+    fs::write(&sentinel, b"this is not the fixture's to delete").expect("the other holder's bytes");
+
+    let tree = scratch(&tag);
+
+    assert_eq!(
+        fs::read(&sentinel).expect("the other holder's content survives acquisition"),
+        b"this is not the fixture's to delete",
+        "the helper deleted a root it had no claim on"
+    );
+    assert_ne!(
+        tree.path(),
+        planted.path(),
+        "the helper's root is still one a tag and a pid predict, so another holder can be \
+         standing on it"
+    );
+}
+
+/// **Defect 2, the discarded cleanup result.** A removal the helper could
+/// not perform must not be swallowed into a fixture that is not fresh.
+///
+/// Unix-only because the failure has to be arranged: an empty child at
+/// `0o000` ([`PlantedRoot::lock_a_child`]) makes `remove_dir_all` fail with
+/// `EACCES` when it opens the child. At `d724fb16` `let _ =` discarded
+/// exactly that error and the following `create_dir_all` succeeded over the
+/// surviving directory, so the helper handed back a root still holding
+/// another holder's child and said nothing. Here the removal does not happen
+/// at all, so there is no result to discard: the root is a new one and it is
+/// empty.
+#[cfg(unix)]
+#[test]
+fn a_removal_the_helper_cannot_perform_never_becomes_a_fixture_that_is_not_fresh() {
+    let tag = format!("undeletable-{}", crate::ulid::ulid());
+    let mut planted = PlantedRoot::at(the_root_the_old_helper_would_have_taken(&tag));
+    let child = planted.lock_a_child("undeletable-child");
+
+    let tree = scratch(&tag);
+
+    let entries: Vec<PathBuf> = fs::read_dir(tree.path())
+        .expect("the fixture root is readable")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "a fresh fixture has nothing in it, and this one holds {entries:?} -- a removal that \
+         failed was discarded and the fixture is another holder's directory"
+    );
+    assert!(
+        child.is_dir(),
+        "the other holder's child was removed by a fixture with no claim on it"
+    );
+}
+
+/// **Defect 3, the recycled pid.** Two acquisitions for one tag, in one
+/// process and therefore under one pid, get distinct roots, and the second
+/// is empty.
+///
+/// This is the only form a single process can put the Windows symptom in:
+/// there, a *later* process drawing a recycled pid found the earlier one's
+/// fixture at the name it computed, and `emit/tests.rs`'s
+/// `assert!(bytes.is_empty(), "a fresh run has no prefix")` failed on
+/// content it had not written -- sixteen failures indistinguishable from a
+/// real defect. Same tag, same pid, one name: at `d724fb16` the second call
+/// returns the first call's path *and pre-cleans it*, so both assertions
+/// fail. The emptiness assertion here is the same assertion as
+/// `emit/tests.rs`'s, made where the name is chosen.
+#[test]
+fn one_tag_twice_in_one_process_is_two_roots_and_the_second_is_fresh() {
+    let tag = format!("recycled-{}", crate::ulid::ulid());
+
+    let first = scratch(&tag);
+    let written = first.path().join("events.jsonl");
+    fs::write(&written, b"the first fixture's bytes").expect("the first fixture writes");
+
+    let second = scratch(&tag);
+
+    assert_ne!(
+        first.path(),
+        second.path(),
+        "one tag and one pid gave one name, so a second process drawing this pid finds this \
+         fixture's content where it expects its own"
+    );
+    let bytes = fs::read(second.path().join("events.jsonl")).unwrap_or_default();
+    assert!(bytes.is_empty(), "a fresh run has no prefix");
+    assert_eq!(
+        fs::read(&written).expect("the first fixture's bytes survive the second acquisition"),
+        b"the first fixture's bytes",
+        "the second acquisition pre-cleaned the first's root"
+    );
+}
+
+/// **Defect 4, the tree nothing reclaimed.** The root is gone when the
+/// guard drops -- on the normal return, and on the unwind a failing
+/// assertion raises.
+///
+/// At `d724fb16` `scratch` returned a bare `PathBuf` and no path in the
+/// program removed it: both halves fail there. The unwinding half is the
+/// one that matters for the measurement in this row, because a suite leaks
+/// a directory per *failing* fixture and those are the runs a developer
+/// repeats.
+///
+/// The unwinding half acquires its tree **before** the closure and moves
+/// the guard in, so the closure owns it when the panic starts and the
+/// unwind is what drops it. The path is read off the guard first, so
+/// nothing has to carry it back out. It also keeps a refused acquisition
+/// loud: that panic starts outside `catch_unwind` and fails this test,
+/// where inside it would be caught as if it were the unwind under test.
+#[test]
+fn the_scratch_tree_is_reclaimed_on_both_exits() {
+    let normal = {
+        let tree = scratch("reclaimed-normally");
+        let path = tree.path().to_path_buf();
+        assert!(path.is_dir(), "the fixture exists while its guard is held");
+        path
+    };
+    assert!(
+        scratch_tree::proves_absent(&normal),
+        "the fixture survived its guard's normal drop: {}",
+        normal.display()
+    );
+
+    let tree = scratch("reclaimed-while-unwinding");
+    let unwinding = tree.path().to_path_buf();
+    assert!(
+        unwinding.is_dir(),
+        "the fixture exists while its guard is held"
+    );
+    let outcome = std::panic::catch_unwind(move || {
+        let _held = tree;
+        panic!("the assertion a fixture is abandoned by");
+    });
+    assert!(outcome.is_err(), "the witness has to actually unwind");
+    assert!(
+        scratch_tree::proves_absent(&unwinding),
+        "the fixture survived an unwind, which is the run a leak is measured on: {}",
+        unwinding.display()
+    );
+}
+
+/// A refusal is loud.
+///
+/// If `acquire` refused and [`scratch`] answered with anything a test could
+/// go on using, every fixture in this suite would become a gate that cannot
+/// fail: the test would run against a directory it does not own, or against
+/// none, and pass. `scratch_with` exists for this witness alone -- the
+/// suite reaches [`scratch`] -- and the assertion is on the panic's own
+/// message, so a refusal names the tag and the arm it refused on.
+#[test]
+fn a_refused_acquisition_panics_and_names_what_it_refused() {
+    fn always_occupied(
+        parent: &Path,
+        tag: &str,
+    ) -> Result<ScratchTree, scratch_tree::ScratchAcquireRefusal> {
+        Err(scratch_tree::ScratchAcquireRefusal::Occupied {
+            root: parent.join(tag),
+        })
+    }
+
+    let outcome =
+        std::panic::catch_unwind(|| scratch_with(always_occupied, "a-refusal-is-not-a-fixture"));
+    let payload = outcome.expect_err("a refused acquisition must not return a usable tree");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("a-refusal-is-not-a-fixture"),
+        "the panic must name the tag that could not be acquired: {message}"
+    );
+    assert!(
+        message.contains("Occupied"),
+        "and the refusal it got: {message}"
+    );
+}
+
+/// The residual this repair leaves, driven rather than argued.
+///
+/// A process that dies between `acquire`'s exclusive `fs::create_dir` and
+/// the token binding leaves a root of the acquired shape that no token
+/// binds. Nothing adopts it and nothing revisits it: the next acquisition
+/// draws a fresh ULID, so it never collides with the orphan and never
+/// cleans over it. That is the whole of the trade this design makes -- the
+/// helper this replaced leaked a root on *every* run and a later run with
+/// the same pid eventually cleaned over the wreckage; this leaks one root
+/// per crashed process and nothing in the tree ever removes it.
+///
+/// The witness plants a root of that shape by hand, because `acquire_named`
+/// is private to `scratch_tree` and rightly so, and then shows both halves:
+/// a later acquisition succeeds beside the orphan, and the orphan is still
+/// there afterwards **with its bytes**. The shape is read off a real
+/// acquisition for the same tag rather than restated, so a change to
+/// `acquire`'s name cannot leave this planting a name `acquire` no longer
+/// produces -- which a sweep of same-shaped siblings would then pass by.
+///
+/// **And the orphan is old.** A reclaimer that sweeps only siblings past an
+/// age floor is the shape #322's round-2 delta review called the likeliest
+/// for one written into `acquire`, and the shape the build box's own sweeper
+/// has (six hours, on the top-level entry's modification time). An orphan
+/// planted a moment ago is younger than any such floor: under a one-hour
+/// reclaimer in `acquire` the witness planting one stayed green, and the
+/// same reclaimer removed a two-hour-old orphan planted beside another test
+/// (that review's D4). This one is dated to 2001 -- decades past the box
+/// sweeper's six hours and the thirty days the box's `systemd-tmpfiles` rule
+/// gives `/tmp` -- and the date is read back before the acquisition, so a
+/// filesystem that ignored it fails here rather than passing vacuously. No
+/// process can date back the change time, so a reclaimer gated on that is
+/// outside this witness.
+#[test]
+fn a_root_left_by_a_process_that_died_mid_acquisition_is_never_revisited() {
+    let tag = format!("orphaned-{}", crate::ulid::ulid());
+    let prefix = format!("upstroke-{tag}-");
+    let suffix_len = {
+        let probe = scratch(&tag);
+        probe
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(&prefix))
+            .map(str::len)
+            .expect("an acquired root is named `upstroke-<tag>-<suffix>`")
+    };
+    let id = crate::ulid::ulid();
+    let suffix = id.get(id.len().saturating_sub(suffix_len)..).unwrap_or(&id);
+    let orphan = PlantedRoot::at(std::env::temp_dir().join(format!("{prefix}{suffix}")));
+    let half_built = orphan.path().join("half-built");
+    fs::write(&half_built, b"a dead process's fixture").expect("what the dead process had written");
+    let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    date_back(&half_built, long_ago);
+    date_back(orphan.path(), long_ago);
+    let dated = fs::metadata(orphan.path())
+        .and_then(|metadata| metadata.modified())
+        .expect("the orphan's modification time");
+    assert!(
+        dated <= long_ago + Duration::from_secs(2),
+        "the orphan reads as modified at {dated:?}, not in 2001, so an age-gated reclaimer \
+         would pass it by and this witness would measure nothing about one"
+    );
+
+    let tree = scratch(&tag);
+
+    assert_ne!(
+        tree.path(),
+        orphan.path(),
+        "a fresh ULID cannot draw the orphan's name"
+    );
+    assert_eq!(
+        fs::read(&half_built).ok().as_deref(),
+        Some(&b"a dead process's fixture"[..]),
+        "the orphan is the residual this design accepts, and a repair that removed it here \
+         would be pre-cleaning a root it has no claim on all over again"
+    );
+}
+
+/// Date `path` back to `when`: its access and its modification time both.
+///
+/// std sets a time only through a handle, and a directory's handle has to
+/// be asked for on Windows: `CreateFileW` opens a directory only with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, and setting its times needs
+/// `FILE_WRITE_ATTRIBUTES` -- the shape `scratch_tree`'s `open_directory`
+/// opens with, the write right in place of the read one. On Unix a
+/// read-only descriptor is enough: `futimens` asks whether the caller owns
+/// the file, not how it was opened.
+fn date_back(path: &Path, when: std::time::SystemTime) {
+    let times = fs::FileTimes::new().set_accessed(when).set_modified(when);
+    open_to_set_times(path)
+        .and_then(|handle| handle.set_times(times))
+        .unwrap_or_else(|error| panic!("date {} back: {error}", path.display()));
+}
+
+#[cfg(unix)]
+fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+#[cfg(windows)]
+fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }
 
 /// Make `<repo>/.upstroke/runs/<run_id>` a husk: a directory whose log holds no
@@ -170,8 +617,9 @@ fn ensuring_existing_run_directories_preserves_resume_contents() {
 fn agent_authored_files_land_outside_the_workspace() {
     // The whole point of the split: a reviewer with read access to the
     // repo has no path to the implementer's transcript.
-    let root = scratch("split");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("split");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let repo = root.join("repo");
@@ -215,7 +663,8 @@ fn the_private_fallback_is_never_the_workspace() {
 
 #[test]
 fn runs_list_chronologically_and_resolve_by_prefix() {
-    let root = scratch("discover");
+    let tree = scratch("discover");
+    let root = tree.path();
     let repo = root.join("repo");
     for id in ["01AAA", "01BBB", "01BCC"] {
         commit_run(&repo, id);
@@ -238,14 +687,16 @@ fn runs_list_chronologically_and_resolve_by_prefix() {
 
 #[test]
 fn an_empty_repo_names_where_it_looked() {
-    let root = scratch("norun");
+    let tree = scratch("norun");
+    let root = tree.path();
     let err = resolve_run_id(&root.join("repo"), "01A").expect_err("nothing to resume");
     assert!(err.to_string().contains("no runs found"), "got: {err}");
 }
 
 #[test]
 fn questions_resolve_to_their_run_by_prefix() {
-    let root = scratch("questions");
+    let tree = scratch("questions");
+    let root = tree.path();
     let repo = root.join("repo");
     for (run, question) in [
         ("01AAA", "q-ONE"),
@@ -278,8 +729,9 @@ fn questions_resolve_to_their_run_by_prefix() {
 
 #[test]
 fn a_run_can_only_be_held_once_at_a_time() {
-    let root = scratch("lock");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("lock");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     assert!(
@@ -317,8 +769,9 @@ fn a_run_can_only_be_held_once_at_a_time() {
 #[cfg(unix)]
 #[test]
 fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
-    let root = scratch("orderedhandoff");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("orderedhandoff");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("first acquire");
 
@@ -340,8 +793,9 @@ fn same_process_handoff_closes_old_descriptor_before_publishing_claim_free() {
 #[cfg(unix)]
 #[test]
 fn cleanup_lease_failure_closes_primary_before_releasing_claim() {
-    let root = scratch("cleanupfailurehandoff");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("cleanupfailurehandoff");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let mut held = RunLock::acquire(&paths.public).expect("primary acquired");
     let file = held._file.take();
@@ -378,8 +832,9 @@ fn the_lock_answers_at_once_rather_than_waiting_to_be_sure() {
     //
     // The grace existed to disbelieve a `fork` window. The primitive now
     // rules that out outright, so there is nothing left to wait for.
-    let root = scratch("prompt");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("prompt");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
 
@@ -426,8 +881,9 @@ fn a_fork_cannot_keep_a_released_run_locked() {
     // Against `flock` this test fails outright: the probe below sees the
     // lock held by the sleeping child. `fcntl` locks are not inherited, so
     // releasing really releases.
-    let root = scratch("forkwindow");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("forkwindow");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let held = RunLock::acquire(&paths.public).expect("acquire");
@@ -476,7 +932,8 @@ fn worktree_lock_child_holds_run_a() {
 
 #[test]
 fn two_run_ids_cannot_drive_one_worktree_concurrently() {
-    let root = scratch("two-runs-one-worktree");
+    let tree = scratch("two-runs-one-worktree");
+    let root = tree.path();
     let repo = root.join("repo");
     let git_dir = root.join("git-dir");
     fs::create_dir_all(&git_dir).expect("worktree git dir");
@@ -778,8 +1235,9 @@ fn a_second_process_is_refused_the_run_lock() {
     // Two engines are two processes, and `fcntl` locks are per-process —
     // which is exactly why this has to be tested across a real process
     // boundary rather than against a second `acquire` here.
-    let root = scratch("twoprocs");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("twoprocs");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
 
     let exe = std::env::current_exe().expect("test binary");
@@ -842,8 +1300,9 @@ fn a_holder_never_opens_its_own_lock_file() {
     // `is_running` answers from `claims` before it would open anything,
     // which is what makes that unreachable. This test is here because the
     // rule is invisible in the code that depends on it.
-    let root = scratch("selfclose");
-    let paths = paths_in(&root, "RUN1");
+    let tree = scratch("selfclose");
+    let root = tree.path();
+    let paths = paths_in(root, "RUN1");
     paths.create().expect("create");
     let _held = RunLock::acquire(&paths.public).expect("acquire");
 
@@ -854,17 +1313,20 @@ fn a_holder_never_opens_its_own_lock_file() {
     // from a process that has no claim of its own to answer from.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
-        let file = File::open(lock_file(&paths.public)).expect("open");
-        let free = matches!(imp::holder(&file), Holder::Nobody);
-        unsafe { libc::_exit(i32::from(free)) };
+        // Every way out of the child is `_exit`. An unwind here would run the
+        // drops of the parent's stack that the fork copied, `tree`'s guard
+        // among them, and that guard would delete the parent's live tree.
+        let code = match File::open(lock_file(&paths.public)) {
+            Ok(file) => i32::from(matches!(imp::holder(&file), Holder::Nobody)),
+            Err(_) => 2,
+        };
+        unsafe { libc::_exit(code) };
     }
     let mut status = 0;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    assert_eq!(
-        libc::WEXITSTATUS(status),
-        0,
-        "the holder released its own lock by looking at it"
-    );
+    let code = libc::WEXITSTATUS(status);
+    assert_ne!(code, 2, "the child could not open the lock file to ask");
+    assert_eq!(code, 0, "the holder released its own lock by looking at it");
 }
 
 #[test]
@@ -889,7 +1351,8 @@ fn an_exact_match_resolves_to_the_name_on_disk() {
     // directory that actually exists: on a case-sensitive filesystem the
     // uppercased input names nothing, and every caller joins this id onto
     // a path.
-    let root = scratch("ondisk");
+    let tree = scratch("ondisk");
+    let root = tree.path();
     let repo = root.join("repo");
     commit_run(&repo, "01AbCd");
 
@@ -1206,7 +1669,8 @@ fn shapes() -> Vec<DirShape> {
 
 #[test]
 fn every_publication_prefix_classifies_as_the_packet_names_it() {
-    let root = scratch("shapes");
+    let tree = scratch("shapes");
+    let root = tree.path();
     let mut committed = 0usize;
     let mut husks = 0usize;
     let mut indeterminate = 0usize;
@@ -1274,7 +1738,8 @@ fn every_publication_prefix_classifies_as_the_packet_names_it() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_event_log_is_a_husk_however_valid_its_target() {
-    let root = scratch("symlinked-log");
+    let tree = scratch("symlinked-log");
+    let root = tree.path();
     let bytes = format!("{}\n", committed_line("01LINK", 3));
 
     // The premise, stated rather than assumed: these exact bytes under this
@@ -1308,7 +1773,8 @@ fn a_symlinked_event_log_is_a_husk_however_valid_its_target() {
 
 #[test]
 fn a_missing_directory_and_a_missing_log_are_both_husks() {
-    let root = scratch("absent");
+    let tree = scratch("absent");
+    let root = tree.path();
     assert_eq!(classify_run_dir(&root.join("nothing")), RunDirClass::Husk);
     let bare = root.join("bare");
     fs::create_dir_all(&bare).expect("bare");
@@ -1354,7 +1820,8 @@ fn committed_line_of_exactly(run_id: &str, total: usize) -> Vec<u8> {
 /// `reviews/FINDINGS.md`.
 #[test]
 fn classification_does_not_depend_on_the_probe_window() {
-    let root = scratch("window");
+    let tree = scratch("window");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     let mut lengths = std::collections::BTreeSet::new();
     for (label, total) in [
@@ -1393,7 +1860,8 @@ fn classification_does_not_depend_on_the_probe_window() {
 /// The two files differ in exactly one byte's presence.
 #[test]
 fn a_complete_first_line_with_no_terminator_is_a_husk_at_every_length() {
-    let root = scratch("unterminated");
+    let tree = scratch("unterminated");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     for (label, total) in [
         ("inside the window", 4096),
@@ -1438,7 +1906,8 @@ fn a_complete_first_line_with_no_terminator_is_a_husk_at_every_length() {
 /// This asserts the bytes rather than the verdict, on both paths.
 #[test]
 fn the_probe_returns_the_lines_exact_bytes_on_both_paths() {
-    let root = scratch("exact");
+    let tree = scratch("exact");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     for (label, total) in [("window path", 4096), ("scan path", window + 7)] {
         let line = committed_line_of_exactly("01EXACT", total);
@@ -2204,7 +2673,8 @@ fn the_proof_kinds_are_the_retain_kinds_the_classifier_does_not_add() {
 /// reintroduce.
 #[test]
 fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
-    let root = scratch("budget");
+    let tree = scratch("budget");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     let line = committed_line_of_exactly("01BUDGET", window + 4096);
     let path = root.join("long").join(EVENT_LOG);
@@ -2256,7 +2726,8 @@ fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
 /// (`SWEEP-CLASSIFY-009`).
 #[test]
 fn a_log_with_no_newline_at_all_is_a_husk_however_long_it_is() {
-    let root = scratch("no-newline");
+    let tree = scratch("no-newline");
+    let root = tree.path();
     let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
     // Valid JSON, so the answer cannot come from the parse.
     let head = committed_line_of_exactly("01NONL", 4096);
@@ -2398,7 +2869,8 @@ fn classification_must_answer(public: &Path, probe: bool, never_returned: &str) 
 fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
     use std::os::unix::fs::FileTypeExt as _;
 
-    let root = scratch("fifo");
+    let tree = scratch("fifo");
+    let root = tree.path();
     let public = root.join("run");
     fs::create_dir_all(&public).expect("public");
     let log = public.join(EVENT_LOG);
@@ -2471,7 +2943,8 @@ fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
 #[cfg(unix)]
 #[test]
 fn a_run_directory_whose_log_never_ends_is_still_classified() {
-    let root = scratch("endless");
+    let tree = scratch("endless");
+    let root = tree.path();
     let public = root.join("run");
     fs::create_dir_all(&public).expect("public");
     assert!(
@@ -2505,8 +2978,13 @@ fn a_run_directory_whose_log_never_ends_is_still_classified() {
 /// A repository holding one committed run, one husk older than it and one
 /// husk newer than it — so a reader that returned husks would be caught
 /// whichever end of the sort it went wrong at.
-fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
-    let repo = scratch(tag).join("repo");
+///
+/// The guard comes back with the path because it owns the root the path is
+/// under: dropping it here would reclaim the tree before the caller's first
+/// assertion. The caller binds it to `_tree` for its own scope.
+fn repo_with_a_committed_run_between_two_husks(tag: &str) -> (ScratchTree, PathBuf) {
+    let tree = scratch(tag);
+    let repo = tree.path().join("repo");
     fs::create_dir_all(runs_root(&repo).join("01AAAHUSK")).expect("older husk");
     write(
         &public_dir(&repo, "01AAAHUSK").join(PLAN),
@@ -2518,7 +2996,7 @@ fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
         &public_dir(&repo, "01ZZZHUSK").join(MARKER),
         &any_marker_bytes(),
     );
-    repo
+    (tree, repo)
 }
 
 /// Every reader **in this module**, crossed with every husk **shape** —
@@ -2547,7 +3025,7 @@ fn repo_with_a_committed_run_between_two_husks(tag: &str) -> PathBuf {
 /// question id being searched for, so `find_question` would return it.
 #[test]
 fn every_reader_returns_committed_directories_only() {
-    let repo = repo_with_a_committed_run_between_two_husks("readers");
+    let (_tree, repo) = repo_with_a_committed_run_between_two_husks("readers");
     // The third shape: a marker that is present and unparseable. Not a
     // fifth reader — the four this module owns are all here already, and
     // the fifth, `status`, is pinned in `status.rs` — a third *shape*.
@@ -2600,7 +3078,8 @@ fn a_committed_run_is_never_excluded_because_of_a_marker() {
     // without a committed run_started **and never hide one because of a
     // marker**". Both marker shapes, and with a newer husk present so the
     // committed run has to win `latest_run` on its merits.
-    let repo = scratch("markedcommitted").join("repo");
+    let tree = scratch("markedcommitted");
+    let repo = tree.path().join("repo");
     commit_run(&repo, "01AAAMARKED");
     commit_run(&repo, "01BBBSTAGED");
     write(
@@ -2634,7 +3113,7 @@ fn latest_run_skips_a_husk_that_would_otherwise_shadow_it() {
     // The named change: "legacy husks that today shadow latest_run are no
     // longer listed". Asserted from the shadowing direction, because that
     // is the operator-visible symptom.
-    let repo = repo_with_a_committed_run_between_two_husks("shadow");
+    let (_tree, repo) = repo_with_a_committed_run_between_two_husks("shadow");
     assert_eq!(latest_run(&repo).as_deref(), Some("01BBBRUN"));
     assert!(
         run_dir_names(&repo)
@@ -2655,6 +3134,11 @@ const BOUND_INCARNATION: &str = "01INCARNATION00000000000000";
 /// owner record published, and no commit record. The one shape the proof
 /// is supposed to accept.
 struct BoundHusk {
+    /// The guard over the root [`BoundHusk::new`] acquired, kept for the
+    /// husk's whole life so the tree is reclaimed when the husk drops --
+    /// on a panicking assertion as much as on a normal return. `None` when
+    /// the caller supplied a root it guards itself ([`BoundHusk::at`]).
+    _tree: Option<ScratchTree>,
     root: PathBuf,
     repo: PathBuf,
     private_root: PathBuf,
@@ -2667,7 +3151,10 @@ struct BoundHusk {
 
 impl BoundHusk {
     fn new(tag: &str) -> Self {
-        Self::at(scratch(tag))
+        let tree = scratch(tag);
+        let mut husk = Self::at(tree.path().to_path_buf());
+        husk._tree = Some(tree);
+        husk
     }
 
     /// The same husk, under a root the caller already owns.
@@ -2706,6 +3193,9 @@ impl BoundHusk {
             runner: policy,
         };
         Self {
+            // `at` is handed a root the caller guards; `new` puts its own
+            // guard in immediately after this returns.
+            _tree: None,
             root,
             repo,
             private_root,
@@ -3606,7 +4096,8 @@ fn a_public_husk_removal_that_fails_partway_leaves_the_marker_that_locates_it() 
 /// platforms.
 #[test]
 fn probe_a_staged_marker_only_public_husk_is_removed() {
-    let root = scratch("probe-stagedonly");
+    let tree = scratch("probe-stagedonly");
+    let root = tree.path();
 
     let public = root.join("runs").join("01STAGEDONLY");
     fs::create_dir_all(&public).expect("public directory");
@@ -3639,8 +4130,9 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
 /// because none of them ever looked at what was on disk at a phase.
 #[test]
 fn p0_creates_the_public_directory_and_nothing_private() {
-    let root = scratch("p0-only");
-    let paths = paths_in(&root, "01P0ONLY");
+    let tree = scratch("p0-only");
+    let root = tree.path();
+    let paths = paths_in(root, "01P0ONLY");
     let public = paths.public.clone();
     let private = paths.private.clone();
 
@@ -3668,7 +4160,8 @@ fn p0_creates_the_public_directory_and_nothing_private() {
 /// exist before `owner.json` is even staged — changed nothing observable.
 #[test]
 fn the_owner_record_is_the_first_content_of_a_private_half() {
-    let root = scratch("owner-first");
+    let tree = scratch("owner-first");
+    let root = tree.path();
     let private = root.join("private").join("runs").join("01OWNERFIRST");
     let owner = OwnerRecord {
         run_id: "01OWNERFIRST".to_owned(),
@@ -3800,7 +4293,8 @@ fn commit_record_of(husk: &BoundHusk) -> CommitRecord {
 /// file held something else would fail here rather than agree with itself.
 #[test]
 fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_directory() {
-    let root = scratch("durability");
+    let tree = scratch("durability");
+    let root = tree.path();
     let public = root.join("public");
     let private = root.join("private");
     create_dir(&public).expect("public");
@@ -4029,7 +4523,8 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
 /// by the record and publishes.
 #[test]
 fn a_report_whose_staged_file_will_not_sync_is_not_published() {
-    let root = scratch("report-stage-sync-fault");
+    let tree = scratch("report-stage-sync-fault");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -4091,7 +4586,8 @@ fn a_report_whose_staged_file_will_not_sync_is_not_published() {
 #[test]
 fn a_private_report_is_staged_at_its_mode_before_any_byte_is_written() {
     use std::os::unix::fs::PermissionsExt as _;
-    let root = scratch("report-staged-mode");
+    let tree = scratch("report-staged-mode");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -4379,7 +4875,8 @@ fn a_kill_between_stage_and_rename_leaves_only_the_tmp() {
     // A real process death, not an early return: the claim is what a
     // coordinator that runs *no* cleanup leaves on disk, and the funnel's
     // kill aborts rather than unwinding for exactly that reason.
-    let root = scratch("killpublish");
+    let tree = scratch("killpublish");
+    let root = tree.path();
     for (which, staged, published) in [
         ("marker", MARKER_STAGED, MARKER),
         ("owner", OWNER_RECORD_STAGED, OWNER_RECORD),
@@ -4433,7 +4930,8 @@ fn a_kill_between_stage_and_rename_leaves_only_the_tmp() {
 /// (`MetadataExt::file_index` is behind `windows_by_handle`).
 #[test]
 fn publication_replaces_the_name_rather_than_writing_through_it() {
-    let root = scratch("publishrename");
+    let tree = scratch("publishrename");
+    let root = tree.path();
     for (which, staged_name, published_name) in [
         ("marker", MARKER_STAGED, MARKER),
         ("owner", OWNER_RECORD_STAGED, OWNER_RECORD),
@@ -4523,7 +5021,8 @@ fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released() {
     // settling groups is the one that died before its log committed, and
     // `list_runs` no longer returns it — so a lease that scanned the
     // readers' view would leave exactly this hold unobserved.
-    let root = scratch("r28witness");
+    let tree = scratch("r28witness");
+    let root = tree.path();
     let repo = root.join("repo");
     let git_dir = root.join("git-dir");
     fs::create_dir_all(&git_dir).expect("git dir");
@@ -4630,7 +5129,8 @@ fn inherited_hold_child() {
 #[cfg(unix)]
 #[test]
 fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
-    let root = scratch("childlease");
+    let tree = scratch("childlease");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000000");
     fs::create_dir_all(&public).expect("the run's public directory");
     assert!(
@@ -4935,7 +5435,8 @@ unsafe fn identity_answered_by(
 fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-unspawned");
+    let tree = scratch("childlease-unspawned");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000001");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -4978,7 +5479,8 @@ fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
 fn a_lease_descriptors_number_reused_by_an_unrelated_file_is_not_read_as_the_lease_still_open() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-number-reused");
+    let tree = scratch("childlease-number-reused");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000006");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5040,7 +5542,8 @@ fn a_descriptor_closed_between_the_listing_and_its_lookup_is_skipped_by_the_iden
     use std::os::fd::AsRawFd as _;
     use std::sync::mpsc;
 
-    let root = scratch("descriptor-scan-closed-in-window");
+    let tree = scratch("descriptor-scan-closed-in-window");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let (number_sender, number_receiver) = mpsc::channel();
@@ -5106,7 +5609,8 @@ fn a_copy_of_the_lease_a_sibling_fork_carries_outlives_this_processs_own_descrip
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-sibling-copy");
+    let tree = scratch("childlease-sibling-copy");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000003");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5167,7 +5671,8 @@ fn a_copy_that_outlasts_the_bound_still_fails_the_release_observation() {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-past-bound");
+    let tree = scratch("childlease-past-bound");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000005");
     fs::create_dir_all(&public).expect("the run's public directory");
     let mut command = std::process::Command::new("git");
@@ -5490,7 +5995,8 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-sentinel");
+    let tree = scratch("childlease-sentinel");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000004");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -7130,7 +7636,8 @@ fn assert_a_parked_fork_isolates_a_sentinel(tag: &str, under: &str) {
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch(tag);
+    let tree = scratch(tag);
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000008");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -9435,7 +9942,8 @@ fn a_sentinel_eof_read_within_the_bound_on_a_real_socket_is_accepted() {
 fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of_reading_absence() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("descriptor-scan-lookup-fails");
+    let tree = scratch("descriptor-scan-lookup-fails");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let number = held.as_raw_fd();
@@ -9496,7 +10004,8 @@ fn a_lookup_that_fails_on_a_listed_descriptor_fails_the_identity_scan_instead_of
 fn a_failed_identity_call_is_read_at_the_call_ebadf_as_absence_and_any_other_errno_as_the_error() {
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("descriptor-identity-call-fails");
+    let tree = scratch("descriptor-identity-call-fails");
+    let root = tree.path();
     let target = root.join("target");
     let held = File::create(&target).expect("the target, held open by this thread");
     let number = held.as_raw_fd();
@@ -10791,7 +11300,8 @@ fn a_lease_wait_whose_every_rest_is_refused() {
     use crate::workspace_manager::fixture::ParkedFork;
 
     const BOUND: Duration = Duration::from_millis(100);
-    let root = scratch("lease-wait-rests-refused");
+    let tree = scratch("lease-wait-rests-refused");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01LEASEWAITRESTS0000000000");
     fs::create_dir_all(&public).expect("the run's public directory");
     let parked = ParkedFork::holding_the_lease_of(&public);
@@ -10839,7 +11349,8 @@ fn a_lease_wait_whose_every_rest_is_refused() {
 #[cfg(target_os = "linux")]
 fn a_readiness_wait_whose_every_rest_is_refused() {
     const BOUND: Duration = Duration::from_millis(100);
-    let root = scratch("readiness-rests-refused");
+    let tree = scratch("readiness-rests-refused");
+    let root = tree.path();
     let signal = root.join("never-published");
     let producer = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([
@@ -11096,7 +11607,8 @@ fn a_descriptor_above_a_lowered_soft_limit_is_closed() {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
     const HIGH: libc::c_int = 128;
-    let root = scratch("childlease-high-descriptor");
+    let tree = scratch("childlease-high-descriptor");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000009");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, mut observer) = sentinel_pair();
@@ -11225,7 +11737,8 @@ fn a_parked_fork_whose_sweep_is_denied_a_close_with_ebadf_fails_before_announcin
 fn a_range_close_that_answers_success_without_closing_is_found_out_before_the_child_is_announced() {
     use crate::workspace_manager::fixture::ParkedFork;
 
-    let root = scratch("childlease-range-close-lies");
+    let tree = scratch("childlease-range-close-lies");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000B");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (_sentinel, _observer) = sentinel_pair();
@@ -11281,7 +11794,8 @@ fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: l
     use crate::workspace_manager::fixture::ParkedFork;
     use std::os::fd::AsRawFd as _;
 
-    let root = scratch("childlease-close-fails");
+    let tree = scratch("childlease-close-fails");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE00000000000000A");
     fs::create_dir_all(&public).expect("the run's public directory");
     let (sentinel, _observer) =
@@ -11331,7 +11845,8 @@ fn a_close_the_policy_refuses_fails_the_setup_after_the_child_is_reaped(errno: l
 #[cfg(unix)]
 #[test]
 fn a_hold_over_an_absent_run_directory_is_an_io_error_naming_the_lease() {
-    let root = scratch("childlease-absent");
+    let tree = scratch("childlease-absent");
+    let root = tree.path();
     let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000002");
     let mut command = std::process::Command::new("git");
     let error = hold_cleanup_lease_for_child(&mut command, &public)
@@ -11588,7 +12103,8 @@ fn this_crates_rlib(deps: &Path) -> PathBuf {
 }
 
 fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, String) {
-    let dir = scratch(&format!("compile-{tag}"));
+    let tree = scratch(&format!("compile-{tag}"));
+    let dir = tree.path();
     let file = dir.join("fixture.rs");
     fs::write(&file, source).expect("fixture source");
     let deps = std::env::current_exe()
@@ -11612,7 +12128,7 @@ fn compile_against_this_crate(tag: &str, source: &str) -> (bool, Vec<String>, St
         .arg(format!("dependency={}", deps.display()))
         .args(["--error-format", "json"])
         .arg("--out-dir")
-        .arg(&dir)
+        .arg(dir)
         .arg(&file)
         .output()
         .expect("rustc runs; a missing rustc is a failure of this test, never a skip");
@@ -11674,7 +12190,8 @@ fn the_repo_key_is_the_construction_the_packet_states() {
     // bytes))". The expected value is computed from that sentence here,
     // and for a fixed path it is a literal computed outside this program
     // entirely — a function may not be its own oracle.
-    let dir = scratch("repokey").join("git-dir");
+    let tree = scratch("repokey");
+    let dir = tree.path().join("git-dir");
     fs::create_dir_all(&dir).expect("git dir");
     let canonical = fs::canonicalize(&dir).expect("canonical");
     let mut bytes = b"upstroke-repo-key-v1".to_vec();
@@ -11720,7 +12237,8 @@ fn every_worktree_of_one_repository_has_one_repo_key() {
     // the **common** git dir. A linked worktree's own git dir is
     // `<common>/worktrees/<name>`, and this proves the derivation against
     // a real one rather than against the rule that produced it.
-    let root = scratch("worktreekey");
+    let tree = scratch("worktreekey");
+    let root = tree.path();
     let main = root.join("main");
     fs::create_dir_all(&main).expect("main");
     git(&main, &["init", "-q", "-b", "main"]);
@@ -11890,7 +12408,8 @@ fn what_the_funnels_write_is_what_the_packet_says_they_write() {
     // The other direction: the bytes on disk, compared against the
     // independently written payloads above rather than against whatever
     // this build happens to serialize.
-    let root = scratch("wire");
+    let tree = scratch("wire");
+    let root = tree.path();
     let dir = root.join("half");
     fs::create_dir_all(&dir).expect("dir");
     let marker: CreatingMarker =
@@ -12026,7 +12545,8 @@ fn the_commit_records_digest_is_over_the_exact_line_bytes() {
 /// exactly like a correct one.
 #[test]
 fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion() {
-    let root = scratch("answer-residue");
+    let tree = scratch("answer-residue");
+    let root = tree.path();
     let answers = root.join("answers");
     create_dir(&answers).expect("answers");
 
@@ -12098,7 +12618,8 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
 /// removed as the writer's own).
 #[test]
 fn report_staging_leaves_whatever_is_at_the_old_fixed_name_as_found() {
-    let root = scratch("report-stage-old-name");
+    let tree = scratch("report-stage-old-name");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public directory");
     let private = root.join("private");
@@ -12175,7 +12696,8 @@ fn report_staging_leaves_whatever_is_at_the_old_fixed_name_as_found() {
 /// inside a directory it makes for itself and touches nothing else.
 #[test]
 fn legacy_report_preserves_unowned_staging_name() {
-    let root = scratch("report-unowned-staging-name");
+    let tree = scratch("report-unowned-staging-name");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12220,7 +12742,8 @@ fn legacy_report_preserves_unowned_staging_name() {
 /// owns, and the proof here is the record, never the name).
 #[test]
 fn legacy_report_preserves_unowned_staging_directory() {
-    let root = scratch("report-unowned-staging-directory");
+    let tree = scratch("report-unowned-staging-directory");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12328,7 +12851,8 @@ fn legacy_report_preserves_unowned_staging_directory() {
 /// round-10 fix-check and crash lenses, P2).
 #[test]
 fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
-    let root = scratch("report-dead-writer");
+    let tree = scratch("report-dead-writer");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12475,7 +12999,8 @@ fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
 /// round 3 found in the gate's corrected witness.
 #[test]
 fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
-    let root = scratch("report-power-loss-reclaim");
+    let tree = scratch("report-power-loss-reclaim");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12584,7 +13109,8 @@ fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
 /// taken ahead of the removal, or the barrier confined to one arm.
 #[test]
 fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_removed() {
-    let root = scratch("report-refused-public-barrier");
+    let tree = scratch("report-refused-public-barrier");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12779,7 +13305,8 @@ fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_remove
 /// private half, and its directory barrier precedes the creation.
 #[test]
 fn a_report_staging_directory_is_recorded_before_it_is_made() {
-    let root = scratch("report-staging-recorded-first");
+    let tree = scratch("report-staging-recorded-first");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -12853,7 +13380,8 @@ fn a_report_staging_record_failure_stops_before_directory_creation() {
         ("file", "the staged record's file barrier"),
         ("directory", "the private directory's barrier"),
     ] {
-        let root = scratch(&format!("report-staging-record-{tag}-fault"));
+        let tree = scratch(&format!("report-staging-record-{tag}-fault"));
+        let root = tree.path();
         let public = root.join("public");
         create_dir(&public).expect("public");
         let private = root.join("private");
@@ -12929,7 +13457,8 @@ fn is_staged_report(path: &Path, public: &Path) -> bool {
 /// is satisfied by any serializer at all.
 #[test]
 fn the_payload_writers_keep_their_exact_legacy_bytes() {
-    let root = scratch("golden-bytes");
+    let tree = scratch("golden-bytes");
+    let root = tree.path();
     let public = root.join("public");
     let questions = public.join("questions");
     create_dir(&questions).expect("questions");
@@ -13024,7 +13553,8 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
 #[test]
 fn rewriting_report_preserves_its_group() {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let root = scratch("report-group");
+    let tree = scratch("report-group");
+    let root = tree.path();
     let public = root.join("public");
     create_dir(&public).expect("public");
     let private = root.join("private");
@@ -13209,7 +13739,8 @@ fn a_husk_id_reports_as_one_of_the_three_things_it_can_be() {
 
 #[test]
 fn an_ambiguous_husk_prefix_is_not_reported_as_one_husk() {
-    let repo = scratch("ambiguoushusk").join("repo");
+    let tree = scratch("ambiguoushusk");
+    let repo = tree.path().join("repo");
     for husk in ["01HUSKA", "01HUSKB"] {
         fs::create_dir_all(runs_root(&repo).join(husk)).expect("husk");
     }

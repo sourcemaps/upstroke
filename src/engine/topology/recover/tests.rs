@@ -76,13 +76,15 @@ impl TimeSource for Frozen {
     }
 }
 
-fn fixture_root(tag: &str) -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "upstroke-pr7e-{}-{tag}-{ordinal}",
-        std::process::id()
-    ))
+fn fixture_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 fn mkdir(path: &Path) {
@@ -106,6 +108,7 @@ struct Fixture {
     release_once_held: RefCell<Option<crate::workspace_manager::fixture::ParkedFork>>,
     #[cfg(unix)]
     holder_released: Cell<Option<(u32, std::process::ExitStatus)>>,
+    _tree: Option<crate::rundir::scratch_tree::ScratchTree>,
 }
 
 #[derive(Default)]
@@ -144,7 +147,8 @@ impl Fixture {
     }
 
     fn build(tag: &str, damage: Damage) -> Self {
-        let root = fixture_root(tag);
+        let tree = fixture_tree(tag);
+        let root = tree.path().to_path_buf();
         let repo_root = root.join("repo");
         let git_dir = repo_root.join(".git");
         let private_root = root.join("private");
@@ -286,6 +290,7 @@ impl Fixture {
             release_once_held: RefCell::new(None),
             #[cfg(unix)]
             holder_released: Cell::new(None),
+            _tree: Some(tree),
         }
     }
 
@@ -346,10 +351,86 @@ impl Fixture {
     fn holder_observed(&self, _observation: u32) {}
 }
 
-impl Drop for Fixture {
+fn the_root_the_pid_keyed_helper_gave_a_first_fixture(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("upstroke-pr7e-{}-{tag}-0", std::process::id()))
+}
+
+struct Predecessor {
+    root: PathBuf,
+}
+
+impl Drop for Predecessor {
     fn drop(&mut self) {
-        let _ = rundir::remove_public_husk(&self.root, &mut NoHooks);
+        let removed = rundir::remove_public_husk(&self.root, &mut NoHooks);
+        assert!(
+            removed.is_ok() || std::thread::panicking(),
+            "the planted predecessor {} was not removed: {removed:?}",
+            self.root.display()
+        );
     }
+}
+
+#[test]
+fn a_fixture_never_builds_on_a_root_a_crashed_process_under_this_pid_left() {
+    let tag = format!("recycled-{}", crate::ulid::ulid());
+    let predecessor = Predecessor {
+        root: the_root_the_pid_keyed_helper_gave_a_first_fixture(&tag),
+    };
+    let left = predecessor.root.join("a-crashed-fixtures-bytes");
+    crate::workspace_manager::fixture::write_file(&left, b"a predecessor's fixture");
+
+    let fixture = Fixture::healthy(&tag);
+
+    assert_ne!(
+        fixture.root, predecessor.root,
+        "the fixture was built on the root a crashed process under this pid left"
+    );
+    assert!(
+        !fixture.root.join("a-crashed-fixtures-bytes").exists(),
+        "a fresh fixture holds a predecessor's bytes"
+    );
+    drop(fixture);
+    assert_eq!(
+        crate::util::read_file_bounded(&left).expect("the predecessor's bytes survive the fixture"),
+        b"a predecessor's fixture",
+        "the fixture's teardown removed a root it never owned"
+    );
+}
+
+thread_local! {
+    static ABANDONED_AT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn abandon_the_build(owner: &mut OwnerRecord) {
+    ABANDONED_AT.set(Some(PathBuf::from(&owner.public_dir)));
+    panic!("the build is abandoned half-way");
+}
+
+#[test]
+fn a_build_that_panics_half_way_leaves_no_tree_behind() {
+    let outcome = std::panic::catch_unwind(|| {
+        Fixture::build(
+            "abandoned-build",
+            Damage {
+                owner: Some(abandon_the_build),
+                ..Damage::default()
+            },
+        )
+    });
+    assert!(outcome.is_err(), "the build has to actually panic");
+    let public = ABANDONED_AT
+        .take()
+        .expect("the build reached the owner record before it was abandoned");
+    let root = public
+        .ancestors()
+        .nth(4)
+        .expect("the public directory is four levels below the fixture root");
+    assert!(
+        crate::rundir::scratch_tree::proves_absent(root),
+        "the half-built fixture survived the panic: {}",
+        root.display()
+    );
 }
 
 struct PlantedHusk {
@@ -14761,6 +14842,7 @@ impl Fixture {
             release_once_held: RefCell::new(None),
             #[cfg(unix)]
             holder_released: Cell::new(None),
+            _tree: None,
         })
     }
 }

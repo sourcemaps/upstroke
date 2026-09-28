@@ -21,13 +21,12 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::rundir::scratch_tree::ScratchTree;
 
 // -----------------------------------------------------------------------
 // Fixtures
 // -----------------------------------------------------------------------
-
-pub(crate) static SCRATCH: AtomicU32 = AtomicU32::new(0);
 
 // -----------------------------------------------------------------------
 // Observing the removal retry
@@ -182,18 +181,30 @@ pub(crate) fn note_marker_read_attempt(attempt: u32) {
     });
 }
 
-/// A scratch directory unique to this process *and* to this call, because
-/// the suite runs tests in parallel and two fixtures sharing a directory
-/// would each measure the other's Git repository.
-pub(crate) fn scratch(tag: &str) -> PathBuf {
-    let ordinal = SCRATCH.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "upstroke-wm-{tag}-{}-{ordinal}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create the scratch directory");
-    dir
+/// A scratch tree for one fixture, guarded by the token that authorises its
+/// deletion.
+///
+/// The helper here built `temp_dir()/upstroke-wm-<tag>-<pid>-<ordinal>` from a
+/// process-wide counter, pre-cleaned it with a discarded `remove_dir_all`
+/// before it had any claim on the name, and returned a root nothing reclaimed
+/// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`). The
+/// counter made two *concurrent* fixtures distinct, which is what its comment
+/// claimed, and did nothing about a second process or a second run of this one
+/// under a pid Windows recycled -- each of which starts its counter at zero
+/// again. `acquire` refuses an occupied root rather than emptying it, keys on
+/// a ULID no recycled pid can supply, and reclaims on drop.
+///
+/// **Bind the guard to a live local**: `let _ = scratch("x")` drops it at the
+/// end of that statement and deletes the fixture.
+pub(crate) fn scratch(tag: &str) -> ScratchTree {
+    let parent = std::env::temp_dir();
+    match crate::rundir::scratch_tree::acquire(&parent, tag) {
+        Ok(tree) => tree,
+        Err(refusal) => panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        ),
+    }
 }
 
 pub(crate) fn git_out(dir: &Path, args: &[&str]) -> Output {
@@ -272,6 +283,12 @@ pub(crate) fn tear_registration(manager: &WorkspaceManager, worktree: &Path) -> 
 pub(crate) const RUN_ID: &str = "01KZSWEEP00000000000000001";
 
 pub(crate) struct Fixture {
+    /// The guard over the root [`Fixture::with_object_format`] acquired,
+    /// kept for the fixture's whole life so the tree is reclaimed when it
+    /// drops -- on a panicking assertion as much as on a normal return.
+    /// `None` for [`Fixture::adopt`], whose root is a dead child's and is
+    /// bound by no token of this process's.
+    _tree: Option<ScratchTree>,
     pub(crate) root: PathBuf,
     pub(crate) base: PathBuf,
     pub(crate) private: PathBuf,
@@ -296,7 +313,8 @@ impl Fixture {
 
     /// A repository of the given object format, `sha1` or `sha256`.
     pub(crate) fn with_object_format(tag: &str, object_format: &str) -> Self {
-        let root = scratch(tag);
+        let tree = scratch(tag);
+        let root = tree.path().to_path_buf();
         let base = root.join("repo");
         let private = root.join("private");
         fs::create_dir_all(&base).expect("repo directory");
@@ -353,6 +371,7 @@ impl Fixture {
         let manager =
             WorkspaceManager::derive(&base, &private, RUN_ID, "inc-1").expect("derive the manager");
         Self {
+            _tree: Some(tree),
             root,
             base,
             private,
@@ -385,6 +404,10 @@ impl Fixture {
         let manager = WorkspaceManager::derive(&base, &private, RUN_ID, "inc-1")
             .expect("derive the manager over an adopted fixture");
         Self {
+            // The child aborted and handed no token over, so nothing this
+            // process holds authorises the root. `Drop` reclaims it the way
+            // it always did; see the note there.
+            _tree: None,
             root,
             base,
             private,
@@ -436,7 +459,27 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    /// An acquired fixture is reclaimed by its own guard, whose `Drop`
+    /// **matches** the reclaim's result -- panicking on a normal return and
+    /// reporting on an unwinding one. This body is therefore only the
+    /// adopted case.
+    ///
+    /// An adopted root is a dead child's tree. The child died by
+    /// `std::process::abort()`, so its guard's `Drop` never ran and no token
+    /// of this process's binds the root; [`ScratchTreeOwnership`] cannot be
+    /// minted for a path `acquire` did not create, and it is right that it
+    /// cannot. The removal is therefore made here, and its result is
+    /// discarded rather than raised for the reason `ScratchTree`'s own
+    /// unwinding arm gives: a panic raised from a `Drop` while the thread is
+    /// already unwinding aborts the process and destroys the diagnosis of
+    /// whatever actually failed. This file may name no print macro (its
+    /// `effects/allowlist.toml` row allows `disallowed_methods` and
+    /// `disallowed_types` and not `disallowed_macros`), so there is no
+    /// channel to report it on either.
     fn drop(&mut self) {
+        if self._tree.is_some() {
+            return;
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -1919,18 +1962,32 @@ pub(crate) const REPLACEMENT_CONTROLS_PINNED: &[&str] = &[
 /// claim about the rest of the run, and "this file is empty" is a fact.
 /// `/dev/null` is not portable to the Windows leg of the matrix.
 pub(crate) fn neutral_git_config() -> &'static Path {
-    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    /// The file and the tree it is in. Held in a `OnceLock` for the life of
+    /// the process, so the tree is not reclaimed while a child is still
+    /// reading the file -- and, being a `static`, it is one of the two
+    /// things in this suite whose `Drop` genuinely never runs (the other is
+    /// a process that aborts). The alternative is worse: a file per caller
+    /// in the shared temporary directory, which is what
+    /// `PR7-SCRATCH-FIXTURE-LEAK` measured at 15 surviving directories per
+    /// green suite run.
+    struct Neutral {
+        _tree: ScratchTree,
+        path: PathBuf,
+    }
+
+    static FILE: std::sync::OnceLock<Neutral> = std::sync::OnceLock::new();
     FILE.get_or_init(|| {
-        let path =
-            std::env::temp_dir().join(format!("upstroke-neutral-gitconfig-{}", std::process::id()));
+        let tree = scratch("neutral-gitconfig");
+        let path = tree.path().join("gitconfig");
         fs::write(&path, b"").unwrap_or_else(|error| {
             panic!(
                 "writing the neutral Git configuration {}: {error}",
                 path.display()
             )
         });
-        path
+        Neutral { _tree: tree, path }
     })
+    .path
     .as_path()
 }
 
@@ -2157,8 +2214,8 @@ pub(crate) const REPLACEMENT_DISABLED_EXIT: i32 = 3;
 /// `core.useReplaceRefs` for the same reason -- a local pin would outrank the
 /// operator's `~/.gitconfig` and hide a control this exists to find.
 pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
-    let root = scratch(&format!("replacement-live-{tag}"));
-    let repo = root.join("repo");
+    let tree = scratch(&format!("replacement-live-{tag}"));
+    let repo = tree.path().join("repo");
     create_dir(&repo);
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "tests@upstroke.local"]);
@@ -2182,7 +2239,8 @@ pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
         &repo,
         &["for-each-ref", "--format=%(refname)", "refs/replace/"],
     );
-    let verdict = if found == format!("refs/replace/{recorded}") {
+
+    if found == format!("refs/replace/{recorded}") {
         let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
         if read == "replacing" {
             ReplacementLiveness::Live
@@ -2191,9 +2249,7 @@ pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
         }
     } else {
         ReplacementLiveness::RefsElsewhere { found }
-    };
-    let _ = fs::remove_dir_all(&root);
-    verdict
+    }
 }
 
 /// [`replacement_liveness`], as the precondition a witness states before it

@@ -1718,7 +1718,6 @@ mod tests {
     use crate::topology::effects::EventSite;
     use std::fs::OpenOptions;
     use std::io::Write;
-    use std::path::PathBuf;
 
     fn effort_policy() -> ResolvedEffortPolicy {
         ResolvedEffortPolicy {
@@ -1848,12 +1847,27 @@ mod tests {
         }
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("upstroke-events-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    /// A scratch tree for one test, guarded by the token that authorises
+    /// its deletion.
+    ///
+    /// The helper here built `temp_dir()/upstroke-events-<tag>-<pid>` and
+    /// pre-cleaned it with a discarded `remove_dir_all` before it had any
+    /// claim on the name, then returned a root nothing reclaimed
+    /// (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`, `PR7-SCRATCH-FIXTURE-LEAK`).
+    /// `acquire` refuses an occupied root rather than emptying it, keys on
+    /// a ULID no recycled pid can supply, and reclaims on drop.
+    ///
+    /// **Bind the guard to a live local**: `let _ = scratch("x")` drops it
+    /// at the end of that statement and deletes the fixture.
+    fn scratch(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
+        let parent = std::env::temp_dir();
+        match crate::rundir::scratch_tree::acquire(&parent, tag) {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `{tag}` under {}: {refusal:?}",
+                parent.display()
+            ),
+        }
     }
 
     #[test]
@@ -2048,7 +2062,8 @@ mod tests {
 
     #[test]
     fn a_torn_final_line_is_dropped_but_committed_invalid_events_are_errors() {
-        let dir = scratch("torn");
+        let tree = scratch("torn");
+        let dir = tree.path();
         let path = dir.join("events.jsonl");
         let good = serde_json::to_string(&Event::now(started())).expect("serialize");
         let also_good = serde_json::to_string(&Event::now(attempt_started("t1", 1, 0, "small")))
@@ -2094,7 +2109,8 @@ mod tests {
 
     #[test]
     fn a_valid_json_event_without_its_commit_newline_is_a_torn_tail() {
-        let dir = scratch("uncommitted-valid-tail");
+        let tree = scratch("uncommitted-valid-tail");
+        let dir = tree.path();
         let path = dir.join("events.jsonl");
         let good = serde_json::to_string(&Event::now(started())).expect("serialize");
         let uncommitted = serde_json::to_string(&Event::now(attempt_started("t1", 1, 0, "small")))
@@ -2111,7 +2127,8 @@ mod tests {
 
     #[test]
     fn appending_after_a_torn_line_discards_it_rather_than_splicing() {
-        let dir = scratch("repair");
+        let tree = scratch("repair");
+        let dir = tree.path();
         let path = dir.join("events.jsonl");
         let good = serde_json::to_string(&Event::now(started())).expect("serialize");
         std::fs::write(&path, format!("{good}\n{{\"ts\":\"trunc")).expect("write");
@@ -2140,7 +2157,8 @@ mod tests {
 
     #[test]
     fn a_log_that_is_nothing_but_a_torn_line_opens_empty() {
-        let dir = scratch("alltorn");
+        let tree = scratch("alltorn");
+        let dir = tree.path();
         let path = dir.join("events.jsonl");
         std::fs::write(&path, "{\"ts\":\"2026").expect("write");
 
@@ -3476,7 +3494,8 @@ mod tests {
 
     #[test]
     fn a_tail_never_yields_half_an_event() {
-        let dir = scratch("tail");
+        let tree = scratch("tail");
+        let dir = tree.path();
         let path = dir.join("events.jsonl");
         let mut warnings = Vec::new();
         let mut log = EventLog::open(EventSite::LegacyOpenLog, &path, &mut warnings).expect("open");

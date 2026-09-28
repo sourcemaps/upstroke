@@ -621,7 +621,7 @@ A day boundary and the last second before one.
 The log is read back with a plain string compare in places; the
 zero-padded fixed-width form is what makes that legitimate.
 
-## `let dir = std::env::temp_dir().join(format!("upstroke-util-path-{}", std::process::id()));`
+## `let tree = scratch("util-path");`
 
 The empty-PATH-segment guard in find_program rests on this: a bare
 name must not resolve against the process CWD. Verified by probing

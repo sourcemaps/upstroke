@@ -242,9 +242,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_batch_shim_runs_and_receives_its_argument() {
-        let dir = std::env::temp_dir().join(format!("upstroke-bin-shim-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let shim = dir.join("upstroke-test-shim.cmd");
+        let parent = std::env::temp_dir();
+        let tree = match crate::rundir::scratch_tree::acquire(&parent, "bin-shim") {
+            Ok(tree) => tree,
+            Err(refusal) => panic!(
+                "a scratch tree for `bin-shim` under {}: {refusal:?}",
+                parent.display()
+            ),
+        };
+        let shim = tree.path().join("upstroke-test-shim.cmd");
         std::fs::write(&shim, "@echo off\r\necho GOT:%~1\r\n").expect("write shim");
 
         let out = crate::runner::host::test_support::build_command(

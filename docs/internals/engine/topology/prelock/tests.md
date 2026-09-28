@@ -20,7 +20,8 @@ Fixed identities, so an assertion can name a literal.
 
 ## `struct Scratch {`
 
-A scratch directory that **owns** its tree.
+A scratch directory that **owns** its tree: the guard
+`rundir::scratch_tree::acquire` returns, held for as long as the `Scratch` is.
 
 The predecessor was a `fn scratch(&str) -> PathBuf`: it created the
 directory and handed back a path nothing owned, so every invocation left
@@ -32,28 +33,49 @@ is not hypothetical: 5050 `upstroke-prelock-*` roots had accumulated in
 the temp directory by 2026-08-30, and five runs of this module after the
 repair added none.
 
-Both ends go through the run-directory funnel because this file is a
-`TOPOLOGY_MODULE`: `std::fs::create_dir_all` and every `std::fs` removal
-are denied in it, tests included. `RunDir.RemovePublicHusk` is the one
-recursive delete a test here can reach — it removes a directory's
-children and then the directory — because `RunDir.RemovePrivateHusk`
-takes a [`crate::rundir::PrivateHalfProof`], and a pre-lock scratch root
-is not the two-halves shape that mints one.
+This file is a `TOPOLOGY_MODULE`: `std::fs::create_dir_all` and every
+`std::fs` removal are denied in it, tests included, so both ends go through
+a funnel. `scratch_tree::acquire` creates the root with an exclusive,
+non-recursive create that refuses an occupied name, and the `ScratchTree`
+guard it returns reclaims the tree on the ordinary exit and on an unwind —
+after checking that the directory at its name is still the one it created,
+and reporting rather than removing when it is not.
 
-The naming is the predecessor's, unchanged: the pid and the thread id
-keep two live fixtures apart, and reclamation is what this type adds.
+Until #322's round 3 this type created its root through
+`RunDir.CreatePrivateDir`, which is `create_dir_all` and adopts whatever
+already stands at the name, and removed it in a `Drop` of its own by path
+through `RunDir.RemovePublicHusk`. Adoption followed by removal by path is
+what made a name collision a deletion of the occupant's bytes rather than
+a refusal, which #322's round-2 delta review reproduced with the clock
+frozen (its D3). Both are gone, and so is that `Drop`.
+
+## `impl Scratch` › `fn new(tag: &str) -> Self {`
+
+A root directly under the temp directory. Every test here takes one; the
+two that plant a replacement at a guard's name nest a second inside it.
+
+The name is `acquire`'s: `upstroke-prelock-<tag>-<ten ULID characters>`.
+It was `upstroke-prelock-<tag>-<pid>-ThreadId(<n>)` until #322, which a later
+process repeats (`PR7-SCRATCH-FIXTURE-LEAK`), and then a ULID's tail over the
+adopting create, on the ground that a `TOPOLOGY_MODULE` had no
+exclusive-create funnel. That ground was false: `acquire` is one, and
+`recover/tests.rs` and `startup/tests.rs` beside this file already took
+their roots through it.
+
+## `impl Scratch` › `fn under(parent: &Path, tag: &str) -> Self {`
+
+A root under `parent`, for the two witnesses that plant a replacement at a
+guard's name. Nested inside an outer `Scratch`, the replacement goes with
+the outer tree however the witness ends, so neither removes anything by
+path on its way out.
+
+A refusal panics and names the tag and the refusal: a test that asked for
+a tree it owns has nothing to fall back on that would not be another
+holder's.
 
 ## `impl Scratch` › `fn path(&self) -> &Path {`
 
 The authorized private root a test hands to [`check`].
-
-## `fn drop(&mut self)` › `assert!(`
-
-A failed reclamation is the leak this type exists to prevent, so
-it is reported rather than discarded — but never while a panic is
-already travelling. A second panic out of a destructor aborts the
-process, which would replace the test's own failure with an abort
-and lose the report that says what actually broke.
 
 ## `fn a_host_selection_resolves_host_v1_and_carries_its_digest() {`
 
@@ -132,14 +154,39 @@ not hold, raised with the guard still in scope.
 
 ## `fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {`
 
-A reclamation that fails is **reported**, not discarded.
+A reclamation that fails is **reported**, not discarded — and what the
+guard could not reclaim, it did not delete.
 
 `Drop` cannot return, so the alternative to reporting is silence — and
 silence here is the same leak the guard exists to close, with nothing to
-say it happened. The tree is reclaimed out from under the guard through
-the very funnel the guard would use, so the removal it then attempts
-fails for a real reason rather than an injected one, and the panic that
-carries the report is caught here rather than failing this test.
+say it happened. The failure is a real one rather than an injected one:
+the tree is removed out from under the guard through
+`RunDir.RemovePublicHusk`, and a replacement holding a directory of its
+own is created at its name through `RunDir.CreatePrivateDir`, so the
+directory the guard finds when it drops is not the one it acquired. Its
+reclaim refuses that, and the panic that carries the report is caught here
+rather than failing this test. Then the replacement's content is asserted
+present: a reclaim that removed whatever stood at its name — as the
+path-named `Drop` this type had until #322's round 3 did — deletes it.
+
+**Unix only.** `scratch_tree`'s reclaim closes its handle before it checks
+absence because a Windows directory's deletion can complete only when its
+handles close, and the guard holds that handle for its whole life, so a
+replacement cannot be relied on to take the name while the guard is
+alive. The refusals themselves are platform-independent code, witnessed on
+every platform in `rundir::scratch_tree`'s own suite: a replaced root
+refused, and a failed reclaim raised on the normal path and suppressed
+while unwinding.
+
+## `fn a_scratch_root_that_cannot_be_reclaimed_is_reported_rather_than_discarded() {` › `drop(root);`
+
+The guard is built before the closure and moved into it, and its path is
+read off it first, so the assertions after the closure have the root
+without anything carrying it out. Dropping it here, as the closure's last
+statement, is what makes the failed reclaim this test's subject: the guard
+drops on the normal path inside `catch_unwind`, so the panic caught is its
+report. Without this line the closure only borrows the guard, returns
+normally, and `expect_err` fails the test.
 
 ## `fn scratch_unwind_with_a_failed_reclamation_child() {`
 
@@ -150,20 +197,21 @@ It drives the one corner of the guard's cross-product the two witnesses
 above cannot reach: a reclamation that **fails** while a panic is
 **already travelling**. `raii-reported` covers failure without an
 unwind and `raii-unwind` covers an unwind without a failure; only both
-at once reaches the `std::thread::panicking()` half of the assertion,
-and only there does the alternative — a second panic out of `Drop` —
-abort the process rather than fail a test.
+at once reaches the guard's unwinding arm, where a second panic out of
+`Drop` would abort the process rather than fail a test, and where the
+guard reports on stderr instead of raising.
 
-Everything asserted here is asserted **in this process**, so the parent
-needs no channel back: reaching the end of this body at all is the
-claim, and the harness's own result line is how the parent reads it.
+Everything the child asserts is asserted **in this process**, so the
+parent needs no channel back beyond the child's exit, its result line and
+its stderr.
 
 ## `fn scratch_unwind_with_a_failed_reclamation_child()` › `remove_public_husk(root.path(), &mut NoHooks).expect("the tree reclaims early");`
 
-Reclaimed out from under the live guard, through the very funnel
-the guard will use, so the removal it attempts while unwinding
-fails with `NotFound` for a real reason rather than an injected
-one — no fault hook, no permission trick, no timing.
+Removed out from under the live guard, and a replacement created at its
+name, so the reclaim the guard attempts while unwinding is refused for a
+real reason rather than an injected one — the directory at its name is
+not the one it acquired. No fault hook, no permission trick, no timing:
+`raii-reported`'s arrangement, and Unix-only for the same reason.
 
 ## `fn scratch_unwind_with_a_failed_reclamation_child()` › `let message = caught`
 
@@ -190,19 +238,28 @@ The Runner is the funnel that owns `Process.Spawn`, which is exactly the
 rule — the same spawn `recover::tests::kill_during_recovery_repeats_recovery`
 and `create::tests::spawn_and_wait` already use.
 
-**Both assertions are load-bearing, and neither alone is enough.**
-`abort()` takes the process before the harness prints anything about the
-test, so an aborted child emits no `test result:` line — but a child
-whose filter matched *nothing* also exits 0 and prints `ok. 0 passed`,
-which a bare exit-code assertion would read as success. Requiring the
-zero exit **and** `ok. 1 passed` separates the three outcomes: aborted,
-selected-and-passed, and selected-nothing-at-all.
+**The first two assertions are load-bearing together, and neither alone
+is enough.** `abort()` takes the process before the harness prints
+anything about the test, so an aborted child emits no `test result:` line
+— but a child whose filter matched *nothing* also exits 0 and prints
+`ok. 0 passed`, which a bare exit-code assertion would read as success.
+Requiring the zero exit **and** `ok. 1 passed` separates the three
+outcomes: aborted, selected-and-passed, and selected-nothing-at-all.
+
+**The third reads the report.** The guard's unwinding arm writes one line,
+`scratch tree <root> was not reclaimed while unwinding: <why>`, through
+`scratch_tree`'s fallible reporter onto the process's real stderr, which
+the child harness's capture of its panic message does not hold. A guard
+that stopped reporting on that arm would lose a tree on a failing run in
+silence, and this reads red. The line must name the replacement's root,
+`upstroke-prelock-replaced-`, so a report about some other tree does not
+satisfy it. Unix only, with its child.
 
 ## `fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {` › `env: Vec::new(),`
 
 Nothing to pass: the child derives its own scratch root from
-the temp directory and its own pid, so the two processes
-cannot collide and there is no state to hand over.
+the temp directory and a fresh ULID of its own, so the two
+processes cannot collide and there is no state to hand over.
 
 ## `fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {` › `assert_eq!(`
 
