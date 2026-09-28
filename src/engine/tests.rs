@@ -9773,6 +9773,18 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
 
 const ROLE_PROBE: &str = "UPSTROKE_V1_ROLE_PROBE";
 
+/// The repository a role creates inside its own working directory. Its name is
+/// short because Windows' `MAX_PATH` is 260 characters and a gate's working
+/// directory is the product's snapshot, nested in the private root at
+/// `runs/<ULID>/gate-worktrees/worktrees/upstroke-gates-<pid>-<ULID>`: the
+/// longest path Git writes in it, `.git/refs/replace/<40 hex>.lock`, is checked
+/// against [`WINDOWS_MAX_PATH`] as the `path-budget` record, so a name that grows
+/// fails there, with the length, before Git's "Filename too long".
+const INSIDE_FIXTURE: &str = "fx";
+
+/// Windows' `MAX_PATH`, 260 characters with the terminating null.
+const WINDOWS_MAX_PATH: usize = 260;
+
 #[derive(Clone)]
 struct RoleProbe {
     worker: CommandSpec,
@@ -9989,8 +10001,26 @@ fn v1_role_probe(role: &str) {
             ),
         }
     }
-    for (place, parent) in [("inside", here.clone()), ("outside", dir.join("fixtures"))] {
-        let read = probe_fixture(&parent, &format!("fixture-{role}-{}", std::process::id()));
+    let outside = format!("fixture-{role}-{}", std::process::id());
+    for (place, parent, name) in [
+        ("inside", here.clone(), INSIDE_FIXTURE),
+        ("outside", dir.join("fixtures"), outside.as_str()),
+    ] {
+        if place == "inside" {
+            let deepest = parent
+                .join(name)
+                .join(".git")
+                .join("refs")
+                .join("replace")
+                .join(format!("{}.lock", "0".repeat(40)));
+            let length = deepest.to_string_lossy().chars().count();
+            note(
+                "path-budget",
+                !cfg!(windows) || length < WINDOWS_MAX_PATH,
+                format!("{length} {}", deepest.display()),
+            );
+        }
+        let read = probe_fixture(&parent, name);
         note(
             &format!("fixture-{place}"),
             read.as_deref() == Ok("replacing"),
@@ -10263,7 +10293,7 @@ fn v1_role_graph_helper() {
     fs::create_dir_all(probe.join("fixtures")).expect("the fixtures' parent");
     fs::create_dir_all(probe.join("log")).expect("the records' directory");
 
-    let (_tree, repo) = temp_engine_repo("v1rolegraph");
+    let (_tree, repo) = temp_engine_repo("v1g");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -10421,7 +10451,7 @@ fn v1_own_fixture_helper() {
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-own-fixture");
     let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
-    let (_tree, repo) = temp_engine_repo("v1ownfixture");
+    let (_tree, repo) = temp_engine_repo("v1o");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -10475,7 +10505,7 @@ fn v1_configuration_helper() {
     }
     let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
     let truthful = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").expect("the challenge"));
-    let (_tree, repo) = temp_engine_repo("v1configuration");
+    let (_tree, repo) = temp_engine_repo("v1c");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
@@ -10603,7 +10633,7 @@ fn v1_siblings_helper() {
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-siblings");
     let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
-    let (_tree, repo) = temp_engine_repo("v1siblings");
+    let (_tree, repo) = temp_engine_repo("v1s");
     seed(
         &repo,
         "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
@@ -10667,13 +10697,14 @@ fn v1_siblings_helper() {
             (sibling, records, child)
         })
         .collect();
-    for (sibling, records, child) in children {
-        let out = child.wait_with_output().expect("a sibling run");
-        assert!(
-            out.status.success(),
-            "sibling {sibling} ended {:?}",
-            out.status
-        );
+    let ended: Vec<_> = children
+        .into_iter()
+        .map(|(sibling, records, mut child)| {
+            (sibling, records, child.wait().expect("a sibling run"))
+        })
+        .collect();
+    for (sibling, records, status) in ended {
+        assert!(status.success(), "sibling {sibling} ended {status:?}");
         let (records, _) = take_role_and_operator_records(&records);
         assert_every_role_read_the_recorded_graph(&records, &format!("sibling {sibling}"));
     }
@@ -10748,7 +10779,7 @@ fn v1_shapes_helper() {
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-shapes");
     let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
-    let tree = temp_engine_scratch("v1shapes");
+    let tree = temp_engine_scratch("v1p");
     let root = tree.path();
     let init = |repo: &Path, args: &[&str]| {
         fs::create_dir_all(repo).expect("the repository's directory");
@@ -10759,23 +10790,23 @@ fn v1_shapes_helper() {
     let mut shapes: Vec<(&str, PathBuf)> = Vec::new();
 
     let spelled = if cfg!(windows) {
-        "glob [x] it's spaced"
+        "a [x] '"
     } else {
-        "glob [x]*? it's spaced"
+        "a [x]*? '"
     };
     let repo = root.join(spelled).join("repo");
     init(&repo, &[]);
     shapes.push(("glob characters, spaces and a quote", repo));
 
-    let store = root.join("separate").join("store.git");
-    let repo = root.join("separate").join("repo");
+    let store = root.join("s").join("store.git");
+    let repo = root.join("s").join("repo");
     init(&repo, &["--separate-git-dir", &store.to_string_lossy()]);
     shapes.push(("a separate Git directory", repo));
 
-    let main = root.join("linked").join("main");
+    let main = root.join("l").join("main");
     init(&main, &[]);
     shaped_engine_repo(&main);
-    let repo = root.join("linked").join("repo");
+    let repo = root.join("l").join("repo");
     git_in(
         &main,
         &[
@@ -10791,23 +10822,23 @@ fn v1_shapes_helper() {
 
     #[cfg(unix)]
     {
-        let real = root.join("entered").join("real");
+        let real = root.join("e").join("real");
         init(&real, &[]);
-        let link = root.join("entered").join("repo");
+        let link = root.join("e").join("repo");
         std::os::unix::fs::symlink(&real, &link).expect("a link to the repository");
         shapes.push(("entered through a symbolic link", link));
 
-        let repo = root.join("gitdir-link").join("repo");
+        let repo = root.join("g").join("repo");
         init(&repo, &[]);
-        let elsewhere = root.join("gitdir-link").join("elsewhere.git");
+        let elsewhere = root.join("g").join("elsewhere.git");
         fs::rename(repo.join(".git"), &elsewhere).expect("the Git directory, moved");
         std::os::unix::fs::symlink(&elsewhere, repo.join(".git")).expect("a link to it");
         shapes.push(("a Git directory behind a symbolic link", repo));
     }
     if cfg!(any(windows, target_os = "macos")) {
-        let repo = root.join("case").join("repo");
+        let repo = root.join("c").join("repo");
         init(&repo, &[]);
-        shapes.push(("spelled in another case", root.join("case").join("REPO")));
+        shapes.push(("spelled in another case", root.join("c").join("REPO")));
     }
 
     for (shape, entry) in shapes {
