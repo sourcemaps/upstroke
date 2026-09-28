@@ -745,7 +745,7 @@ fn starts_named_function_item(bytes: &[u8], at: usize) -> bool {
     if at
         .checked_sub(1)
         .and_then(|before| bytes.get(before))
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'#'))
+        .is_some_and(|byte| is_identifier_byte(*byte) || *byte == b'#')
     {
         return false;
     }
@@ -756,7 +756,7 @@ fn starts_named_function_item(bytes: &[u8], at: usize) -> bool {
         && rest
             .iter()
             .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            .is_some_and(|byte| is_identifier_byte(*byte))
 }
 
 struct Identifier<'a> {

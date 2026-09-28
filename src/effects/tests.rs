@@ -2780,6 +2780,10 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
             "an identifier with `fn` after an underscore before a `where`",
             "impl T for x_fn where u8: Copy {\n    m!();\n}\n",
         ),
+        (
+            "an identifier with `fn` after a non-ASCII letter before a `where`",
+            "impl T for \u{c9}fn where u8: Copy {\n    m!();\n}\n",
+        ),
     ] {
         assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
     }
@@ -2932,6 +2936,10 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
         (
             "a const initializer under a compound test-only gate",
             "#[cfg(all(unix, test))]\nconst C: u8 = m!();\n",
+        ),
+        (
+            "a test-only trait and impl whose name ends `fn` after a non-ASCII letter",
+            "#[cfg(test)]\ntrait \u{c9}fn {\n    const LINE: u32;\n}\n#[cfg(test)]\nimpl \u{c9}fn for u8 {\n    const LINE: u32 = line!();\n}\n",
         ),
     ] {
         assert!(

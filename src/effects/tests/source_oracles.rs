@@ -1538,6 +1538,14 @@ pub(super) mod oracles {
                 "#[cfg(test)]\nfn \u{e9}<A, B>() {\n    m!();\n}\n",
             ),
             (
+                "an impl of a trait whose name ends `fn` after a non-ASCII letter",
+                "#[cfg(test)]\nimpl \u{c9}fn for u8 {\n    const LINE: u32 = line!();\n}\n",
+            ),
+            (
+                "a supertrait whose name ends `fn` after a non-ASCII letter, before a `where`",
+                "#[cfg(test)]\ntrait Sub: \u{c9}fn where Self: Sized {\n    fn f(&self) { m!(); }\n}\n",
+            ),
+            (
                 "attributes written before the gate",
                 "#[doc = concat!(\"a\", \"b\")]\n#[inline]\n#[cfg(test)]\n#[allow(dead_code)]\nfn t<A, B>() {}\n",
             ),
@@ -1857,6 +1865,21 @@ pub(super) mod oracles {
                 "an item with no `;` before the next function",
                 "#[cfg(test)]\nstatic S: u8 = 1\nfn kept() {}\nconst Y: u8 = 2;\n",
                 "static S: u8 = 1 fn kept() {} const Y: u8 = 2;",
+            ),
+            (
+                "an item with no `;` before a non-ASCII-named function",
+                "#[cfg(test)]\nstatic S: u8 = 1\nfn \u{e9}() {}\nconst Y: u8 = 2;\n",
+                "static S: u8 = 1 fn \u{e9}() {} const Y: u8 = 2;",
+            ),
+            (
+                "a header with no body before the next function",
+                "#[cfg(test)]\nimpl X\nfn kept() {}\nconst Y: u8 = 2;\n",
+                "impl X fn kept() {} const Y: u8 = 2;",
+            ),
+            (
+                "a header with no body before a non-ASCII-named function",
+                "#[cfg(test)]\nimpl X\nfn \u{e9}() {}\nconst Y: u8 = 2;\n",
+                "impl X fn \u{e9}() {} const Y: u8 = 2;",
             ),
             (
                 "an item its block closes before its `;`",
