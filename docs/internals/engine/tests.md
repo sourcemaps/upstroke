@@ -2749,9 +2749,23 @@ and none panics: the witness wants the whole record, not the first failure.
   through the snapshot's `HEAD` as recorded, find that replacement in `git
   replace -l`, and see `git diff --exit-code HEAD` pass and `git status
   --porcelain` empty before anything else touches their directory.
+- `path-budget`: the length of the longest path Git writes in the repository
+  the role makes inside its working directory,
+  `fx/.git/refs/replace/<40 hex>.lock`. It fails on Windows at 260 characters,
+  `MAX_PATH`. A gate's working directory is the product's snapshot, deep in the
+  private root, so this is where a name that grows runs out first, and the record
+  says so with the length before Git's "Filename too long" does. On the CI guest
+  the longest is 249 characters, for the shapes witness's glob directory.
 - `fixture-inside`, `fixture-outside`: the role makes a repository inside its
-  own working directory and one outside it, installs a replacement in each and
-  reads it back replaced. A repository a role creates keeps its replacements.
+  own working directory (named `fx`, for the budget above) and one outside it,
+  installs a replacement in each and reads it back replaced. A repository a role
+  creates keeps its replacements. Its commit passes
+  `-c maintenance.autoDetach=false`, which works around
+  `PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE` on the owner's ruling of
+  2026-09-28. Git 2.55.0's commit otherwise detaches its auto-maintenance. It
+  forks, the parent exits and the child calls `setsid()`, and on macOS the role
+  that ran the commit then died of `SIGHUP` in 15 of 20 probes. The witnesses
+  avoid that trigger. The defect is filed with its reproduction, not absent.
 
 A gate exits 1 when any line failed, so a failing gate also fails the attempt;
 workers and reviewers exit 0 and leave the verdict to the record.
@@ -2830,7 +2844,10 @@ files are byte-identical after each; the resume's roles read the recorded graph.
 Two runs at once, in two linked worktrees of one repository with replacements,
 each in a process of its own, over one private root that holds no include yet.
 Both complete; every role of both read the recorded graph; the shared include
-holds its exact bytes afterwards; no configuration file changed. The sibling
+holds its exact bytes afterwards; no configuration file changed. The helper
+waits for both runs before judging either. A failing sibling's assertion used to
+unwind the helper, and its scratch-tree guard deleted the tree the other sibling
+was still running in. The sibling
 checkouts are created with `--no-replace-objects -c core.useReplaceRefs=false`,
 because a checkout written through the commit replacement differs from what its
 HEAD records and the run refuses it as dirty, correctly.

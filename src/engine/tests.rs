@@ -9863,11 +9863,18 @@ fn probe_fixture(parent: &Path, name: &str) -> Result<String, String> {
         git(&["init", "-q"])?;
         fs::write(fixture.join("f.txt"), "recorded\n").map_err(|error| error.to_string())?;
         git(&["add", "f.txt"])?;
+        // `maintenance.autoDetach=false` works around
+        // PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE, owner ruling
+        // 2026-09-28: a commit whose auto-maintenance detaches forks, exits and
+        // calls setsid, and on macOS the role that ran it then dies of SIGHUP.
+        // The witnesses avoid that trigger; the defect is filed, not absent.
         git(&[
             "-c",
             "user.name=probe",
             "-c",
             "user.email=probe@upstroke.local",
+            "-c",
+            "maintenance.autoDetach=false",
             "commit",
             "-q",
             "-m",
