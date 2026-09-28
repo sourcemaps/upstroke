@@ -392,22 +392,23 @@ fn next_test_only_attribute(source: &str, blanked: &str, from: usize) -> Option<
 }
 
 fn configures_test_only(source: &str, blanked: &str, open: usize) -> bool {
+    gate_predicate(source, blanked, open).is_some_and(|predicate| entails_test(&predicate))
+}
+
+fn gate_predicate(source: &str, blanked: &str, open: usize) -> Option<Predicate> {
     let bytes = blanked.as_bytes();
     let name = past_whitespace(bytes, open + 1);
     let name_end = identifier_from(bytes, name).end;
     let paren = past_whitespace(bytes, name_end);
     if bytes.get(name..name_end) != Some(b"cfg".as_slice()) || bytes.get(paren) != Some(&b'(') {
-        return false;
+        return None;
     }
-    let Some(paren_close) = matching(bytes, paren, b'(', b')') else {
-        return false;
-    };
+    let paren_close = matching(bytes, paren, b'(', b')')?;
     source
         .get(paren + 1..paren_close)
         .zip(blanked.get(paren + 1..paren_close))
         .and_then(|(raw, shape)| with_literal_identity(raw, shape))
         .and_then(|written| parse_predicate(&written).ok())
-        .is_some_and(|predicate| entails_test(&predicate))
 }
 
 fn past_outer_attributes(source: &str, bytes: &[u8], from: usize) -> usize {

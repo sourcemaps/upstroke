@@ -18,8 +18,9 @@ pub(super) mod oracles {
         crate_roots, is_the_literal_mod_tests_form, repo_root, scanned_sources,
     };
     use crate::effects::{
-        CLASSIFIED_MODULES, RUSTC_WHITESPACE, TOPOLOGY_MODULES, blank_comments,
-        blank_comments_and_strings, externally_reachable_fns, production_code, production_region,
+        CLASSIFIED_MODULES, Predicate, RUSTC_WHITESPACE, TOPOLOGY_MODULES, attribute_open,
+        blank_comments, blank_comments_and_strings, externally_reachable_fns, gate_predicate,
+        next_test_only_attribute, parse_predicate, production_code, production_region,
         reachable_fn_multiplicity,
     };
 
@@ -2053,34 +2054,112 @@ pub(super) mod oracles {
         assert!(!region.contains("mod tests;"), "{region:?}");
     }
 
+    struct AboveTheCut {
+        truncated: String,
+        whole: String,
+        gates: usize,
+    }
+
+    fn read_above_the_cut(path: &str, source: &str) -> AboveTheCut {
+        const CUT: &str = "#[cfg(test)]";
+        let region = production_region(source);
+        let truncated = blank_comments_and_strings(&region);
+        let whole = production_code(source);
+        let prefix = whole.get(..truncated.len()).unwrap_or(&whole);
+        let with_its_gate =
+            production_code(source.get(..region.len() + CUT.len()).unwrap_or(source));
+        let above_the_cut = with_its_gate
+            .get(..truncated.len())
+            .unwrap_or(&with_its_gate);
+        assert_eq!(
+            prefix.replace(' ', ""),
+            above_the_cut.replace(' ', ""),
+            "{path}: above the truncating cut, this region reads the whole file differently \
+             from the text above the cut read with the gate that makes the cut"
+        );
+        assert!(
+            above_the_cut.len() == truncated.len()
+                && above_the_cut
+                    .bytes()
+                    .zip(truncated.bytes())
+                    .all(|(kept, cut)| kept == cut || kept == b' '),
+            "{path}: the truncating region keeps code this one does not, other than code this \
+             one removes as test-only"
+        );
+        let mut gates = 0_usize;
+        let mut from = 0;
+        while let Some((hash, close)) = next_test_only_attribute(&region, &truncated, from) {
+            let predicate = attribute_open(&region, truncated.as_bytes(), hash)
+                .and_then(|(_, open)| gate_predicate(&region, &truncated, open));
+            assert!(
+                predicate.as_ref().is_some_and(is_false_wherever_test_is),
+                "{path}: above the truncating cut, this region removes the element under `{}` as \
+                 test-only, and its predicate holds under some assignment of its names with \
+                 `test` false",
+                region.get(hash..=close).unwrap_or_default()
+            );
+            gates += 1;
+            from = close + 1;
+        }
+        AboveTheCut {
+            truncated,
+            whole,
+            gates,
+        }
+    }
+
+    const MOST_NAMES_EVALUATED: usize = 20;
+
+    fn is_false_wherever_test_is(predicate: &Predicate) -> bool {
+        fn names<'a>(predicate: &'a Predicate, into: &mut BTreeSet<&'a str>) {
+            match predicate {
+                Predicate::Test => {}
+                Predicate::Other(name) => {
+                    into.insert(name);
+                }
+                Predicate::All(parts) | Predicate::Any(parts) => {
+                    for part in parts {
+                        names(part, into);
+                    }
+                }
+                Predicate::Not(inner) => names(inner, into),
+            }
+        }
+        fn holds(predicate: &Predicate, set: &dyn Fn(&str) -> bool) -> bool {
+            match predicate {
+                Predicate::Test => false,
+                Predicate::Other(name) => set(name),
+                Predicate::All(parts) => parts.iter().all(|part| holds(part, set)),
+                Predicate::Any(parts) => parts.iter().any(|part| holds(part, set)),
+                Predicate::Not(inner) => !holds(inner, set),
+            }
+        }
+        let mut found = BTreeSet::new();
+        names(predicate, &mut found);
+        let found: Vec<&str> = found.into_iter().collect();
+        assert!(
+            found.len() <= MOST_NAMES_EVALUATED,
+            "a predicate naming {} configuration names is refused rather than evaluated: {predicate:?}",
+            found.len()
+        );
+        (0..1_u32 << found.len()).all(|assignment| {
+            !holds(predicate, &|name| {
+                found
+                    .iter()
+                    .position(|each| *each == name)
+                    .is_some_and(|at| assignment >> at & 1 == 1)
+            })
+        })
+    }
+
     pub(in crate::effects::tests) fn the_whole_region_contains_the_truncated_one() {
         let mut compared = 0_usize;
         let mut strictly_larger = 0_usize;
         let mut gained: BTreeSet<String> = BTreeSet::new();
-        let mut narrowed: BTreeSet<String> = BTreeSet::new();
         for (path, source) in scanned_sources() {
-            let truncated = blank_comments_and_strings(&production_region(&source));
-            let whole = production_code(&source);
-            let prefix = &whole[..truncated.len().min(whole.len())];
-            let above_the_cut = production_code(&production_region(&source));
-            assert_eq!(
-                prefix.replace(' ', ""),
-                above_the_cut.replace(' ', ""),
-                "{path}: above the truncating cut, this region reads the whole file differently \
-                 from the text above the cut read alone"
-            );
-            assert!(
-                above_the_cut.len() == truncated.len()
-                    && above_the_cut
-                        .bytes()
-                        .zip(truncated.bytes())
-                        .all(|(kept, cut)| kept == cut || kept == b' '),
-                "{path}: the truncating region keeps code this one does not, other than code this \
-                 one removes as test-only"
-            );
-            if above_the_cut != truncated {
-                narrowed.insert(path.clone());
-            }
+            let AboveTheCut {
+                truncated, whole, ..
+            } = read_above_the_cut(&path, &source);
             compared += 1;
             if whole.trim().len() > truncated.trim().len() {
                 strictly_larger += 1;
@@ -2098,17 +2177,59 @@ pub(super) mod oracles {
             "the legacy coordinator — 35 of 1599 lines under the truncating region — must be one \
              of the files that gains, or the census that adopted this helper still cannot see it"
         );
-        assert_eq!(
-            narrowed,
-            BTreeSet::from([
-                "src/agent/proc.rs".to_owned(),
-                "src/agent/proc/ambient.rs".to_owned(),
-            ]),
-            "the files where this region removes, above the truncating cut, an item the truncating \
-             region reads as production moved. That region cuts at the literal `#[cfg(test)]` and \
-             reads nothing else; this one also removes an item under a `cfg` that entails `test` \
-             in any other spelling -- `all(unix, test)` in these two"
-        );
+
+        const SAME_PATH: &str =
+            "pub(crate) fn same_path(left: &Path, right: &Path) -> bool {\n    left == right\n}\n";
+        for (what, above, gates) in [
+            ("the gate alone", "#[cfg(test)]\n", 0),
+            (
+                "an attribute above the gate that makes the cut",
+                "#[allow(dead_code)]\n#[cfg(test)]\n",
+                0,
+            ),
+            (
+                "attributes and a comment above the gate that makes the cut",
+                "#[inline]\n// a note\n#[allow(dead_code)]\n#[cfg(test)]\n",
+                0,
+            ),
+            (
+                "a spelling of the gate other than the one that cuts",
+                "#[cfg(all(test))]\n",
+                1,
+            ),
+            (
+                "an attribute above a compound gate",
+                "#[allow(dead_code)]\n#[cfg(all(unix, test))]\n",
+                1,
+            ),
+            ("a gate that no build satisfies", "#[cfg(any())]\n", 1),
+        ] {
+            let source = format!(
+                "fn before() {{}}\n{above}{SAME_PATH}fn after() {{}}\n#[cfg(test)]\nmod tests {{}}\n"
+            );
+            let read = read_above_the_cut(what, &source);
+            assert_eq!(read.gates, gates, "{what}: {source:?}");
+            assert!(
+                !read.whole.contains("same_path") && read.whole.contains("fn after()"),
+                "{what}: the element is not what the region removed: {:?}",
+                read.whole
+            );
+        }
+        for (predicate, entails) in [
+            ("test", true),
+            ("all(unix, test)", true),
+            ("not(not(test))", true),
+            ("any()", true),
+            ("all(unix, not(unix))", true),
+            ("any(unix, test)", false),
+            ("not(test)", false),
+            ("all()", false),
+            ("unix", false),
+            ("test = \"x\"", false),
+        ] {
+            let parsed = parse_predicate(predicate).unwrap_or_else(|refusal| panic!("{refusal}"));
+            assert_eq!(is_false_wherever_test_is(&parsed), entails, "{predicate}");
+        }
 
         const SENTINEL: &str = "\npub fn sentinel_below_every_configured_item() {}\n";
         let mut carried = 0_usize;
