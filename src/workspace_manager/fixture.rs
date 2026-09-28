@@ -2369,11 +2369,30 @@ pub(crate) const REPLACEMENT_WITNESS: &str = "UPSTROKE_PR271_REPLACEMENT_WITNESS
 /// could pass without its fix, and each repair reached only the witness a
 /// reviewer had named; there is now one door and no witness beside it.
 pub(crate) fn run_replacement_witness_child(test: &str) -> std::process::ExitStatus {
+    run_challenged_replacement_witness_child(test, &[])
+}
+
+/// [`run_replacement_witness_child`], with `challenge` set on the child
+/// **after** every ambient control is taken away.
+///
+/// The door the witnesses that must beat a configured `core.useReplaceRefs =
+/// true` go through. Set before the neutralisation, a challenge is exactly
+/// what the neutralisation exists to remove, and the witness would measure
+/// an environment that never challenged it; set after, the child carries the
+/// challenge and nothing else ambient. Each such witness asserts that its
+/// challenge reached Git, at every scope it names, before it measures.
+pub(crate) fn run_challenged_replacement_witness_child(
+    test: &str,
+    challenge: &[(&str, OsString)],
+) -> std::process::ExitStatus {
     let mut command = Command::new(std::env::current_exe().expect("this test binary"));
     command
         .args(["--exact", test, "--ignored", "--nocapture"])
         .env(REPLACEMENT_WITNESS, "1");
     without_ambient_replacement_controls(&mut command);
+    for (key, value) in challenge {
+        command.env(key, value);
+    }
     command.status().expect("spawn the witness child")
 }
 

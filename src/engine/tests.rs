@@ -92,6 +92,7 @@ struct FakeAdapter {
 
     reports_cost: bool,
     calls: Mutex<Calls>,
+    role_probe: Option<RoleProbe>,
 }
 
 #[derive(Default)]
@@ -121,6 +122,7 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             calls: Mutex::new(Calls::default()),
+            role_probe: None,
         }
     }
 
@@ -132,7 +134,13 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             calls: Mutex::new(Calls::default()),
+            role_probe: None,
         }
+    }
+
+    fn probing(mut self, probe: RoleProbe) -> Self {
+        self.role_probe = Some(probe);
+        self
     }
 
     fn broken(mut self, message: &'static str) -> Self {
@@ -318,6 +326,9 @@ impl AgentAdapter for FakeAdapter {
                 })?;
             }
 
+            if let Some(probe) = &self.role_probe {
+                return Ok(probe.reviewer.clone());
+            }
             return Ok(shell_spec(&format!("echo {REVIEW_MARKER}")));
         }
         let index = {
@@ -398,6 +409,10 @@ impl AgentAdapter for FakeAdapter {
             fs::write(&questions, "not a directory\n").map_err(|e| UpstrokeError::Agent {
                 message: format!("fake could not block question writes: {e}"),
             })?;
+        }
+        if let Some(probe) = &self.role_probe {
+            probe.read_as_the_operator_does(&run.workspace);
+            return Ok(probe.worker.clone());
         }
         Ok(shell_spec("exit 0"))
     }
@@ -533,6 +548,11 @@ struct FakeSource {
 impl FakeSource {
     fn copilot(&self) -> &FakeAdapter {
         self.copilot.as_ref().expect("this source has a copilot")
+    }
+
+    fn probing_with(mut self, probe: RoleProbe) -> Self {
+        self.adapter = self.adapter.probing(probe);
+        self
     }
 }
 
@@ -9749,4 +9769,614 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     drop(hooks);
 
     resume_parked(&tree, &repo, &run_id, &record, tag);
+}
+
+const ROLE_PROBE: &str = "UPSTROKE_V1_ROLE_PROBE";
+
+#[derive(Clone)]
+struct RoleProbe {
+    worker: CommandSpec,
+    reviewer: CommandSpec,
+    operator_reads: Option<(PathBuf, String)>,
+}
+
+impl RoleProbe {
+    fn new(overlay: &[(&str, &str)]) -> Self {
+        let exe = std::env::current_exe()
+            .expect("this test binary")
+            .to_string_lossy()
+            .into_owned();
+        let helper = |test: &str| {
+            let mut spec = CommandSpec::new(exe.clone())
+                .arg("--exact")
+                .arg(test)
+                .arg("--ignored")
+                .arg("--nocapture");
+            for (key, value) in overlay {
+                spec = spec.env(*key, *value);
+            }
+            spec
+        };
+        Self {
+            worker: helper("engine::tests::v1_role_probe_worker"),
+            reviewer: helper("engine::tests::v1_role_probe_reviewer"),
+            operator_reads: None,
+        }
+    }
+
+    fn reading_as_the_operator(mut self, record: &Path, blob: &str) -> Self {
+        self.operator_reads = Some((record.to_path_buf(), blob.to_owned()));
+        self
+    }
+
+    fn read_as_the_operator_does(&self, workspace: &Path) {
+        if let Some((record, blob)) = &self.operator_reads {
+            let read = git_in(workspace, &["cat-file", "-p", blob]);
+            fs::write(
+                record.join(format!("operator-{}", crate::ulid::ulid())),
+                format!("operator blob {}\n", read.trim()),
+            )
+            .expect("the operator's reading");
+        }
+    }
+}
+
+fn role_probe_gates() -> String {
+    format!(
+        "[[gates]]\nname = \"role-probe\"\n\
+         cmd = '\"{}\" --exact engine::tests::v1_role_probe_gate --ignored --nocapture'\n",
+        std::env::current_exe().expect("this test binary").display()
+    )
+}
+
+fn probe_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+fn probe_fixture(parent: &Path, name: &str) -> Result<String, String> {
+    let fixture = parent.join(name);
+    let read = (|| {
+        fs::create_dir_all(&fixture).map_err(|error| error.to_string())?;
+        let git = |args: &[&str]| probe_git(&fixture, args).map(|out| out.trim().to_owned());
+        git(&["init", "-q"])?;
+        fs::write(fixture.join("f.txt"), "recorded\n").map_err(|error| error.to_string())?;
+        git(&["add", "f.txt"])?;
+        git(&[
+            "-c",
+            "user.name=probe",
+            "-c",
+            "user.email=probe@upstroke.local",
+            "commit",
+            "-q",
+            "-m",
+            "recorded",
+        ])?;
+        let recorded = git(&["rev-parse", "HEAD:f.txt"])?;
+        fs::write(fixture.join("replacing.txt"), "replacing\n")
+            .map_err(|error| error.to_string())?;
+        let replacing = git(&["hash-object", "-w", "replacing.txt"])?;
+        git(&["replace", &recorded, &replacing])?;
+        git(&["cat-file", "-p", &recorded])
+    })();
+    let _ = fs::remove_dir_all(&fixture);
+    read
+}
+
+fn v1_role_probe(role: &str) {
+    let Some(dir) = std::env::var_os(ROLE_PROBE) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let spec = fs::read_to_string(dir.join("spec")).expect("the spec the witness wrote");
+    let here = std::env::current_dir().expect("this role's working directory");
+    let mut record: Vec<String> = Vec::new();
+    let mut note = |check: &str, ok: bool, detail: String| {
+        let verdict = if ok { "ok" } else { "FAIL" };
+        record.push(format!("{role} {check} {verdict} {detail}"));
+    };
+    note(
+        "variable",
+        std::env::var_os("GIT_NO_REPLACE_OBJECTS").is_none(),
+        "GIT_NO_REPLACE_OBJECTS is not in this role's environment".to_owned(),
+    );
+    if role == "gate" && spec.lines().any(|line| line == "worktree true") {
+        let set = probe_git(
+            &here,
+            &["config", "--worktree", "core.useReplaceRefs", "true"],
+        );
+        note("worktree-true", set.is_ok(), format!("{set:?}"));
+    }
+    let trimmed = |read: Result<String, String>| read.map(|out| out.trim().to_owned());
+    for line in spec.lines() {
+        let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let (first, second) = rest.split_once(' ').unwrap_or((rest, ""));
+        match kind {
+            "include" => {
+                let origin = probe_git(
+                    &here,
+                    &[
+                        "config",
+                        "-z",
+                        "--show-origin",
+                        "--get",
+                        "core.useReplaceRefs",
+                    ],
+                );
+                let expected = format!("file:{}\0false\0", rest.replace('\\', "/"));
+                let read = origin.clone().map(|origin| origin.replace('\\', "/"));
+                note("include", read == Ok(expected), format!("{origin:?}"));
+            }
+            "blob" => {
+                let read = trimmed(probe_git(&here, &["cat-file", "-p", first]));
+                note("blob", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "tree" => {
+                let read = trimmed(probe_git(
+                    &here,
+                    &["rev-parse", &format!("{first}:inner.txt")],
+                ));
+                note("tree", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "commit" => {
+                let read = trimmed(probe_git(&here, &["log", "-1", "--format=%s", first]));
+                note("commit", read.as_deref() == Ok(second), format!("{read:?}"));
+            }
+            "candidate" if role == "worker" => {
+                fs::write(here.join("candidate.txt"), format!("{first}\n"))
+                    .expect("the worker's candidate");
+                let replacing = dir.join(format!("replacing-{}", std::process::id()));
+                fs::write(&replacing, format!("{second}\n")).expect("the replacing content");
+                let recorded = trimmed(probe_git(&here, &["hash-object", "-w", "candidate.txt"]));
+                let replacement = trimmed(probe_git(
+                    &here,
+                    &["hash-object", "-w", &replacing.to_string_lossy()],
+                ));
+                let installed = match (&recorded, &replacement) {
+                    (Ok(recorded), Ok(replacement)) => {
+                        probe_git(&here, &["replace", "-f", recorded, replacement])
+                    }
+                    _ => Err(format!("{recorded:?} {replacement:?}")),
+                };
+                note(
+                    "candidate-replaced",
+                    installed.is_ok(),
+                    format!("{installed:?}"),
+                );
+                let read = match &recorded {
+                    Ok(recorded) => trimmed(probe_git(&here, &["cat-file", "-p", recorded])),
+                    Err(error) => Err(error.clone()),
+                };
+                note(
+                    "candidate",
+                    read.as_deref() == Ok(first),
+                    format!("{read:?}"),
+                );
+            }
+            "candidate" => {
+                let read = trimmed(probe_git(&here, &["show", "HEAD:candidate.txt"]));
+                note(
+                    "candidate",
+                    read.as_deref() == Ok(first),
+                    format!("{read:?}"),
+                );
+                let recorded = trimmed(probe_git(&here, &["hash-object", "candidate.txt"]));
+                let listed = trimmed(probe_git(&here, &["replace", "-l"]));
+                note(
+                    "candidate-replacement-installed",
+                    matches!((&recorded, &listed), (Ok(id), Ok(list)) if list.lines().any(|line| line == id)),
+                    format!("{recorded:?} in {listed:?}"),
+                );
+                let diff = probe_git(&here, &["diff", "--quiet", "--exit-code", "HEAD"]);
+                note("diff", diff.is_ok(), format!("{diff:?}"));
+                let status = trimmed(probe_git(&here, &["status", "--porcelain"]));
+                note("status", status.as_deref() == Ok(""), format!("{status:?}"));
+            }
+            "worktree" => {}
+            _ => note(
+                "spec",
+                false,
+                format!("a spec line this probe cannot read: {line:?}"),
+            ),
+        }
+    }
+    for (place, parent) in [("inside", here.clone()), ("outside", dir.join("fixtures"))] {
+        let read = probe_fixture(&parent, &format!("fixture-{role}-{}", std::process::id()));
+        note(
+            &format!("fixture-{place}"),
+            read.as_deref() == Ok("replacing"),
+            format!("{read:?}"),
+        );
+    }
+    let failed = record.iter().any(|line| line.contains(" FAIL "));
+    let log = dir.join("log");
+    fs::create_dir_all(&log).expect("the record's directory");
+    fs::write(
+        log.join(format!(
+            "{role}-{}-{}",
+            std::process::id(),
+            crate::ulid::ulid()
+        )),
+        record.join("\n") + "\n",
+    )
+    .expect("the record");
+    if role == "gate" && failed {
+        std::process::exit(1);
+    }
+}
+
+#[test]
+#[ignore = "a v0.1 worker the role witnesses start"]
+fn v1_role_probe_worker() {
+    v1_role_probe("worker");
+}
+
+#[test]
+#[ignore = "a v0.1 gate the role witnesses start"]
+fn v1_role_probe_gate() {
+    v1_role_probe("gate");
+}
+
+#[test]
+#[ignore = "a v0.1 reviewer the role witnesses start"]
+fn v1_role_probe_reviewer() {
+    use std::io::Write as _;
+
+    if std::env::var_os(ROLE_PROBE).is_none() {
+        return;
+    }
+    v1_role_probe("reviewer");
+    std::io::stdout()
+        .write_all(format!("{REVIEW_MARKER}\n").as_bytes())
+        .expect("the review marker");
+}
+
+fn take_role_records(probe: &Path) -> Vec<String> {
+    let log = probe.join("log");
+    let mut lines = Vec::new();
+    let mut entries: Vec<PathBuf> = fs::read_dir(&log)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    for entry in entries {
+        let text = fs::read_to_string(&entry).expect("a role's record");
+        lines.extend(text.lines().map(str::to_owned));
+        fs::remove_file(&entry).expect("the record, taken");
+    }
+    lines
+}
+
+fn assert_every_role_read_the_recorded_graph(records: &[String], when: &str) {
+    for role in ["worker", "gate", "reviewer"] {
+        assert!(
+            records
+                .iter()
+                .any(|line| line.starts_with(&format!("{role} "))),
+            "{when}: no {role} ran a probe: {records:#?}"
+        );
+    }
+    let failed: Vec<&String> = records
+        .iter()
+        .filter(|line| !line.contains(" ok "))
+        .collect();
+    assert!(failed.is_empty(), "{when}: {failed:#?}");
+}
+
+fn take_role_and_operator_records(probe: &Path) -> (Vec<String>, Vec<String>) {
+    take_role_records(probe)
+        .into_iter()
+        .partition(|line| !line.starts_with("operator "))
+}
+
+fn challenge_every_scope(truthful: &Path, probe: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    vec![
+        ("GIT_CONFIG_SYSTEM", truthful.as_os_str().to_owned()),
+        ("GIT_CONFIG_NOSYSTEM", "0".into()),
+        ("GIT_CONFIG_GLOBAL", truthful.as_os_str().to_owned()),
+        ("GIT_CONFIG_COUNT", "1".into()),
+        ("GIT_CONFIG_KEY_0", "core.useReplaceRefs".into()),
+        ("GIT_CONFIG_VALUE_0", "true".into()),
+        (
+            "GIT_CONFIG_PARAMETERS",
+            "'core.useReplaceRefs'='true'".into(),
+        ),
+        (ROLE_PROBE, probe.as_os_str().to_owned()),
+    ]
+}
+
+const OVERLAY_SAYS_TRUE: [(&str, &str); 4] = [
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "core.useReplaceRefs"),
+    ("GIT_CONFIG_VALUE_0", "true"),
+    ("GIT_CONFIG_PARAMETERS", "'core.useReplaceRefs'='true'"),
+];
+
+fn install_a_replaced_graph(repo: &Path, probe: &Path) -> (String, String) {
+    fs::create_dir_all(repo.join("dir")).expect("the replaced tree's directory");
+    fs::write(repo.join("blob.txt"), "recorded-blob\n").expect("the replaced blob");
+    fs::write(repo.join("dir").join("inner.txt"), "recorded-tree\n").expect("the replaced tree");
+    git_in(repo, &["add", "-A"]);
+    git_in(repo, &["commit", "-q", "-m", "recorded-commit"]);
+    let id = |spec: &str| git_in(repo, &["rev-parse", spec]).trim().to_owned();
+    let (commit, blob, tree, inner) = (
+        id("HEAD"),
+        id("HEAD:blob.txt"),
+        id("HEAD:dir"),
+        id("HEAD:dir/inner.txt"),
+    );
+    let written = |name: &str, content: &str| {
+        let file = probe.join(name);
+        fs::write(&file, content).expect("a replacing object's content");
+        git_in(repo, &["hash-object", "-w", &file.to_string_lossy()])
+            .trim()
+            .to_owned()
+    };
+    let replacing_blob = written("replacing-blob", "replacing-blob\n");
+    let replacing_inner = written("replacing-inner", "replacing-tree\n");
+    let index = probe.join("replacing-index");
+    let with_index = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    with_index(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{replacing_inner},inner.txt"),
+    ]);
+    let replacing_tree = with_index(&["write-tree"]);
+    let replacing_commit = git_in(
+        repo,
+        &[
+            "commit-tree",
+            &id("HEAD^{tree}"),
+            "-p",
+            "HEAD^",
+            "-m",
+            "replacing-commit",
+        ],
+    )
+    .trim()
+    .to_owned();
+    git_in(repo, &["replace", &blob, &replacing_blob]);
+    git_in(repo, &["replace", &tree, &replacing_tree]);
+    git_in(repo, &["replace", &commit, &replacing_commit]);
+    crate::workspace_manager::fixture::pin_replacement_refs_in(repo);
+    git_in(repo, &["config", "extensions.worktreeConfig", "true"]);
+    git_in(
+        repo,
+        &["config", "--worktree", "core.useReplaceRefs", "true"],
+    );
+    (
+        blob.clone(),
+        format!(
+            "blob {blob} recorded-blob\ntree {tree} {inner}\ncommit {commit} recorded-commit\n\
+             candidate recorded-candidate replacing-candidate\nworktree true\n"
+        ),
+    )
+}
+
+fn assert_every_scope_says_true(repo: &Path) {
+    let scopes = git_in(
+        repo,
+        &["config", "--show-scope", "--get-all", "core.useReplaceRefs"],
+    );
+    for scope in ["system", "global", "local", "worktree"] {
+        assert!(
+            scopes.lines().any(|line| line == format!("{scope}\ttrue")),
+            "the challenge must reach Git at `{scope}` scope: {scopes:?}"
+        );
+    }
+    assert_eq!(
+        scopes
+            .lines()
+            .filter(|line| *line == "command\ttrue")
+            .count(),
+        2,
+        "and at command scope twice, `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS`: {scopes:?}"
+    );
+    assert!(
+        !scopes.contains("false"),
+        "nothing the operator has says `false`: {scopes:?}"
+    );
+}
+
+fn configuration_of(repo: &Path, also: &[&Path]) -> Vec<(PathBuf, Vec<u8>)> {
+    let common = PathBuf::from(
+        git_in(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .trim(),
+    );
+    let mut files: Vec<PathBuf> = also.iter().map(|file| file.to_path_buf()).collect();
+    let mut named: Vec<PathBuf> = fs::read_dir(&common)
+        .expect("the common directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("config"))
+        })
+        .collect();
+    named.sort();
+    files.extend(named);
+    files
+        .into_iter()
+        .map(|file| {
+            let bytes = fs::read(&file).expect("a configuration file");
+            (file, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn the_v1_conductor_keeps_every_role_on_the_recorded_graph_of_its_own_repository() {
+    let tree = temp_engine_scratch("v1-role-graph");
+    let truthful = tree.path().join("true.gitconfig");
+    fs::write(&truthful, "[core]\n\tuseReplaceRefs = true\n").expect("a `true` for two scopes");
+    let status = crate::workspace_manager::fixture::run_challenged_replacement_witness_child(
+        "engine::tests::v1_role_graph_helper",
+        &challenge_every_scope(&truthful, tree.path()),
+    );
+    assert!(
+        status.success(),
+        "the child runs and resumes a v0.1 run whose worker, gates and reviewers each read \
+         a repository with blob, tree and commit replacements, under `core.useReplaceRefs = \
+         true` at every scope, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_role_graph_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    let probe = PathBuf::from(std::env::var_os(ROLE_PROBE).expect("the probe's directory"));
+    let truthful = PathBuf::from(std::env::var_os("GIT_CONFIG_GLOBAL").expect("the challenge"));
+    fs::create_dir_all(probe.join("fixtures")).expect("the fixtures' parent");
+    fs::create_dir_all(probe.join("log")).expect("the records' directory");
+
+    let (_tree, repo) = temp_engine_repo("v1rolegraph");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(&format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n{}",
+            role_probe_gates()
+        )),
+    );
+    let (blob, spec) = install_a_replaced_graph(&repo, &probe);
+    let include = private_root_for(&repo)
+        .join("git")
+        .join("recorded-objects.gitconfig");
+    fs::write(
+        probe.join("spec"),
+        format!("include {}\n{spec}", include.display()),
+    )
+    .expect("the probe's spec");
+    assert_every_scope_says_true(&repo);
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "the operator's own Git honours the replacements, or nothing below is measured"
+    );
+    let configuration = configuration_of(&repo, &[&truthful]);
+
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let probing =
+        RoleProbe::new(&OVERLAY_SAYS_TRUE).reading_as_the_operator(&probe.join("log"), &blob);
+    let first = run_with(
+        &opts,
+        &source(vec![Effect::EditFile], vec![ReviewBehavior::Fail]).probing_with(probing.clone()),
+    )
+    .expect("the first run");
+    assert_eq!(first.outcome(), RunOutcome::Parked, "{first:?}");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_every_role_read_the_recorded_graph(&records, "the first run");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "while the run's roles read the recorded graph, the operator's own Git kept reading \
+         the replacements: {operator:?}"
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the run changed no Git configuration"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+
+    fs::remove_file(&include).expect("the include, gone before the resume");
+    let question = first
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question[..8],
+        crate::answer::Reply::Text("the widget lives in src/widget.rs".to_owned()),
+    )
+    .expect("answer");
+    let resumed = resume_with(
+        &resume_options(&repo, &first.run_id),
+        &source(vec![Effect::EditFile], vec![ReviewBehavior::Pass]).probing_with(probing),
+    )
+    .expect("the resume");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
+    let (records, operator) = take_role_and_operator_records(&probe);
+    assert_every_role_read_the_recorded_graph(&records, "the resume");
+    assert!(
+        !operator.is_empty()
+            && operator
+                .iter()
+                .all(|line| line == "operator blob replacing-blob"),
+        "{operator:?}"
+    );
+    assert_eq!(
+        fs::read(&include).expect("the include the resume wrote again"),
+        crate::runner::host::RECORDED_OBJECTS_INCLUDE
+    );
+    assert_eq!(
+        configuration_of(&repo, &[&truthful]),
+        configuration,
+        "the resume changed no Git configuration"
+    );
+    assert_eq!(
+        git_in(&repo, &["cat-file", "-p", &blob]).trim(),
+        "replacing-blob",
+        "and afterwards the operator's Git still honours the replacements"
+    );
+    assert_eq!(
+        git_in(
+            &repo,
+            &[
+                "--no-replace-objects",
+                "-c",
+                "core.useReplaceRefs=false",
+                "show",
+                "HEAD:candidate.txt"
+            ]
+        )
+        .trim(),
+        "recorded-candidate",
+        "the task committed the bytes its worker wrote, not the replacement it installed"
+    );
 }
