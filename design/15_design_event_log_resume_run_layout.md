@@ -86,22 +86,21 @@ and `worktree add --detach` materialises `A`, while a process inside that worktr
 through Git sees `B` — `git show HEAD:f` returns the replacement and
 `git status --porcelain` reports the untouched checkout modified. Two trees for one
 snapshot is not a tree §4's "ground truth is the diff" could name, so upstroke removes the ambiguity
-rather than detecting it: every child that runs Git over a snapshot — the manager's own commands and
-read-only reads, and every gate, reviewer and implementer the runners start, on the host runner and
-in a container alike — runs with `GIT_NO_REPLACE_OBJECTS=1`, which the runners compose last. On Git
-2.42 and later the variable is final, and no adapter, image or command overlay can turn it back on.
-On Git 2.40 and 2.41, inside the floor `README.md` states, it is not final: a
-`core.useReplaceRefs = true` in a system, global or repository configuration file, or in
+rather than detecting it. On the schema-4 path every child that runs Git over a snapshot — the
+manager's own commands and read-only reads, and every gate, reviewer and implementer the runners
+start, on the host runner and in a container alike — runs with `GIT_NO_REPLACE_OBJECTS=1`, which the
+runners compose last. On Git 2.42 and later the variable is final, and no adapter, image or command
+overlay can turn it back on. On Git 2.41, the oldest version `README.md` supports, it is not final: a
+`core.useReplaceRefs = true` in a system, global, repository or worktree configuration file, or in
 command-line configuration a child inherits, which is what a `GIT_CONFIG_*` pair in an image or an
 overlay is, turns replacements back on for a child that carries only the variable (measured with Git
-on 2.40.0 and 2.41.0 at each of those places; 2.42.0 and 2.43.0 held). The v0.1 workspace's own
-children pass `-c core.useReplaceRefs=false` as well, which outranks all of them (the next
-paragraph). The manager's children and every runner's role processes carry the variable alone, so on
-2.40 and 2.41 the rule holds for them only where nothing configures
-`core.useReplaceRefs = true` (`PR326-MANAGER-GIT-CHILDREN-CARRY-THE-VARIABLE-ALONE` for
-the manager, `PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` for the schema-4
-runners). A replacement graph is a ref outside the recorded inputs of a run, so a verdict that
-depended on one would not be reproducible from the record; an operator who wants the replaced
+on 2.40.0 and 2.41.0 at each of those places; 2.42.0 and 2.43.0 held). The variable is also
+process-wide, so a role that creates a repository of its own loses that repository's replacements
+too. Both are filed against the schema-4 path, which no supported configuration activates
+(`PR326-MANAGER-GIT-CHILDREN-CARRY-THE-VARIABLE-ALONE` for the manager,
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` for the runners), and the v0.1 path
+below has neither. A replacement graph is a ref outside the recorded inputs of a run, so a verdict
+that depended on one would not be reproducible from the record; an operator who wants the replaced
 history judged rewrites it, and the run judges what the repository then holds. The variable is one
 constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of those boundaries.
 
@@ -109,14 +108,24 @@ constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each 
 snapshot: its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, frozen at
 PR5. Every Git child of that module refuses replacements all the same, built by the one function
 each of them starts from, which reads the same constant and also passes
-`-c core.useReplaceRefs=false`: on Git 2.40 and 2.41 a configured
-`core.useReplaceRefs = true` outranks the variable, and a command-line setting outranks
-every configuration file. The runner the v0.1 conductor installs composes the variable for its
-gates, reviewers and implementers as the schema-4 runners do. So on Git 2.42 and later a v0.1 run
-reads the recorded graph throughout, like a schema-4 run; on 2.40 and 2.41 its role processes do so
-only where nothing configures `core.useReplaceRefs = true`, as the paragraph above says.
-Producer and consumer move together or not at all: a consumer of that workspace must read what its
-own producer wrote or judge a tree nobody created, and a gate reading one graph over a snapshot
+`-c core.useReplaceRefs=false`: on Git 2.41 a configured `core.useReplaceRefs = true` outranks the
+variable, and a command-line setting outranks every configuration file. The runner the v0.1
+conductor installs keeps its gates, reviewers and implementers on the recorded graph of the
+repository the run manages, and of no other repository. For every role it appends two conditional
+includes to `GIT_CONFIG_PARAMETERS`, after every entry the role inherits or its overlay sets —
+`includeIf.gitdir:<common dir>.path` and `includeIf.gitdir:<common dir>/worktrees/*.path` — both
+naming a file that holds `[core] useReplaceRefs = false`. Git reads `GIT_CONFIG_PARAMETERS` after
+every configuration file and after the counted `GIT_CONFIG_*` pairs, so in the managed repository's
+main worktree and in every linked one, the run's snapshots included, that setting comes last; a
+repository a role creates for itself matches neither condition and keeps its replacements. Nothing
+is written into any Git configuration: the file lives in the private root, at
+`<private root>/git/recorded-objects.gitconfig`, every run and resume writes it before its first
+role starts, and the runner refuses to start a role while it is missing or altered. Configuration is
+not an enforcement boundary: a later `git -c core.useReplaceRefs=true` inside a role still wins, and a
+role that clears its environment loses the include. Git 2.40's `git merge-tree` reads a replaced
+commit whatever its configuration says, so the floor is Git 2.41, and a run refuses an older Git by
+name. Producer and consumer move together or not at all: a consumer of that workspace must read what
+its own producer wrote or judge a tree nobody created, and a gate reading one graph over a snapshot
 written from the other fails `git diff --exit-code HEAD` on a checkout nothing has
 touched (measured on git 2.43: in both directions for a replaced tree or commit; for a replaced
 blob, only over a snapshot written from the replaced graph). Until
