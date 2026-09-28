@@ -296,25 +296,26 @@ fn every_composed_environment_disables_replacement_objects() {
     );
 }
 
-fn managed_repository() -> ManagedRepository {
-    let (common, include) = if cfg!(windows) {
-        (
-            r"C:\srv\repo [x]*?\.git",
-            r"C:\Users\upstroke\.upstroke\git\recorded-objects.gitconfig",
-        )
+fn managed_repository() -> (crate::rundir::scratch_tree::ScratchTree, ManagedRepository) {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-scope")
+        .expect("a scratch tree");
+    let name = if cfg!(windows) {
+        "repo [x]"
     } else {
-        (
-            "/srv/repo [x]*?/.git",
-            "/home/upstroke/.upstroke/git/recorded-objects.gitconfig",
-        )
+        "repo [x]*?"
     };
-    ManagedRepository::new(Path::new(common), Path::new(include), GitdirRule::native())
-        .expect("a repository the runner can scope")
+    let common = tree.path().join(name).join(".git");
+    std::fs::create_dir_all(&common).expect("a common directory the scope can look up");
+    let common = std::fs::canonicalize(&common).expect("its canonical path");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let repository = ManagedRepository::new(&common, &include, GitdirRule::native())
+        .expect("a repository the runner can scope");
+    (tree, repository)
 }
 
 #[test]
 fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {
-    let repository = managed_repository();
+    let (_tree, repository) = managed_repository();
     let legacy = HostRunner::for_legacy_workspace(repository.clone());
     assert_eq!(
         legacy.environment().objects(),
@@ -417,26 +418,8 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
 
 #[cfg(unix)]
 #[test]
-fn the_includes_name_the_common_directory_exactly_under_each_posix_rule() {
+fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {
     let include = Path::new("/home/u/.upstroke/git/recorded-objects.gitconfig");
-    for (rule, keyword) in [
-        (GitdirRule::Posix, "gitdir:"),
-        (GitdirRule::PosixFoldingCase, "gitdir/i:"),
-    ] {
-        let repository =
-            ManagedRepository::new(Path::new(r"/srv/it's [x]*?\y/.git"), include, rule)
-                .expect("a path Git can read in a key");
-        let pattern = format!(r"{keyword}/srv/it'\''s \[x\]\*\?\\y/.git");
-        let value = "'/home/u/.upstroke/git/recorded-objects.gitconfig'";
-        assert_eq!(
-            repository.parameters(),
-            OsStr::new(&format!(
-                "'includeIf.{pattern}.path'={value} 'includeIf.{pattern}/worktrees/*.path'={value}"
-            )),
-            "{rule:?}: a glob character in the path is escaped, a quote is closed, escaped \
-             and reopened, and only the worktrees component is a glob"
-        );
-    }
     let refused =
         ManagedRepository::new(Path::new("/srv/new\nline/.git"), include, GitdirRule::Posix)
             .expect_err("Git refuses a newline in a configuration key")
@@ -452,24 +435,16 @@ fn the_includes_name_the_common_directory_exactly_under_each_posix_rule() {
                 .to_string();
         assert!(refused.contains("absolute"), "{refused}");
     }
-}
-
-#[cfg(windows)]
-#[test]
-fn the_includes_name_the_common_directory_exactly_under_the_windows_rule() {
-    let repository = ManagedRepository::new(
-        Path::new(r"\\?\C:\Users\Me\it's [x]\.git"),
-        Path::new(r"C:\Users\Me\.upstroke\git\recorded-objects.gitconfig"),
-        GitdirRule::Windows,
+    let refused = ManagedRepository::new(
+        Path::new("/srv/upstroke-no-such-repository/.git"),
+        include,
+        GitdirRule::Posix,
     )
-    .expect("a path Git can read in a key");
-    let pattern = r"gitdir/i:C:/Users/Me/it'\''s \[x\]/.git";
-    let value = "'C:/Users/Me/.upstroke/git/recorded-objects.gitconfig'";
-    assert_eq!(
-        repository.parameters(),
-        OsStr::new(&format!(
-            "'includeIf.{pattern}.path'={value} 'includeIf.{pattern}/worktrees/*.path'={value}"
-        ))
+    .expect_err("a directory that is not there cannot say whether it folds case")
+    .to_string();
+    assert!(
+        refused.contains("in another case") && refused.contains("upstroke-no-such-repository"),
+        "{refused}"
     );
 }
 
@@ -490,27 +465,27 @@ fn the_windows_rule_spells_a_path_as_git_for_windows_does() {
             "{canonical}"
         );
     }
-    for rule in [GitdirRule::Posix, GitdirRule::PosixFoldingCase] {
+    assert_eq!(
+        GitdirRule::Posix.spelling(br"/srv/a\b/.git"),
+        br"/srv/a\b/.git".to_vec(),
+        "a Unix path is spelled as it is"
+    );
+    for rule in GitdirRule::ALL {
         assert_eq!(
-            rule.spelling(br"/srv/a\b/.git"),
-            br"/srv/a\b/.git".to_vec(),
-            "{rule:?}: a Unix path is spelled as it is"
+            rule.keyword(),
+            "gitdir:",
+            "{rule:?}: `gitdir/i:` folds every component, whatever the directory holding it does"
         );
     }
-    assert_eq!(GitdirRule::Windows.keyword(), "gitdir/i:");
-    assert_eq!(GitdirRule::PosixFoldingCase.keyword(), "gitdir/i:");
-    assert_eq!(GitdirRule::Posix.keyword(), "gitdir:");
     assert_eq!(
         GitdirRule::native(),
         if cfg!(windows) {
             GitdirRule::Windows
-        } else if cfg!(target_os = "macos") {
-            GitdirRule::PosixFoldingCase
         } else {
             GitdirRule::Posix
         }
     );
-    assert_eq!(GitdirRule::ALL.len(), 3);
+    assert_eq!(GitdirRule::ALL.len(), 2);
 }
 
 #[test]
@@ -520,6 +495,7 @@ fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph()
     let include = tree.path().join("recorded-objects.gitconfig");
     let workspace = tree.path().join("ws");
     std::fs::create_dir(&workspace).expect("a workspace");
+    std::fs::create_dir(tree.path().join("repo.git")).expect("a common directory");
     let repository = ManagedRepository::new(
         &tree.path().join("repo.git"),
         &include,
