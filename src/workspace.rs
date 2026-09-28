@@ -3528,6 +3528,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_rollback_over_a_replaced_tree_restores_the_recorded_bytes() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_tree_rollback_helper",
+        );
+        assert!(
+            status.success(),
+            "the child rolls an edit back over a HEAD whose tree carries a replacement, \
+             with every ambient control over `refs/replace/*` taken away from it, and \
+             ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_tree_rollback_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-rollback");
+
+        let (_tree, repo) = temp_repo("replaced-rollback");
+        pin_replacement_refs_in(&repo);
+        let (parent, recorded_tree) = committed(&repo, "recorded\n", "the recorded tree");
+        let (_, replacing_tree) = committed(&repo, "replacing\n", "the replacing tree");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        run_git(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:f.txt"]),
+            b"replacing\n",
+            "a Git child that honours `refs/replace/*` reads the replacing tree at HEAD; \
+             without that this test measures nothing"
+        );
+        fs::write(repo.join("f.txt"), "agent-edit\n").expect("the agent's edit");
+
+        Workspace::open(&repo)
+            .expect("open")
+            .discard_uncommitted()
+            .expect("the rollback");
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt"))
+                .expect("the rolled-back file")
+                .replace("\r\n", "\n"),
+            "recorded\n",
+            "a rollback restores the bytes HEAD records, not the replacement's"
+        );
+    }
+
     fn test_module_span(code: &str) -> Result<(usize, usize), String> {
         let identifier = |byte: Option<&u8>| {
             byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
