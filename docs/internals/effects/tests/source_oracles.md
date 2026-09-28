@@ -1294,15 +1294,19 @@ classification census holds the two agent files' items against
 `effects/wrappers.toml` both ways.
 
 Round 4 read the text above the cut alone and named the files the two regions
-may differ in, `src/agent/proc.rs` and `src/agent/proc/ambient.rs`. A review of
-`b9b6faa3` executed an edit to `util::same_path` that each of those refused and
-rustc accepts. With `#[allow(dead_code)]` written above its `#[cfg(test)]`, the
-whole file's reading removes the allow with the gate's element, and the text
-above the cut, read alone, keeps it -- nothing after it there is a gate; reading
-that text with the gate is the repair. With `#[cfg(all(test))]` in place of the
-`#[cfg(test)]`, the reader removes the function above the literal cut, a
-spelling it supports, and the named list refused `src/util.rs`. The list is
-gone rather than widened: it could only name what the tree spells today. What
+may differ in, `src/agent/proc.rs` and `src/agent/proc/ambient.rs`. The round-4
+delta review of `f19e51d4` executed an edit to `util::same_path` against each,
+and rustc compiles both. With `#[allow(dead_code)]` written above its
+`#[cfg(test)]`, the whole file's reading removes the allow with the gate's
+element, and the text above the cut, read alone, keeps it -- nothing after it
+there is a gate; reading that text with the gate is the repair. With
+`#[cfg(all(test))]` in place of the `#[cfg(test)]`, the reader removes the
+function above the literal cut, a spelling it supports, and the named list
+refused `src/util.rs`. That spelling is refused by this repository's clippy as
+well -- `non_minimal_cfg`, and clippy's `panic` lint takes only the literal
+`cfg(test)` for test code -- but a clippy-clean `#[cfg(all(unix, test))] pub
+const` above the cut was refused by the list the same way. The list is gone
+rather than widened: it could only name what the tree spells today. What
 replaces it asks of each gate whether removing its element is right, by an
 evaluation that is not the reader's. The rows after the tree walk hold both
 edits' shapes, and four more, whatever the tree comes to spell.

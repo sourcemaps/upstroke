@@ -857,8 +857,8 @@ The byte before `fn` and the name's first byte are read with
 is ASCII, as it is there. Until #325's fifth round both were ASCII tests. So
 the `fn` that ends `\u{c9}fn` in a test-only `impl \u{c9}fn for u8` read as a
 function starting, [`header_end`] gave up, the `impl` stayed in the region,
-and the macro-position census refused the `line!()` in it (executed by a
-review of `b9b6faa3`); and a header or an initializer that never ended ran on
+and the macro-position census refused the `line!()` in it (executed by the
+round-4 delta review of `f19e51d4`); and a header or an initializer that never ended ran on
 through a following `fn \u{e9}()`, where it stops at `fn kept()`.
 
 ## `struct Identifier<'a> {`
