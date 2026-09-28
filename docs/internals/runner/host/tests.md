@@ -164,7 +164,9 @@ the constructor back on `ObjectGraph::Recorded`.
 
 Its repository is a real directory under a scratch tree (`managed_repository`):
 since #326 round 5 the scope asks each directory on the path whether it folds
-case, and a path that is not there is refused.
+case, and a path that is not there is refused. Since round 6 it also asks the
+common directory, through the `refs` every common directory holds, so the
+fixture creates `refs` too.
 
 ## `fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {`
 
@@ -191,7 +193,9 @@ on Windows and `Posix` everywhere else, macOS included.
 `HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
 holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
 runs it once the file holds the exact bytes. Its common directory is created
-first, because the scope asks it whether it folds case.
+first, with the `refs` every common directory holds, because the scope asks
+each directory on the path, and the common directory itself through `refs`,
+whether it folds case.
 
 ## `fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {`
 
@@ -206,6 +210,15 @@ Against `49243a24`, with this witness alone added, it failed on this box (exit
 `recorded` from `repo`, which had installed a replacement, and with the rule
 list narrowed to `Windows` the same assertion failed under that rule. Both
 used `gitdir/i:`; `Posix`, which ran first, passed.
+
+Round 6 extended its capitals check to the linked worktree's Git directory
+(`read_case_siblings`). Against `c453705f`, with those 24 lines alone added and
+`TMPDIR` on a case-folding ext4 mount, it failed with Git 2.43.0 and with Git
+2.41.0 (exit 101): under `Posix` the gate read `replacing` through
+`…/Repo/.git/WORKTREES/Repo-linked`. With that spelling removed, the
+all-capitals one failed the same way, and with the rule list narrowed to
+`Windows` the `WORKTREES` spelling did. On ext4, which keeps case, the check
+does not run, so only a folding temporary directory can show it.
 
 ## `fn case_git(dir: &Path, args: &[&str]) -> String {`
 
@@ -238,7 +251,14 @@ common directory and `HostRunner::for_legacy_workspace` run gates that read:
   realpath does not look the case up; reached with `-C`, Git named the
   repository in its stored case, as `pwd -P` does (both measured on a
   case-folding ext4 mount), which is why the `-C` reads alone could not tell a
-  scope that never folds from one that does.
+  scope that never folds from one that does;
+- when the directory folds, `Repo`'s linked worktree through its Git
+  directory given with `--git-dir`, spelled as Git stores it, with
+  `worktrees` alone in capitals, and with every component the test controls
+  in capitals: `recorded`. The linked worktree's name under `worktrees` is
+  taken from Git (`rev-parse --absolute-git-dir`), not assumed. Until #326
+  round 6 nothing read a linked worktree's Git directory in another case, and
+  the scope matched `worktrees` as a literal.
 
 It returns whether the directory kept case.
 

@@ -160,12 +160,38 @@ round-4 regression lens, which also reproduced it natively on Windows with
 NTFS case sensitivity enabled on one directory). Each component is now matched with
 case unless the directory holding it finds it under the other case;
 [`ManagedRepository::new`]'s section says how that is measured, and what it
-costs.
+costs. Since #326 round 6 that includes the `worktrees` component of the
+linked worktrees' condition, which round 5 appended as a literal: where the
+common directory folds, a gate that named a linked worktree's Git directory
+`<common>/WORKTREES/<id>` read the replaced object in the managed
+repository (the round-5 review's finding).
 
 **What it does not do.** A role's own `git -c core.useReplaceRefs=true`
 comes after the includes and wins, and a role that clears its environment
 before running Git loses them. Configuration is not an enforcement
 boundary, and the policy claims none.
+
+**Where the conditions reach further, or less far, than the managed
+repository.** Both are measured, and neither is repaired:
+
+- **Further, through an alias.** A directory that keeps case, but holds an
+  alias whose name is a component of the managed repository's path with
+  every ASCII letter's case swapped and which resolves to that component,
+  is judged to fold case: a junction on Windows, which
+  `std::fs::canonicalize` follows, or a bind mount on Linux, whose root has
+  the component's device and inode. The component is then spelled in
+  classes, and the conditions also reach a repository beside it whose name
+  differs from it only in case, whose roles then read the recorded object
+  where it installed a replacement. That is
+  `PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING` (P2,
+  deferred): the round-5 review measured it natively on Git for Windows
+  2.50.1, and #326 round 6 measured the bind mount on ext4, where a
+  symbolic link of the same name did not do it.
+- **Less far, through a spelling the classes do not cover.** Only ASCII
+  letters are spelled in classes. On a case-folding ext4 directory, a Git
+  directory named with a letter outside ASCII in its other case (`CAFÉ`
+  for `café`), or in the other Unicode normalization, names the managed
+  repository and reads the replaced object (#326 round 6, Git 2.43.0).
 
 **Each decision fails a witness when it is undone** (#326 round 4, Git 2.43.0;
 the witnesses are in `src/engine/tests.rs`, `src/runner/host/tests.rs`,
@@ -267,8 +293,11 @@ the same bytes.
 The entries, for a canonical common directory `C`:
 
 ```
-'includeIf.gitdir:C.path'='<include>' 'includeIf.gitdir:C/worktrees/*.path'='<include>'
+'includeIf.gitdir:C.path'='<include>' 'includeIf.gitdir:C/W/*.path'='<include>'
 ```
+
+`W` is `worktrees`, spelled as `C` matches names: in classes where `C`
+folds case, and exactly where it does not.
 
 - **Matched as each directory matches.** For each component of `C`,
   [`folds_case`] asks the directory holding it whether it finds that name
@@ -284,16 +313,31 @@ The entries, for a canonical common directory `C`:
   Windows path is matched
   as spelled (the `Windows` rule's section), and so are letters outside
   ASCII, which Git's own `gitdir/i:` does not fold either.
+- **`worktrees` as `C` matches names.** It is a name `C` looks up, so it
+  is spelled in classes where `C` finds `refs` under the other case, and
+  exactly where it does not. `refs` asks rather than `worktrees` itself:
+  Git creates `worktrees` with the first linked worktree, usually after
+  the scope is built, and `git worktree prune` removes it once it is
+  empty, while every common directory Git accepts holds `refs` (Git's
+  `is_git_directory` requires it). Whether a directory folds is the
+  directory's, whichever name asks it. Not `HEAD` either: Git rewrites it
+  by renaming a lock file over it, so the two lookups could meet two
+  entries. Until #326 round 6 `worktrees` was written as a literal, and
+  where `C` folds a gate that named a linked worktree's Git directory
+  `C/WORKTREES/<id>` read the replaced object: measured on a case-folding
+  ext4 mount with Git 2.41.0 and 2.43.0, where `worktrees` read
+  `recorded` and `WORKTREES` read `replacing`.
 - **Two conditions.** `C` is the main worktree's Git directory, and
-  `C/worktrees/*` every linked worktree's, the gate and review snapshots
-  among them. `*` does not cross a `/`, so the Git directory of a
-  submodule, under `C/modules/`, is not matched, and neither is anything
-  deeper. A bare `C/` would have matched both.
+  `C/W/*` every linked worktree's, the gate and review snapshots among
+  them. `*` does not cross a `/`, so the Git directory of a submodule,
+  under `C/modules/`, is not matched, and neither is anything deeper. A
+  bare `C/` would have matched both.
 - **Escaped.** The condition is a wildmatch pattern, so each `[`, `]`,
   `*`, `?` and `\` of `C` is escaped, in a folding component as in any
-  other; the only globs are the worktrees component and the classes the
-  folding components are spelled with. Unescaped, a `[` silently matches
-  nothing and a `*` matches other repositories.
+  other; the only globs are the linked worktrees' `*` and the classes the
+  folding components, and a folding `worktrees`, are spelled with.
+  Unescaped, a `[` silently matches nothing and a `*` matches other
+  repositories.
 - **Quoted.** Each key and value is single-quoted; a quote inside is
   closed, escaped and reopened (`'\''`), which is what Git's own
   `sq_dequote` reads.
@@ -302,32 +346,39 @@ The entries, for a canonical common directory `C`:
   rejects in a key; on Windows a path that is not valid Unicode, which
   cannot reach Git for Windows through its environment; a `.` or `..`
   component, which the realpath Git matches never holds; and a component
-  whose directory cannot be asked, which leaves no way to tell whether it
-  must be matched with case. A pattern that silently failed to match would
-  put the roles back on the replaced graph with nothing to say so, and one
-  that matched too much would take another repository's replacements away.
+  whose directory cannot be asked, or a `C` that cannot be asked through
+  `refs`, which leaves no way to tell whether it must be matched with
+  case. A pattern that silently failed to match would put the roles back
+  on the replaced graph with nothing to say so, and one that matched too
+  much would take another repository's replacements away.
 
 **What the lookups cost, and what happens when one fails.** Two lookups for
-each component that holds an ASCII letter (two `lstat`s on Unix, two
-`std::fs::canonicalize` calls elsewhere), once per run and once per resume:
-`Workspace::recorded_objects_scope` builds the scope there, and no role
-repeats it. Measured on the build box through this constructor, over 10,000
-constructions each: six `statx` calls and 2.7 µs for `/srv/tactus/.git`,
-and 12.7 µs for a path of twelve components.
+each component that holds an ASCII letter, and two for `refs` in `C` (two
+`lstat`s on Unix, two `std::fs::canonicalize` calls elsewhere), once per run
+and once per resume: `Workspace::recorded_objects_scope` builds the scope
+there, and no role repeats it. Measured on the build box through this
+constructor, in a release build, over 10,000 constructions, three times each
+(#326 round 6): for `/srv/tactus/.git`, eight `statx` calls and 2.76 to
+2.88 µs, where round 5's constructor made six and took 2.17 to 2.23 µs; for
+a path of twelve components, 10.27 to 10.35 µs, where round 5's took 9.10 to
+9.25 µs.
 
 A lookup that fails with anything but "not found" refuses the run before
 its first role, naming the path and the error (`UpstrokeError::Refused`, from
 `run` and `resume` alike); nothing falls back to either answer. On a folding
 directory the other spelling names the entry just found, and on a
 case-sensitive one it is not found unless a sibling bears exactly that
-spelling, which the identity check tells apart. None of the layouts measured
-for this change reached the refusal: a case-sensitive ext4 directory, a
-case-folding one, and a case-sensitive directory inside a case-folding one.
-A directory missing from the path does reach it
-(`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key`); by
-reasoning, not measurement, so would an I/O error, a directory removed
-between the two lookups, or on Windows a case-sibling the process may not
-open.
+spelling, which the identity check tells apart, or an alias resolves it to
+the entry itself, which the identity check does not (the section above). None
+of the layouts measured for this change reached the refusal: a case-sensitive
+ext4 directory, a case-folding one, and a case-sensitive directory inside a
+case-folding one. A directory missing from the path does reach it
+(`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key`), and so
+does a `C` with no `refs`, which Git would not accept as a common directory
+(measured through this constructor at #326 round 6). By reasoning, not
+measurement, so would an I/O error, or on Windows a case-sibling the process
+may not open. A directory removed between the two lookups does not: its
+second lookup answers "not found", and the component is matched exactly.
 
 **Each round-5 decision fails a test when it is undone** (Git 2.43.0, with
 `TMPDIR` on this box's ext4, which keeps case, and in a case-folding directory
@@ -359,12 +410,39 @@ directory: `git -C <mnt>/ci/PROBE rev-parse --absolute-git-dir` printed
 read through a Git directory spelled in capitals is what catches "no component
 folds" there.
 
+**Each round-6 decision fails a test when it is undone** (Git 2.43.0, in a
+`git archive` copy of `5c1e0292`, with `TMPDIR` on this box's ext4 and in the
+case-folding directory; "ok" means the mutation survived that test on both, and
+a layout named means it failed there alone). The witness is the same test,
+whose capitals check now also reads the linked worktree's Git directory; the
+inline tests are this module's own; the host fixtures are
+`the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository` and
+`a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph`,
+whose common directories hold `refs`; the five v0.1 witnesses are in
+`src/engine/tests.rs`:
+
+| mutation | witness | inline: exact entries | inline: refusals | host: fixtures | five v0.1 witnesses |
+|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok |
+| `worktrees` never folds | FAILED (case-folding) | FAILED | ok | ok | ok |
+| `worktrees` always folds | ok | FAILED | ok | ok | ok |
+| `worktrees` takes the answer of the component `.git` | ok | FAILED | FAILED | ok | ok |
+| a failed `refs` lookup reads as "keeps case" | ok | ok | FAILED | ok | ok |
+| `worktrees` asked instead of `refs` | ok | FAILED | FAILED | FAILED | four of five FAILED |
+
+"`worktrees` always folds" survives the witness: in a common directory that
+keeps case no other spelling names `worktrees`, so only the exact entries see
+it. "Takes the answer of the component `.git`" asks nothing of `refs`, so a
+failing `refs` lookup no longer refuses. "Asked instead of `refs`" refuses
+every scope built before the first linked worktree exists; the siblings
+witness, whose runs start in linked worktrees, survives it.
+
 ## `impl ManagedRepository` › `fn matching(`
 
 [`Self::new`] with the lookup supplied, so the inline tests can pin the
 entries for any answer without a directory to measure. It walks `C` once,
 root first, and asks about each normal component with the path of the
-directory that holds it.
+directory that holds it; then it asks `C` about `refs`, for `worktrees`.
 
 ## `impl ManagedRepository` › `pub fn verify_include(&self) -> Result<(), UpstrokeError> {`
 
@@ -402,6 +480,13 @@ returns the name as the directory stores it: the standard library's file
 identity there, `MetadataExt::file_index`, is unstable on 1.85.0 and on
 1.97.1 alike (E0658, `windows_by_handle`). A second spelling that is not
 found is `false`; an error on either lookup is the caller's refusal.
+
+Neither comparison tells an alias from the entry itself. `canonicalize`
+follows a junction or a symbolic link on Windows, and a bind mount's root
+carries its source's device and inode on Linux, so an alias spelled in the
+other case answers `true` in a directory that keeps case:
+`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`. A
+symbolic link on Unix does not, since `lstat` reads the link itself.
 
 ## `fn matched(into: &mut Vec<u8>, spelled: &[u8], folded: bool) {`
 
