@@ -97,8 +97,14 @@ configuration file missed `config.worktree`.
   under `modules/`.
 - **The canonical path, glob-escaped.** Each of `[`, `]`, `*`, `?` and `\` is escaped. A quote in the path is
   closed, escaped and reopened inside the single-quoted key.
-- **Git for Windows's spelling.** On Windows the pattern is `gitdir/i:` with no `\\?\`, forward slashes, and
-  `//server/share` for a UNC path; macOS takes `gitdir/i:` too.
+- **Git for Windows's spelling, and case as each directory matches it.** The keyword is `gitdir:` on every
+  platform, never `gitdir/i:`, which folds every component and so reached a repository whose path differs from
+  the managed one only in case (#326 round 4's rule on Windows and macOS, replaced in round 5). On Windows the
+  path has no `\\?\`, forward slashes, and `//server/share` for a UNC path. Each component of the common
+  directory, and the `worktrees` of the second pattern, is spelled with a class of both cases per ASCII letter
+  where the directory holding it finds it under the other case, and exactly where it does not (`worktrees` since
+  round 6, asked through the common directory's `refs`). An alias spelled in the other case defeats that
+  lookup: `PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`.
 - **An include that exists whenever a role starts.** #326 writes it at
   `<private root>/git/recorded-objects.gitconfig` before a run's or resume's first role, and refuses to start a
   role while it is missing or altered.
