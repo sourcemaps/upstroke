@@ -1669,9 +1669,17 @@ before it, no identifier character after it -- as `(start, end)`. That is all
 rustc asks of a keyword, so it is all the `trait`, `impl` and `for` readers
 ask; [`declared_fns`] goes on to want a separator after `fn`, because a name
 has to follow and `fn(` is a type. One reading of "a keyword is written here"
-for the four, where there were three and each wanted its own neighbour. A
-non-ASCII character before the keyword is taken for a boundary, which
-over-reads.
+for the four, where there were three and each wanted its own neighbour.
+
+The byte before the keyword is read with [`is_identifier_byte`], as
+[`starts_named_function_item`] reads the byte before its `fn`, and the
+character after with `char::is_alphanumeric`. Until #325's fifth round the
+byte before was an ASCII test, so a non-ASCII letter was taken for a boundary
+and the readers over-read: `-> \u{c9}fn {` in a trait impl was a reachable
+function named `{`, and `impl \u{c9}for` a trait impl whose private methods
+were reachable -- names the classification census would demand rows for in a
+classified module, refusing honest code. Held by rows of
+`the_reachable_fn_parser_finds_each_shape_this_tree_uses`.
 
 ## `fn declared_fns(region: &str) -> Vec<(usize, &str)> {`
 

@@ -663,6 +663,8 @@ pub(super) mod oracles {
             "impl::path::Trait for Thing { fn after_a_glued_impl(&self) {} }\n",
             "impl Trait for&'static str { fn for_a_reference(&self) {} }\n",
             "impl<F: for<'a> Fn(&'a u8)> Holder<F> { fn behind_a_bound(&self) {} }\n",
+            "impl Trait for Thing { fn returning_a_type_ending_fn(&self) -> \u{c9}fn { \u{c9}fn } }\n",
+            "impl \u{c9}for { fn behind_a_type_ending_for(&self) {} }\n",
             "macro_rules! named { ($name:ident) => { pub fn $name() {} }; }\n",
             "#[cfg(test)]\nmod tests { pub fn in_the_test_region() {} }\n",
         );
@@ -685,6 +687,7 @@ pub(super) mod oracles {
                 "inherent".to_owned(),
                 "path_visible".to_owned(),
                 "raw_identifier".to_owned(),
+                "returning_a_type_ending_fn".to_owned(),
                 "spaced_path_visible".to_owned(),
                 "super_visible".to_owned(),
                 "through_an_array_impl".to_owned(),
@@ -705,6 +708,10 @@ pub(super) mod oracles {
         assert!(!found.contains(&"in_the_test_region".to_owned()));
         assert!(!found.contains(&"declared".to_owned()));
         assert!(!found.contains(&"private_default".to_owned()));
+        assert!(
+            !found.contains(&"behind_a_type_ending_for".to_owned()),
+            "the `for` that ends `\u{c9}for` is not a keyword, so its impl is inherent"
+        );
 
         for separator in RUSTC_WHITESPACE {
             let written = format!(

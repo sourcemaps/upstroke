@@ -1643,7 +1643,7 @@ fn keyword_sites<'a>(text: &'a str, keyword: &'a str) -> impl Iterator<Item = (u
             let glued_before = start
                 .checked_sub(1)
                 .and_then(|before| bytes.get(before))
-                .is_some_and(|byte| is_ident_byte(*byte));
+                .is_some_and(|byte| is_identifier_byte(*byte));
             let glued_after = text.get(*end..).is_some_and(|rest| {
                 rest.starts_with(|next: char| next.is_alphanumeric() || next == '_')
             });
