@@ -2681,7 +2681,7 @@ pub(crate) mod census_domain {
                 b'<' => angle += 1,
                 b'>' if at.checked_sub(1).and_then(|before| bytes.get(before)) == Some(&b'-') => {}
                 b'>' => angle = angle.checked_sub(1)?,
-                b';' | b')' | b']' | b'}' if angle == 0 => return None,
+                b';' | b')' | b']' | b'}' => return None,
                 _ => {}
             }
             at += 1;

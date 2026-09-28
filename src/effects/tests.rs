@@ -2784,6 +2784,44 @@ fn the_macro_position_reader_refuses_every_position_outside_a_function_body() {
         assert_eq!(outside(source).len(), 1, "{position}: {source:?}");
     }
 
+    const LATER_BLOCK: &str = "const WIDE: u32 = if usize::BITS > 16 {\n    const LINE: u32 = line!();\n    LINE + column!()\n} else {\n    0\n};\n";
+    for (position, header) in [
+        (
+            "a macro's parentheses in a function body",
+            "fn tokens() -> &'static str {\n    stringify!(fn x <)\n}\n",
+        ),
+        (
+            "a macro's brackets in a function body",
+            "fn tokens() -> &'static str {\n    stringify![fn x <]\n}\n",
+        ),
+        (
+            "a macro's braces in a function body",
+            "fn tokens() -> &'static str {\n    let tokens = stringify! { fn x < };\n    tokens\n}\n",
+        ),
+        (
+            "an attribute's arguments",
+            "#[cfg_attr(any(), witness(fn x <))]\nconst NARROW: u8 = 0;\n",
+        ),
+    ] {
+        let unclosed = format!("{header}{LATER_BLOCK}");
+        let closed = unclosed.replacen("fn x <", "fn x", 1);
+        assert_ne!(closed, unclosed, "{position}");
+        let both = vec!["line".to_owned(), "column".to_owned()];
+        assert_eq!(outside(&closed), both, "{position}: {closed:?}");
+        assert_eq!(
+            outside(&unclosed),
+            both,
+            "{position}: a `fn` header whose `<` never closes ended where its token tree ends \
+             only if the angle depth was zero, so the scan left that tree, reached zero at a \
+             later `>`, and took the block after it for the header's body: {unclosed:?}"
+        );
+    }
+    assert_eq!(
+        outside("#[cfg_attr(any(), witness(fn x < ; > { m!() }))]\nconst NARROW: u8 = 0;\n"),
+        vec!["m".to_owned()],
+        "a `;` ends a `fn` header at any angle depth, so the braces after the `>` are not its body"
+    );
+
     for (position, source) in [
         (
             "a block after a `fn` in a macro's parentheses",
