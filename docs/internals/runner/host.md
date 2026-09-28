@@ -198,9 +198,10 @@ ordering predicate ("resolved once per spawn, before any of the spawn") and the 
 
 ### What the error says about the process
 
-Every error is a `RunnerError` carrying a [`ProcessFate`]. The environment
-composition and the name resolution happen before anything is spawned, so
-their refusals are `NeverStarted`; everything after is the funnel's own
+Every error is a `RunnerError` carrying a [`ProcessFate`]. The include check
+of a `RecordedIn` reading, the environment composition and the name
+resolution happen before anything is spawned, so their refusals are
+`NeverStarted`; everything after is the funnel's own
 classification through `proc::run_with_timeout_classified` — `NeverStarted`
 for a spawn that created nothing, `Gone` once the process group (Unix) or
 the job (Windows) was established empty, `Unresolved` where the funnel
@@ -210,6 +211,17 @@ exited. A reaped direct child is never the evidence, because it says
 nothing about the descendants that shared its group. The distinction
 exists for the integration verification, which may settle an outage
 terminal only on a fate that says no process survives.
+
+### Why the include is checked before every role
+
+Under `ObjectGraph::RecordedIn`, `run` asks `ManagedRepository::verify_include` before it composes
+anything, and does not start the role unless the include file holds exactly
+`RECORDED_OBJECTS_INCLUDE`. Git reads a missing include as nothing at all, so a role started after
+the file went missing would read the replaced graph with nothing to say so. Checking once per role
+rather than once per run is what makes "the include is there whenever a role starts" true, not
+merely "it was there when the run began". Every run and resume writes the file again before its
+first role; between those, a role that finds it missing or altered is refused as `NeverStarted`. The
+check reads the file; it never writes it.
 
 ### Where the program name is resolved
 
@@ -450,9 +462,17 @@ Infallible because `host-v1`'s record is a constant with nothing to inspect;
 
 ## `HostRunner::for_legacy_workspace`
 
-The runner the schema-1..3 conductor installs. It reads `ObjectGraph::Recorded`, so today nothing
-separates it from [`HostRunner::new`](#hostrunnernew) but its name and the fact that it says which
-graph it reads rather than inheriting the default.
+The runner the schema-1..3 conductor installs. It reads `ObjectGraph::RecordedIn(repository)`: its
+gates, reviewers and implementers read the recorded graph in the repository the run manages, and
+whatever the configuration says in any other. [`HostRunner::new`](#hostrunnernew) still reads
+`ObjectGraph::Recorded`, the process-wide variable, for the schema-4 host path, whose repair is
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE`'s and stays deferred with it. The
+two policies are distinct so that repairing this one changed nothing on that path.
+
+The `ManagedRepository` comes from `Workspace::recorded_objects_scope`, which `engine::run_harness`
+and `engine::resume_harness` call on `Workspace::open(repo_root)` before anything else: it names the
+repository's canonical common directory and writes the include file under the private root. The
+two `#[cfg(test)]` coordinator entries beneath them do the same.
 
 Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed it read `ObjectGraph::AsReplaced`. That
 was PR #271's repair (`a55f7049`) for a v0.1 gate regression: `src/workspace.rs`, which produces
@@ -461,14 +481,16 @@ was frozen, so a consumer reading the recorded graph failed `git diff --exit-cod
 checkout nothing had touched. Closing the finding put every Git child of that module on the
 recorded graph, and the same measurement then failed the other way: `for_legacy_workspace` still
 reading `AsReplaced` failed that gate over an untouched snapshot of a replaced tree, where a runner
-reading `Recorded` passed it (git 2.43). So the runner moved with its producer, in the same change.
-See [`ObjectGraph`](host/environment.md) for why the two must agree.
+reading `Recorded` passed it (git 2.43). So the runner moved with its producer, in the same change,
+first to `Recorded`. Two reviews of #326 then showed that reading was wrong for v0.1: the variable
+reached the repositories a gate creates for itself, and on Git 2.41 it lost to a configured `true`.
+See [`ObjectGraph`](host/environment.md) for both, and for why producer and consumer must agree.
 
-The constructor was kept rather than folded into `HostRunner::new`, deliberately: keeping it leaves
-`engine::run`'s and `engine::resume`'s call sites, its `effect_free` entry in `effects/wrappers.toml`
-and the `CONSTRUCTORS` census untouched, and it keeps the v0.1 path's choice of graph stated at the
-one place that path builds its runner. `engine::run`, `engine::resume` and the two `#[cfg(test)]`
-coordinator entries beneath them are its call sites, and they are all of them.
+The constructor is kept rather than folded into `HostRunner::new`, deliberately: it keeps
+the v0.1 path's choice of graph stated at the one place that path builds its runner, its
+`effect_free` entry in `effects/wrappers.toml`, and the `CONSTRUCTORS` census.
+`engine::run_harness`, `engine::resume_harness` and the two `#[cfg(test)]` coordinator entries
+beneath them are its call sites, and they are all of them.
 
 ## `HostRunner::policy`
 

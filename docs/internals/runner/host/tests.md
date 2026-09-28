@@ -142,28 +142,47 @@ Witnessed failing with the upsert removed from `compose`
 surviving, since this key is deliberately not a reserved one that gets
 stripped) and with it moved above the overlay loop (`Some("0")`).
 
-## `fn the_v1_conductors_environment_disables_replacement_objects() {`
+## `fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {`
 
-The v0.1 conductor's environment composes the replacement isolation too,
-because the v0.1 workspace now writes the recorded graph
-(`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`).
+The v0.1 conductor's environment keeps the recorded graph to the repository the
+run manages. It replaces `the_v1_conductors_environment_disables_replacement_objects`,
+which pinned the process-wide variable: round 4 of #326 moved the v0.1 runner off
+it, because a variable reaches every repository a role touches, and on Git 2.41
+it loses to a configured `true`.
 
-Until that finding closed this test was
-`the_v1_conductors_environment_composes_no_replacement_isolation` and
-asserted the opposite: that `HostRunner::for_legacy_workspace` read
-`AsReplaced`, and that the operator's own value of the key survived in
-every role's environment (PR #271, round 1's regression finding). It
-pinned the old design, so it was inverted rather than deleted.
+It asserts four things. The constructor reads `ObjectGraph::RecordedIn` with the
+repository it was given. Over every role, both name rules and five sources of
+`GIT_CONFIG_PARAMETERS` — none, empty, the base's `true`, an overlay's, and both
+— the composed value is the inherited one, a space, and the two includes, or the
+includes alone: never before an inherited entry, never with a leading space, and
+one variable however the base spelled its name. `GIT_NO_REPLACE_OBJECTS` is never
+composed, and an operator who exports it keeps their own value. And the
+constructor's own environment, over this process's base, ends with the includes.
 
-It now asserts three things. The constructor reads `Recorded`. Over a base
-that exports a value of its own, an environment reading what the
-constructor reads composes `GIT_NO_REPLACE_OBJECTS=1` for every role under
-both name rules. That is the old grid, with the expected value flipped from
-the base's surviving value to the pair. And the constructor's own
-environment, over this process's base, composes the pair for every role.
+Witnessed failing with the includes placed before the inherited entries, and with
+the constructor back on `ObjectGraph::Recorded`.
 
-Witnessed failing with `for_legacy_workspace` reading `AsReplaced` again,
-the state of `a9535c42`: the first assertion fails.
+## `fn the_includes_name_the_common_directory_exactly_under_each_posix_rule() {`
+
+The two entries a `ManagedRepository` composes, byte for byte, for a common
+directory whose path holds a quote, `[x]*?` and a backslash: each glob character
+escaped, the quote closed, escaped and reopened, only the worktrees component a
+glob, and `gitdir/i:` under the folding rule. A newline in the path and a
+relative directory or include are refused. Unix-only, because a Unix absolute
+path is not absolute on Windows; the Windows twin below runs there.
+
+## `fn the_windows_rule_spells_a_path_as_git_for_windows_does() {`
+
+`GitdirRule::Windows` over the shapes `std::fs::canonicalize` gives on Windows
+(`\\?\C:\…`, `\\?\UNC\server\share\…`) and over already-plain ones, on every
+platform: no prefix, forward slashes, `//server/share` for a share. Also that
+each rule's keyword and the native rule are what the notes say.
+
+## `fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {`
+
+`HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
+holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
+runs it once the file holds the exact bytes.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 

@@ -66,15 +66,23 @@ Whether these two names are the same variable under this rule.
 ## `pub enum ObjectGraph {`
 
 Which object graph the Git children of a composed environment read, and
-the one thing about it a conductor gets to choose.
+where, and the one thing about it a conductor gets to choose.
 
 `Recorded` is the default and the schema-4 rule: the objects the
 repository holds, never the objects `refs/replace/*` points at them
 (`design/15`, "What an exact snapshot is exact against"). It is what
 `compose` writes [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs)
-for.
+for, process-wide: every repository a child touches loses its
+replacements, a repository a gate creates for itself included. That is
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` (P2,
+latent: no supported configuration activates the schema-4 conductor),
+and it is why the v0.1 runner no longer reads it.
 
-`AsReplaced` composes no pair, so a child reads whatever its base says
+`RecordedIn` is the v0.1 conductor's: the recorded graph in one
+repository, the one the run manages, and whatever the configuration says
+everywhere else. Its section below says how.
+
+`AsReplaced` composes nothing, so a child reads whatever its base says
 about `refs/replace/*`. No conductor installs it. It is a test
 instrument: the witnesses that must show a replacement is live in a
 role process's environment (`src/workspace_manager/tests.rs`), or that
@@ -91,17 +99,188 @@ gate over that checkout put the two on different graphs and failed `git
 diff --exit-code HEAD` on a workspace the engine itself had just written
 (measured on git 2.43, PR #271 round 1's regression finding), and the v0.1
 conductor installed `AsReplaced` to match its producer. The exemption
-existed because of the freeze. Closing the finding amended the freeze
-for this one variable: every Git child of the module now sets the pair,
-and the same gate over an untouched snapshot then failed under
-`AsReplaced` and passed under `Recorded` (git 2.43). So the v0.1
-conductor reads `Recorded` too, and both paths read the recorded graph
-at both ends.
+existed because of the freeze. Closing the finding amended the freeze:
+every Git child of the module now refuses replacements, and the same gate
+over an untouched snapshot then failed under `AsReplaced` and passed under
+`Recorded` (git 2.43). So the v0.1 conductor reads the recorded graph
+too, first as `Recorded` and, since #326 round 4, as `RecordedIn`.
 
 It is a field of the environment rather than of the request because it is
 a property of the *conductor* — one schema per run, chosen once where the
 runner is built — and because defaulting it here makes the isolated
 reading the one a new spawn site gets without asking.
+
+## `pub enum ObjectGraph` › `RecordedIn(ManagedRepository),`
+
+The recorded graph in the repository [`ManagedRepository`] names, through
+two conditional includes `compose` appends to `GIT_CONFIG_PARAMETERS`.
+
+Not the process-wide variable, because a variable does not know which
+repository it is for. Under `Recorded` a v0.1 gate that ran `git init`,
+`commit` and `git replace` in a fixture of its own read the original
+object, failed and parked the run, in a managed repository with nothing
+under `refs/replace/` (#326's round-2 regression review). And on Git 2.41 a
+configured `core.useReplaceRefs = true` beats the variable, so the
+producer wrote recorded bytes while the roles read replacements (the
+round-3 review of record).
+
+Not the repository's own configuration either. A v0.1 run manages the
+operator's checkout, and every gate snapshot is a linked worktree of it,
+so `--local` would write the operator's common `.git/config`, visible from
+unrelated sibling worktrees and outliving the run; and a
+`config.worktree` or an inherited `GIT_CONFIG_COUNT` or
+`GIT_CONFIG_PARAMETERS` outranks that file anyway (the design check of
+2026-09-27, on Git 2.40.0, 2.41.0 and 2.43.0).
+
+Not `GIT_CONFIG_COUNT` pairs: Git reads `GIT_CONFIG_PARAMETERS` after the
+counted pairs, so an inherited `'core.useReplaceRefs'='true'` there would
+win. Appended to `GIT_CONFIG_PARAMETERS`, after every entry the base or the
+overlay carries, the includes are the last configuration any role's Git
+reads, except a `-c` that Git command is given itself.
+
+Measured with plain Git on 2.40.0, 2.41.0, 2.42.0 and 2.43.0, with `true`
+in the system, global, repository and worktree files, in
+`GIT_CONFIG_COUNT` and in inherited `GIT_CONFIG_PARAMETERS`: the managed
+repository's main and linked worktrees read the recorded object, and a
+fixture repository inside the linked worktree and one outside it kept
+their replacements, under a path with spaces and `[x]*?` in it. On 2.40.0,
+`git merge-tree` over a replaced commit read the replacement with the
+includes, and with `-c core.useReplaceRefs=false` too; from 2.41.0 it read
+the recorded commit. That is why the floor is 2.41
+(`src/workspace.rs`'s `require_git_floor`).
+
+**What it does not do.** A role's own `git -c core.useReplaceRefs=true`
+comes after the includes and wins, and a role that clears its environment
+before running Git loses them. Configuration is not an enforcement
+boundary, and the policy claims none.
+
+**Each decision fails a witness when it is undone** (#326 round 4, Git 2.43.0;
+the witnesses are in `src/engine/tests.rs`, `src/runner/host/tests.rs`,
+`src/workspace.rs` and `src/gates.rs`, and "ok" means the mutation survived that
+one):
+
+| mutation | run and resume | own fixture | path shapes | siblings | refusal, interruption | composition | exact entries | spawn refusal | Git floor | gate |
+|---|---|---|---|---|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok | ok | ok | ok | ok | ok |
+| the process-wide variable again | FAILED | FAILED | FAILED | FAILED | FAILED | FAILED | ok | FAILED | ok | ok |
+| the includes before the inherited entries | FAILED | ok | ok | ok | FAILED | FAILED | ok | ok | ok | ok |
+| no `/worktrees/*` condition | FAILED | FAILED | FAILED | FAILED | FAILED | ok | FAILED | ok | ok | FAILED |
+| no glob escaping | ok | ok | FAILED | ok | ok | ok | FAILED | ok | ok | ok |
+| no quote escaping | ok | ok | FAILED | ok | ok | ok | FAILED | ok | ok | ok |
+| one `<common dir>/` condition instead of two | FAILED | FAILED | FAILED | ok | FAILED | ok | FAILED | ok | ok | ok |
+| the include never written | FAILED | FAILED | FAILED | FAILED | FAILED | ok | ok | ok | ok | FAILED |
+| no check before a role | ok | ok | ok | ok | ok | ok | ok | FAILED | ok | ok |
+| no Git floor | ok | ok | ok | ok | ok | ok | ok | ok | FAILED | ok |
+| the includes before the overlay | FAILED | ok | ok | ok | FAILED | FAILED | ok | ok | ok | ok |
+
+The gate witness is `a_v1_gate_judges_the_tree_its_own_workspace_materialised`,
+whose fixture pins `true` in the repository: on Git 2.41 it also fails under the
+process-wide variable. The siblings run in linked worktrees only, which a single
+`<common dir>/` condition does reach.
+
+## `pub const CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";`
+
+The variable Git reads command-line configuration from, and hands its own
+children: `git -c` appends to it. Undocumented by `git-config(1)` and read
+by every Git since 2.31 in its `'key'='value'` form, which is the form the
+includes are written in.
+
+## `pub const RECORDED_OBJECTS_INCLUDE: &[u8] = b"[core]\n\tuseReplaceRefs = false\n";`
+
+The whole of the include file, byte for byte. The runner compares the file
+with it before every role it starts, so a file that holds anything else,
+nothing, or is not there refuses the role rather than including nothing.
+A missing include is otherwise silent: Git skips an include whose file does
+not exist.
+
+## `pub enum GitdirRule {`
+
+How a canonical path is spelled for an `includeIf.gitdir` condition on
+this platform. A type rather than a `cfg!` at each use, for the reason
+[`KeyCase`] is one: `ALL` lets a grid on one machine cover every rule.
+
+## `pub enum GitdirRule` › `Posix,`
+
+Linux and the other Unix targets: the path's own bytes, matched with case.
+
+## `pub enum GitdirRule` › `PosixFoldingCase,`
+
+macOS: the path's own bytes under `gitdir/i:`. The default volume folds
+case, Git's realpath there keeps the spelling it was handed, and the two
+sides of the match reach the common directory through different spellings
+(the engine's `-C` root, a worktree's `.git` file). Matching without case
+costs nothing on a folding volume; on a case-sensitive one it would also
+match a repository whose path differs only in case.
+
+## `pub enum GitdirRule` › `Windows,`
+
+Git for Windows compares the realpath `GetFinalPathNameByHandleW` gives,
+with its `\\?\` prefix removed, `UNC\` turned into `//`, and every
+backslash a slash. `std::fs::canonicalize` is the same call, so its result
+spelled that way is Git's own text; `gitdir/i:` also covers the second,
+non-canonical spelling Git tries.
+
+## `impl GitdirRule` › `pub const fn native() -> Self {`
+
+The rule this machine's Git follows.
+
+## `impl GitdirRule` › `pub const fn keyword(self) -> &'static str {`
+
+The condition's keyword: `gitdir:`, or `gitdir/i:` where case folds.
+
+## `impl GitdirRule` › `pub fn spelling(self, path: &[u8]) -> Vec<u8> {`
+
+The path as Git spells it under this rule, before any escaping.
+
+## `pub struct ManagedRepository {`
+
+The repository a v0.1 run manages, as `compose` names it to Git: its
+canonical common directory, the include file, and the two
+`GIT_CONFIG_PARAMETERS` entries they make, built once so every role gets
+the same bytes.
+
+## `impl ManagedRepository` › `pub fn new(common_dir: &Path, include: &Path, rule: GitdirRule) -> Result<Self, UpstrokeError> {`
+
+The entries, for a canonical common directory `C`:
+
+```
+'includeIf.gitdir:C.path'='<include>' 'includeIf.gitdir:C/worktrees/*.path'='<include>'
+```
+
+- **Two conditions.** `C` is the main worktree's Git directory, and
+  `C/worktrees/*` every linked worktree's, the gate and review snapshots
+  among them. `*` does not cross a `/`, so the Git directory of a
+  submodule, under `C/modules/`, is not matched, and neither is anything
+  deeper. A bare `C/` would have matched both.
+- **Escaped.** The condition is a wildmatch pattern, so each `[`, `]`,
+  `*`, `?` and `\` of `C` is escaped; only the worktrees component is a
+  glob. Unescaped, a `[` silently matches nothing and a `*` matches other
+  repositories.
+- **Quoted.** Each key and value is single-quoted; a quote inside is
+  closed, escaped and reopened (`'\''`), which is what Git's own
+  `sq_dequote` reads.
+- **Refused, never approximated:** a relative common directory or include,
+  which Git rejects from the command line; a newline in `C`, which Git
+  rejects in a key; and on Windows a path that is not valid Unicode, which
+  cannot reach Git for Windows through its environment. A pattern that
+  silently failed to match would put the roles back on the replaced graph
+  with nothing to say so.
+
+## `impl ManagedRepository` › `pub fn verify_include(&self) -> Result<(), UpstrokeError> {`
+
+Whether the include holds [`RECORDED_OBJECTS_INCLUDE`] exactly. The
+runner asks before every role it starts and does not start one on `Err`
+(`ProcessFate::NeverStarted`). A read, not an effect: the file is written
+by `Workspace::recorded_objects_scope`, which every run and resume call
+before their first role.
+
+## `fn glob_escaped(path: &[u8]) -> Vec<u8> {`
+
+A backslash before each character wildmatch treats as syntax.
+
+## `fn single_quoted(text: &[u8]) -> Vec<u8> {`
+
+POSIX single quoting, as Git's `sq_quote_buf` writes it.
 
 ## `pub struct HostEnvironment {`
 
@@ -119,12 +298,12 @@ The Upstroke process environment, under this platform's name rule.
 
 An explicit base, for grids that must cover both name rules.
 
-## `impl HostEnvironment` › `pub const fn reading(mut self, objects: ObjectGraph) -> Self {`
+## `impl HostEnvironment` › `pub fn reading(mut self, objects: ObjectGraph) -> Self {`
 
 The object graph this environment's children read. Owned by whoever
 builds the runner, never by an adapter or an overlay.
 
-## `impl HostEnvironment` › `pub const fn objects(&self) -> ObjectGraph {`
+## `impl HostEnvironment` › `pub const fn objects(&self) -> &ObjectGraph {`
 
 Which graph is in force, so a witness can assert what a conductor
 installed rather than infer it from a composed vector.
@@ -218,10 +397,14 @@ also make this step *output-equivalent to deleting it*, because
 So the reserved keys arrive from one place — this function's supply
 step, which is role-scoped — or not at all.
 
-Then [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs), **after**
-the overlay and not before it, and under [`ObjectGraph::Recorded`] — which
-every conductor's environment reads, the v0.1 conductor's included;
-`AsReplaced` is the test instrument its section above describes.
+Then the object graph, **after** the overlay and not before it. Under
+[`ObjectGraph::Recorded`], the schema-4 runners' reading,
+[`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs). Under
+[`ObjectGraph::RecordedIn`], the v0.1 conductor's, the repository's two
+includes appended to whatever `GIT_CONFIG_PARAMETERS` the base and the
+overlay left, separated by one space, or alone when there is none:
+Git refuses a leading space there. `AsReplaced` is the test instrument its
+section above describes.
 `HostRunner::run` clears the ambient environment
 and installs exactly what this returns, so a pair that is not composed here
 reaches no child: a gate or a reviewer inside an exact snapshot would read

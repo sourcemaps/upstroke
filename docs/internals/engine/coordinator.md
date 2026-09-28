@@ -33,19 +33,39 @@ leaving this file) and denied by path in `clippy.toml` like the conductors
 below. The bodies are what they were; the call in `run_contained` lost its
 `coordinator::` prefix and the two seams became `pub(super)`.
 
-## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())`
+## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))`
 
 The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
 
-`HostRunner::for_legacy_workspace` reads `ObjectGraph::Recorded`: its
-children read the objects the repository holds, which is the graph
+`HostRunner::for_legacy_workspace` reads `ObjectGraph::RecordedIn(repository)`:
+its gates, reviewers and implementers read the objects the repository holds, in
+the repository the run manages and in no other, which is the graph
 `src/workspace.rs` writes the workspace and its gate snapshots from since
 `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed. Until then it read the
 graph `refs/replace/*` describes, to match that frozen producer, and the two
 moved together in the change that closed the finding. This function drives the
 *schema-1..3* coordinator and nothing else, so it is the one place that choice
 belongs. See [`ObjectGraph`](../runner/host/environment.md) for why a consumer
-has to read its own producer's graph.
+has to read its own producer's graph, and why only in its own repository.
+
+The `repository` is `Workspace::open(repo_root)`'s `recorded_objects_scope`,
+built on the line above, before the inputs are validated. It asks Git for the
+common directory, which a path outside any repository refuses exactly as
+`Workspace::open` in the coordinator would, and it writes the include file under
+the private root. That write happens even for a run refused later, and is
+harmless: the file's bytes never vary, it lives in the private root, and no Git
+configuration names it; only the environment of a role this runner starts does.
+
+## `if !workspace.is_clean()? {`
+
+The dirty-tree refusal names the command that shows what upstroke found,
+`git --no-replace-objects -c core.useReplaceRefs=false status`, and `git replace
+-l`. Both controls: over a checkout written through a replacement of HEAD, with
+`core.useReplaceRefs = true` configured, `git --no-replace-objects status` alone
+prints nothing on Git 2.40.0 and 2.41.0, and this command prints `M  README.md` on
+2.40.0 through 2.43.0 (measured with plain Git). Upstroke's own Git children carry
+the same two. `a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run`
+runs the command against that checkout.
 
 ## `pub(super) fn run_harness_on(`
 

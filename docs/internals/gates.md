@@ -313,8 +313,9 @@ letting the legs below agree for the wrong reason.
 `gate_snapshot_for_candidate_in_store`, and both check out through
 `add_gate_worktree`. The gate is `ShellGate::check` running
 `git diff --exit-code HEAD -- f.txt` with a legacy invocation. The runner
-is `HostRunner::for_legacy_workspace()`, the value `engine::run` and
-`engine::resume` install.
+is `HostRunner::for_legacy_workspace(repository)`, the value `engine::run` and
+`engine::resume` install, over the repository `Workspace::recorded_objects_scope`
+names, with its include written under a private root of the test's own.
 
 Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, this test pinned
 the old exemption, and it did so without driving the producer. It made
@@ -330,7 +331,14 @@ longer agreed with it. The measurement that found this:
 |---|---|---|---|
 | `a3767bcc` | `B` | `Pass` (it read `AsReplaced`) | `Fail` |
 | `a9535c42` | `A` | `Fail` (it read `AsReplaced`) | `Pass` |
-| this change | `A` | `Pass` (it reads `Recorded`) | `Pass` |
+| `915c0646` | `A` | `Pass` (it read `Recorded`) | `Pass` |
+| #326 round 4 | `A` | `Pass` (it reads `RecordedIn`) | `Pass` |
+
+The fixture pins `core.useReplaceRefs = true` in the repository. At `6e3e618f`,
+whose v0.1 runner carried the variable alone, the production-runner leg failed on
+Git 2.40.0 and 2.41.0 (the round-3 review of record): the configured `true` beat
+the variable. Under the includes it passes on 2.41.0, 2.42.0 and 2.43.0
+(measured with each first on `PATH`).
 
 It now asserts, in order:
 
