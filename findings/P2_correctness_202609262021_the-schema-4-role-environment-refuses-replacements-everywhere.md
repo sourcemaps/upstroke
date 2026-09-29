@@ -104,7 +104,12 @@ configuration file missed `config.worktree`.
   directory, and the `worktrees` of the second pattern, is spelled with a class of both cases per ASCII letter
   where the directory holding it finds it under the other case, and exactly where it does not (`worktrees` since
   round 6, asked through the common directory's `refs`). An alias spelled in the other case defeats that
-  lookup: `PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`.
+  lookup: `PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`. This is an ASCII mechanism,
+  and a schema-4 scope built the same way inherits its P1: a spelling the filesystem equates with the stored
+  one that the classes do not cover, such as `CAFÉ` for `café`, the other Unicode normalization, or an ASCII
+  name spelled with a character the filesystem folds onto an ASCII letter, reads the replaced graph
+  (`PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`). Copying it is not a
+  repair of that finding.
 - **An include that exists whenever a role starts.** #326 writes it at
   `<private root>/git/recorded-objects.gitconfig` before a run's or resume's first role, and refuses to start a
   role while it is missing or altered.
