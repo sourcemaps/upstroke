@@ -38,15 +38,23 @@ below. The bodies are what they were; the call in `run_contained` lost its
 The v0.1 conductor's runner, and the same call in [`resume_harness`](resume.md).
 
 `HostRunner::for_legacy_workspace` reads `ObjectGraph::RecordedIn(repository)`:
-its gates, reviewers and implementers read the objects the repository holds, in
-the repository the run manages and in no other, which is the graph
-`src/workspace.rs` writes the workspace and its gate snapshots from since
-`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed. Until then it read the
-graph `refs/replace/*` describes, to match that frozen producer, and the two
-moved together in the change that closed the finding. This function drives the
-*schema-1..3* coordinator and nothing else, so it is the one place that choice
-belongs. See [`ObjectGraph`](../runner/host/environment.md) for why a consumer
-has to read its own producer's graph, and why only in its own repository.
+its gates, reviewers and implementers read the objects the repository holds in
+the repository the run manages, which is the graph `src/workspace.rs` writes the
+workspace and its gate snapshots from since
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, wherever their Git names its
+Git directory in a spelling the scope's conditions match. That is not every
+spelling that reaches it, nor only it. A spelling the filesystem equates with
+the stored one that the conditions do not match reads the replaced graph there
+(`PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`,
+P1, deferred), and an alias spelled in the other case can make the conditions
+reach a repository beside it
+(`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`). Until
+then it read the graph `refs/replace/*` describes, to match that frozen
+producer, and the two moved together in the change that closed the finding.
+This function drives the *schema-1..3* coordinator and nothing else, so it is
+the one place that choice belongs. See [`ObjectGraph`](../runner/host/environment.md)
+for why a consumer has to read its own producer's graph, and why the scope is
+meant to be its own repository alone.
 
 The `repository` is `Workspace::open(repo_root)`'s `recorded_objects_scope`,
 built on the line above, before the inputs are validated. It asks Git for the

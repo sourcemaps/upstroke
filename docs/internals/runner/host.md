@@ -463,8 +463,14 @@ Infallible because `host-v1`'s record is a constant with nothing to inspect;
 ## `HostRunner::for_legacy_workspace`
 
 The runner the schema-1..3 conductor installs. It reads `ObjectGraph::RecordedIn(repository)`: its
-gates, reviewers and implementers read the recorded graph in the repository the run manages, and
-whatever the configuration says in any other. [`HostRunner::new`](#hostrunnernew) still reads
+gates, reviewers and implementers read the recorded graph in the repository the run manages wherever
+their Git names its Git directory in a spelling the conditions match, and whatever the configuration
+says in other repositories. Two exceptions are measured and filed, not repaired: a spelling the
+filesystem equates with the stored one that the conditions do not match reads the replaced graph in the
+managed repository
+(`PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`, P1), and an
+alias spelled in the other case can make the conditions reach a repository beside it
+(`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`, P2). [`HostRunner::new`](#hostrunnernew) still reads
 `ObjectGraph::Recorded`, the process-wide variable, for the schema-4 host path, whose repair is
 `PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE`'s and stays deferred with it. The
 two policies are distinct so that repairing this one changed nothing on that path.

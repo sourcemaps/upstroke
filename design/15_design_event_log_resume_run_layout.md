@@ -120,7 +120,13 @@ then with either case of each ASCII letter; a letter outside ASCII is matched as
 spells it. Git reads `GIT_CONFIG_PARAMETERS` after every configuration file and after the counted
 `GIT_CONFIG_*` pairs, so in the managed repository's main worktree and in every linked one, the
 run's snapshots included, that setting comes last wherever Git names the Git directory in a
-spelling those conditions match. A repository a role creates for itself matches neither condition
+spelling those conditions match. A spelling the filesystem equates with the stored one that they do
+not match, such as a letter outside ASCII in its other case or Unicode normalization, or a character
+the filesystem folds onto an ASCII letter, reads the replaced graph, and a gate over an untouched
+snapshot then fails
+(`PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`, deferred:
+which spellings name one directory is the filesystem's decision, not Git's and not this code's). A
+repository a role creates for itself matches neither condition
 and keeps its replacements. So does a repository whose path differs from the managed one's only in
 the ASCII case of components held by directories that keep case, unless such a directory also holds
 an alias of the managed path's component named with each ASCII letter's case swapped: a junction or

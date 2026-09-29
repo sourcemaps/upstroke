@@ -78,9 +78,10 @@ replacements, a repository a gate creates for itself included. That is
 latent: no supported configuration activates the schema-4 conductor),
 and it is why the v0.1 runner no longer reads it.
 
-`RecordedIn` is the v0.1 conductor's: the recorded graph in one
-repository, the one the run manages, and whatever the configuration says
-everywhere else. Its section below says how.
+`RecordedIn` is the v0.1 conductor's: the recorded graph in the repository
+the run manages, and whatever the configuration says elsewhere, as far as a
+condition on the spelling of a Git directory can tell the two apart. Its
+section below says how, and where the spelling and the filesystem disagree.
 
 `AsReplaced` composes nothing, so a child reads whatever its base says
 about `refs/replace/*`. No conductor installs it. It is a test
@@ -188,10 +189,22 @@ repository.** Both are measured, and neither is repaired:
   2.50.1, and #326 round 6 measured the bind mount on ext4, where a
   symbolic link of the same name did not do it.
 - **Less far, through a spelling the classes do not cover.** Only ASCII
-  letters are spelled in classes. On a case-folding ext4 directory, a Git
-  directory named with a letter outside ASCII in its other case (`CAFÉ`
-  for `café`), or in the other Unicode normalization, names the managed
-  repository and reads the replaced object (#326 round 6, Git 2.43.0).
+  letters are spelled in classes (`matched`). On a case-folding ext4
+  directory, a Git directory named with a letter outside ASCII in its other
+  case (`CAFÉ` for `café`), or in the other Unicode normalization, names the
+  managed repository and reads the replaced object, and so does one whose
+  ASCII name is spelled with a character the filesystem folds onto an ASCII
+  letter (`worKtrees` with the Kelvin sign, `worktreeſ` with the long s).
+  Through production code, a gate that names its linked worktree's Git
+  directory through `CAFÉ` or the NFD spelling reads the replacing bytes
+  over a snapshot holding the recorded ones and returns `Fail`. That is
+  `PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`
+  (P1, deferred, on the owner's ruling of 2026-09-29): plain Git measured at
+  `c453705f` and `6acf1216` on Git 2.41.0 and 2.43.0, the gate at both
+  heads. The scope matches a
+  spelling, while the filesystem decides which spellings name one directory,
+  so the finding asks for a decision about repository identity rather than
+  another class of characters.
 
 **Each decision fails a witness when it is undone** (#326 round 4, Git 2.43.0;
 the witnesses are in `src/engine/tests.rs`, `src/runner/host/tests.rs`,

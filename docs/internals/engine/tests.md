@@ -2758,8 +2758,11 @@ and none panics: the witness wants the whole record, not the first failure.
   the longest is 249 characters, for the shapes witness's glob directory.
 - `fixture-inside`, `fixture-outside`: the role makes a repository inside its
   own working directory (named `fx`, for the budget above) and one outside it,
-  installs a replacement in each and reads it back replaced. A repository a role
-  creates keeps its replacements. Its commit passes
+  installs a replacement in each and reads it back replaced. Both keep their
+  replacements. So does a repository a role creates elsewhere, except one beside a
+  component of the managed repository's path, named like it but for case, in a
+  directory an alias makes look as though it folds case
+  (`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`). Its commit passes
   `-c maintenance.autoDetach=false`, which works around
   `PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE` on the owner's ruling of
   2026-09-28. Git 2.55.0's commit otherwise detaches its auto-maintenance. It
