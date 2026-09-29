@@ -68,34 +68,450 @@ Whether these two names are the same variable under this rule.
 ## `pub enum ObjectGraph {`
 
 Which object graph the Git children of a composed environment read, and
-the one thing about it a conductor gets to choose.
+where, and the one thing about it a conductor gets to choose.
 
 `Recorded` is the default and the schema-4 rule: the objects the
 repository holds, never the objects `refs/replace/*` points at them
 (`design/15`, "What an exact snapshot is exact against"). It is what
 `compose` writes [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs)
-for.
+for, process-wide: every repository a child touches loses its
+replacements, a repository a gate creates for itself included. That is
+`PR326-SCHEMA4-ROLE-ENVIRONMENT-REFUSES-REPLACEMENTS-EVERYWHERE` (P2,
+latent: no supported configuration activates the schema-4 conductor),
+and it is why the v0.1 runner no longer reads it.
 
-`AsReplaced` is the schema-1..3 exemption, and it exists because a
-consumer must read what its own producer wrote. The v0.1 workspace
-(`src/workspace.rs`) sets no such pair on its Git children and is frozen
-by `effects/allowlist.toml`'s `[[legacy]]` row — `invariants_preserved[1]`,
-"this module's behaviour untouched" — so its checkout of a commit whose
-recorded tree carries a replacement materialises the *replacing* tree.
-Composing the pair for a gate over that checkout put the two on different
-graphs and failed `git diff --exit-code HEAD` on a workspace the engine
-itself had just written (measured on git 2.43, PR #271 round 1's
-regression finding). So each path is internally consistent instead: the
-v0.1 conductor installs `AsReplaced` at `engine::run` and
-`engine::resume`, and the schema-4 path, whose producer removes
-replacements at both ends, keeps `Recorded`. That the v0.1 path reads
-replacements at all is `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`,
-deferred behind that freeze and unchanged by this.
+`RecordedIn` is the v0.1 conductor's: the recorded graph in the repository
+the run manages, and whatever the configuration says elsewhere, as far as a
+condition on the spelling of a Git directory can tell the two apart. Its
+section below says how, and where the spelling and the filesystem disagree.
+
+`AsReplaced` composes nothing, so a child reads whatever its base says
+about `refs/replace/*`. No conductor installs it. It is a test
+instrument: the witnesses that must show a replacement is live in a
+role process's environment (`src/workspace_manager/tests.rs`), or that
+reading the replaced graph over a snapshot written from the recorded one
+fails (`src/gates.rs`), build a runner reading it.
+
+It was the schema-1..3 exemption from PR #271 (`a55f7049`) until
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed. The rule behind it
+still stands: a consumer must read what its own producer wrote. The v0.1
+workspace (`src/workspace.rs`) then set no pair on its Git children and
+was frozen, so its checkout of a commit whose recorded tree carries a
+replacement materialised the *replacing* tree. Composing the pair for a
+gate over that checkout put the two on different graphs and failed `git
+diff --exit-code HEAD` on a workspace the engine itself had just written
+(measured on git 2.43, PR #271 round 1's regression finding), and the v0.1
+conductor installed `AsReplaced` to match its producer. The exemption
+existed because of the freeze. Closing the finding amended the freeze:
+every Git child of the module now refuses replacements, and the same gate
+over an untouched snapshot then failed under `AsReplaced` and passed under
+`Recorded` (git 2.43). So the v0.1 conductor reads the recorded graph
+too, first as `Recorded` and, since #326 round 4, as `RecordedIn`.
 
 It is a field of the environment rather than of the request because it is
 a property of the *conductor* — one schema per run, chosen once where the
 runner is built — and because defaulting it here makes the isolated
 reading the one a new spawn site gets without asking.
+
+## `pub enum ObjectGraph` › `RecordedIn(ManagedRepository),`
+
+The recorded graph in the repository [`ManagedRepository`] names, through
+two conditional includes `compose` appends to `GIT_CONFIG_PARAMETERS`.
+
+Not the process-wide variable, because a variable does not know which
+repository it is for. Under `Recorded` a v0.1 gate that ran `git init`,
+`commit` and `git replace` in a fixture of its own read the original
+object, failed and parked the run, in a managed repository with nothing
+under `refs/replace/` (#326's round-2 regression review). And on Git 2.41 a
+configured `core.useReplaceRefs = true` beats the variable, so the
+producer wrote recorded bytes while the roles read replacements (the
+round-3 review of record).
+
+Not the repository's own configuration either. A v0.1 run manages the
+operator's checkout, and every gate snapshot is a linked worktree of it,
+so `--local` would write the operator's common `.git/config`, visible from
+unrelated sibling worktrees and outliving the run; and a
+`config.worktree` or an inherited `GIT_CONFIG_COUNT` or
+`GIT_CONFIG_PARAMETERS` outranks that file anyway (the design check of
+2026-09-27, on Git 2.40.0, 2.41.0 and 2.43.0).
+
+Not `GIT_CONFIG_COUNT` pairs: Git reads `GIT_CONFIG_PARAMETERS` after the
+counted pairs, so an inherited `'core.useReplaceRefs'='true'` there would
+win. Appended to `GIT_CONFIG_PARAMETERS`, after every entry the base or the
+overlay carries, the includes are the last configuration any role's Git
+reads, except a `-c` that Git command is given itself.
+
+Measured with plain Git on 2.40.0, 2.41.0, 2.42.0 and 2.43.0, with `true`
+in the system, global, repository and worktree files, in
+`GIT_CONFIG_COUNT` and in inherited `GIT_CONFIG_PARAMETERS`: the managed
+repository's main and linked worktrees read the recorded object, and a
+fixture repository inside the linked worktree and one outside it kept
+their replacements, under a path with spaces and `[x]*?` in it. On 2.40.0,
+`git merge-tree` over a replaced commit read the replacement with the
+includes, and with `-c core.useReplaceRefs=false` too; from 2.41.0 it read
+the recorded commit. That is why the floor is 2.41
+(`src/workspace.rs`'s `require_git_floor`).
+
+**Which repository the conditions reach is decided by what each directory
+does, not by the platform** (#326 round 5). Until then macOS and Windows
+matched the whole path under `gitdir/i:`, which folds every component
+whatever the directory holding it does. On a case-sensitive directory the
+include therefore also reached a repository whose path differs from the
+managed one only in case, and a gate reading that repository got the
+recorded object where the repository had installed a replacement (the
+round-4 regression lens, which also reproduced it natively on Windows with
+NTFS case sensitivity enabled on one directory). Each component is now matched with
+case unless the directory holding it finds it under the other case;
+[`ManagedRepository::new`]'s section says how that is measured, and what it
+costs. Since #326 round 6 that includes the `worktrees` component of the
+linked worktrees' condition, which round 5 appended as a literal: where the
+common directory folds, a gate that named a linked worktree's Git directory
+`<common>/WORKTREES/<id>` read the replaced object in the managed
+repository (the round-5 review's finding).
+
+**What it does not do.** A role's own `git -c core.useReplaceRefs=true`
+comes after the includes and wins, and a role that clears its environment
+before running Git loses them. Configuration is not an enforcement
+boundary, and the policy claims none.
+
+**Where the conditions reach further, or less far, than the managed
+repository.** Both are measured, and neither is repaired:
+
+- **Further, through an alias.** A directory that keeps case, but holds an
+  alias whose name is a component of the managed repository's path with
+  every ASCII letter's case swapped and which resolves to that component,
+  is judged to fold case: a junction on Windows, which
+  `std::fs::canonicalize` follows, or a bind mount on Linux, whose root has
+  the component's device and inode. The component is then spelled in
+  classes, and the conditions also reach a repository beside it whose name
+  differs from it only in case, whose roles then read the recorded object
+  where it installed a replacement. That is
+  `PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING` (P2,
+  deferred): the round-5 review measured it natively on Git for Windows
+  2.50.1, and #326 round 6 measured the bind mount on ext4, where a
+  symbolic link of the same name did not do it.
+- **Less far, through a spelling the classes do not cover.** Only ASCII
+  letters are spelled in classes (`matched`). On a case-folding ext4
+  directory, a Git directory named with a letter outside ASCII in its other
+  case (`CAFÉ` for `café`), or in the other Unicode normalization, names the
+  managed repository and reads the replaced object, and so does one whose
+  ASCII name is spelled with a character the filesystem folds onto an ASCII
+  letter (`worKtrees` with the Kelvin sign, `worktreeſ` with the long s).
+  Through production code, a gate that names its linked worktree's Git
+  directory through `CAFÉ` or the NFD spelling reads the replacing bytes
+  over a snapshot holding the recorded ones and returns `Fail`. That is
+  `PR326-A-SPELLING-THE-FILESYSTEM-EQUATES-READS-REPLACEMENTS-IN-THE-MANAGED-REPOSITORY`
+  (P1, deferred, on the owner's ruling of 2026-09-29): plain Git measured at
+  `c453705f` and `6acf1216` on Git 2.41.0 and 2.43.0, the gate at both
+  heads. The scope matches a
+  spelling, while the filesystem decides which spellings name one directory,
+  so the finding asks for a decision about repository identity rather than
+  another class of characters.
+
+**Each decision fails a witness when it is undone** (#326 round 4, Git 2.43.0;
+the witnesses are in `src/engine/tests.rs`, `src/runner/host/tests.rs`,
+`src/workspace.rs` and `src/gates.rs`, and "ok" means the mutation survived that
+one):
+
+| mutation | run and resume | own fixture | path shapes | siblings | refusal, interruption | composition | exact entries | spawn refusal | Git floor | gate |
+|---|---|---|---|---|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok | ok | ok | ok | ok | ok |
+| the process-wide variable again | FAILED | FAILED | FAILED | FAILED | FAILED | FAILED | ok | FAILED | ok | ok |
+| the includes before the inherited entries | FAILED | ok | ok | ok | FAILED | FAILED | ok | ok | ok | ok |
+| no `/worktrees/*` condition | FAILED | FAILED | FAILED | FAILED | FAILED | ok | FAILED | ok | ok | FAILED |
+| no glob escaping | ok | ok | FAILED | ok | ok | ok | FAILED | ok | ok | ok |
+| no quote escaping | ok | ok | FAILED | ok | ok | ok | FAILED | ok | ok | ok |
+| one `<common dir>/` condition instead of two | FAILED | FAILED | FAILED | ok | FAILED | ok | FAILED | ok | ok | ok |
+| the include never written | FAILED | FAILED | FAILED | FAILED | FAILED | ok | ok | ok | ok | FAILED |
+| no check before a role | ok | ok | ok | ok | ok | ok | ok | FAILED | ok | ok |
+| no Git floor | ok | ok | ok | ok | ok | ok | ok | ok | FAILED | ok |
+| the includes before the overlay | FAILED | ok | ok | ok | FAILED | FAILED | ok | ok | ok | ok |
+
+The gate witness is `a_v1_gate_judges_the_tree_its_own_workspace_materialised`,
+whose fixture pins `true` in the repository: on Git 2.41 it also fails under the
+process-wide variable. The siblings run in linked worktrees only, which a single
+`<common dir>/` condition does reach.
+
+## `pub const CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";`
+
+The variable Git reads command-line configuration from, and hands its own
+children: `git -c` appends to it. Undocumented by `git-config(1)` and read
+by every Git since 2.31 in its `'key'='value'` form, which is the form the
+includes are written in.
+
+## `pub const RECORDED_OBJECTS_INCLUDE: &[u8] = b"[core]\n\tuseReplaceRefs = false\n";`
+
+The whole of the include file, byte for byte. The runner compares the file
+with it before every role it starts, so a file that holds anything else,
+nothing, or is not there refuses the role rather than including nothing.
+A missing include is otherwise silent: Git skips an include whose file does
+not exist.
+
+## `pub enum GitdirRule {`
+
+How a canonical path is spelled for an `includeIf.gitdir` condition on
+this platform. A type rather than a `cfg!` at each use, for the reason
+[`KeyCase`] is one: `ALL` lets a grid on one machine cover every rule.
+
+It decides the spelling and nothing else. Whether a component is matched
+with case is not a property of the platform: a macOS volume or a Windows
+directory can be case-sensitive, and a Linux directory can fold case, so
+[`ManagedRepository::new`] asks each directory on the path. Until #326
+round 5 macOS had a rule of its own, `PosixFoldingCase`, and it and the
+Windows rule matched under `gitdir/i:`; the `keyword` section says why that
+went.
+
+## `pub enum GitdirRule` › `Posix,`
+
+Every Unix target, macOS included: the path's own bytes.
+
+## `pub enum GitdirRule` › `Windows,`
+
+Git for Windows compares the realpath `GetFinalPathNameByHandleW` gives,
+with its `\\?\` prefix removed, `UNC\` turned into `//`, and every
+backslash a slash. `std::fs::canonicalize` is the same call, so its result
+spelled that way is Git's own text. The prefix, a drive letter or a UNC
+server and share, is matched as that call spells it, and each component
+below it by what the directory holding it does.
+
+## `impl GitdirRule` › `pub const fn native() -> Self {`
+
+The spelling this machine's Git uses.
+
+## `impl GitdirRule` › `pub const fn keyword(self) -> &'static str {`
+
+The condition's keyword: `gitdir:`, under every rule.
+
+`gitdir/i:` folds every component whatever the directory holding it does.
+On a case-sensitive directory, then, it also matched a repository whose
+path differs from the managed one only in case, and kept that repository's
+gates off the replacements it had installed: the blocking finding of #326's
+round-4 regression review, which the case-sibling witness reproduces (it
+fails at `49243a24` under both rules that used `gitdir/i:`). Where a
+directory does fold case, the component is spelled with both cases of each
+ASCII letter instead, which reaches that component in any ASCII case and
+reaches no other component in any case but its own.
+
+## `impl GitdirRule` › `pub fn spelling(self, path: &[u8]) -> Vec<u8> {`
+
+The path as Git spells it under this rule, before any escaping.
+
+## `pub struct ManagedRepository {`
+
+The repository a v0.1 run manages, as `compose` names it to Git: its
+canonical common directory, the include file, and the two
+`GIT_CONFIG_PARAMETERS` entries they make, built once so every role gets
+the same bytes.
+
+## `impl ManagedRepository` › `pub fn new(common_dir: &Path, include: &Path, rule: GitdirRule) -> Result<Self, UpstrokeError> {`
+
+The entries, for a canonical common directory `C`:
+
+```
+'includeIf.gitdir:C.path'='<include>' 'includeIf.gitdir:C/W/*.path'='<include>'
+```
+
+`W` is `worktrees`, spelled as `C` matches names: in classes where `C`
+folds case, and exactly where it does not.
+
+- **Matched as each directory matches.** For each component of `C`,
+  [`folds_case`] asks the directory holding it whether it finds that name
+  under the other ASCII case. Where it does, each ASCII letter of the
+  component is spelled as a class of both cases (`Repo` becomes
+  `[Rr][eE][pP][oO]`); where it does not, the component is matched
+  exactly. So a path Git reaches through a folding directory in another
+  case still names the managed repository, and a repository beside it,
+  in a directory that keeps case, whose name differs only in case, does
+  not. Where nothing on the path folds, as on this box's ext4, the entries
+  are byte for byte what round 4 wrote; on a volume that folds case
+  throughout, every component is spelled in classes. The prefix of a
+  Windows path is matched
+  as spelled (the `Windows` rule's section), and so are letters outside
+  ASCII, which Git's own `gitdir/i:` does not fold either.
+- **`worktrees` as `C` matches names.** It is a name `C` looks up, so it
+  is spelled in classes where `C` finds `refs` under the other case, and
+  exactly where it does not. `refs` asks rather than `worktrees` itself:
+  Git creates `worktrees` with the first linked worktree, usually after
+  the scope is built, and `git worktree prune` removes it once it is
+  empty, while every common directory Git accepts holds `refs` (Git's
+  `is_git_directory` requires it). Whether a directory folds is the
+  directory's, whichever name asks it. Not `HEAD` either: Git rewrites it
+  by renaming a lock file over it, so the two lookups could meet two
+  entries. Until #326 round 6 `worktrees` was written as a literal, and
+  where `C` folds a gate that named a linked worktree's Git directory
+  `C/WORKTREES/<id>` read the replaced object: measured on a case-folding
+  ext4 mount with Git 2.41.0 and 2.43.0, where `worktrees` read
+  `recorded` and `WORKTREES` read `replacing`.
+- **Two conditions.** `C` is the main worktree's Git directory, and
+  `C/W/*` every linked worktree's, the gate and review snapshots among
+  them. `*` does not cross a `/`, so the Git directory of a submodule,
+  under `C/modules/`, is not matched, and neither is anything deeper. A
+  bare `C/` would have matched both.
+- **Escaped.** The condition is a wildmatch pattern, so each `[`, `]`,
+  `*`, `?` and `\` of `C` is escaped, in a folding component as in any
+  other; the only globs are the linked worktrees' `*` and the classes the
+  folding components, and a folding `worktrees`, are spelled with.
+  Unescaped, a `[` silently matches nothing and a `*` matches other
+  repositories.
+- **Quoted.** Each key and value is single-quoted; a quote inside is
+  closed, escaped and reopened (`'\''`), which is what Git's own
+  `sq_dequote` reads.
+- **Refused, never approximated:** a relative common directory or include,
+  which Git rejects from the command line; a newline in `C`, which Git
+  rejects in a key; on Windows a path that is not valid Unicode, which
+  cannot reach Git for Windows through its environment; a `.` or `..`
+  component, which the realpath Git matches never holds; and a component
+  whose directory cannot be asked, or a `C` that cannot be asked through
+  `refs`, which leaves no way to tell whether it must be matched with
+  case. A pattern that silently failed to match would put the roles back
+  on the replaced graph with nothing to say so, and one that matched too
+  much would take another repository's replacements away.
+
+**What the lookups cost, and what happens when one fails.** Two lookups for
+each component that holds an ASCII letter, and two for `refs` in `C` (two
+`lstat`s on Unix, two `std::fs::canonicalize` calls elsewhere), once per run
+and once per resume: `Workspace::recorded_objects_scope` builds the scope
+there, and no role repeats it. Measured on the build box through this
+constructor, in a release build, over 10,000 constructions, three times each
+(#326 round 6): for `/srv/tactus/.git`, eight `statx` calls and 2.76 to
+2.88 µs, where round 5's constructor made six and took 2.17 to 2.23 µs; for
+a path of twelve components, 10.27 to 10.35 µs, where round 5's took 9.10 to
+9.25 µs.
+
+A lookup that fails with anything but "not found" refuses the run before
+its first role, naming the path and the error (`UpstrokeError::Refused`, from
+`run` and `resume` alike); nothing falls back to either answer. On a folding
+directory the other spelling names the entry just found, and on a
+case-sensitive one it is not found unless a sibling bears exactly that
+spelling, which the identity check tells apart, or an alias resolves it to
+the entry itself, which the identity check does not (the section above). None
+of the layouts measured for this change reached the refusal: a case-sensitive
+ext4 directory, a case-folding one, and a case-sensitive directory inside a
+case-folding one. A directory missing from the path does reach it
+(`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key`), and so
+does a `C` with no `refs`, which Git would not accept as a common directory
+(measured through this constructor at #326 round 6). By reasoning, not
+measurement, so would an I/O error, or on Windows a case-sibling the process
+may not open. A directory removed between the two lookups does not: its
+second lookup answers "not found", and the component is matched exactly.
+
+**Each round-5 decision fails a test when it is undone** (Git 2.43.0, with
+`TMPDIR` on this box's ext4, which keeps case, and in a case-folding directory
+of a loop-mounted `mkfs.ext4 -O casefold` image; "ok" means the mutation
+survived that test on both, and a layout named means it failed there alone).
+The witness is
+`a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements`;
+the inline tests are this module's own; the host tests are
+`the_includes_refuse_a_common_directory_git_cannot_read_in_a_key` and
+`the_windows_rule_spells_a_path_as_git_for_windows_does`:
+
+| mutation | witness | inline: exact entries | inline: refusals | host: refusals | host: rules |
+|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok |
+| `gitdir/i:` again under the `Windows` rule | FAILED (ext4) | ok | ok | ok | FAILED |
+| `gitdir/i:` under both rules | FAILED (ext4) | FAILED | ok | ok | FAILED |
+| every component folds | FAILED (ext4) | ok | ok | FAILED | ok |
+| no component folds | FAILED (case-folding) | ok | ok | FAILED | ok |
+| any entry under the other spelling counts as the same one | FAILED (ext4) | ok | ok | ok | ok |
+| a failed lookup reads as "keeps case" | ok | ok | FAILED | FAILED | ok |
+| a component takes the answer of the one before it | ok | FAILED | ok | ok | ok |
+
+The five v0.1 witnesses in `src/engine/tests.rs` survived every row on both
+layouts. On ext4 nothing folds. On the case-folding directory Git named the
+managed repository in its stored case whenever it found it from a working
+directory: `git -C <mnt>/ci/PROBE rev-parse --absolute-git-dir` printed
+`<mnt>/ci/Probe/.git`, as `pwd -P` there printed `Probe`, while
+`git --git-dir=<mnt>/ci/PROBE/.GIT` printed the path as given. The witness's
+read through a Git directory spelled in capitals is what catches "no component
+folds" there.
+
+**Each round-6 decision fails a test when it is undone** (Git 2.43.0, in a
+`git archive` copy of `5c1e0292`, with `TMPDIR` on this box's ext4 and in the
+case-folding directory; "ok" means the mutation survived that test on both, and
+a layout named means it failed there alone). The witness is the same test,
+whose capitals check now also reads the linked worktree's Git directory; the
+inline tests are this module's own; the host fixtures are
+`the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository` and
+`a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph`,
+whose common directories hold `refs`; the five v0.1 witnesses are in
+`src/engine/tests.rs`:
+
+| mutation | witness | inline: exact entries | inline: refusals | host: fixtures | five v0.1 witnesses |
+|---|---|---|---|---|---|
+| none | ok | ok | ok | ok | ok |
+| `worktrees` never folds | FAILED (case-folding) | FAILED | ok | ok | ok |
+| `worktrees` always folds | ok | FAILED | ok | ok | ok |
+| `worktrees` takes the answer of the component `.git` | ok | FAILED | FAILED | ok | ok |
+| a failed `refs` lookup reads as "keeps case" | ok | ok | FAILED | ok | ok |
+| `worktrees` asked instead of `refs` | ok | FAILED | FAILED | FAILED | four of five FAILED |
+
+"`worktrees` always folds" survives the witness: in a common directory that
+keeps case no other spelling names `worktrees`, so only the exact entries see
+it. "Takes the answer of the component `.git`" asks nothing of `refs`, so a
+failing `refs` lookup no longer refuses. "Asked instead of `refs`" refuses
+every scope built before the first linked worktree exists; the siblings
+witness, whose runs start in linked worktrees, survives it.
+
+## `impl ManagedRepository` › `fn matching(`
+
+[`Self::new`] with the lookup supplied, so the inline tests can pin the
+entries for any answer without a directory to measure. It walks `C` once,
+root first, and asks about each normal component with the path of the
+directory that holds it; then it asks `C` about `refs`, for `worktrees`.
+
+## `impl ManagedRepository` › `pub fn verify_include(&self) -> Result<(), UpstrokeError> {`
+
+Whether the include holds [`RECORDED_OBJECTS_INCLUDE`] exactly. The
+runner asks before every role it starts and does not start one on `Err`
+(`ProcessFate::NeverStarted`). A read, not an effect: the file is written
+by `Workspace::recorded_objects_scope`, which every run and resume call
+before their first role.
+
+## `fn folds_case(parent: &Path, name: &OsStr) -> Result<bool, String> {`
+
+Whether the directory `parent` finds `name` under the other ASCII case.
+It looks up `name` with the case of every ASCII letter swapped (`Repo` as
+`rEPO`) and compares what it finds with `name` itself: the same entry means
+the directory folds case, "not found" or a different entry means it keeps
+case, and any other error is the caller's refusal. A name with no ASCII
+letter has no other spelling to look up, and is matched exactly.
+
+## `fn in_the_other_case(name: &OsStr) -> Option<OsString> {`
+
+`name` with the case of every ASCII letter swapped, or `None` when it has
+none.
+
+## `const fn other_case(byte: u8) -> u8 {`
+
+The other ASCII case of a letter; any other byte as it is.
+
+## `fn same_entry(entry: &Path, other: &Path) -> Result<bool, String> {`
+
+Whether two spellings name one entry. On Unix by `(st_dev, st_ino)` of
+each, without following a final symbolic link: Linux's realpath does not
+correct case, so comparing canonical paths would call a folding directory
+case-sensitive there. Elsewhere by `std::fs::canonicalize`, which on Windows
+returns the name as the directory stores it: the standard library's file
+identity there, `MetadataExt::file_index`, is unstable on 1.85.0 and on
+1.97.1 alike (E0658, `windows_by_handle`). A second spelling that is not
+found is `false`; an error on either lookup is the caller's refusal.
+
+Neither comparison tells an alias from the entry itself. `canonicalize`
+follows a junction or a symbolic link on Windows, and a bind mount's root
+carries its source's device and inode on Linux, so an alias spelled in the
+other case answers `true` in a directory that keeps case:
+`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`. A
+symbolic link on Unix does not, since `lstat` reads the link itself.
+
+## `fn matched(into: &mut Vec<u8>, spelled: &[u8], folded: bool) {`
+
+One component of the condition: each ASCII letter as a class of both cases
+when the component folds, and every character wildmatch treats as syntax
+escaped with a backslash.
+
+## `fn single_quoted(text: &[u8]) -> Vec<u8> {`
+
+POSIX single quoting, as Git's `sq_quote_buf` writes it.
 
 ## `pub struct HostEnvironment {`
 
@@ -113,12 +529,12 @@ The Upstroke process environment, under this platform's name rule.
 
 An explicit base, for grids that must cover both name rules.
 
-## `impl HostEnvironment` › `pub const fn reading(mut self, objects: ObjectGraph) -> Self {`
+## `impl HostEnvironment` › `pub fn reading(mut self, objects: ObjectGraph) -> Self {`
 
 The object graph this environment's children read. Owned by whoever
 builds the runner, never by an adapter or an overlay.
 
-## `impl HostEnvironment` › `pub const fn objects(&self) -> ObjectGraph {`
+## `impl HostEnvironment` › `pub const fn objects(&self) -> &ObjectGraph {`
 
 Which graph is in force, so a witness can assert what a conductor
 installed rather than infer it from a composed vector.
@@ -212,10 +628,15 @@ also make this step *output-equivalent to deleting it*, because
 So the reserved keys arrive from one place — this function's supply
 step, which is role-scoped — or not at all.
 
-Then [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs), **after**
-the overlay and not before it, and under [`ObjectGraph::Recorded`] — every
-environment but the v0.1 conductor's, whose own producer reads the replaced
-graph and whose section above says why. `HostRunner::run` clears the ambient environment
+Then the object graph, **after** the overlay and not before it. Under
+[`ObjectGraph::Recorded`], the schema-4 runners' reading,
+[`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs). Under
+[`ObjectGraph::RecordedIn`], the v0.1 conductor's, the repository's two
+includes appended to whatever `GIT_CONFIG_PARAMETERS` the base and the
+overlay left, separated by one space, or alone when there is none:
+Git refuses a leading space there. `AsReplaced` is the test instrument its
+section above describes.
+`HostRunner::run` clears the ambient environment
 and installs exactly what this returns, so a pair that is not composed here
 reaches no child: a gate or a reviewer inside an exact snapshot would read
 whatever `git replace` points at the judged objects, and measured on git 2.43 it
@@ -223,7 +644,8 @@ did — `git show HEAD:f` returned the replacement and `git status --porcelain`
 called an untouched snapshot modified. `design/15`'s "What an exact snapshot is
 exact against" is the product sentence; the pair is one constant named at each
 of the four boundaries that starts a child which can run Git over a snapshot
-this engine produced.
+this engine produced, and at the one builder every Git child of the v0.1
+workspace starts from (`src/workspace.rs`'s `git_command`).
 
 It is **asserted, not reserved**, and the two are different things. The reserved
 keys are values this boundary reads *from its host* and re-supplies role-scoped,

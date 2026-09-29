@@ -248,24 +248,33 @@ config file at a time` and exits 129, so
 under a setting an operator is entitled to have. The base here is the same
 one `runner_reading` takes.
 
-## `mod tests` › `fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {`
+## `mod tests` › `fn git_honouring_replacements(dir: &Path, args: &[&str]) -> String {`
 
-A `git` of the shape `src/workspace.rs` runs — no
-[`NO_REPLACEMENT_OBJECTS`](../../src/workspace_manager.rs) — over an
-environment that decides nothing else about `refs/replace/*` either.
+The fixture's own `git`: it builds the repository the witness below
+measures and states that witness's premise, so it must honour
+`refs/replace/*`, over an environment that decides nothing else about them
+either.
 
-The removal is the point. The v0.1 workspace sets no such pair on its
-twenty Git children, so its checkout materialises whatever `refs/replace/*`
-points the recorded tree at; a suite started under an exported
-`GIT_NO_REPLACE_OBJECTS=1` would set the fixture up the *other* way and
-measure nothing.
+It is not the producer and no longer claims to be. Until
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed it was
+`git_as_the_legacy_workspace_does`, because `src/workspace.rs`'s Git
+children set no pair and this function stood in for them: the witness
+below materialised its checkout with it. The v0.1 workspace now refuses
+replacements, and the witness drives that workspace itself, so this
+builds the fixture and states the premise, and nothing it does stands in
+for code under test.
+
+The removal is still the point. A suite started under an exported
+`GIT_NO_REPLACE_OBJECTS=1` would build a fixture whose replacement no
+Git child reads, and the premise below would fail rather than let the
+witness measure nothing.
 
 That variable is not the only way, which is round 2's finding and the whole
 of round 3's instruction. `core.useReplaceRefs=false` does it too, and the
 reviewer reached it through `GIT_CONFIG_COUNT` — measured at head
-`aa2728d`, the test below failed at exit `101` with actual `"A\n"` where the
-fixture requires `"B\n"`, under a configuration an operator is entitled to
-set. So the whole enumeration is taken away here rather than the one name:
+`aa2728d`, the test below failed at exit `101` with actual `"A\n"` where its
+fixture then required `"B\n"`, under a configuration an operator is entitled
+to set. So the whole enumeration is taken away here rather than the one name:
 `without_ambient_replacement_controls` states what it is and how it was
 measured, and `pin_replacement_refs_in` states the repository-local half.
 
@@ -276,58 +285,76 @@ A host runner whose base carries none of the ambient controls over
 
 `HostRunner::run` clears the ambient environment and installs what
 `compose` returned, and `compose`'s base is this process's environment:
-under an exported `GIT_NO_REPLACE_OBJECTS=1` the base would carry the pair
-and both legs of the witness below would read the same object graph, and
-under an exported `core.useReplaceRefs=false` both would read the recorded
-one. Taking the enumeration out of the base is what makes them differ by
-the one thing under test.
+under an exported `core.useReplaceRefs=false` a runner reading
+`AsReplaced` would read the recorded graph after all, and the witness
+below's contrast leg would pass for the wrong reason. Taking the
+enumeration out of the base is what makes that leg read the replaced
+graph.
 
 ## `mod tests` › `fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {`
 
-A v0.1 gate judges the tree its own workspace materialised (PR #271,
-round 1's regression finding).
+A v0.1 gate judges the tree its own workspace materialised: over a
+snapshot the v0.1 workspace wrote from a tree that carries a replacement,
+the runner the v0.1 conductor installs judges the tree the snapshot's
+commit records.
 
-**The work is in `v1_gate_replacement_helper`, a neutralised child** (round
-4). Every `git` below already runs with the ambient controls taken away, so
-nothing here could be decided by the operator's environment — but "nothing
-could be" was the claim rounds 1, 2 and 3 each made about a witness that
-then could be, and what this process does not carry cannot be asserted from
-inside a process that carries it. `fixture::run_replacement_witness_child`
-is the shared door; `assert_replacement_controls_pinned` is the first
-statement on the other side of it, and it refuses on the enumerated names
-and then on a measurement of whether a Git child honours `refs/replace/*` at
-all. An eighteenth mechanism nobody has listed fails there, loudly, instead
-of letting these two legs agree for the wrong reason.
+**The work is in `v1_gate_replacement_helper`, a neutralised child**
+(PR #271, round 4). What a process does not carry cannot be asserted from
+inside a process that carries it, so `fixture::run_replacement_witness_child`
+is the shared door, and `assert_replacement_controls_pinned` is the first
+statement on the other side of it: it refuses on the enumerated names,
+and then on a measurement of whether a Git child honours `refs/replace/*`
+at all. A mechanism nobody has listed fails there, loudly, instead of
+letting the legs below agree for the wrong reason.
 
-The schema-1..3 path shares `HostRunner` with the schema-4 one, and its
-producer is frozen: `src/workspace.rs`'s Git children set no
-`NO_REPLACEMENT_OBJECTS`, so with `refs/replace/<tree A> -> <tree B>`
-installed its checkout of a commit whose recorded tree is `A` puts `B` on
-disk. Composing the pair for that gate's process puts producer and consumer
-on different object graphs, and `git diff --exit-code HEAD` over a checkout
-nothing has touched exits 1 — a `Fail` on a workspace the engine itself
-wrote. Measured on git 2.43 with the pair composed unconditionally: `Fail`,
-exactly as the `Recorded` leg still records.
+**Every stage is production code.** The producer is
+`Workspace::gate_snapshot_for_candidate`, run on a tree `A` with
+`refs/replace/A -> B` installed. The engine calls its sibling
+`gate_snapshot_for_candidate_in_store`, and both check out through
+`add_gate_worktree`. The gate is `ShellGate::check` running
+`git diff --exit-code HEAD -- f.txt` with a legacy invocation. The runner
+is `HostRunner::for_legacy_workspace(repository)`, the value `engine::run` and
+`engine::resume` install, over the repository `Workspace::recorded_objects_scope`
+names, with its include written under a private root of the test's own.
 
-So the v0.1 conductor's runner reads the graph its own producer wrote
-(`HostRunner::for_legacy_workspace`, installed at `engine::run` and
-`engine::resume`), and the exact-snapshot rule of `design/15` binds the
-schema-4 path, whose producer removes replacements at both ends. That the
-v0.1 path reads replacements at all is
-`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, deferred behind the module's
-freeze; this test pins only that this pull request did not change its
-answer.
+Until `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, this test pinned
+the old exemption, and it did so without driving the producer. It made
+its own checkout with the fixture's `git`, asserted `B` on disk under the
+premise message "the v0.1 producer honours `refs/replace/*`", and then
+compared runners reading `AsReplaced` (`Pass`) and `Recorded` (`Fail`)
+over that checkout. A statement about the producer backed by a simulation
+of it could not see the producer change. Closing the finding changed the
+producer, and the whole suite stayed green over a v0.1 runner that no
+longer agreed with it. The measurement that found this:
 
-Both legs run the production `ShellGate::check` over a production
-`Workspace` with a legacy invocation, so what differs between them is one
-field of one environment.
+| producer | bytes on disk | `HostRunner::for_legacy_workspace()` | runner reading `Recorded` |
+|---|---|---|---|
+| `a3767bcc` | `B` | `Pass` (it read `AsReplaced`) | `Fail` |
+| `a9535c42` | `A` | `Fail` (it read `AsReplaced`) | `Pass` |
+| `915c0646` | `A` | `Pass` (it read `Recorded`) | `Pass` |
+| #326 round 4 | `A` | `Pass` (it reads `RecordedIn`) | `Pass` |
 
-The `assert_eq!` before them is the premise, and the half this pull request
-must not have changed: the workspace's own checkout of the recorded tree
-put the replacing blob on disk. It is also this test's own probe that the
-enumeration held — if an ambient control had reached the fixture's `git`
-after all, that assertion fails loudly rather than letting the two legs
-agree for the wrong reason.
+The fixture pins `core.useReplaceRefs = true` in the repository. At `6e3e618f`,
+whose v0.1 runner carried the variable alone, the production-runner leg failed on
+Git 2.40.0 and 2.41.0 (the round-3 review of record): the configured `true` beat
+the variable. Under the includes it passes on 2.41.0, 2.42.0 and 2.43.0
+(measured with each first on `PATH`).
+
+It now asserts, in order:
+
+- the premise: a Git child that does not refuse the replacement reads
+  `B` wherever `A` is named, so the fixture carries a live replacement;
+- the producer: the snapshot holds `A`, the tree its commit records;
+- the production runner: the gate over that untouched snapshot passes;
+- the contrast: a runner reading `ObjectGraph::AsReplaced` over the same
+  snapshot fails. That shows the replacement is live in the environment a
+  role process gets, and that the two graphs really differ over it, so the
+  passing leg is not passing because nothing was replaced.
+
+Witnessed failing three ways. With `git_command`'s pair removed, the
+producer assertion fails with `B` on disk. With `for_legacy_workspace`
+reading `AsReplaced`, the production-runner leg fails. With both, the
+state of `a3767bcc`, the producer assertion fails first.
 
 ## `mod tests` › `fn every_shell_spells_its_invocation_the_way_the_record_says() {`
 

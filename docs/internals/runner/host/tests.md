@@ -142,21 +142,142 @@ Witnessed failing with the upsert removed from `compose`
 surviving, since this key is deliberately not a reserved one that gets
 stripped) and with it moved above the overlay loop (`Some("0")`).
 
-## `fn the_v1_conductors_environment_composes_no_replacement_isolation() {`
+## `fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {`
 
-The other half of the pair above: the v0.1 conductor's environment adds
-nothing, so a gate over a v0.1 checkout reads the graph that checkout
-was written from (PR #271, round 1's regression finding).
+The v0.1 conductor's environment keeps the recorded graph to the repository the
+run manages. It replaces `the_v1_conductors_environment_disables_replacement_objects`,
+which pinned the process-wide variable: round 4 of #326 moved the v0.1 runner off
+it, because a variable reaches every repository a role touches, and on Git 2.41
+it loses to a configured `true`.
 
-The base carries a value of its own and the assertion is that it
-*survives* — an exemption that stripped the key would be a third graph,
-not the producer's. The last line pins the connection to production:
-`HostRunner::for_legacy_workspace`, which `engine::run` and
-`engine::resume` install, is an environment reading `AsReplaced`.
+It asserts four things. The constructor reads `ObjectGraph::RecordedIn` with the
+repository it was given. Over every role, both name rules and five sources of
+`GIT_CONFIG_PARAMETERS` — none, empty, the base's `true`, an overlay's, and both
+— the composed value is the inherited one, a space, and the two includes, or the
+includes alone: never before an inherited entry, never with a leading space, and
+one variable however the base spelled its name. `GIT_NO_REPLACE_OBJECTS` is never
+composed, and an operator who exports it keeps their own value. And the
+constructor's own environment, over this process's base, ends with the includes.
 
-Witnessed failing with the `ObjectGraph::Recorded` condition removed from
-`compose` (`Some("1")` for every role and both name rules), which is the
-head this repair was written against.
+Witnessed failing with the includes placed before the inherited entries, and with
+the constructor back on `ObjectGraph::Recorded`.
+
+Its repository is a real directory under a scratch tree (`managed_repository`):
+since #326 round 5 the scope asks each directory on the path whether it folds
+case, and a path that is not there is refused. Since round 6 it also asks the
+common directory, through the `refs` every common directory holds, so the
+fixture creates `refs` too.
+
+## `fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {`
+
+A newline in the path and a relative directory or include are refused before
+any directory is asked anything, and a common directory that is not there is
+refused because the scope cannot ask it whether it folds case. Unix-only,
+because a Unix absolute path is not absolute on Windows.
+
+Until #326 round 5 this test also pinned the entries byte for byte, for a path
+that did not exist. The entries now depend on what each directory on the path
+answers, so `src/runner/host/environment.rs`'s inline tests pin them, supplying
+the answers, and the Windows twin that stood beside this test moved there too.
+
+## `fn the_windows_rule_spells_a_path_as_git_for_windows_does() {`
+
+`GitdirRule::Windows` over the shapes `std::fs::canonicalize` gives on Windows
+(`\\?\C:\…`, `\\?\UNC\server\share\…`) and over already-plain ones, on every
+platform: no prefix, forward slashes, `//server/share` for a share. Also that
+the keyword is `gitdir:` under both rules, and that the native rule is `Windows`
+on Windows and `Posix` everywhere else, macOS included.
+
+## `fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {`
+
+`HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
+holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
+runs it once the file holds the exact bytes. Its common directory is created
+first, with the `refs` every common directory holds, because the scope asks
+each directory on the path, and the common directory itself through `refs`,
+whether it folds case.
+
+## `fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {`
+
+The negative witness for #326 round 5's blocking finding: the v0.1 include must
+not reach a repository whose path differs from the managed one only in case.
+The work is `v1_case_sibling_helper`'s, in a child whose environment
+`run_replacement_witness_child` has cleared of every ambient replacement
+control.
+
+Against `49243a24`, with this witness alone added, it failed on this box (exit
+101): under `PosixFoldingCase`, macOS's rule then, the gate in `Repo` read
+`recorded` from `repo`, which had installed a replacement, and with the rule
+list narrowed to `Windows` the same assertion failed under that rule. Both
+used `gitdir/i:`; `Posix`, which ran first, passed.
+
+Round 6 extended its capitals check to the linked worktree's Git directory
+(`read_case_siblings`). Against `c453705f`, with those 24 lines alone added and
+`TMPDIR` on a case-folding ext4 mount, it failed with Git 2.43.0 and with Git
+2.41.0 (exit 101): under `Posix` the gate read `replacing` through
+`…/Repo/.git/WORKTREES/Repo-linked`. With that spelling removed, the
+all-capitals one failed the same way, and with the rule list narrowed to
+`Windows` the `WORKTREES` spelling did. On ext4, which keeps case, the check
+does not run, so only a folding temporary directory can show it.
+
+## `fn case_git(dir: &Path, args: &[&str]) -> String {`
+
+The witness's own Git, in its own process rather than through the runner, with
+an identity and without auto-maintenance, so no background process outlives a
+commit in the scratch tree.
+
+## `fn replaced_repository(repo: &Path) -> String {`
+
+A repository whose committed blob `recorded` is replaced by `replacing`, checked
+live outside any run before anything is measured; it returns the blob's id.
+
+## `fn read_case_siblings(dir: &Path, include: &Path) -> bool {`
+
+One layout: `Repo` managed, and beside it `repo` and `rEPO`, the second being
+the spelling the scope itself looks up. When the directory keeps case they are
+repositories of their own with their own replacements; when it folds they are
+`Repo`, and creating them finds it there. For every rule this platform's Git
+reads (both on Unix; on Windows only `Windows`, since the `Posix` rule keeps a
+Windows path's backslashes and Git for Windows spells its Git directory with
+forward slashes), a scope over `Repo`'s canonical
+common directory and `HostRunner::for_legacy_workspace` run gates that read:
+
+- `Repo` and its linked worktree: `recorded`;
+- each sibling, from `Repo` and from the sibling itself: `replacing` when it is
+  a repository of its own, `recorded` when it is `Repo`;
+- when the directory folds, `Repo` through a Git directory named `REPO/.GIT`
+  under the layout's directory spelled in capitals: `recorded`. Given with
+  `--git-dir`, that spelling reaches Git's condition as spelled on Linux, whose
+  realpath does not look the case up; reached with `-C`, Git named the
+  repository in its stored case, as `pwd -P` does (both measured on a
+  case-folding ext4 mount), which is why the `-C` reads alone could not tell a
+  scope that never folds from one that does;
+- when the directory folds, `Repo`'s linked worktree through its Git
+  directory given with `--git-dir`, spelled as Git stores it, with
+  `worktrees` alone in capitals, and with every component the test controls
+  in capitals: `recorded`. The linked worktree's name under `worktrees` is
+  taken from Git (`rev-parse --absolute-git-dir`), not assumed. Until #326
+  round 6 nothing read a linked worktree's Git directory in another case, and
+  the scope matched `worktrees` as a literal.
+
+It returns whether the directory kept case.
+
+## `fn v1_case_sibling_helper() {`
+
+Runs `read_case_siblings` in the temporary directory, and on Windows again in a
+directory `fsutil file setCaseSensitiveInfo` makes case-sensitive, inside the
+folding temporary directory. It prints which halves ran, in lines beginning
+`v1-case-sibling:`, so a CI log shows it.
+
+Where the leg declares `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` (macOS and Windows) the
+temporary directory must fold, or the declaration and the filesystem disagree;
+elsewhere its behaviour is observed, not required, as
+`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` treats
+the same declaration. So the case-sensitive half runs where the temporary
+directory keeps case, as on this box, and on Windows wherever `fsutil`
+succeeds; macOS runs the folding half only, since case sensitivity there is a
+property of a whole volume. A Windows machine where `fsutil` fails prints that
+and runs the folding half.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 

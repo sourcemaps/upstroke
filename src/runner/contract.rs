@@ -1219,14 +1219,17 @@ pub(crate) mod tests {
             ),
             (
                 "src/workspace.rs",
-                14,
+                1,
                 1,
                 0,
                 "authoritative Git, deliberately NOT routed. DESIGN.md:612 — \
                  \"Workers, repository-controlled gates, and reviewers all \
                  cross the boundary; authoritative Git and the event log \
                  never do.\" A git call that started going through the Runner \
-                 would be a defect in the other direction",
+                 would be a defect in the other direction. One `Command::new(` \
+                 since LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS: \
+                 `git_command`, the builder every Git child of this module \
+                 comes from, where fourteen sites each built their own",
             ),
             (
                 "src/workspace_manager.rs",
@@ -2015,11 +2018,14 @@ fn charge_allowance(&mut self) {}
             (
                 "src/workspace.rs",
                 1,
-                4,
+                5,
                 0,
                 "authoritative Git, which DESIGN.md:612 keeps off the boundary \
                  entirely: `std::process::Command` methods on git invocations, \
-                 not a CommandSpec",
+                 not a CommandSpec. Of the five `.env(`, four are the fixed \
+                 author and committer identity on `commit-tree` and one is \
+                 `NO_REPLACEMENT_OBJECTS` on `git_command`, the builder every \
+                 Git child of this module comes from",
             ),
             (
                 "src/workspace_manager.rs",

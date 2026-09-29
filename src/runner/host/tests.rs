@@ -296,35 +296,502 @@ fn every_composed_environment_disables_replacement_objects() {
     );
 }
 
+fn managed_repository() -> (crate::rundir::scratch_tree::ScratchTree, ManagedRepository) {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-scope")
+        .expect("a scratch tree");
+    let name = if cfg!(windows) {
+        "repo [x]"
+    } else {
+        "repo [x]*?"
+    };
+    let common = tree.path().join(name).join(".git");
+    std::fs::create_dir_all(common.join("refs")).expect("a common directory the scope can look up");
+    let common = std::fs::canonicalize(&common).expect("its canonical path");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let repository = ManagedRepository::new(&common, &include, GitdirRule::native())
+        .expect("a repository the runner can scope");
+    (tree, repository)
+}
+
 #[test]
-fn the_v1_conductors_environment_composes_no_replacement_isolation() {
+fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {
+    let (_tree, repository) = managed_repository();
+    let legacy = HostRunner::for_legacy_workspace(repository.clone());
+    assert_eq!(
+        legacy.environment().objects(),
+        &ObjectGraph::RecordedIn(repository.clone()),
+        "the environment `engine::run` and `engine::resume` install must read the objects \
+         the repository holds, which is the graph `src/workspace.rs` writes the v0.1 \
+         workspace and its gate snapshots from, and only in that repository"
+    );
+    let ours = repository.parameters().to_owned();
+    let inherited = "'core.useReplaceRefs'='true'";
+    let overlaid = "'core.useReplaceRefs'='true' 'color.ui'='false'";
     let mut rows = 0_usize;
     for case in KeyCase::ALL {
-        let mut base = synthetic_base();
-        base.push((
-            os(NO_REPLACEMENT_OBJECTS.0),
-            os("whatever-the-operator-exported"),
-        ));
-        let environment = HostEnvironment::with_base(base, *case).reading(ObjectGraph::AsReplaced);
-        for role in ExecutionRole::all() {
-            let composed = environment
-                .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
-                .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
-            assert_eq!(
-                value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
-                Some(OsStr::new("whatever-the-operator-exported")),
-                "{role} ({case:?}): the v0.1 conductor's own base is what its \
-                 children read, and this boundary must add nothing to it"
-            );
-            rows += 1;
+        let spelling = match case {
+            KeyCase::Sensitive => CONFIG_PARAMETERS.to_owned(),
+            KeyCase::Insensitive => CONFIG_PARAMETERS.to_ascii_lowercase(),
+        };
+        for (base_value, overlay_value, prefix) in [
+            (None, None, None),
+            (Some(""), None, None),
+            (Some(inherited), None, Some(inherited)),
+            (None, Some(overlaid), Some(overlaid)),
+            (Some(inherited), Some(overlaid), Some(overlaid)),
+        ] {
+            let mut base = synthetic_base();
+            if let Some(value) = base_value {
+                base.push((os(&spelling), os(value)));
+            }
+            let overlay: Vec<(String, String)> = overlay_value
+                .map(|value| vec![(CONFIG_PARAMETERS.to_owned(), value.to_owned())])
+                .unwrap_or_default();
+            let environment = HostEnvironment::with_base(base, *case)
+                .reading(legacy.environment().objects().clone());
+            for role in ExecutionRole::all() {
+                let composed = environment
+                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                let mut expected = prefix.map(OsString::from).unwrap_or_default();
+                if !expected.is_empty() {
+                    expected.push(" ");
+                }
+                expected.push(&ours);
+                assert_eq!(
+                    value(&composed, CONFIG_PARAMETERS, *case),
+                    Some(expected.as_os_str()),
+                    "{role} ({case:?}, base {base_value:?}, overlay {overlay_value:?}): the \
+                     includes must come after every inherited entry, because Git reads \
+                     `GIT_CONFIG_PARAMETERS` after the counted pairs and the last value wins"
+                );
+                assert_eq!(
+                    composed
+                        .iter()
+                        .filter(|(name, _)| case.same_key(name, OsStr::new(CONFIG_PARAMETERS)))
+                        .count(),
+                    1,
+                    "{role} ({case:?}): one variable, however the base spelled it"
+                );
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                    None,
+                    "{role} ({case:?}): the process-wide variable reaches every repository a \
+                     role creates, which is the regression this policy replaces"
+                );
+                rows += 1;
+            }
         }
     }
-    assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
     assert_eq!(
-        HostRunner::for_legacy_workspace().environment().objects(),
-        ObjectGraph::AsReplaced,
-        "and that is the environment `engine::run` and `engine::resume` install"
+        rows,
+        5 * 5 * KeyCase::ALL.len(),
+        "every role, every source, both key cases"
     );
+
+    let mut base = synthetic_base();
+    base.push((os(NO_REPLACEMENT_OBJECTS.0), os("the-operators-own")));
+    let composed = HostEnvironment::with_base(base, KeyCase::current())
+        .reading(legacy.environment().objects().clone())
+        .compose(&ExecutionRole::Gate, None, &[])
+        .expect("compose");
+    assert_eq!(
+        value(&composed, NO_REPLACEMENT_OBJECTS.0, KeyCase::current()),
+        Some(OsStr::new("the-operators-own")),
+        "an operator who exports the variable keeps it: the runner neither adds nor removes it"
+    );
+    for role in ExecutionRole::all() {
+        let composed = legacy
+            .environment()
+            .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+            .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
+        let parameters = value(&composed, CONFIG_PARAMETERS, legacy.environment().case())
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            parameters.ends_with(&*ours.to_string_lossy()),
+            "{role}: the constructor's own environment, over this process's base, ends with \
+             the includes"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {
+    let include = Path::new("/home/u/.upstroke/git/recorded-objects.gitconfig");
+    let refused =
+        ManagedRepository::new(Path::new("/srv/new\nline/.git"), include, GitdirRule::Posix)
+            .expect_err("Git refuses a newline in a configuration key")
+            .to_string();
+    assert!(refused.contains("newline"), "{refused}");
+    for (common, included) in [
+        ("relative/.git", "/home/u/include"),
+        ("/srv/repo/.git", "relative/include"),
+    ] {
+        let refused =
+            ManagedRepository::new(Path::new(common), Path::new(included), GitdirRule::Posix)
+                .expect_err("Git reads neither a relative condition nor a relative include")
+                .to_string();
+        assert!(refused.contains("absolute"), "{refused}");
+    }
+    let refused = ManagedRepository::new(
+        Path::new("/srv/upstroke-no-such-repository/.git"),
+        include,
+        GitdirRule::Posix,
+    )
+    .expect_err("a directory that is not there cannot say whether it folds case")
+    .to_string();
+    assert!(
+        refused.contains("in another case") && refused.contains("upstroke-no-such-repository"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_windows_rule_spells_a_path_as_git_for_windows_does() {
+    for (canonical, spelled) in [
+        (r"\\?\C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        (
+            r"\\?\UNC\server\share\repo\.git",
+            "//server/share/repo/.git",
+        ),
+        (r"C:\Users\Me\repo\.git", "C:/Users/Me/repo/.git"),
+        ("C:/Users/Me/repo/.git", "C:/Users/Me/repo/.git"),
+    ] {
+        assert_eq!(
+            GitdirRule::Windows.spelling(canonical.as_bytes()),
+            spelled.as_bytes(),
+            "{canonical}"
+        );
+    }
+    assert_eq!(
+        GitdirRule::Posix.spelling(br"/srv/a\b/.git"),
+        br"/srv/a\b/.git".to_vec(),
+        "a Unix path is spelled as it is"
+    );
+    for rule in GitdirRule::ALL {
+        assert_eq!(
+            rule.keyword(),
+            "gitdir:",
+            "{rule:?}: `gitdir/i:` folds every component, whatever the directory holding it does"
+        );
+    }
+    assert_eq!(
+        GitdirRule::native(),
+        if cfg!(windows) {
+            GitdirRule::Windows
+        } else {
+            GitdirRule::Posix
+        }
+    );
+    assert_eq!(GitdirRule::ALL.len(), 2);
+}
+
+#[test]
+fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1-include-gone")
+        .expect("a scratch tree");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    let workspace = tree.path().join("ws");
+    std::fs::create_dir(&workspace).expect("a workspace");
+    std::fs::create_dir_all(tree.path().join("repo.git").join("refs")).expect("a common directory");
+    let repository = ManagedRepository::new(
+        &tree.path().join("repo.git"),
+        &include,
+        GitdirRule::native(),
+    )
+    .expect("a scope");
+    let runner = HostRunner::for_legacy_workspace(repository);
+    let request = || {
+        crate::runner::gate_request(
+            native().spec("exit 0"),
+            workspace.clone(),
+            crate::config::DEFAULT_GATE_TIMEOUT,
+            gate_invocation(),
+        )
+    };
+    for (state, bytes) in [
+        ("missing", None),
+        (
+            "altered",
+            Some(b"[core]\n\tuseReplaceRefs = true\n".as_slice()),
+        ),
+        ("empty", Some(b"".as_slice())),
+    ] {
+        if let Some(bytes) = bytes {
+            std::fs::write(&include, bytes).expect("the include, altered");
+        }
+        let refused = runner
+            .run(&request())
+            .expect_err("a role without its include must not start");
+        assert_eq!(
+            refused.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{state}: {refused}"
+        );
+        let message = refused.source.to_string();
+        assert!(
+            message.contains("refusing to start a role process")
+                && message.contains(&include.display().to_string()),
+            "{state}: {message}"
+        );
+    }
+    std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include, whole");
+    runner
+        .run(&request())
+        .expect("with its include in place the role starts");
+}
+
+#[test]
+fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "runner::host::tests::v1_case_sibling_helper",
+    );
+    assert!(
+        status.success(),
+        "the child scopes a v0.1 runner to `Repo` under each rule this platform's Git reads, \
+         beside `repo`, and has its gates read both, and ended {status:?}"
+    );
+}
+
+fn case_git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=tests@upstroke.local",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn replaced_repository(repo: &Path) -> String {
+    case_git(repo, &["init", "-q"]);
+    std::fs::write(repo.join("f.txt"), "recorded\n").expect("the recorded blob");
+    case_git(repo, &["add", "f.txt"]);
+    case_git(repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = case_git(repo, &["rev-parse", "HEAD:f.txt"]);
+    std::fs::write(repo.join("replacing.txt"), "replacing\n").expect("the replacing blob");
+    let replacing = case_git(repo, &["hash-object", "-w", "replacing.txt"]);
+    case_git(repo, &["replace", &recorded, &replacing]);
+    assert_eq!(
+        case_git(repo, &["cat-file", "-p", &recorded]),
+        "replacing",
+        "{}: outside any run the replacement is live, or nothing below is measured",
+        repo.display()
+    );
+    recorded
+}
+
+fn read_case_siblings(dir: &Path, include: &Path) -> bool {
+    let managed = dir.join("Repo");
+    std::fs::create_dir_all(&managed).expect("the managed repository's directory");
+    let managed_blob = replaced_repository(&managed);
+    let siblings: Vec<(PathBuf, String, bool)> = ["repo", "rEPO"]
+        .into_iter()
+        .map(|name| {
+            let sibling = dir.join(name);
+            match std::fs::create_dir(&sibling) {
+                Ok(()) => {
+                    let blob = replaced_repository(&sibling);
+                    (sibling, blob, true)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    (sibling, managed_blob.clone(), false)
+                }
+                Err(error) => panic!("{}: {error}", sibling.display()),
+            }
+        })
+        .collect();
+    let separate = siblings.iter().all(|(_, _, separate)| *separate);
+    assert!(
+        separate || siblings.iter().all(|(_, _, separate)| !*separate),
+        "{}: the directory found one spelling of `Repo` and not the other: {siblings:?}",
+        dir.display()
+    );
+    let linked = dir.join("Repo-linked");
+    case_git(
+        &managed,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    let id = PathBuf::from(case_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+        .file_name()
+        .map(|id| id.to_string_lossy().into_owned())
+        .expect("the linked worktree's own Git directory");
+    let common = std::fs::canonicalize(managed.join(".git")).expect("the common directory");
+    let rules = GitdirRule::ALL
+        .iter()
+        .filter(|rule| cfg!(unix) || **rule == GitdirRule::Windows);
+    for rule in rules {
+        let scope = ManagedRepository::new(&common, include, *rule).expect("the managed scope");
+        let runner = HostRunner::for_legacy_workspace(scope);
+        let read_as = |workspace: &Path, how: &str, repository: &Path, blob: &str| {
+            let output = runner
+                .run(&crate::runner::gate_request(
+                    CommandSpec::new("git")
+                        .arg(how)
+                        .arg(repository.to_string_lossy())
+                        .arg("cat-file")
+                        .arg("-p")
+                        .arg(blob),
+                    workspace.to_path_buf(),
+                    crate::config::DEFAULT_GATE_TIMEOUT,
+                    gate_invocation(),
+                ))
+                .expect("the gate runs");
+            assert_eq!(output.code, Some(0), "{rule:?}: {output:?}");
+            output.stdout.trim().to_owned()
+        };
+        let read = |workspace: &Path, repository: &Path, blob: &str| {
+            read_as(workspace, "-C", repository, blob)
+        };
+        for (workspace, what) in [
+            (&managed, "the managed repository"),
+            (&linked, "its linked worktree"),
+        ] {
+            assert_eq!(
+                read(workspace, workspace, &managed_blob),
+                "recorded",
+                "{rule:?}, {}: a gate in {what} reads the objects it records",
+                dir.display()
+            );
+        }
+        let expected = if separate { "replacing" } else { "recorded" };
+        for (sibling, blob, _) in &siblings {
+            for workspace in [&managed, sibling] {
+                assert_eq!(
+                    read(workspace, sibling, blob),
+                    expected,
+                    "{rule:?}, {}: a gate in {} reads {}, which is {}",
+                    dir.display(),
+                    workspace.display(),
+                    sibling.display(),
+                    if separate {
+                        "a repository of its own and keeps its replacement"
+                    } else {
+                        "the managed repository spelled in another case"
+                    }
+                );
+            }
+        }
+        if !separate {
+            let name = dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_uppercase())
+                .expect("the layout's own directory");
+            let respelled = dir.with_file_name(name).join("REPO").join(".GIT");
+            assert_eq!(
+                read_as(&managed, "--git-dir", &respelled, &managed_blob),
+                "recorded",
+                "{rule:?}: a gate names the managed repository's Git directory as {}, which \
+                 Git keeps as spelled wherever its realpath does not look the case up",
+                respelled.display()
+            );
+            let stored = managed.join(".git");
+            for (spelled, how) in [
+                (stored.join("worktrees").join(&id), "as Git stores it"),
+                (
+                    stored.join("WORKTREES").join(&id),
+                    "with `worktrees` in capitals",
+                ),
+                (
+                    respelled.join("WORKTREES").join(id.to_ascii_uppercase()),
+                    "in capitals",
+                ),
+            ] {
+                assert_eq!(
+                    read_as(&linked, "--git-dir", &spelled, &managed_blob),
+                    "recorded",
+                    "{rule:?}: a gate names its linked worktree's Git directory {how}, as {}, \
+                     which Git keeps as spelled wherever its realpath does not look the case up",
+                    spelled.display()
+                );
+            }
+        }
+    }
+    separate
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_case_sibling_helper() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-case-sibling");
+    let tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "v1k").expect("a scratch tree");
+    let include = tree.path().join("recorded-objects.gitconfig");
+    std::fs::write(&include, RECORDED_OBJECTS_INCLUDE).expect("the include");
+    let temporary = tree.path().join("t");
+    let separate = read_case_siblings(&temporary, &include);
+    if std::env::var_os("UPSTROKE_TEST_TEMP_FOLDS_CASE").is_some_and(|value| value == "1") {
+        assert!(
+            !separate,
+            "UPSTROKE_TEST_TEMP_FOLDS_CASE=1 declares that {} folds case, but `repo` beside \
+             `Repo` is a directory of its own",
+            temporary.display()
+        );
+    }
+    println!(
+        "v1-case-sibling: {} {}",
+        temporary.display(),
+        if separate {
+            "is case-sensitive, and `repo` kept its replacement under every rule"
+        } else {
+            "folds case, and `repo` read the managed repository's recorded graph"
+        }
+    );
+    if cfg!(windows) {
+        let sensitive = tree.path().join("s");
+        std::fs::create_dir(&sensitive).expect("a directory to make case-sensitive");
+        let enabled = Command::new("fsutil")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&sensitive)
+            .arg("enable")
+            .output()
+            .expect("run fsutil");
+        if enabled.status.success() {
+            assert!(
+                read_case_siblings(&sensitive, &include),
+                "fsutil made {} case-sensitive, so `repo` beside `Repo` is a directory of its \
+                 own",
+                sensitive.display()
+            );
+            println!(
+                "v1-case-sibling: {} is case-sensitive inside a folding directory, and `repo` \
+                 kept its replacement",
+                sensitive.display()
+            );
+        } else {
+            println!(
+                "v1-case-sibling: fsutil could not make {} case-sensitive ({}), so only the \
+                 folding half ran here",
+                sensitive.display(),
+                String::from_utf8_lossy(&enabled.stdout).trim()
+            );
+        }
+    }
 }
 
 #[test]

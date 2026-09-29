@@ -855,6 +855,12 @@ effect_free = [
 # convention pointed at were exactly where an effectful `pub(super)` fn had
 # gone undenied. If one of these `fn`s is ever reclassified effectful, the
 # stored path can name it for the denylist, which is what the field is for.
+# `ManagedRepository::verify_include` READS the include file and compares its
+# bytes, and is classified EFFECT-FREE for the tree's own reason: a read-only
+# inspection is not an effect (`naming.rs`'s `is_program` below is the
+# precedent). The file is written by `Workspace::recorded_objects_scope` in
+# `src/workspace.rs`, which is effectful and denied; nothing in this child
+# creates, writes, renames or removes a path.
 [[module]]
 path = "src/runner/host/environment.rs"
 crate_path = "upstroke::runner::host::environment"
@@ -864,15 +870,23 @@ effectful_unnameable = []
 effect_free = [
     "base",
     "case",
+    "common_dir",
     "compose",
     "current",
     "from_process",
+    "include",
+    "keyword",
     "lookup",
+    "native",
+    "new",
     "objects",
+    "parameters",
     "preflight",
     "reading",
     "reserved_values",
     "same_key",
+    "spelling",
+    "verify_include",
     "with_base",
 ]
 
@@ -1267,6 +1281,12 @@ effect_free = [
     "validate_inputs",
 ]
 
+# `Workspace::recorded_objects_scope` is effectful: it creates the private
+# root's `git` directory and writes the include file the v0.1 runner's role
+# processes read the recorded graph through, staging it beside the file and
+# renaming it into place, outside any RunDir site. Its only callers are the two
+# conductor entry points, `run_harness` and `resume_harness`, which are denied
+# already.
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
@@ -1280,6 +1300,7 @@ effectful = [
     "Workspace::prepared_commit_matches",
     "Workspace::prepared_pin_target",
     "Workspace::ensure_run_exclusions",
+    "Workspace::recorded_objects_scope",
 ]
 effectful_unnameable = [
     "drop",

@@ -47,7 +47,9 @@ pub fn resume_harness(
     opts: &ResumeOptions,
     harness: &Harness<'_>,
 ) -> Result<RunReport, UpstrokeError> {
-    resume_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
+    let repository =
+        Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
+    resume_harness_on(opts, harness, &HostRunner::for_legacy_workspace(repository))
 }
 
 pub(super) fn resume_harness_on(
@@ -76,10 +78,12 @@ pub(super) fn resume_harness_inner(
     harness: &Harness<'_>,
 ) -> Result<(RunReport, RunState), UpstrokeError> {
     let contained = crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)?;
+    let repository =
+        Workspace::open(&opts.repo_root)?.recorded_objects_scope(opts.private_root.as_deref())?;
     resume_harness_inner_on(
         opts,
         harness,
-        &crate::runner::host::HostRunner::for_legacy_workspace(),
+        &crate::runner::host::HostRunner::for_legacy_workspace(repository),
         &contained,
     )
 }
@@ -439,7 +443,11 @@ pub(super) fn resume_harness_inner_on(
             return Err(refuse(format!(
                 "you have uncommitted changes and are not on `{}`. Commit or stash them, then \
                  resume — switching branches over them would lose work that is not this run's \
-                 to discard.",
+                 to discard. upstroke compares the checkout with the objects the repository \
+                 records, never with what `git replace` substitutes for them, so \
+                 `git --no-replace-objects -c core.useReplaceRefs=false status` lists what \
+                 it found; plain `git status` can report the checkout clean when a \
+                 replacement changes what HEAD holds (`git replace -l` lists them).",
                 started.branch
             )));
         }

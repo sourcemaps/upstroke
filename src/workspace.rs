@@ -13,6 +13,8 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
+use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 pub struct Workspace {
     root: PathBuf,
@@ -35,6 +37,18 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
     "--no-textconv",
     "--no-color",
 ];
+
+const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
+
+fn git_command(directory: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(directory)
+        .args(REPLACE_REFS_REFUSED)
+        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1);
+    command
+}
 
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, UpstrokeError> {
@@ -72,6 +86,26 @@ impl Workspace {
             });
         }
         Ok(git_dir)
+    }
+
+    pub fn recorded_objects_scope(
+        &self,
+        private_root: Option<&Path>,
+    ) -> Result<ManagedRepository, UpstrokeError> {
+        let private_root =
+            private_root.map_or_else(crate::rundir::default_private_root, Path::to_path_buf);
+        let common = self.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
+            path: common.clone(),
+            source,
+        })?;
+        let directory =
+            std::path::absolute(private_root.join("git")).map_err(|source| UpstrokeError::Io {
+                path: private_root.to_path_buf(),
+                source,
+            })?;
+        let include = write_recorded_objects_include(&directory)?;
+        ManagedRepository::new(&common, &include, GitdirRule::native())
     }
 
     fn git_path(&self, args: &[&str]) -> Result<PathBuf, UpstrokeError> {
@@ -125,14 +159,13 @@ impl Workspace {
     }
 
     fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })?;
+        let output =
+            git_command(&self.root)
+                .args(args)
+                .output()
+                .map_err(|e| UpstrokeError::Git {
+                    message: format!("failed to run git: {e}"),
+                })?;
         if !output.status.success() {
             return Err(UpstrokeError::Git {
                 message: format!(
@@ -152,9 +185,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        git_command(&self.root)
             .arg("-c")
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
@@ -197,9 +228,7 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let mut child = git_command(&self.root)
             .arg("-c")
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
@@ -257,9 +286,7 @@ impl Workspace {
         message: &str,
     ) -> Result<String, UpstrokeError> {
         let args = ["commit-tree", tree_oid, "-p", parent_oid, "-m", message];
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(args)
             .env("GIT_AUTHOR_NAME", "upstroke")
             .env("GIT_AUTHOR_EMAIL", "upstroke@upstroke.local")
@@ -295,6 +322,7 @@ impl Workspace {
     }
 
     pub fn ensure_execution_prerequisites(&self) -> Result<(), UpstrokeError> {
+        require_git_floor(&self.git(&["version"])?)?;
         require_check_attr_source(self.git_output_with_input(
             &["check-attr", "--source=HEAD", "--stdin", "-z", "filter"],
             Vec::new(),
@@ -349,9 +377,7 @@ impl Workspace {
     }
 
     pub fn current_branch_ref(&self) -> Result<String, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -390,9 +416,7 @@ impl Workspace {
     }
 
     pub fn parent_sha(&self, sha: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("{sha}^"))
             .output()
@@ -433,9 +457,7 @@ impl Workspace {
     }
 
     pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{name}"))
             .output()
@@ -854,9 +876,7 @@ impl Workspace {
     ) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .arg("-c")
             .arg(hooks_config)
             .args([
@@ -888,9 +908,7 @@ impl Workspace {
     fn verify_gate_worktree(&self, path: &Path, hooks_path: &Path) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
+        let output = git_command(path)
             .arg("-c")
             .arg(hooks_config)
             .args([
@@ -1018,9 +1036,7 @@ impl Workspace {
         if self.validate_prepared_ref(&prepared.pin_ref).is_err() {
             return Ok(false);
         }
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["cat-file", "commit", &prepared.commit_sha])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1077,9 +1093,7 @@ impl Workspace {
     }
 
     fn symbolic_ref_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["symbolic-ref", "--quiet", "--no-recurse", refname])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1114,9 +1128,7 @@ impl Workspace {
                 ),
             });
         }
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let output = git_command(&self.root)
             .args(["rev-parse", "--verify", "--quiet", pin_ref])
             .output()
             .map_err(|e| UpstrokeError::Git {
@@ -1223,10 +1235,35 @@ impl Workspace {
     }
 }
 
+const GIT_FLOOR: (u32, u32) = (2, 41);
+
+fn require_git_floor(reported: &str) -> Result<(), UpstrokeError> {
+    let reported = reported.trim();
+    let found = reported.strip_prefix("git version ").and_then(|version| {
+        let mut numbers = version.split(|character: char| !character.is_ascii_digit());
+        let major = numbers.next()?.parse::<u32>().ok()?;
+        let minor = numbers.next()?.parse::<u32>().ok()?;
+        Some((major, minor))
+    });
+    match found {
+        Some(found) if found >= GIT_FLOOR => Ok(()),
+        _ => Err(UpstrokeError::Refused {
+            message: format!(
+                "Git {}.{} or newer is required, and `git version` reports `{reported}`: \
+                 upstroke keeps the Git commands its gates, reviewers and implementers run \
+                 in this repository on the objects it records through configuration, and \
+                 Git 2.40's `git merge-tree` reads what `git replace` substitutes for them \
+                 whatever the configuration says",
+                GIT_FLOOR.0, GIT_FLOOR.1
+            ),
+        }),
+    }
+}
+
 fn require_check_attr_source(probe: Result<Vec<u8>, UpstrokeError>) -> Result<(), UpstrokeError> {
     probe.map(|_| ()).map_err(|error| UpstrokeError::Refused {
         message: format!(
-            "Git 2.40 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
+            "Git 2.41 or newer is required: upstroke must bind filter-attribute checks to the exact captured tree with `git check-attr --source` before gates or review ({error})"
         ),
     })
 }
@@ -1465,6 +1502,44 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+const RECORDED_OBJECTS_INCLUDE_NAME: &str = "recorded-objects.gitconfig";
+
+fn write_recorded_objects_include(directory: &Path) -> Result<PathBuf, UpstrokeError> {
+    let include = directory.join(RECORDED_OBJECTS_INCLUDE_NAME);
+    let holds_it =
+        |path: &Path| fs::read(path).is_ok_and(|bytes| bytes == RECORDED_OBJECTS_INCLUDE);
+    if holds_it(&include) {
+        return Ok(include);
+    }
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| UpstrokeError::Io { path, source }
+    };
+    create_private_dir_all(directory).map_err(io(directory))?;
+    let staged = directory.join(format!(
+        "{RECORDED_OBJECTS_INCLUDE_NAME}.{}-{}.tmp",
+        std::process::id(),
+        crate::ulid::ulid()
+    ));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(RECORDED_OBJECTS_INCLUDE))
+        .map_err(io(&staged))?;
+    match fs::rename(&staged, &include) {
+        Ok(()) => Ok(include),
+        Err(source) => {
+            let _ = fs::remove_file(&staged);
+            if holds_it(&include) {
+                Ok(include)
+            } else {
+                Err(io(&include)(source))
+            }
+        }
+    }
+}
+
 fn remove_ephemeral_store(store: Option<&Path>) {
     if let Some(store) = store {
         let _ = fs::remove_dir(store);
@@ -1479,9 +1554,7 @@ fn cleanup_gate_workspace(
 ) -> Result<(), UpstrokeError> {
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_path);
-    let removal = Command::new("git")
-        .arg("-C")
-        .arg(source_root)
+    let removal = git_command(source_root)
         .arg("-c")
         .arg(&hooks_config)
         .args([
@@ -1531,9 +1604,7 @@ fn worktree_is_registered(
     path: &Path,
     hooks_config: &std::ffi::OsStr,
 ) -> Result<bool, UpstrokeError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(source_root)
+    let output = git_command(source_root)
         .arg("-c")
         .arg(hooks_config)
         .args([
@@ -1742,8 +1813,192 @@ mod tests {
         }))
         .expect_err("missing exact-tree attribute support must fail closed")
         .to_string();
-        assert!(error.contains("Git 2.40 or newer"), "{error}");
+        assert!(error.contains("Git 2.41 or newer"), "{error}");
         assert!(error.contains("check-attr --source"), "{error}");
+    }
+
+    #[test]
+    fn a_git_older_than_the_floor_is_refused_by_name() {
+        for (reported, accepted) in [
+            ("git version 2.40.0", false),
+            ("git version 2.40.4\n", false),
+            ("git version 2.39.5 (Apple Git-154)", false),
+            ("git version 1.99.9", false),
+            ("git version 2.41.0", true),
+            ("git version 2.41.0.windows.1\r\n", true),
+            ("git version 2.43.0", true),
+            ("git version 2.45.GIT", true),
+            ("git version 3.0.0", true),
+            ("git version 2", false),
+            ("git version two", false),
+            ("", false),
+        ] {
+            let verdict = require_git_floor(reported);
+            assert_eq!(verdict.is_ok(), accepted, "{reported:?}: {verdict:?}");
+            if let Err(refused) = verdict {
+                let refused = refused.to_string();
+                assert!(
+                    refused.contains("Git 2.41 or newer is required")
+                        && refused.contains(reported.trim()),
+                    "{refused}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execution_prerequisites_ask_git_its_version_and_refuse_2_40() {
+        let status = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_GIT_FLOOR_WITNESS", "1")
+            .status()
+            .expect("spawn the helper");
+        assert!(
+            status.success(),
+            "the helper runs the execution prerequisites with a `git` on PATH that reports \
+             2.40.0, and ended {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_helper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if env::var_os("UPSTROKE_GIT_FLOOR_WITNESS").is_none() {
+            return;
+        }
+        let (_tree, repo) = temp_repo("git-floor");
+        let real = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("find git")
+                .stdout,
+        )
+        .expect("a UTF-8 path")
+        .trim()
+        .to_owned();
+        let bin = repo.with_file_name("bin");
+        fs::create_dir(&bin).expect("the stub's directory");
+        let asked = repo.with_file_name("asked");
+        let stub = bin.join("git");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
+                 case \" $* \" in *' version '*) echo 'git version 2.40.0'; exit 0;; esac\n\
+                 exec '{real}' \"$@\"\n",
+                asked.display()
+            ),
+        )
+        .expect("the stub");
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("an executable stub");
+        let path = format!("{}:{}", bin.display(), env::var("PATH").expect("a PATH"));
+        let out = Command::new(env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "workspace::tests::git_2_40_prerequisites_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env("UPSTROKE_GIT_FLOOR_REPO", &repo)
+            .output()
+            .expect("spawn the child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let asked = fs::read_to_string(&asked).expect("what the stub was asked");
+        assert!(
+            asked.lines().any(|line| line.ends_with(" version")),
+            "the prerequisites asked the `git` on PATH for its version: {asked}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn git_2_40_prerequisites_child() {
+        let Some(repo) = env::var_os("UPSTROKE_GIT_FLOOR_REPO") else {
+            return;
+        };
+        let refused = Workspace::open(Path::new(&repo))
+            .expect("open")
+            .ensure_execution_prerequisites()
+            .expect_err("Git 2.40 is below the floor")
+            .to_string();
+        assert!(
+            refused.contains("Git 2.41 or newer is required")
+                && refused.contains("git version 2.40.0")
+                && refused.contains("merge-tree"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn the_recorded_objects_scope_names_the_repositorys_own_common_directory() {
+        let (tree, repo) = temp_repo("recorded-scope");
+        let private = tree.path().join("home");
+        let ws = Workspace::open(&repo).expect("open");
+        let scope = ws
+            .recorded_objects_scope(Some(&private))
+            .expect("the scope the v0.1 runner reads");
+        assert_eq!(
+            scope.common_dir(),
+            fs::canonicalize(repo.join(".git")).expect("the canonical common directory"),
+        );
+        let include = private.join("git").join("recorded-objects.gitconfig");
+        assert_eq!(scope.include(), include);
+        assert_eq!(
+            fs::read(&include).expect("the include"),
+            RECORDED_OBJECTS_INCLUDE
+        );
+        scope.verify_include().expect("the include verifies");
+
+        fs::write(&include, "[core]\n\tuseReplaceRefs = true\n").expect("an altered include");
+        ws.recorded_objects_scope(Some(&private))
+            .expect("a second scope");
+        assert_eq!(
+            fs::read(&include).expect("the include, written again"),
+            RECORDED_OBJECTS_INCLUDE,
+            "an altered include is replaced, never adopted"
+        );
+        let linked = tree.path().join("linked");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &linked.to_string_lossy(),
+            ],
+        );
+        assert_eq!(
+            Workspace::open(&linked)
+                .expect("open the linked worktree")
+                .recorded_objects_scope(Some(&private))
+                .expect("its scope")
+                .parameters(),
+            scope.parameters(),
+            "a linked worktree names the same repository"
+        );
+        let staged: Vec<_> = fs::read_dir(private.join("git"))
+            .expect("the include's directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(staged.len(), 1, "no staged copy is left behind: {staged:?}");
     }
 
     #[test]
@@ -3143,5 +3398,484 @@ mod tests {
         };
         assert!(error.contains("nested"), "{error}");
         assert!(error.contains("mode 160000"), "{error}");
+    }
+
+    fn committed(repo: &Path, content: &str, message: &str) -> (String, String) {
+        fs::write(repo.join("f.txt"), content).expect("the committed content");
+        run_git(repo, &["add", "-A"]);
+        run_git(repo, &["commit", "-q", "-m", message]);
+        let read = |revision: &str| {
+            String::from_utf8(run_git(repo, &["rev-parse", revision]))
+                .expect("an object id is ASCII")
+                .trim()
+                .to_owned()
+        };
+        (read("HEAD"), read("HEAD^{tree}"))
+    }
+
+    #[test]
+    fn a_replaced_parent_leaves_the_captured_candidate_unchanged() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_parent_capture_helper",
+        );
+        assert!(
+            status.success(),
+            "the child captures one candidate with and without a replacement of its \
+             parent installed, with every ambient control over `refs/replace/*` taken \
+             away from it, and ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_parent_capture_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-capture");
+
+        let (_tree, repo) = temp_repo("replaced-parent");
+        pin_replacement_refs_in(&repo);
+        let (parent, _) = committed(&repo, "one\n", "the recorded parent");
+        let (replacing, _) = committed(&repo, "two\n", "the replacing commit");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        fs::write(repo.join("f.txt"), "agent-edit\n").expect("the agent's edit");
+
+        let ws = Workspace::open(&repo).expect("open");
+        let without = ws
+            .capture_candidate()
+            .expect("capture with no replacement installed");
+        assert_eq!(without.parent_oid, parent);
+        assert!(
+            without.diff.contains("\n-one\n") && without.diff.contains("\n+agent-edit\n"),
+            "{}",
+            without.diff
+        );
+
+        run_git(&repo, &["replace", &parent, &replacing]);
+        assert_eq!(
+            run_git(&repo, &["show", &format!("{parent}:f.txt")]),
+            b"two\n",
+            "a Git child that honours `refs/replace/*` reads the replacing commit \
+             wherever the parent is named; without that this test measures nothing"
+        );
+
+        let with = ws
+            .capture_candidate()
+            .expect("capture with the parent replaced");
+        assert_eq!(
+            with, without,
+            "the review payload must describe the parent the prepared commit records, \
+             not the commit `refs/replace/` points it at"
+        );
+    }
+
+    #[test]
+    fn a_replaced_candidate_tree_materialises_as_recorded() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_tree_snapshot_helper",
+        );
+        assert!(
+            status.success(),
+            "the child materialises a gate snapshot of a tree that carries a \
+             replacement, with every ambient control over `refs/replace/*` taken \
+             away from it, and ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_tree_snapshot_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-snapshot");
+
+        let (_tree, repo) = temp_repo("replaced-tree");
+        pin_replacement_refs_in(&repo);
+        let (parent, recorded_tree) = committed(&repo, "recorded\n", "the recorded tree");
+        let (_, replacing_tree) = committed(&repo, "replacing\n", "the replacing tree");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        run_git(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        assert_eq!(
+            run_git(&repo, &["show", &format!("{recorded_tree}:f.txt")]),
+            b"replacing\n",
+            "a Git child that honours `refs/replace/*` reads the replacing tree \
+             wherever the recorded one is named; without that this test measures nothing"
+        );
+
+        let ws = Workspace::open(&repo).expect("open");
+        let snapshot = ws
+            .gate_snapshot_for_candidate(&parent, &recorded_tree)
+            .expect("materialise the recorded tree");
+        assert_eq!(
+            fs::read_to_string(snapshot.workspace().root().join("f.txt"))
+                .expect("the materialised file")
+                .replace("\r\n", "\n"),
+            "recorded\n",
+            "a gate snapshot must hold the tree its ephemeral commit records"
+        );
+    }
+
+    #[test]
+    fn a_rollback_over_a_replaced_tree_restores_the_recorded_bytes() {
+        let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+            "workspace::tests::replaced_tree_rollback_helper",
+        );
+        assert!(
+            status.success(),
+            "the child rolls an edit back over a HEAD whose tree carries a replacement, \
+             with every ambient control over `refs/replace/*` taken away from it, and \
+             ended {status:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn replaced_tree_rollback_helper() {
+        use crate::workspace_manager::fixture::{
+            REPLACEMENT_WITNESS, assert_replacement_controls_pinned, pin_replacement_refs_in,
+        };
+
+        if env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("legacy-rollback");
+
+        let (_tree, repo) = temp_repo("replaced-rollback");
+        pin_replacement_refs_in(&repo);
+        let (parent, recorded_tree) = committed(&repo, "recorded\n", "the recorded tree");
+        let (_, replacing_tree) = committed(&repo, "replacing\n", "the replacing tree");
+        run_git(&repo, &["reset", "-q", "--hard", &parent]);
+        run_git(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        assert_eq!(
+            run_git(&repo, &["show", "HEAD:f.txt"]),
+            b"replacing\n",
+            "a Git child that honours `refs/replace/*` reads the replacing tree at HEAD; \
+             without that this test measures nothing"
+        );
+        fs::write(repo.join("f.txt"), "agent-edit\n").expect("the agent's edit");
+
+        Workspace::open(&repo)
+            .expect("open")
+            .discard_uncommitted()
+            .expect("the rollback");
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt"))
+                .expect("the rolled-back file")
+                .replace("\r\n", "\n"),
+            "recorded\n",
+            "a rollback restores the bytes HEAD records, not the replacement's"
+        );
+    }
+
+    fn test_module_span(code: &str) -> Result<(usize, usize), String> {
+        let identifier = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        };
+        let bytes = code.as_bytes();
+        let modules: Vec<usize> = code
+            .match_indices("mod tests")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !identifier(bytes.get(at.wrapping_sub(1)))
+                    && !identifier(bytes.get(at + "mod tests".len()))
+            })
+            .collect();
+        let [module] = modules.as_slice() else {
+            return Err(format!(
+                "one test module, the only span this census does not read: {modules:?}"
+            ));
+        };
+        let attribute = code
+            .get(..*module)
+            .map(str::trim_end)
+            .filter(|before| before.ends_with("#[cfg(test)]"))
+            .map(|before| before.len() - "#[cfg(test)]".len())
+            .ok_or(
+                "the test module is not configured out of production by the attribute above it",
+            )?;
+        let after = module + "mod tests".len();
+        let rest = code.get(after..).unwrap_or_default();
+        let next = after + (rest.len() - rest.trim_start().len());
+        match bytes.get(next) {
+            Some(b';') => Ok((attribute, next)),
+            Some(b'{') => {
+                let mut depth = 0_usize;
+                for (at, byte) in bytes.iter().enumerate().skip(next) {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Ok((attribute, at));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err("the test module's body never closes".to_owned())
+            }
+            other => Err(format!(
+                "`mod tests` is followed by {:?}, which is neither an inline body nor the end \
+                 of a declaration whose body lives in another file",
+                other.map(|byte| char::from(*byte))
+            )),
+        }
+    }
+
+    #[test]
+    fn the_census_reads_past_a_test_module_declared_out_of_line() {
+        let span = |source: &str| {
+            let code = crate::effects::blank_comments_and_strings(source);
+            test_module_span(&code).map(|(start, end)| {
+                let mut kept = code.clone();
+                kept.replace_range(start..=end, "");
+                kept
+            })
+        };
+        let inline =
+            span("fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() { { } }\n}\nfn c() {}\n")
+                .expect("an inline test module");
+        assert!(
+            inline.contains("fn a()")
+                && inline.contains("fn c()")
+                && !inline.contains("fn b()")
+                && !inline.contains("mod tests"),
+            "an inline test module is taken out through the brace that closes it: {inline:?}"
+        );
+        let out_of_line = span(
+            "#[path = \"t.rs\"]\n#[cfg(test)]\nmod tests;\nfn helper() -> Command {\n    \
+             Command::new(\"git\")\n}\n",
+        )
+        .expect("a test module declared out of line");
+        assert!(
+            out_of_line.contains("fn helper()")
+                && out_of_line.contains("Command::new(")
+                && !out_of_line.contains("mod tests"),
+            "a test module declared out of line is taken out through its `;` alone, and the \
+             helper after it stays where the census reads it: {out_of_line:?}"
+        );
+        for malformed in [
+            "#[cfg(test)]\nmod tests\nfn helper() {}\n",
+            "#[cfg(test)]\nmod tests {\n    fn b() {}\n",
+            "mod tests {}\n",
+            "#[cfg(test)]\nmod tests {}\n#[cfg(test)]\nmod tests;\n",
+        ] {
+            assert!(
+                span(malformed).is_err(),
+                "a shape the census cannot place is refused, never read: {malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_git_child_of_this_module_is_built_where_replacements_are_refused() {
+        let source = include_str!("workspace.rs");
+        let mut code = crate::effects::blank_comments_and_strings(source);
+        assert_eq!(
+            code.len(),
+            source.len(),
+            "the blanking must keep every byte where it was, or the span taken out \
+             below is not the test module's"
+        );
+        let (attribute, end) =
+            test_module_span(&code).expect("the one test module this census does not read");
+        code.replace_range(attribute..=end, &" ".repeat(end + 1 - attribute));
+
+        for present in [
+            "fn git_output(",
+            "fn run_git_with_private_hooks(",
+            "fn git_output_with_input(",
+            "fn commit_tree_with_upstroke_identity(",
+            "fn add_gate_worktree(",
+            "fn verify_gate_worktree(",
+            "fn prepared_pin_target(",
+            "fn cleanup_gate_workspace(",
+            "fn worktree_is_registered(",
+            "impl Drop for GateWorkspace",
+        ] {
+            assert!(
+                code.contains(present),
+                "the blanked production region does not contain `{present}`, so the \
+                 census below measures nothing: {} bytes",
+                code.len()
+            );
+        }
+
+        let start = code
+            .find("fn git_command(")
+            .expect("the builder every Git child of this module comes from");
+        let open = start
+            + code
+                .get(start..)
+                .and_then(|rest| rest.find('{'))
+                .expect("the builder's body");
+        let mut depth = 0_usize;
+        let mut close = None;
+        for (at, byte) in code.bytes().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.expect("the builder's body closes");
+        let builder: String = code
+            .get(start..=close)
+            .expect("the builder's span")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        assert_eq!(
+            code.matches("Command::new(").count(),
+            1,
+            "LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS: a Git child this module builds \
+             anywhere but `git_command` reads whatever `refs/replace/*` describes"
+        );
+        assert_eq!(builder.matches("Command::new(").count(), 1);
+        assert!(
+            builder.contains(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)"),
+            "the builder must set the pair on every child it builds: {builder}"
+        );
+        assert!(
+            builder.contains(".args(REPLACE_REFS_REFUSED)"),
+            "and refuse replacements at command scope too, which on git 2.40 and 2.41 is \
+             what outranks a `core.useReplaceRefs = true` in any configuration: {builder}"
+        );
+        assert_eq!(
+            REPLACE_REFS_REFUSED,
+            ["-c", "core.useReplaceRefs=false"],
+            "the census blanks string literals, so the setting is read here"
+        );
+
+        let import = code.find("use std::process::").expect("the process import");
+        let import_end = import
+            + code
+                .get(import..)
+                .and_then(|rest| rest.find(';'))
+                .expect("the import ends");
+        let identifier = |byte: Option<&u8>| {
+            byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        };
+        let named: Vec<usize> = code
+            .match_indices("Command")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !identifier(code.as_bytes().get(at.wrapping_sub(1)))
+                    && !identifier(code.as_bytes().get(at + "Command".len()))
+            })
+            .collect();
+        let renamed: Vec<usize> = named
+            .iter()
+            .copied()
+            .filter(|at| {
+                code.get(at + "Command".len()..)
+                    .map(str::trim_start)
+                    .and_then(|rest| rest.strip_prefix("as"))
+                    .is_some_and(|rest| !identifier(rest.as_bytes().first()))
+            })
+            .collect();
+        assert!(
+            renamed.is_empty(),
+            "`Command` is imported under another name at byte offsets {renamed:?}, and a \
+             Git child built through that name is one the count above cannot see"
+        );
+        let elsewhere: Vec<usize> = named
+            .iter()
+            .copied()
+            .filter(|at| !(import..import_end).contains(at) && !(start..=close).contains(at))
+            .collect();
+        assert!(
+            elsewhere.is_empty(),
+            "`Command` is named outside the process import and `git_command` at byte \
+             offsets {elsewhere:?}"
+        );
+
+        let bytes = code.as_bytes();
+        let mut callers: Vec<&str> = Vec::new();
+        for (at, name) in code.match_indices("git_command") {
+            if identifier(bytes.get(at.wrapping_sub(1)))
+                || identifier(bytes.get(at + name.len()))
+                || (start..=close).contains(&at)
+            {
+                continue;
+            }
+            assert!(
+                code.get(at + name.len()..)
+                    .map(str::trim_start)
+                    .is_some_and(|rest| rest.starts_with('(')),
+                "`git_command` is named at byte offset {at} without being called, and a \
+                 Git child built through that value is one the list below cannot place"
+            );
+            let keyword = code
+                .get(..at)
+                .and_then(|before| {
+                    before
+                        .rmatch_indices("fn")
+                        .map(|(keyword, _)| keyword)
+                        .find(|keyword| {
+                            !identifier(bytes.get(keyword.wrapping_sub(1)))
+                                && bytes
+                                    .get(keyword + "fn".len())
+                                    .is_some_and(u8::is_ascii_whitespace)
+                        })
+                })
+                .expect("every call of the builder sits inside a function");
+            let signature = code
+                .get(keyword + "fn".len()..)
+                .map(str::trim_start)
+                .expect("the enclosing function's name");
+            let signature = signature.strip_prefix("r#").unwrap_or(signature);
+            let end = signature
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(signature.len());
+            callers.push(signature.get(..end).expect("an identifier"));
+        }
+        assert_eq!(
+            callers,
+            [
+                "git_output",
+                "run_git_with_private_hooks",
+                "git_output_with_input",
+                "commit_tree_with_upstroke_identity",
+                "current_branch_ref",
+                "parent_sha",
+                "branch_exists",
+                "add_gate_worktree",
+                "verify_gate_worktree",
+                "prepared_commit_matches",
+                "symbolic_ref_target",
+                "prepared_pin_target",
+                "cleanup_gate_workspace",
+                "worktree_is_registered",
+            ],
+            "every Git child of this module is a call of `git_command`, so a new one moves \
+             no `Command::new(` count anywhere: it moves this list, in source order, and \
+             whoever adds it names its function here"
+        );
+
+        for undo in ["env_remove(", "env_clear("] {
+            assert_eq!(
+                code.matches(undo).count(),
+                0,
+                "`{undo}` can take the pair back off a child `git_command` built"
+            );
+        }
     }
 }

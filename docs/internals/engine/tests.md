@@ -1247,16 +1247,31 @@ t1 commits; the process dies inside t2's first attempt.
 Only reachable if the adapter never got a second invocation, which
 would mean this test is not exercising what it claims to.
 
-## `const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\`
+## `const V1_OBJECT_GRAPH_GATES: &str = "[[gates]]\nname = \"snapshot-bytes\"\n\`
 
-A gate whose verdict *is* the object graph it reads, and nothing else.
+Two gates. Each one's verdict is one half of the graph question and nothing
+else. Both read the committed `probe.txt`, whose blob `refs/replace/*` sends
+to a blob reading `replacing`.
 
-`probe-recorded` is a tag on a commit that `refs/replace/*` sends to the
-commit `probe-replacing` names. Reading replacements, the two names are one
-object and `git diff --exit-code` exits 0; reading the recorded graph they
-are two commits one blob apart and it exits 1. No shell builtin, no `grep`,
-no platform-specific quoting — the whole of the Windows leg is `git` and two
-ref names.
+`snapshot-bytes` reads the file the snapshot holds with `git grep --no-index`,
+which reads the working tree and no object, so it passes only if the v0.1
+workspace materialised the recorded blob. `object-graph` reads the same path
+through Git at `HEAD`, so it passes only if the runner's child refuses the
+replacement. Measured on git 2.43 with plain `git`, over one checkout written
+with replacements honoured and one written with them refused.
+`snapshot-bytes` exits 1 over the first and 0 over the second. `object-graph`
+exits 1 in a child that honours the replacement and 0 in one that refuses
+it, over either checkout.
+
+The replacement is on a blob, not a tree or a commit. The candidate tree is
+the agent's, not the fixture's, so the one object a fixture can replace in
+advance and know it reaches every snapshot of the run is a blob in the tree
+the run starts from. That is also why neither gate is `git diff --exit-code
+HEAD`. A snapshot's index records the blob's own id, so comparing ids passes
+over replaced bytes without reading them: measured, exit 0 under both graphs
+over the checkout written with replacements refused. Neither gate uses a
+shell builtin or platform-specific quoting. Each is one `git` command, the
+same under `sh -c` and `cmd /C`.
 
 ## `fn v1_object_graph_helper()` › `crate::workspace_manager::fixture::REPLACEMENT_WITNESS`
 
@@ -1271,10 +1286,11 @@ one marker beside one door is the whole of that (PR #271, round 4).
 
 ## `fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote()` › `run_replacement_witness_child`
 
-The helper runs in a child because what it measures is
-`HostEnvironment::from_process()`, which is production's own read of the
-environment this process was started in. There is no seam to filter it at,
-so the environment is prepared instead —
+The helper runs in a child because what it measures reads the environment
+this process was started in: `HostEnvironment::from_process()` is
+production's own read of it, and the v0.1 workspace's Git children inherit
+it. There is no seam to filter either at, so the environment is prepared
+instead —
 [`without_ambient_replacement_controls`](../../../src/workspace_manager/fixture.rs)
 states what it takes away and why, and
 `assert_replacement_controls_pinned` refuses in the child if any of it
@@ -1287,36 +1303,94 @@ a door is three places a later repair can reach two of.
 
 ## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> (ScratchTree, PathBuf) {`
 
-An engine repository carrying a replacement the run itself never touches.
+An engine repository whose committed `probe.txt` carries a replacement the
+v0.1 workspace must refuse.
 
-The two probe commits are made on a branch off `main` and the branch is
-deleted, so `probe.txt` is in no tree the engine reads, the worktree is
-clean when the run starts, and the tags are what keeps the commits alive.
-The replacement is installed last, after the checkouts that would otherwise
-resolve through it.
+`probe.txt` is written before `seed` commits. So it is in the tree the run
+starts from and in every candidate tree the run builds, since the agent's
+edit touches another path. The replacing blob is written with `git
+hash-object -w` from a file that is then removed, so the worktree is clean
+when the run starts, and the replacement ref keeps that blob reachable.
+Before it returns, the fixture states its premise with a Git child of its
+own that honours replacements: `git show HEAD:probe.txt` reads `replacing`.
+Without that, neither gate would be measuring anything.
+
+## `fn a_checkout_a_replacement_rewrote_is_refused_with_a_check_the_reader_can_run() {`
+
+Both refusals of a checkout that differs from what HEAD records while
+`git status` finds nothing to differ. `replace_head_with_a_sibling` replaces
+HEAD with a sibling commit whose `README.md` differs and checks HEAD out through
+the replacement, so the file on disk and the index are the sibling's. Plain
+`git status` reads the same replacement and reports the checkout clean; upstroke
+reads the recorded commit and finds `README.md` modified. Until round 3 of #326
+the run's refusal said only "working tree is not clean; commit or stash first",
+which `git status` contradicts, and there `git commit` finds nothing to commit
+and `git stash` no local changes to save (git 2.43.0, measured). The fixture
+asserts both views before either refusal runs, and each refusal is asserted to
+name the command that shows upstroke's view,
+`git --no-replace-objects -c core.useReplaceRefs=false status`, and the one that
+lists replacements, `git replace -l`.
+
+**Both controls, and the fixture pins `core.useReplaceRefs = true` to show why.**
+Round 3 named `git --no-replace-objects status`. On Git 2.40.0 and 2.41.0, with
+`true` in the repository's configuration, that command printed nothing and exited
+0 over this checkout, while the command the refusals now name printed
+`M  README.md` there and on 2.42.0 and 2.43.0 (measured with plain Git; the
+review of `6e3e618f` found it). `replace_head_with_a_sibling` pins the value
+before it installs the replacement and runs the command the refusals name, so the
+fixture's own assertion is the check, on whichever Git the suite runs.
+
+The first leg is the run's start. The second parks a run, switches back to
+`main` and makes the same checkout there, so the refusal that fires is the
+resume's, off the run branch. Reverting either message to its `915c0646`
+wording turns the test red (`r3/` in the pull request's evidence).
 
 ## `#[test]`
 
-The v0.1 conductor runs and resumes on the graph its own workspace wrote
-(PR #271, round 2's fix-check finding).
+The v0.1 conductor runs and resumes on the graph its own workspace wrote. Since
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` closed, that is the recorded
+graph. The test first came from PR #271, round 2's fix-check finding.
+
+Until that finding closed, this test pinned the opposite. Its one gate, `git
+diff --exit-code probe-recorded probe-replacing`, passed only when the child
+read the replaced graph, so it held the conductor to `ObjectGraph::AsReplaced`.
+Its replacement never reached a gate snapshot either: the two probe commits
+were tags on a deleted branch, in no tree the run read, so it measured the
+runner and never the producer. It pinned the old design, so it was inverted
+rather than deleted, and the replacement moved into the tree every snapshot
+of the run is made from.
 
 `src/gates.rs`'s `a_v1_gate_judges_the_tree_its_own_workspace_materialised`
-supplies `ObjectGraph::AsReplaced` **itself**, so it measures what that
-value does and not whether the conductor selects it; the environment test
-beside it checks the constructor independently, and
+drives `HostRunner::for_legacy_workspace()`, and the environment test pins
+what that constructor reads. Neither reaches the two sites that call it, and
 `production_reaches_a_spawn_through_one_host_runner_per_run` accepts either
-constructor by design. Measured at head `aa2728d`: reverting the two calls,
-then in `src/engine/mod.rs` and since 2026-09-20 in `src/engine/coordinator.rs`
-and `src/engine/resume.rs`, to `HostRunner::new()` left all of them green at `0`,
-so the whole legacy repair could have been reverted without a guard
-noticing.
+constructor by design. So this is the test that notices a site building some
+other runner. That gap is why it exists: at head `aa2728d`, before it did,
+reverting the two calls to `HostRunner::new()` left the gates witness, the
+environment test and that census all green. The calls were then in
+`src/engine/mod.rs`; since 2026-09-20 they are in `src/engine/coordinator.rs`
+and `src/engine/resume.rs`.
 
-This drives `engine::run_with` and `engine::resume_with` — the production
-facades, one call above each of those two sites — so each is guarded on its
-own. Measured with `run_harness` alone reverted: the run parks, `GateFailed`,
-Git exit 1, exit `101`. Measured with `resume_harness` alone reverted: the
-first run parks as it is meant to, the answer un-parks it, and the resumed
-attempt parks on the same gate, exit `101`.
+It drives `engine::run_with` and `engine::resume_with`, the production
+facades one call above each of `run_harness` and `resume_harness`, so each
+site is guarded on its own. Through them it drives the production producer
+(`gate_snapshot_for_candidate_in_store`) and the production runner. Measured
+by mutation at this head:
+
+| mutation | where the test failed |
+|---|---|
+| `for_legacy_workspace` reading `AsReplaced` | the run leg: every attempt `GateFailed` on `object-graph`, `snapshot-bytes` passing, the run parked |
+| `run_harness` building a runner reading `AsReplaced` | the run leg, the same way |
+| `resume_harness` building a runner reading `AsReplaced` | the resume leg only: the first run parks as it is meant to, the answer un-parks it, and the resumed attempt parks on `object-graph` |
+| `git_command` without the pair | the run leg, before any gate: `verify_gate_worktree` refused the snapshot with ` M probe.txt` |
+| both halves reverted, the behaviour of `a3767bcc` | the run leg, as the row above |
+
+The fourth row is the producer's own post-checkout check firing, not
+`snapshot-bytes`. The checkout wrote the replacing bytes under an index that
+records the recorded blob, and `git status` in the snapshot found the file
+modified. So with both halves reverted, a v0.1 run whose candidate tree
+carries a replaced blob does not reach its gates at all. `snapshot-bytes`
+states the producer's half directly, not through that check.
 
 The resume leg takes `a_parked_run_is_answered_out_of_band_and_resumed`'s
 shape — `Effect::NoEdit` parks the task before any gate runs, the answer is
@@ -2614,3 +2688,179 @@ fired. Nothing the continuation does happened: no process was created (no `child
 callback), the runner ran nothing, the log's bytes are unchanged, the question's payload was not
 written, and nothing holds the run lock. The next resume converges as `resume_parked` requires.
 Both resumes run with `resume_options_in` over the witness's tree.
+
+## `struct FakeAdapter` › `role_probe: Option<RoleProbe>,`
+
+When set, the worker and reviewer commands are this test binary run as the role
+([`RoleProbe`]) rather than `exit 0` and `echo UPSTROKE-FAKE-REVIEW`. Everything
+else the fake does is unchanged: its in-process edits, its scripted review
+verdicts, its call counts. So a witness gets a real worker and a real reviewer
+process, started by the production runner with the environment it composes,
+without writing a second fake.
+
+## `const ROLE_PROBE: &str = "UPSTROKE_V1_ROLE_PROBE";`
+
+The directory a role probe reads its `spec` from and writes its record into. The
+witness's parent sets it on the child it spawns, so the engine's own
+environment carries it and every role the runner starts inherits it: nothing
+reaches a role by any route the runner does not compose.
+
+## `struct RoleProbe {`
+
+The worker's and reviewer's command specs, each this test binary at
+`v1_role_probe_worker` or `v1_role_probe_reviewer`, with the overlay a witness
+hands it; and, optionally, one blob the fake reads with the operator's own Git in
+the engine process before each worker starts.
+
+## `impl RoleProbe` › `fn read_as_the_operator_does(&self, workspace: &Path) {`
+
+An external process reading during the run. The fake's `build` runs in the engine
+process, whose environment is the operator's, so a `git cat-file -p` there is
+what any Git the operator runs beside the run would see. The witnesses assert it
+read the replacement every time: the run changed nothing that the operator's Git
+reads.
+
+## `fn role_probe_gates() -> String {`
+
+The one gate a role witness configures: this test binary at `v1_role_probe_gate`,
+as a command line that `sh -c` and `cmd /C` both run.
+
+## `fn v1_role_probe(role: &str) {`
+
+What one role process reads, as a list of `<role> <check> ok|FAIL <detail>`
+lines in its own file under the record directory. Every check is independent,
+and none panics: the witness wants the whole record, not the first failure.
+
+- `variable`: no `GIT_NO_REPLACE_OBJECTS` in this process's environment. Its
+  presence is the regression this policy replaced.
+- `worktree-true` (gates, when the spec says `worktree true`): the role sets
+  `core.useReplaceRefs = true` in its own snapshot's worktree configuration
+  first, so every read below it has to beat that scope too.
+- `include`: `git config -z --show-origin --get core.useReplaceRefs` answers
+  `false` from the include file, in the directory the role was started in. The
+  include is present and in force while the role runs, not only when the run
+  began.
+- `blob`, `tree`, `commit`: each replaced object read by id — `cat-file -p` of
+  the blob, `rev-parse <tree>:inner.txt`, `log -1 --format=%s <commit>` — answers
+  as the repository records it.
+- `candidate`: the worker writes `candidate.txt`, installs a replacement of its
+  blob with `git replace -f` and reads the blob back recorded; the replacement is
+  installed during the attempt, by a role. Gates and reviewers read the file
+  through the snapshot's `HEAD` as recorded, find that replacement in `git
+  replace -l`, and see `git diff --exit-code HEAD` pass and `git status
+  --porcelain` empty before anything else touches their directory.
+- `path-budget`: the length of the longest path Git writes in the repository
+  the role makes inside its working directory,
+  `fx/.git/refs/replace/<40 hex>.lock`. It fails on Windows at 260 characters,
+  `MAX_PATH`. A gate's working directory is the product's snapshot, deep in the
+  private root, so this is where a name that grows runs out first, and the record
+  says so with the length before Git's "Filename too long" does. On the CI guest
+  the longest is 249 characters, for the shapes witness's glob directory.
+- `fixture-inside`, `fixture-outside`: the role makes a repository inside its
+  own working directory (named `fx`, for the budget above) and one outside it,
+  installs a replacement in each and reads it back replaced. Both keep their
+  replacements. So does a repository a role creates elsewhere, except one beside a
+  component of the managed repository's path, named like it but for case, in a
+  directory an alias makes look as though it folds case
+  (`PR326-A-JUNCTION-MAKES-A-CASE-SENSITIVE-DIRECTORY-READ-AS-FOLDING`). Its commit passes
+  `-c maintenance.autoDetach=false`, which works around
+  `PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE` on the owner's ruling of
+  2026-09-28. Git 2.55.0's commit otherwise detaches its auto-maintenance. It
+  forks, the parent exits and the child calls `setsid()`, and on macOS the role
+  that ran the commit then died of `SIGHUP` in 15 of 20 probes. The witnesses
+  avoid that trigger. The defect is filed with its reproduction, not absent.
+
+A gate exits 1 when any line failed, so a failing gate also fails the attempt;
+workers and reviewers exit 0 and leave the verdict to the record.
+
+## `fn v1_role_probe_reviewer() {`
+
+The reviewer's probe prints the fake's review marker after its record is written,
+so the fake parses a review and the attempt goes on to the verdict the source
+scripts. It writes through `std::io::Write`, because `println!` is a denied macro
+in this file.
+
+## `fn install_a_replaced_graph(repo: &Path, probe: &Path) -> (String, String) {`
+
+Commits `blob.txt` and `dir/inner.txt` as `recorded-commit`, then replaces all
+three kinds of object it just made: the blob, the `dir` tree (by one built in a
+private index) and the commit itself (by a sibling whose message reads
+`replacing-commit`). It pins `core.useReplaceRefs = true` in the repository and,
+with `extensions.worktreeConfig`, in the main worktree's own configuration. The
+checkout was written before any replacement existed, so the run's clean check,
+which reads the recorded graph, passes. It returns the blob's id and the probe's
+spec lines.
+
+## `fn assert_every_scope_says_true(repo: &Path) {`
+
+The challenge's own precondition. `git config --show-scope --get-all
+core.useReplaceRefs` must list `true` at system, global, local and worktree scope,
+and twice at command scope, once for `GIT_CONFIG_COUNT` and once for
+`GIT_CONFIG_PARAMETERS`, and no `false` anywhere. A witness whose challenge had
+been neutralised away would stop here, not pass.
+
+## `fn configuration_of(repo: &Path, also: &[&Path]) -> Vec<(PathBuf, Vec<u8>)> {`
+
+The bytes of every file directly in the common directory whose name starts with
+`config` — `config` and `config.worktree` — and of any other file the caller
+names. Compared before and after, it says the run wrote no Git configuration.
+
+## `fn the_v1_conductor_keeps_every_role_on_the_recorded_graph_of_its_own_repository() {`
+
+The round-4 acceptance witness. Its child comes through
+`run_challenged_replacement_witness_child`: every ambient control is taken away
+and then the challenge is set, `true` in the system and global files, in
+`GIT_CONFIG_COUNT` and in inherited `GIT_CONFIG_PARAMETERS`. The child adds
+`true` in the repository and worktree files; every worker and reviewer is
+started with `true` in its overlay; every gate sets it in its own snapshot.
+
+The first run's worker, gate and reviewer each probe, and a scripted review
+failure parks the task after all three have run. The include is then deleted and
+the task resumed; the resume writes it back, and its worker, gate and reviewer
+probe again. After each: every record line is `ok`, the operator's Git read the
+replacement throughout, the configuration files are byte-identical, and the
+include holds its exact bytes. The committed `candidate.txt` is the worker's
+bytes, not the replacement it installed.
+
+Under the v0.1 runner put back on the process-wide variable, it fails: the roles'
+fixtures read `recorded`, the variable is present, and the include is not in
+force. On Git 2.41.0 and 2.42.0 it passes (measured, with those Gits first on
+`PATH`).
+
+## `fn a_gate_that_replaces_objects_in_its_own_fixture_passes_under_the_v1_runner() {`
+
+The regression review's own reproduction, in a clean environment: a managed
+repository with nothing under `refs/replace/`, whose worker, gate and reviewer
+each create a repository of their own, install a replacement and read it back.
+The run completes. With the process-wide variable it parked with `gate_failed`.
+
+## `fn a_refused_an_interrupted_and_a_resumed_v1_run_leave_git_configuration_as_they_found_it() {`
+
+Under the same challenge as the acceptance witness: a run refused over a stray
+file, a run killed inside its first attempt (`v1_interrupted_run_helper`, the
+crash pattern `killing_a_run_mid_attempt_leaves_a_resumable_record` uses), and
+the resume of the killed run after its include is deleted. The configuration
+files are byte-identical after each; the resume's roles read the recorded graph.
+
+## `fn sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded() {`
+
+Two runs at once, in two linked worktrees of one repository with replacements,
+each in a process of its own, over one private root that holds no include yet.
+Both complete; every role of both read the recorded graph; the shared include
+holds its exact bytes afterwards; no configuration file changed. The helper
+waits for both runs before judging either. A failing sibling's assertion used to
+unwind the helper, and its scratch-tree guard deleted the tree the other sibling
+was still running in. The sibling
+checkouts are created with `--no-replace-objects -c core.useReplaceRefs=false`,
+because a checkout written through the commit replacement differs from what its
+HEAD records and the run refuses it as dirty, correctly.
+
+## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
+
+One run per shape, each over a repository with the blob, tree and commit
+replacements: a path with `[x]*?` (`[x]` on Windows), spaces and a quote in it; a
+separate Git directory; a linked worktree as the entry; on Unix, a symbolic link
+as the entry and a `.git` that is a symbolic link to the Git directory; on
+Windows and macOS, the entry spelled in upper case. Every role of every run read
+the recorded graph, and afterwards the operator's Git still reads the
+replacements.

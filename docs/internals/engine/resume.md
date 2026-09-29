@@ -37,6 +37,17 @@ difference is a warning about an edit that does not apply here. A refusal is
 for the cases where continuing would be wrong, and continuing under the
 gates this run has been using all along is exactly right.
 
+**Every resume writes the include again before its first role.** `resume_harness`
+builds the same `ManagedRepository` [`run_harness`](coordinator.md) does, through
+`Workspace::recorded_objects_scope`, so an include that went missing or was
+altered between the run and its resume is whole again before a resumed worker,
+gate or reviewer starts; the runner refuses any role while it is not.
+
+The refusal off the run branch names `git --no-replace-objects -c
+core.useReplaceRefs=false status`: both controls, because on Git 2.41 a
+configured `core.useReplaceRefs = true` outranks the first alone and that
+command then reports the checkout clean.
+
 ## `pub(super) fn resume_harness_on(`
 
 The same resume, on an explicit [`Runner`]. See

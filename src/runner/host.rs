@@ -30,7 +30,10 @@ mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
 
 mod environment;
-pub use self::environment::{HostEnvironment, KeyCase, ObjectGraph};
+pub use self::environment::{
+    CONFIG_PARAMETERS, GitdirRule, HostEnvironment, KeyCase, ManagedRepository, ObjectGraph,
+    RECORDED_OBJECTS_INCLUDE,
+};
 
 pub const RESERVED_ALWAYS: &[&str] = &["PATH", "HOME", "USERPROFILE"];
 
@@ -117,9 +120,10 @@ impl HostRunner {
     }
 
     #[must_use]
-    pub fn for_legacy_workspace() -> Self {
-        Self::new()
-            .with_environment(HostEnvironment::from_process().reading(ObjectGraph::AsReplaced))
+    pub fn for_legacy_workspace(repository: ManagedRepository) -> Self {
+        Self::new().with_environment(
+            HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
+        )
     }
 
     #[must_use]
@@ -197,6 +201,11 @@ impl HostRunner {
 
 impl Runner for HostRunner {
     fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        if let ObjectGraph::RecordedIn(repository) = self.environment.objects() {
+            repository
+                .verify_include()
+                .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
+        }
         let composed = self
             .environment
             .compose(&request.role, request.agent.as_ref(), &request.command.env)

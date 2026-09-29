@@ -134,8 +134,10 @@ These are invariants, and they are what make it safe to leave running:
 
 ## Requirements
 
-Rust 1.85+ (edition 2024), Git 2.40+ (`git check-attr --source`), and
-[Claude Code](https://docs.claude.com/en/docs/claude-code/overview) on `PATH`. The
+Rust 1.85+ (edition 2024), Git 2.41+, and
+[Claude Code](https://docs.claude.com/en/docs/claude-code/overview) on `PATH`. Git 2.40 is no longer
+supported: its `git merge-tree` reads what `git replace` substitutes for the objects a repository
+records, whatever the configuration says, and a run refuses it by name. The
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
 and the Codex CLI are optional and unlock cross-family review. Windows, macOS and Linux are all
 first-class.
