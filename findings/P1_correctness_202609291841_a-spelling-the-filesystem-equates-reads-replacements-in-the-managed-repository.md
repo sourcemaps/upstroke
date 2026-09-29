@@ -6,7 +6,7 @@ category: correctness
 pr: 326
 reviewed_sha: 6acf1216410f0a1485ef2bfbbd23994c44618d92
 location: src/runner/host/environment.rs:290
-provenance: pre_existing   # on the owner's ruling: it reproduces at c453705f, before round 6. The Provenance section gives its history in #326
+provenance: fix_regression   # corrected on the owner's ruling of 2026-09-29: at master d6f65cbb the gate passes through the missed spelling, and #326's repair makes it fail; the Provenance section gives the measurement
 first_bad: b2e6dc60c45916b57759ff5bc310a86a3f511bc1   # the path-scoped include it escapes; prior finding LEGACY-WORKSPACE-V1-RUNNER-READS-THE-REPLACED-GRAPH-OVER-A-RECORDED-SNAPSHOT
 guard: a decision by the owner about repository identity and supported layouts, not another repair round. Nothing in the suite reproduces it: the case-sibling witness spells only ASCII case
 ---
@@ -85,22 +85,37 @@ those two characters onto ASCII letters, so an ASCII-only path is reachable thro
 
 ## Reachability
 
-Supported Git, ordinary filesystem name equivalence, installed replacements, and a normal `--git-dir` argument. No
-push access and no source change. **It reaches the ordinary-use limb.**
+It needs two things: **live replacements** in the managed repository, and a role naming the repository's Git
+directory by **an alternate explicit spelling** the filesystem equates with the stored one. **Ordinary discovery
+from the working directory passed**: a gate that lets Git find the repository from its working directory read the
+recorded bytes in every run below. No alias, no source modification and no privileged role operation are needed;
+supported Git and ordinary filesystem name equivalence are enough. That is narrower than ordinary use unqualified:
+it takes an explicit alternate spelling. The review grades it P1 on those conditions.
 
 - **The filesystem.** Measured on a case-folding ext4 directory only. macOS volumes fold case by default and
   Windows directories fold case by default; neither was measured for this row, and Git for Windows takes its
   realpath from `GetFinalPathNameByHandleW`, which returns the stored name, so Windows may not reach it.
 - **The repository's name.** The NFC and NFD rows need a letter outside ASCII in the path, which is ordinary (an
   accented name in a home directory or a project). The Kelvin-sign and long-s rows need none.
-- **The spelling.** The role, its tools or its gate command must name the Git directory in a spelling other than
-  the one the scope was built from: through `--git-dir`, `GIT_DIR`, or a path built from input. A gate that lets
-  Git find the repository from its working directory read the recorded bytes in every run above.
+- **The spelling.** The role, its tools or its gate command must name the Git directory explicitly, in a
+  spelling other than the one the scope was built from: through `--git-dir`, `GIT_DIR`, or a path built from
+  input. In every run above, a gate that let Git find the repository from its working directory read the
+  recorded bytes.
 
 ## Provenance
 
-On the owner's ruling this row is `pre_existing`: every measurement above reproduces at `c453705f`, before round 6.
-Within #326 its history is this. The include it escapes is #326's own, added at `b2e6dc60` (round 4), which matched
+**`fix_regression`**, on the owner's ruling of 2026-09-29, which corrected an earlier `pre_existing`. The round-6
+regression lens measured the gate at master, as the orchestrator's ruling relays it:
+
+| revision | snapshot bytes | gate, stored spelling | gate, missed spelling |
+|---|---|---|---|
+| master `d6f65cbb` | replacing `B` | `Pass`, reads `B` | `Pass`, reads `B` |
+| `c453705f` | recorded `A` | `Pass`, reads `A` | **`Fail`**, reads `B` |
+| `6acf1216` | recorded `A` | `Pass`, reads `A` | **`Fail`**, reads `B` |
+
+At master both spellings pass, because the producer and the roles agree: both read replacements. The gate's failure
+is introduced by #326's repair. Every measurement in this file reproduces at `c453705f` as well as at `6acf1216`, so
+it predates round 6, not #326. Within #326 its history is this. The include it escapes is #326's own, added at `b2e6dc60` (round 4), which matched
 the path exactly on Linux and under `gitdir/i:` on macOS and Windows; `gitdir/i:` did not fold a letter outside
 ASCII either (round 5 measured a `CAFÉ` condition missing a repository at `café`). The
 disagreement that makes the gate fail needs the recorded producer, #326's `a9535c42`. Before #326, master's v0.1
