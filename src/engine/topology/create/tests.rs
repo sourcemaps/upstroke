@@ -727,7 +727,6 @@ struct Driver<'a> {
     runner: RunnerPolicy,
     execution: RecordingRunner,
     ledger: std::sync::Mutex<InvocationLedger>,
-    slots: std::sync::Mutex<SlotAssertion>,
     warnings: Vec<String>,
 }
 
@@ -741,13 +740,12 @@ impl<'a> Driver<'a> {
             runner: crate::runner::policy::host_policy(),
             execution: RecordingRunner::default(),
             ledger: std::sync::Mutex::new(InvocationLedger::new()),
-            slots: std::sync::Mutex::new(SlotAssertion::new()),
             warnings: Vec::new(),
         }
     }
 
-    fn leak_into_the_pair(&self, agent: &str) {
-        let id = PreflightIdentities::agent(agent, 7).expect("a probe identity");
+    fn leak_into_the_pair(&self) {
+        let id = PreflightIdentities::shell(7).expect("a probe identity");
         self.ledger
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -769,7 +767,7 @@ impl<'a> Driver<'a> {
             refs: self.refs,
             clock: &clock,
             runner: &self.execution,
-            pair: ProbePair::grant(&self.ledger, &self.slots),
+            pair: ProbePair::grant(&self.ledger),
         };
         create_run(self.fixture.checked(), request, hooks, &mut self.warnings)
     }
@@ -1754,7 +1752,7 @@ fn a_leaked_probe_registration_is_reported_by_the_append_error() {
         InjectionMode::ErrorReturn,
     );
     let mut driver = Driver::new(&fixture, &probes, &refs);
-    driver.leak_into_the_pair(AGENT);
+    driver.leak_into_the_pair();
     let refused = driver
         .run(&mut hooks)
         .expect_err("the append returned an error");
@@ -3014,7 +3012,6 @@ fn container_probe_kill_child() {
     let clock = Fixed::default();
     let agents = agents();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
     let request = Request {
         repo_root: &fixture.repo,
         repo_key: fixture.repo_key.clone(),
@@ -3026,7 +3023,7 @@ fn container_probe_kill_child() {
         refs: &refs,
         clock: &clock,
         runner: &execution,
-        pair: ProbePair::grant(&ledger, &slots),
+        pair: ProbePair::grant(&ledger),
     };
     let mut warnings = Vec::new();
     let _ = create_run(checked, request, &mut hooks, &mut warnings);
@@ -3368,8 +3365,7 @@ fn the_creation_ledger_accounts_every_probe_process() {
     let runner = FailsTheSecondRequest::default();
     let source = TwoRequestSource::default();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     let probes = RunnerProbes {
         shell: crate::gates::ShellKind::Sh,
         workspace: std::env::temp_dir(),
@@ -3401,11 +3397,12 @@ fn the_creation_ledger_accounts_every_probe_process() {
         ledger.running()
     );
 
-    let slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
+    let slots = ledger.slots();
     assert!(
-        slots.held().is_none(),
-        "the refused probe kept its slot pair: {:?}",
-        slots.held()
+        slots.is_empty(),
+        "the refused probe kept its slot pair: held {:?}, pending {:?}",
+        slots.holders(),
+        slots.pending()
     );
 }
 
@@ -3475,8 +3472,7 @@ fn the_production_probes_run_both_halves_through_the_runs_runner() {
     let runner = RecordingRunner::default();
     let source = OneSource::default();
     let ledger = std::sync::Mutex::new(InvocationLedger::new());
-    let slots = std::sync::Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     let probes = RunnerProbes {
         shell: crate::gates::ShellKind::Sh,
         workspace: std::env::temp_dir(),
@@ -3649,12 +3645,10 @@ fn an_agent_probe_registers_only_into_the_pair_its_caller_bound() {
     let probes = RunsThroughWhatItIsHanded::new(false);
 
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let granted = ProbePair::grant(&ledger, &slots);
+    let granted = ProbePair::grant(&ledger);
 
     let other_ledger = Mutex::new(InvocationLedger::new());
-    let other_slots = Mutex::new(SlotAssertion::new());
-    let unbound = ProbePair::grant(&other_ledger, &other_slots);
+    let unbound = ProbePair::grant(&other_ledger);
 
     probes
         .agent(AGENT, &granted.agent_probe(&runner))
@@ -3687,8 +3681,7 @@ fn the_two_probe_paths_refuse_each_others_identities() {
     let runner = RecordingRunner::default();
     let probes = RunsThroughWhatItIsHanded::new(true);
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let shell_id = PreflightIdentities::shell(0).expect("the shell identity");
     probes
@@ -3731,8 +3724,7 @@ fn the_shell_probe_registers_without_taking_a_slot() {
     let runner = RecordingRunner::default();
     let probes = RunsThroughWhatItIsHanded::new(false);
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let shell_id = PreflightIdentities::shell(0).expect("the shell identity");
     probes
@@ -3745,15 +3737,11 @@ fn the_shell_probe_registers_without_taking_a_slot() {
         (1, 0),
         "the shell probe was not accounted in the granted pair"
     );
-    drop(accounted);
     assert!(
-        slots
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .held()
-            .is_none(),
-        "the shell probe left a slot pair held"
+        accounted.slots().is_empty() && accounted.slots().granted() == 0,
+        "the shell probe took a slot pair"
     );
+    drop(accounted);
     assert_eq!(runner.requests().len(), 1);
     assert_eq!(runner.requests()[0].invocation, shell_id);
     assert!(pair.balances());
@@ -3764,8 +3752,7 @@ fn a_probe_that_registers_nothing_does_not_move_the_grant() {
     let runner = RecordingRunner::default();
     let probes = IgnoresTheCapability::agent_only();
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let before = pair.accounted();
     probes
@@ -3960,8 +3947,7 @@ impl crate::runner::contract::tests::InlineRunner for RefusesEveryRequest {
 fn the_grant_counts_a_probe_process_that_started_and_failed() {
     let runner = RefusesEveryRequest::default();
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
 
     let before = pair.accounted();
     pair.agent_probe(&runner)
@@ -3996,50 +3982,77 @@ fn the_grant_counts_a_probe_process_that_started_and_failed() {
 
 #[test]
 fn the_granted_pairs_balance_answers_for_the_ledger_and_the_slots() {
+    use crate::engine::topology::identity::{Admission, SlotPair};
+    use crate::engine::topology::select::Standing;
+
     let ledger = Mutex::new(InvocationLedger::new());
-    let slots = Mutex::new(SlotAssertion::new());
-    let pair = ProbePair::grant(&ledger, &slots);
+    let pair = ProbePair::grant(&ledger);
     assert!(pair.balances(), "a fresh pair balances");
 
-    let id = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");
-    ledger
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .register(&id)
-        .expect("the registration");
-    assert!(!pair.balances(), "an unsettled registration balanced");
-    ledger
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .complete(&id)
-        .expect("the settlement");
-    assert!(pair.balances(), "a settled registration did not balance");
+    let slotted = |id: &crate::runner::InvocationId| {
+        ledger
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .register_slotted(
+                id,
+                SlotPair {
+                    agent: AGENT.to_owned(),
+                    pool: None,
+                },
+                &Standing::preflight(),
+            )
+            .expect("the registration")
+    };
+    let settle = |id: &crate::runner::InvocationId, complete: bool| {
+        let mut ledger = ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if complete {
+            ledger.complete(id)
+        } else {
+            ledger.cancel(id)
+        }
+        .expect("the settlement")
+    };
 
-    slots
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .acquire(
-            &id,
-            crate::engine::topology::identity::SlotPair {
-                agent: AGENT.to_owned(),
-                pool: None,
-            },
-        )
-        .expect("the pair");
+    let first = PreflightIdentities::agent(AGENT, 0).expect("a probe identity");
+    assert_eq!(slotted(&first), Admission::Granted);
+    assert!(
+        !pair.balances(),
+        "a registration running with its pair held balanced"
+    );
+
+    let second = PreflightIdentities::agent(AGENT, 1).expect("a probe identity");
+    assert_eq!(
+        slotted(&second),
+        Admission::Pending,
+        "the one slot of `{AGENT}` is held, so the second waits"
+    );
+    assert_eq!(
+        settle(&second, false),
+        Vec::<crate::runner::InvocationId>::new(),
+        "withdrawing the waiting request grants nothing"
+    );
+    assert!(
+        !pair.balances(),
+        "the first still holds its pair, so the table cannot balance"
+    );
+
+    assert_eq!(
+        settle(&first, true),
+        Vec::<crate::runner::InvocationId>::new(),
+        "nothing waits behind the first once the second withdrew"
+    );
+    assert!(
+        pair.balances(),
+        "a settled registration and a released pair did not balance"
+    );
     assert!(
         ledger
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .balances(),
-        "the ledger half must be clean, or this proves nothing about the slot half"
+            .slots()
+            .is_empty(),
+        "and the slot table is empty again"
     );
-    assert!(!pair.balances(), "a held slot pair balanced");
-    slots
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .release(&id)
-        .expect("the release");
-    assert!(pair.balances(), "a released pair did not balance");
 }
 
 #[test]

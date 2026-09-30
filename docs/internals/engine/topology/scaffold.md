@@ -98,6 +98,12 @@ One task's fold state.
 
 The class of the generation `generation` of `key`.
 
+## `impl EventEmitter for FoldedEmitter` › `fn standing(&self, invocation: &InvocationId) -> super::select::Standing {`
+
+The standing the production emitter reports, read from this emitter's own
+fold, so an attempt driven through the scaffold registers its slotted
+processes under the same precondition as the run's.
+
 ## `impl EventEmitter for FoldedEmitter` › `fn emit(`
 
 **`_hooks` is ignored, and that is the divergence rather than an
@@ -355,6 +361,14 @@ delivers its result with [`RecordingRunner::complete`] or its call is
 cancelled — `tests_acceptance.determinism`'s "explicit start/complete control".
 Without it, the runner answers each request at once from the queued codes, as
 before PR11.
+
+## `impl RecordingRunner` › `pub(super) fn stop_holding(&self) {`
+
+From now on invocations are answered at once again; those already held stay
+held until completed. A test that holds one invocation mid-run and then
+drives another through the same runner uses it, so that the second — if a
+regression let it reach the runner — returns at once and fails its assertion
+instead of hanging the test.
 
 ## `impl RecordingRunner` › `pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {`
 

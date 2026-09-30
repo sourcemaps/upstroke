@@ -3935,7 +3935,7 @@ fn ledgers_empty_after_resume() {
         "the shell probe is non-slotted and the agent probe is slotted"
     );
     assert!(crate::engine::topology::identity::Reservations::new().is_empty());
-    assert!(crate::engine::topology::identity::SlotAssertion::new().is_empty());
+    assert!(crate::engine::topology::identity::SlotTable::new().is_empty());
     assert!(crate::engine::topology::identity::InvocationLedger::new().balances());
 }
 

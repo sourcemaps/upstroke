@@ -69,6 +69,18 @@ memory, no cleanup, then the stable-prefix barrier — and there would be two
 implementations of it, which is the duplication class this crate has already
 paid for three times.
 
+## `pub trait EventEmitter` › `fn standing(&self, invocation: &crate::runner::InvocationId) -> super::select::Standing;`
+
+The standing of `invocation`'s pipeline, read from the fold the emitter
+appends to: whether the attempt it belongs to is the one in flight.
+
+An ordering module holds the emitter and not the fold, and the one thing
+`attempt.rs` needs of the fold is this — the precondition PR11's broker puts
+on every slotted registration (`permits.deadlock_freedom`: acquisition order
+pipeline -> merge -> {agent, pool}). Asking the emitter keeps the fold where
+it is and keeps `attempt.rs` out of the list of modules that name it
+(`events::log::tests::the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold`).
+
 ## `pub trait EventEmitter` › `fn emit(`
 
 Emit one durable event, or fail.

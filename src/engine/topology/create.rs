@@ -127,7 +127,7 @@ use crate::topology::effects::EventSite;
 use crate::topology::events::{RunStarted4, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{FrozenInputs, TopologyDelta, TopologyFold};
 
-use super::identity::{InvocationLedger, PreflightIdentities, SlotAssertion};
+use super::identity::{InvocationLedger, PreflightIdentities};
 use super::prelock::PreLockChecked;
 use super::seams::{TimeSource, TopologyHooks};
 
@@ -151,7 +151,8 @@ pub use steps::Started;
 /// observable if a test can see which probe ran first. [`RunnerProbes`] is the
 /// production implementation and is a thin composition of two existing
 /// functions.
-/// The granted atomic pair — R3's ledger and R4's slots — as **one value**.
+/// The grant P4 hands its probes — R4's invocation ledger, which carries R3's slot table since
+/// PR11's broker put the two in one ledger — as **one value**.
 ///
 /// **The unit of the grant is the pair, so the pair is a type.** They were two
 /// fields on the creation request beside a `&dyn Probes`, and nothing required
@@ -181,14 +182,14 @@ pub use steps::Started;
 #[derive(Clone, Copy)]
 pub struct ProbePair<'a> {
     ledger: &'a Mutex<InvocationLedger>,
-    slots: &'a Mutex<SlotAssertion>,
 }
 
 impl<'a> ProbePair<'a> {
-    /// Grant the pair. The caller owns both halves for the run's lifetime.
+    /// Grant the pair. The caller owns the ledger, and the slot table inside it, for the run's
+    /// lifetime.
     #[must_use]
-    pub fn grant(ledger: &'a Mutex<InvocationLedger>, slots: &'a Mutex<SlotAssertion>) -> Self {
-        Self { ledger, slots }
+    pub fn grant(ledger: &'a Mutex<InvocationLedger>) -> Self {
+        Self { ledger }
     }
 
     /// The **non-slotted** capability the shell probe registers through.
@@ -200,11 +201,11 @@ impl<'a> ProbePair<'a> {
     #[must_use]
     pub fn shell_probe(&self, runner: &'a dyn Runner) -> ShellProbe<'a> {
         ShellProbe {
-            through: super::preflight::Registering {
-                inner: runner,
-                ledger: self.ledger,
-                slots: None,
-            },
+            through: super::preflight::Registering::new(
+                runner,
+                self.ledger,
+                super::preflight::Slots::None,
+            ),
         }
     }
 
@@ -218,15 +219,15 @@ impl<'a> ProbePair<'a> {
     #[must_use]
     pub fn agent_probe(&self, runner: &'a dyn Runner) -> AgentProbe<'a> {
         AgentProbe {
-            through: super::preflight::Registering {
-                inner: runner,
-                ledger: self.ledger,
-                slots: Some(self.slots),
-            },
+            through: super::preflight::Registering::new(
+                runner,
+                self.ledger,
+                super::preflight::Slots::Probe,
+            ),
         }
     }
 
-    /// How many invocations this pair has accounted, settled or still running.
+    /// How many invocations this pair has accounted, settled or still in flight.
     ///
     /// **What P4 uses to tell a probe that ran from one that only said it
     /// did.** Handing a probe a capability cannot make it call one: the trait
@@ -244,11 +245,10 @@ impl<'a> ProbePair<'a> {
     /// separate question of whether what ran was settled.
     #[must_use]
     pub fn accounted(&self) -> usize {
-        let ledger = self
-            .ledger
+        self.ledger
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ledger.completed() + ledger.cancelled() + ledger.running().len()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .registered()
     }
 
     /// Whether every invocation registered into **this** pair settled exactly
@@ -265,12 +265,6 @@ impl<'a> ProbePair<'a> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .balances()
-            && self
-                .slots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .held()
-                .is_none()
     }
 }
 
@@ -281,7 +275,7 @@ impl<'a> ProbePair<'a> {
 /// [`super::preflight::Registering`] makes that decision, because it is the one
 /// place register/slot/run/settle is implemented.
 pub struct ShellProbe<'a> {
-    through: super::preflight::Registering<'a>,
+    through: super::preflight::Registering<'a, InvocationLedger>,
 }
 
 impl Runner for ShellProbe<'_> {
@@ -297,7 +291,7 @@ impl Runner for ShellProbe<'_> {
 /// INV-23's asymmetry: the shell probe is the one non-slotted probe and it does
 /// not run on this path.
 pub struct AgentProbe<'a> {
-    through: super::preflight::Registering<'a>,
+    through: super::preflight::Registering<'a, InvocationLedger>,
 }
 
 impl Runner for AgentProbe<'_> {
@@ -1537,8 +1531,8 @@ pub struct Request<'a> {
     /// and a probes implementation that also held a runner could assemble a
     /// second boundary.
     pub runner: &'a dyn Runner,
-    /// R3's ledger and R4's slots — **the only pair**, and the thing each
-    /// probe's boundary is built from.
+    /// R4's ledger with R3's slot table in it — **the only pair**, and the thing
+    /// each probe's boundary is built from.
     ///
     /// They were two fields here beside a `&dyn Probes` that carried another
     /// pair, then accessors on the trait, and each phrasing claimed a guarantee

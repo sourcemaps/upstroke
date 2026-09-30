@@ -80,6 +80,13 @@ worker, review_pass, review_reask … and agent probe; **gate invocations and
 the shell probe acquire no slot**". [`is_slotted`] is the single reading of
 that sentence and this module never re-decides it.
 
+Since PR11's broker the review passes cross the Runner through the broker's
+registering boundary too ([`Judge::judge`]), so every slotted process of an
+attempt — the worker, each review pass, each re-ask — is registered with its
+pair before it starts and holds it until it ends. Before that a review pass
+reached the Runner raw and was entered in the ledger only after it returned
+(`PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`).
+
 ## `pub struct ReviewerPlan {`
 
 ---------------------------------------------------------------------------
@@ -737,11 +744,10 @@ The context
 
 Everything one attempt needs from the run.
 
-A borrowed bundle rather than eight parameters, because six of the eight are
+A borrowed bundle rather than eight parameters, because some of them are
 process-lifetime ledgers that must be *the run's* and not a fresh one: a
-caller that passed a new [`SlotAssertion`] would assert a single slotted
-invocation against an empty table and never see the overlap the assertion
-exists to catch.
+caller that passed a new [`InvocationLedger`] would register against an empty
+slot table and never see the hold the table exists to see.
 
 ## `pub struct AttemptContext<'a>` › `pub manager: &'a WorkspaceManager,`
 
@@ -759,13 +765,11 @@ Where a durable event goes. `emit.rs`'s, behind its seam.
 
 The boundary every process of this run crosses.
 
-## `pub struct AttemptContext<'a>` › `pub slots: &'a mut SlotAssertion,`
-
-R3, "assertion only" at `max_parallel = 1`.
-
 ## `pub struct AttemptContext<'a>` › `pub ledger: &'a mut InvocationLedger,`
 
-R4: every Runner process registered exactly once, settled exactly once.
+R4, with R3's slot table inside it: every Runner process registered exactly
+once and settled exactly once, and every agent CLI process's pair held while
+it runs.
 
 ## `pub struct AttemptContext<'a>` › `pub adapters: &'a dyn AdapterSource,`
 
@@ -1182,14 +1186,16 @@ first, the slot released with it, and the terminal appended after.
 
 As [`Self::settle_interrupted`].
 
-## `impl AttemptContext<'_>` › `if let Some(held) = self.slots.held().cloned() {`
+## `impl AttemptContext<'_>` › `let cancelled = self.ledger.cancel_all_running();`
 
-Released without naming an invocation, because what is being
-cancelled is whatever this process still holds. Naming one would be
-asserting *which*, and a halt is the moment that assertion is least
-safe: the pair may belong to the worker, to a reviewer, or to a
-re-ask, and a guess that missed would leave the ledger unbalanced at
-process end with nothing to say so.
+Every in-flight registration cancelled, and with it every pair held or
+waited for, without naming one, because what is being cancelled is whatever
+this process still holds. Naming one would be asserting *which*, and a halt
+is the moment that assertion is least safe: the pair may belong to the
+worker, to a reviewer, or to a re-ask, and a guess that missed would leave
+the ledger unbalanced at process end with nothing to say so. The pair goes
+with the registration because the table is inside the ledger, so the two
+cannot disagree.
 
 ## `impl AttemptContext<'_>` › `fn discard_residue(&mut self, dispatched: &Dispatched) -> Result<(), UpstrokeError> {`
 
@@ -1199,27 +1205,31 @@ Snapshots reclaimed, then the task worktree scrubbed with force.
 
 The source retains the registration, slot and settlement protocol required by §10.
 
-Register, take the slot pair if the identity is slotted, run, release,
-complete.
+Register with the slot pair if the identity is slotted, run, complete or
+cancel — the settlement releases the pair.
 
 `permits.protocol` in order: "register(invocation_id, slots) -> if
 slotted, wait for the atomic pair grant … -> Runner spawn ->
-complete(invocation_id) releasing any slots". Nothing waits here: at
-`max_parallel = 1` a second concurrent slotted acquisition is a leaked
-hold rather than contention, and [`SlotAssertion`] refuses it.
+complete(invocation_id) releasing any slots". Nothing waits here: this is
+the synchronous substrate, where the coordinator runs the process itself,
+and INV-18's coordinator "never blocks on an entitlement, provisional
+reservation, or slot" — so a pair that is not grantable at once is a leaked
+hold rather than contention, and [`InvocationLedger::register_at_once`]
+withdraws the request and refuses it.
 
 ### The registration is settled on every path out
 
-The register is here and the pair, the run and the release are in
-[`Self::run_registered`], which is the whole reason the two are separate
-functions. `permits.protocol` settles an invocation "exactly once", and
-[`InvocationLedger::balances`] states that as "no entry is `Running`" —
-so a `?` between the register and the settlement would abandon a
-`Running` entry that at process end is **indistinguishable** from a
-process this coordinator genuinely lost. A slot pair the assertion
-refuses is not a lost process; it is a process that never started, and
-reporting it as a leak would spend a real signal on a bookkeeping
-mistake.
+[`Self::register_now`] either leaves a registration running (its pair
+granted) or leaves none unsettled: a refused request was withdrawn inside
+the ledger, registered and cancelled once. From there the only step between
+the registration and its settlement is the Runner call, and both of its
+answers settle. `permits.protocol` settles an invocation "exactly once", and
+[`InvocationLedger::balances`] states that as "no entry is `Pending` or
+`Running`" — so a `?` between the register and the settlement would abandon
+an entry that at process end is **indistinguishable** from a process this
+coordinator genuinely lost. A pair the substrate cannot be granted is not a
+lost process; it is a process that never started, and reporting it as a leak
+would spend a real signal on a bookkeeping mistake.
 
 ## `impl AttemptContext<'_>` › `Ok(output) => {`
 
@@ -1229,30 +1239,17 @@ could not start or supervise never completed, and recording it as
 completed would put a failure in the ledger under the name of a
 success.
 
-## `impl AttemptContext<'_>` › `drop(self.ledger.cancel(&request.invocation));`
+## `impl AttemptContext<'_>` › `fn register_now(`
 
-Cancelled, not completed: the protocol failed before the
-Runner answered, so nothing ran. It cannot itself fail —
-`cancel` refuses only an identity that was never registered,
-and the line above registered this one — and the failure that
-brought us here is the one worth reporting either way.
+The registration before the run. An unslotted invocation — a gate —
+registers; a slotted one registers with its pair, `{agent, pool?}` with the
+agent from the request and the pool from the plan, under the Judge's
+standing, and is granted at once or withdrawn and refused.
 
-## `impl AttemptContext<'_>` › `fn run_registered(`
-
-Everything between the registration and its settlement: the pair, the
-run, and the release.
-
-The nesting keeps the two failures apart, the way
-[`WorkspaceManager::verify_worktree`] keeps its two apart. The **outer**
-error is a protocol failure — a slotted request naming no agent, a pair
-the assertion refuses, a release that did not match — and means no
-process ran, so [`Self::execute`] cancels the registration. The
-**inner** one is the Runner's own answer about a process it could not
-start or supervise, and is what decides `complete` against `cancel`.
-
-Every early return here is therefore safe: this function may fail
-anywhere and the ledger entry is still settled exactly once, by its
-caller.
+A slotted request naming no agent is refused before anything is
+registered: the pair it would take has no agent to key it by. Every error
+here therefore leaves the ledger settled, which is what lets
+[`Self::execute_typed`] use `?` on it.
 
 ## `impl AttemptContext<'_>` › `fn verdict(`
 
@@ -1294,10 +1291,16 @@ Every recorded gate and every review pass an integration reruns on the
 proposed tree: `DESIGN.md` §26.3, "rerun every recorded gate and review on
 the proposed integrated tree".
 
-## `impl AttemptContext<'_> {` › `fn judge_core(&mut self) -> Judge<'_> {`
+## `impl AttemptContext<'_> {` › `fn judge_core(&mut self, identities: &AttemptIdentities) -> Judge<'_> {`
 
-The judge over this context's ledgers: the same slot assertion and
-invocation ledger, reborrowed for one gate set or one review.
+The judge over this context's ledger, reborrowed for one worker, one gate
+set or one review, carrying the standing of the attempt `identities` names.
+
+The standing is read from the fold through the emitter
+([`EventEmitter::standing`]), because the fold is the emitter's to hold and
+this module reads nothing of it but this: whether the attempt is the one the
+fold has in flight, which is what admits its slotted requests
+(`permits.deadlock_freedom`'s acquisition order).
 
 ## `pub enum SnapshotOf {`
 
@@ -1392,6 +1395,43 @@ on the proposal or head commit, and everything else — the snapshot per
 role, the invocation ledger, the slot pair, the review records — is the
 same protocol run once.
 
+## `pub struct Judge<'a>` › `pub standing: Standing,`
+
+The standing of the pipeline this judgement runs for — an attempt in flight,
+or a verification started — read from the fold by whoever built the judge
+and presented with every slotted registration it makes. Read once: nothing
+is appended while a judgement runs, so the fold it was read from cannot move
+under it.
+
+## `impl Judge<'_> {` › `let ledger = std::sync::Mutex::new(&mut *self.ledger);`
+
+Each review pass runs through a registering boundary over this judge's
+ledger, so each of its processes — the pass, and a re-ask — is registered
+with its pair before it starts and settled after it ends. This closes
+`PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`: the pass used to be handed the
+raw runner and entered in the ledger only after it returned, holding no
+pair while it ran.
+
+The lock is the boundary's, not the ledger's owner's: the boundary is a
+`Runner`, `Runner::run` takes `&self`, and a `Runner` is `Send + Sync`, so the
+ledger it registers into sits behind a `Mutex` for the length of one pass.
+It guards the ledger's register and settle calls only, never the Runner call
+between them, and nothing else locks it: a pass runs one process at a time
+on this thread. `src/review.rs` is not touched, so the legacy engine's review
+path — which calls the same `run_review` with its own runner — is unchanged.
+
+## `impl Judge<'_> {` › `if invocations != through_the_pair {`
+
+The pass reports how many of its processes returned, and the boundary counts
+how many it completed. They differ only when the pass ran a process
+somewhere other than the runner it was handed — outside the broker, holding
+no pair — and the judgement is refused. It is the same kind of check P4 makes
+of a probe (`create.rs`, `used_the_grant`): handing a pass a capability
+cannot make it use one, so the use is measured.
+
+It sits after the charge, so a pass that returned is charged whatever this
+check finds.
+
 ## `impl Judge<'_> {` › `workspace: snapshot.path(),`
 
 Each reviewer runs in the fresh snapshot taken for its pass and nowhere
@@ -1462,8 +1502,8 @@ saying what it does with the cost.
 ## `for (index, reviewer) in subject.reviewers.iter().enumerate() {` › `account.charge(&record);`
 
 The pass has returned, so its cost is spent. Charge it before anything below
-can fail and discard the judgement: the invocation ledger, the snapshot
-removal, and the next iteration's snapshot creation are all `?` from here on.
+can fail and discard the judgement: the grant check, the snapshot removal,
+and the next iteration's snapshot creation all return early from here on.
 
 The record is built first and charged from, then pushed, so the account and
 `reviews` hold the same value and the charge still sits above every `?` that

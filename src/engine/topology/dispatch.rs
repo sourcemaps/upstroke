@@ -20,6 +20,8 @@ pub trait EventEmitter {
         body: TopologyEventBody,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), super::emit::EmitFailure>;
+
+    fn standing(&self, invocation: &crate::runner::InvocationId) -> super::select::Standing;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

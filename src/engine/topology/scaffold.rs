@@ -251,6 +251,10 @@ impl EventEmitter for FoldedEmitter {
         self.fold.apply_delta(delta);
         Ok(())
     }
+
+    fn standing(&self, invocation: &InvocationId) -> super::select::Standing {
+        super::select::Standing::of(&self.fold, invocation)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -476,6 +480,10 @@ impl RecordingRunner {
 
     pub(super) fn hold(&self) {
         self.control().holding = true;
+    }
+
+    pub(super) fn stop_holding(&self) {
+        self.control().holding = false;
     }
 
     pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {
@@ -964,7 +972,6 @@ pub(super) struct Run {
     pub(super) runner: RecordingRunner,
     pub(super) invocations: crate::engine::topology::identity::InvocationLedger,
     pub(super) reservations: crate::engine::topology::identity::Reservations,
-    pub(super) slots: crate::engine::topology::identity::SlotAssertion,
     pub(super) verify_gates: Vec<super::attempt::GatePlan>,
     pub(super) verify_reviewers: Vec<super::attempt::ReviewerPlan>,
     pub(super) verify_review: VerifyReview,
@@ -1113,7 +1120,7 @@ impl super::integrate::Verification for Run {
             manager: &manager,
             hooks: &mut self.hooks,
             runner: &self.runner,
-            slots: &mut self.slots,
+            standing: super::select::Standing::of(self.emitter.fold(), &identities.gate(0, 0)),
             ledger: &mut self.invocations,
             adapters: &adapters,
             paths: &self.paths,
@@ -1191,7 +1198,6 @@ impl Run {
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
             reservations: crate::engine::topology::identity::Reservations::new(),
             runner: RecordingRunner::new(),
-            slots: crate::engine::topology::identity::SlotAssertion::new(),
             verify_gates: Vec::new(),
             verify_reviewers: Vec::new(),
             verify_review: VerifyReview::Passed,
@@ -1354,7 +1360,6 @@ impl Run {
             runner: RecordingRunner::new(),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
             reservations: crate::engine::topology::identity::Reservations::new(),
-            slots: crate::engine::topology::identity::SlotAssertion::new(),
             verify_gates: Vec::new(),
             verify_reviewers: Vec::new(),
             verify_review: VerifyReview::Passed,

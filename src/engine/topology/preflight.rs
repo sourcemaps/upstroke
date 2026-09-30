@@ -1,6 +1,8 @@
 //! Extended notes: `docs/internals/engine/topology/preflight.md`
 
+use std::borrow::BorrowMut;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::agent::{AdapterSource, Caps, ProcessOutput};
@@ -10,7 +12,8 @@ use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::{RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest};
 use crate::topology::events::RunnerPolicy;
 
-use super::identity::{InvocationLedger, PreflightIdentities, SlotAssertion, SlotPair, is_slotted};
+use super::identity::{InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
+use super::select::Standing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probed {
@@ -32,7 +35,6 @@ pub struct RunPreflight<'a> {
     workspace: PathBuf,
     agents: Vec<String>,
     ledger: Mutex<InvocationLedger>,
-    slots: Mutex<SlotAssertion>,
     probed: Mutex<Option<Probed>>,
 }
 
@@ -63,7 +65,6 @@ impl<'a> RunPreflight<'a> {
             workspace: workspace.to_path_buf(),
             agents,
             ledger: Mutex::new(InvocationLedger::new()),
-            slots: Mutex::new(SlotAssertion::new()),
             probed: Mutex::new(None),
         }
     }
@@ -82,11 +83,6 @@ impl<'a> RunPreflight<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .balances()
-            && self
-                .slots
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .balances()
     }
 
     #[must_use]
@@ -106,12 +102,8 @@ impl<'a> RunPreflight<'a> {
             .collect()
     }
 
-    fn registering(&self) -> Registering<'_> {
-        Registering {
-            inner: self.runner,
-            ledger: &self.ledger,
-            slots: Some(&self.slots),
-        }
+    fn registering(&self) -> Registering<'_, InvocationLedger> {
+        Registering::new(self.runner, &self.ledger, Slots::Probe)
     }
 }
 
@@ -164,13 +156,38 @@ fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {
     }
 }
 
-pub(super) struct Registering<'a> {
-    pub(super) inner: &'a dyn Runner,
-    pub(super) ledger: &'a Mutex<InvocationLedger>,
-    pub(super) slots: Option<&'a Mutex<SlotAssertion>>,
+pub(super) enum Slots {
+    None,
+    Probe,
+    Pipeline {
+        standing: Standing,
+        pool: Option<String>,
+    },
 }
 
-impl Runner for Registering<'_> {
+pub(super) struct Registering<'a, L> {
+    inner: &'a dyn Runner,
+    ledger: &'a Mutex<L>,
+    slots: Slots,
+    completed: AtomicU32,
+}
+
+impl<'a, L> Registering<'a, L> {
+    pub(super) const fn new(inner: &'a dyn Runner, ledger: &'a Mutex<L>, slots: Slots) -> Self {
+        Self {
+            inner,
+            ledger,
+            slots,
+            completed: AtomicU32::new(0),
+        }
+    }
+
+    pub(super) fn completed(&self) -> u32 {
+        self.completed.load(Ordering::Relaxed)
+    }
+}
+
+impl<L: BorrowMut<InvocationLedger> + Send> Runner for Registering<'_, L> {
     fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         Box::pin(async move {
             self.admit(request)?;
@@ -180,52 +197,56 @@ impl Runner for Registering<'_> {
     }
 }
 
-impl Registering<'_> {
+impl<L: BorrowMut<InvocationLedger>> Registering<'_, L> {
     fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError> {
         let refused = |error: UpstrokeError| RunnerError::never_started(&request.invocation, error);
-        {
-            let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-            ledger.register(&request.invocation).map_err(refused)?;
-        }
-        let withdrawn = |refusal: UpstrokeError| {
-            let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-            let cancelled = ledger.cancel(&request.invocation);
-            refused(refusal.with_cleanup(cancelled))
-        };
-        if is_slotted(&request.invocation) {
-            let Some(slots) = self.slots else {
-                return Err(withdrawn(UpstrokeError::Refused {
+        let slots = if is_slotted(&request.invocation) {
+            let standing = match &self.slots {
+                Slots::None => {
+                    return Err(refused(UpstrokeError::Refused {
+                        message: format!(
+                            "`{}` is a slotted invocation and this boundary holds no slots; \
+                             INV-23's non-slotted probe is the recorded shell alone",
+                            request.invocation
+                        ),
+                    }));
+                }
+                Slots::Probe => Standing::preflight(),
+                Slots::Pipeline { standing, .. } => *standing,
+            };
+            let Some(agent) = request.agent.as_ref() else {
+                return Err(refused(UpstrokeError::Refused {
                     message: format!(
-                        "`{}` is a slotted invocation and this boundary holds no slots; INV-23's \
-                         non-slotted probe is the recorded shell alone",
+                        "`{}` is a slotted invocation with no agent binding; the pair it would \
+                         take is `{{agent, pool?}}` and there is no agent to name",
                         request.invocation
                     ),
                 }));
             };
-            let pair = SlotPair {
-                agent: match request.agent.as_ref() {
-                    Some(agent) => agent.to_string(),
-                    None => {
-                        return Err(withdrawn(UpstrokeError::Refused {
-                            message: format!(
-                                "`{}` is a slotted invocation with no agent binding; the pair it \
-                                 would take is `{{agent, pool?}}` and there is no agent to name",
-                                request.invocation
-                            ),
-                        }));
-                    }
-                },
-                pool: None,
+            let pool = match &self.slots {
+                Slots::Pipeline { pool, .. } => pool.clone(),
+                Slots::None | Slots::Probe => None,
             };
-            let acquired = slots
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .acquire(&request.invocation, pair);
-            if let Err(error) = acquired {
-                return Err(withdrawn(error));
-            }
-        }
-        Ok(())
+            Some((
+                SlotPair {
+                    agent: agent.to_string(),
+                    pool,
+                },
+                standing,
+            ))
+        } else {
+            None
+        };
+        let mut guard = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        let ledger: &mut InvocationLedger = (*guard).borrow_mut();
+        ledger
+            .register_at_once(
+                &request.invocation,
+                slots
+                    .as_ref()
+                    .map(|(pair, standing)| (pair.clone(), standing)),
+            )
+            .map_err(refused)
     }
 
     fn settle(
@@ -237,15 +258,18 @@ impl Registering<'_> {
             Ok(_) => RunnerError::gone(&request.invocation, error),
             Err(failure) => RunnerError::new(&request.invocation, failure.fate, error),
         };
-        if let (true, Some(slots)) = (is_slotted(&request.invocation), self.slots) {
-            let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
-            slots.release(&request.invocation).map_err(settled)?;
-        }
-        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        let ledger: &mut InvocationLedger = (*guard).borrow_mut();
         match &outcome {
-            Ok(_) => ledger.complete(&request.invocation).map_err(settled)?,
-            Err(_) => ledger.cancel(&request.invocation).map_err(settled)?,
+            Ok(_) => {
+                ledger.complete(&request.invocation).map_err(settled)?;
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                ledger.cancel(&request.invocation).map_err(settled)?;
+            }
         }
+        drop(guard);
         outcome
     }
 }

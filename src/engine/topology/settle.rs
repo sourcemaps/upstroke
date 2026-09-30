@@ -276,7 +276,11 @@ pub fn retry(
         .ok_or_else(|| refused("the run has not started"))?;
     let (generation, session, attempt) = retained(fold, request.key, epoch)?;
 
-    reservations.take(request.key, ReservationKind::Retry)?;
+    reservations.reserve(
+        request.key,
+        ReservationKind::Retry,
+        &super::select::Entitlements::of(fold),
+    )?;
 
     let verified = match worktrees.verify(
         hooks,

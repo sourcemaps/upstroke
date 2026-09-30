@@ -45,7 +45,8 @@ schema 1..3 and is forbidden here, clause by clause
    this process cannot vouch for.
 2. Provisional reservations are cancelled ([`Reservations::cancel_any`]) —
    `permits`: "cancellation on any pre-append failure, run end, shutdown, or
-   a poisoned fold".
+   a poisoned fold". Every outstanding one since PR11's broker, which lets
+   several be outstanding at width above one.
 3. In-flight invocations are cancelled, and **both halves are the
    caller's**. The Runner side always was ("in-flight invocations are
    cancelled through the Runner"); the ledger side moved out of this module
@@ -495,10 +496,11 @@ that may or may not be durable and can vouch for neither.
 
 ## `let cancelled_reservation = state.reservations.cancel_any();`
 
-(2) The provisional reservation, if one is held. Cancelled without being
-    named: the coordinator is ending and asserting *which* reservation it
-    holds would be one more thing derived from a state it cannot vouch
-    for.
+(2) The provisional reservations, whichever are held — every outstanding
+    one, since PR11's ledger holds several at width above one. Cancelled
+    without being named: the coordinator is ending and asserting *which*
+    reservations it holds would be one more thing derived from a state it
+    cannot vouch for.
 
 ## `let path = state.log.path().to_path_buf();`
 

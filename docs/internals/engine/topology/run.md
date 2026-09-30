@@ -872,22 +872,24 @@ durable either way, which is what makes a closure that fails diagnosable.
 `TopologyRun` — the schema-4 run, driven.
 
 Owns exactly what a run owns: the fold, the append handle, the two locks
-(inside [`RunHandle`]), the two provisional ledgers, and the ceiling it was
+(inside [`RunHandle`]), the permit broker, and the ceiling it was
 configured with. Everything else is a seam.
 
-**It owns the slot assertion (R3)**, and the sentence here said it did not.
-`slots: SlotAssertion` is a field of this struct, `TopologyRun::resumed`
-initialises it with `SlotAssertion::new()`, and `fn attempt` threads
-`slots: &mut self.slots` into the one production `AttemptContext`. Named
-rather than cited by line: the correction that replaced this paragraph made
-it thirteen lines longer, so the `run.rs:615` the first draft carried — correct
-**at `9b6fef1`** — now points **into the correction itself**. `R5-SEAMS`/`PR7-R5-ATT-007`, and
-CLAUDE.md's trap list already names stale line anchors as a repeat cost. The denial was written
-while that was true — "a field nothing reads is a claim the code does not
-back" — and stayed after the branch that uses it arrived.
-`PR7-R3-CONTRACT-006`; confirmed against the tree and corrected 2026-08-26.
-`SlotAssertion::balances()` has to be true at process end, and that is the
-claim the field carries.
+**It owns the broker**, [`PermitBroker`] (`permits.rs`, since PR11): the
+provisional-reservation ledger (R13) and the invocation ledger with its slot
+table (R4, R3), which the width-1 run holds as the one authority for all
+three. `TopologyRun::resumed` builds it empty, as `crash_reconstruction`
+requires, with the slot limits defaulted to the recorded `max_parallel`;
+[`Self::attempt`], [`Self::integrate`], [`Self::with_journal`] and
+[`Self::emit`] split it into its two ledgers with `PermitBroker::halves`,
+because `EmitState` — and the frozen recovery module's `EmitContext` — carry
+the two separately. Its `balances()` has to be true at process end, and that
+is the claim the field carries.
+
+Before PR11 this field was `slots: SlotAssertion` beside `reservations` and
+`invocations`, and an earlier revision of this paragraph denied the slot
+assertion existed at all (`PR7-R3-CONTRACT-006`, corrected 2026-08-26); the
+denial is why the ownership is named here rather than cited by line.
 
 ## `pub struct TopologyRun` › `brief: Brief,`
 
@@ -978,7 +980,7 @@ only if something can ask the ledger.
 entitlement before the step that can refuse and leak it on the refusing
 path, and all three were green because no test asked this question.
 
-## `pub fn holds_entitlement(&mut self) -> bool` › `self.reservations.cancel_any()`
+## `pub fn holds_entitlement(&mut self) -> bool` › `self.broker.halves().0.cancel_any()`
 
 `cancel_any` reports whether there was one *and* releases it, which
 is exactly right here: the run is being inspected after the step it
@@ -1122,15 +1124,24 @@ Whatever [`dispatch`] refuses or fails at, with the reservation
 cancelled first. Or [`UpstrokeError::Refused`] when the task is not one
 the registry knows, which is a fold and a registry that disagree.
 
-## `impl TopologyRun` › `self.reservations.take(key, ReservationKind::Dispatch)?;`
+## `impl TopologyRun` › `self.broker.reserve(`
 
-Provisional, before the effect it authorizes.
+Provisional, before the effect it authorizes, and through the broker's
+check: the fold-derived pipeline count plus the outstanding reservations
+must leave room under `max_parallel`, read from the fold at the moment of
+the reservation. The selection that chose this dispatch read the same fold,
+so at width 1 the check is the selection's own count confirmed; at width
+above one it is what keeps several outstanding reservations inside the
+limit.
 
-## `impl TopologyRun` › `let _ = self.reservations.cancel(key, ReservationKind::Dispatch);`
+## `impl TopologyRun` › `let cancelled = reservations.cancel(key, ReservationKind::Dispatch);`
 
 Cancel before returning, and do not let a cancellation
 failure hide the failure that caused it: the first error is
-the one an operator needs.
+the one an operator needs, and the cancellation's own result
+rides along as its cleanup rather than being discarded. After an
+append error the protocol has already cancelled every reservation,
+and this one is then a counted duplicate, not a failure.
 
 ## `impl TopologyRun` › `fn hard_block(`
 
@@ -1748,8 +1759,9 @@ implementation of this protocol.
 
 The driver owns the ledger, so obligation (3) is discharged here
 and the loop keeps one error type. `emitter` borrows the fold, the
-log, the reservations and the warnings; `invocations` is a disjoint
-field, which is the whole reason it is no longer inside `EmitState`.
+log, the reservations and the warnings; `invocations` is the broker's
+other half, split off by `PermitBroker::halves`, which is the whole reason
+it is not inside `EmitState`.
 
 ## `struct IntegrationCx<'a, 'h> {`
 

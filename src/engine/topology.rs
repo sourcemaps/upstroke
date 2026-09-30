@@ -18,6 +18,7 @@ pub mod finalize;
 pub mod identity;
 pub mod integrate;
 pub mod ledger;
+pub mod permits;
 pub mod prelock;
 pub mod reachability;
 pub mod repair;

@@ -37,15 +37,14 @@ use super::dispatch::{
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
 use super::finalize;
-use super::identity::{
-    InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
-};
+use super::identity::{InvocationLedger, ReservationKind, SequenceIdentities};
 use super::integrate::{
     self, IntegrationJournal, IntegrationRequest, Terminal, Verification, Verified, VerifyRequest,
 };
+use super::permits::PermitBroker;
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
-use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
+use super::select::{Admitted, Ceiling, Entitlements, Spend, Standing, Step, checkpoint, select};
 use super::settle::{
     Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, close_generation,
     retry, settle_failed,
@@ -65,6 +64,10 @@ impl EventEmitter for RunEmitter<'_> {
     ) -> Result<(), EmitFailure> {
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
         Ok(())
+    }
+
+    fn standing(&self, invocation: &crate::runner::InvocationId) -> Standing {
+        Standing::of(self.state.fold, invocation)
     }
 }
 
@@ -90,7 +93,6 @@ struct IntegrationCx<'a, 'h> {
     emitter: RunEmitter<'a>,
     hooks: &'h mut dyn TopologyHooks,
     invocations: &'h mut InvocationLedger,
-    slots: &'h mut SlotAssertion,
     spend: &'h mut Spend,
     seams: &'h RunSeams<'a>,
 }
@@ -293,12 +295,13 @@ impl IntegrationCx<'_, '_> {
                 })
             })?;
         let identities = SequenceIdentities::new(request.sequence);
+        let standing = Standing::of(self.emitter.state.fold, &identities.gate(0, 0));
         let mut judge = Judge {
             manager: self.seams.manager,
             hooks: &mut *self.hooks,
             runner: self.seams.runner,
-            slots: self.slots,
-            ledger: self.invocations,
+            standing,
+            ledger: &mut *self.invocations,
             adapters: self.seams.adapters,
             paths: self.seams.paths,
             reviews: self.seams.reviews,
@@ -603,13 +606,11 @@ pub enum Progress {
 pub struct TopologyRun {
     handle: RunHandle,
     identity: RunIdentity,
-    reservations: Reservations,
-    invocations: InvocationLedger,
+    broker: PermitBroker,
     warnings: Vec<String>,
     ceiling: Ceiling,
     spend: Spend,
     deferral: Deferral,
-    slots: SlotAssertion,
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
 }
@@ -624,16 +625,15 @@ impl TopologyRun {
         };
         let spend = Spend::replay(&handle.events);
         let brief = Brief::replay(&handle.events);
+        let broker = PermitBroker::for_run(&Entitlements::of(&handle.fold));
         Self {
             handle,
             identity,
-            reservations: Reservations::new(),
-            invocations: InvocationLedger::new(),
+            broker,
             warnings: Vec::new(),
             ceiling,
             spend,
             deferral: Deferral::default_backoff(),
-            slots: SlotAssertion::new(),
             retained: BTreeMap::new(),
             brief,
         }
@@ -645,11 +645,11 @@ impl TopologyRun {
 
     #[must_use]
     pub fn holds_entitlement(&mut self) -> bool {
-        self.reservations.cancel_any()
+        self.broker.halves().0.cancel_any()
     }
 
     pub fn invocations_balance(&self) -> bool {
-        self.invocations.balances()
+        self.broker.invocations().balances()
     }
 
     pub const fn spend(&self) -> &Spend {
@@ -674,12 +674,12 @@ impl TopologyRun {
 
     #[must_use]
     pub fn entitlements_held(&self) -> u32 {
-        self.reservations.entitlements_held()
+        self.broker.reservations().entitlements_held()
     }
 
     #[must_use]
     pub const fn reservations_cancelled(&self) -> u32 {
-        self.reservations.cancelled()
+        self.broker.reservations().cancelled()
     }
 
     #[must_use]
@@ -821,8 +821,13 @@ impl TopologyRun {
     ) -> Result<Dispatched, UpstrokeError> {
         let request = self.dispatch_request(key, generation, seams)?;
 
-        self.reservations.take(key, ReservationKind::Dispatch)?;
+        self.broker.reserve(
+            &Entitlements::of(&self.handle.fold),
+            key,
+            ReservationKind::Dispatch,
+        )?;
 
+        let (reservations, invocations) = self.broker.halves();
         let dispatched = {
             let mut emitter = RunEmitter {
                 identity: &self.identity,
@@ -830,7 +835,7 @@ impl TopologyRun {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
                     events: &mut self.handle.events,
-                    reservations: &mut self.reservations,
+                    reservations: &mut *reservations,
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
@@ -840,13 +845,13 @@ impl TopologyRun {
 
         match dispatched {
             Ok(dispatched) => {
-                self.reservations.convert(key, ReservationKind::Dispatch)?;
+                reservations.convert(key, ReservationKind::Dispatch)?;
                 self.deferral.progressed();
                 Ok(dispatched)
             }
             Err(error) => {
-                let _ = self.reservations.cancel(key, ReservationKind::Dispatch);
-                Err(error.discharging(&mut self.invocations))
+                let cancelled = reservations.cancel(key, ReservationKind::Dispatch);
+                Err(error.discharging(invocations).with_cleanup(cancelled))
             }
         }
     }
@@ -860,9 +865,14 @@ impl TopologyRun {
         let request =
             IntegrationRequest::from_log(&self.handle.fold, &self.handle.events, &candidate)?;
         let key = candidate.key;
-        self.reservations.take(key, ReservationKind::Integration)?;
+        self.broker.reserve(
+            &Entitlements::of(&self.handle.fold),
+            key,
+            ReservationKind::Integration,
+        )?;
 
         let terminal = {
+            let (reservations, invocations) = self.broker.halves();
             let mut cx = IntegrationCx {
                 emitter: RunEmitter {
                     identity: &self.identity,
@@ -870,14 +880,13 @@ impl TopologyRun {
                         fold: &mut self.handle.fold,
                         log: &mut self.handle.log,
                         events: &mut self.handle.events,
-                        reservations: &mut self.reservations,
+                        reservations,
                         warnings: &mut self.warnings,
                     },
                     clock: seams.clock,
                 },
                 hooks,
-                invocations: &mut self.invocations,
-                slots: &mut self.slots,
+                invocations,
                 spend: &mut self.spend,
                 seams,
             };
@@ -906,9 +915,9 @@ impl TopologyRun {
                 })
             }
             Err(error) => {
-                if !self.reservations.is_empty() {
-                    self.reservations
-                        .cancel(key, ReservationKind::Integration)?;
+                if self.broker.reservations().held(key) == Some(ReservationKind::Integration) {
+                    self.broker
+                        .cancel_reservation(key, ReservationKind::Integration)?;
                 }
                 Err(error)
             }
@@ -1148,7 +1157,7 @@ impl TopologyRun {
             let worktrees = ManagedWorktrees::new(seams.manager);
             retry(
                 &self.handle.fold,
-                &mut self.reservations,
+                self.broker.halves().0,
                 &worktrees,
                 hooks.effects(),
                 &RetryRequest {
@@ -1178,7 +1187,7 @@ impl TopologyRun {
                     seams,
                     hooks,
                 )?;
-                self.reservations.convert(key, ReservationKind::Retry)?;
+                self.broker.convert(key, ReservationKind::Retry)?;
                 self.deferral.progressed();
 
                 let base = self
@@ -1260,7 +1269,7 @@ impl TopologyRun {
             closed += 1;
         }
 
-        if self.reservations.cancel_any() {
+        if self.broker.halves().0.cancel_any() {
             self.warnings.push(
                 "run-end closure found a provisional reservation still held and cancelled it"
                     .to_owned(),
@@ -1349,13 +1358,14 @@ impl TopologyRun {
             materialization_observed: run_as.materialized,
         })?;
 
+        let (reservations, invocations) = self.broker.halves();
         let mut emitter = RunEmitter {
             identity: &self.identity,
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
                 events: &mut self.handle.events,
-                reservations: &mut self.reservations,
+                reservations,
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
@@ -1365,8 +1375,7 @@ impl TopologyRun {
             hooks,
             emitter: &mut emitter,
             runner: seams.runner,
-            slots: &mut self.slots,
-            ledger: &mut self.invocations,
+            ledger: invocations,
             adapters: seams.adapters,
             paths: seams.paths,
             reviews: seams.reviews,
@@ -1576,6 +1585,7 @@ impl TopologyRun {
         hooks: &mut dyn TopologyHooks,
         run: impl FnOnce(&mut RunJournal<'_, '_>) -> Result<T, UpstrokeError>,
     ) -> Result<T, UpstrokeError> {
+        let (reservations, invocations) = self.broker.halves();
         let mut journal = RunJournal {
             emitter: RunEmitter {
                 identity: &self.identity,
@@ -1583,13 +1593,13 @@ impl TopologyRun {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
                     events: &mut self.handle.events,
-                    reservations: &mut self.reservations,
+                    reservations,
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
             },
             hooks,
-            invocations: &mut self.invocations,
+            invocations,
         };
         run(&mut journal)
     }
@@ -1772,20 +1782,21 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), UpstrokeError> {
+        let (reservations, invocations) = self.broker.halves();
         let mut emitter = RunEmitter {
             identity: &self.identity,
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
                 events: &mut self.handle.events,
-                reservations: &mut self.reservations,
+                reservations,
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
         };
         emitter
             .emit(body, hooks)
-            .map_err(|failure| failure.discharging(&mut self.invocations))
+            .map_err(|failure| failure.discharging(invocations))
     }
 }
 

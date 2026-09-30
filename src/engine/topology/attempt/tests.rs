@@ -46,20 +46,18 @@ fn agent_edits(worktree: &Path) {
 }
 
 struct Process {
-    slots: SlotAssertion,
     ledger: InvocationLedger,
 }
 
 impl Process {
     fn new() -> Self {
         Self {
-            slots: SlotAssertion::new(),
             ledger: InvocationLedger::new(),
         }
     }
 
     fn balances(&self) -> bool {
-        self.slots.balances() && self.ledger.balances()
+        self.ledger.balances()
     }
 }
 
@@ -70,7 +68,6 @@ macro_rules! context {
             hooks: &mut $run.hooks,
             emitter: &mut $run.emitter,
             runner: &$run.runner,
-            slots: &mut $process.slots,
             ledger: &mut $process.ledger,
             adapters: &crate::engine::topology::scaffold::ScaffoldAdapters::new(),
             paths: &$run.paths,
@@ -263,7 +260,7 @@ impl ReviewAccount for SpendingAccount {
 }
 
 #[test]
-fn a_completed_review_is_charged_before_its_identity_is_settled() {
+fn a_completed_review_is_charged_before_its_processes_are_checked_against_the_grant() {
     const SEQUENCE: u32 = 1;
 
     let mut run = Run::started("charge-before-settle");
@@ -284,11 +281,6 @@ fn a_completed_review_is_charged_before_its_identity_is_settled() {
     let identities = SequenceIdentities::new(crate::topology::events::SequenceId(SEQUENCE));
     let proposed = ObjectId::new(run.base().0).expect("the fixture's head commit is an object id");
 
-    process
-        .ledger
-        .register(&identities.review_pass(0, 0))
-        .expect("the injected registration takes the identity the pass will report");
-
     let reviews = CostedReview { cost_usd: 2.5 };
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
     let mut account = SpendingAccount::default();
@@ -296,7 +288,7 @@ fn a_completed_review_is_charged_before_its_identity_is_settled() {
         manager: &run.fixture.manager,
         hooks: &mut run.hooks,
         runner: &run.runner,
-        slots: &mut process.slots,
+        standing: Standing::of(run.emitter.fold(), &identities.gate(0, 0)),
         ledger: &mut process.ledger,
         adapters: &adapters,
         paths: &run.paths,
@@ -322,15 +314,20 @@ fn a_completed_review_is_charged_before_its_identity_is_settled() {
         },
         &mut account,
     )
-    .expect_err("the injected registration refuses the identity the pass reported");
+    .expect_err("a pass reporting a process nothing registered is refused after it returned");
 
     assert!(
         matches!(
             &error,
             JudgeError::Other(UpstrokeError::Refused { message })
-                if message.contains("is already registered")
+                if message.contains("ran through the slot pair it was handed")
         ),
-        "the refusal is the duplicate registration and not something before it: {error:?}"
+        "the refusal is the grant check and not something before it: {error:?}"
+    );
+    assert_eq!(
+        process.ledger.registered(),
+        0,
+        "the double ran nothing through the grant, which is the fault injected"
     );
     assert_eq!(
         account
@@ -345,6 +342,187 @@ fn a_completed_review_is_charged_before_its_identity_is_settled() {
         (account.spend.run_total() - 2.5).abs() < 1e-9,
         "and the run total a ceiling reads carries it: {}",
         account.spend.run_total()
+    );
+}
+
+struct ContendingReview<'r> {
+    recording: &'r crate::engine::topology::scaffold::RecordingRunner,
+    refusal: std::sync::Mutex<Option<String>>,
+}
+
+impl ReviewPasses for ContendingReview<'_> {
+    fn run(
+        &self,
+        cx: &review::ReviewCx<'_>,
+        runner: &dyn Runner,
+        invocations: &review::ReviewInvocations,
+    ) -> Result<review::ReviewOutcome, UpstrokeError> {
+        let request = |invocation: &InvocationId| {
+            crate::runner::review_request(
+                CommandSpec::new(cx.adapter.id()).arg("--review"),
+                cx.workspace.to_path_buf(),
+                AgentId::new(cx.adapter.id()),
+                cx.timeout,
+                invocation.clone(),
+            )
+        };
+        let (pass, reask) = (request(&invocations.pass), request(&invocations.reask));
+        self.recording.hold();
+        std::thread::scope(|scope| {
+            let running = scope.spawn(|| runner.run_blocking(&pass));
+            assert_eq!(
+                self.recording
+                    .await_waiting(1, std::time::Duration::from_secs(60)),
+                vec![invocations.pass.clone()],
+                "the pass's process is in flight, held by the double"
+            );
+            self.recording.stop_holding();
+            let refused = runner
+                .run_blocking(&reask)
+                .expect_err("a second process of the reviewer's agent cannot take its slot");
+            *self
+                .refusal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refused.to_string());
+            self.recording
+                .complete(
+                    &invocations.pass,
+                    Ok(ProcessOutput {
+                        code: Some(0),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration: std::time::Duration::from_millis(1),
+                        timed_out: false,
+                        output_limited: false,
+                    }),
+                )
+                .expect("the held pass completes");
+            running
+                .join()
+                .expect("the pass's thread")
+                .expect("the pass's process ended");
+        });
+        Ok(review::ReviewOutcome {
+            result: review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: Vec::new(),
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            cost_usd: None,
+            invocations: 1,
+            transcript: PathBuf::new(),
+            never_started: false,
+        })
+    }
+}
+
+#[test]
+fn a_review_pass_registers_and_holds_its_pair_while_its_process_runs() {
+    let mut run = Run::started("reviewer-holds-its-pair");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    let started = context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the worker runs and ends");
+    assert!(
+        process.balances(),
+        "the worker's pair was released when its process ended"
+    );
+
+    let reviewers = vec![ReviewerPlan {
+        agent: AgentId::new(crate::engine::topology::scaffold::REVIEW_AGENT),
+        profile: crate::review::profile_for(
+            crate::engine::topology::scaffold::REVIEW_AGENT,
+            "review-model",
+            "review",
+            crate::ir::Effort::High,
+        ),
+        lens: review::Lens::Acceptance,
+        preflight_cli_version: None,
+        timeout: std::time::Duration::from_secs(120),
+    }];
+    let inputs = run.review_inputs();
+    let proposed = ObjectId::new(run.base().0).expect("the fixture's head commit is an object id");
+    let identities = started.identities;
+    let contending = ContendingReview {
+        recording: &run.runner,
+        refusal: std::sync::Mutex::new(None),
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let judgement = Judge {
+        manager: &run.fixture.manager,
+        hooks: &mut run.hooks,
+        runner: &run.runner,
+        standing: Standing::of(run.emitter.fold(), &identities.worker()),
+        ledger: &mut process.ledger,
+        adapters: &adapters,
+        paths: &run.paths,
+        reviews: &contending,
+    }
+    .judge(
+        &Subject {
+            snapshot: SnapshotOf::Commit(proposed),
+            disposal: SnapshotDisposal::AfterTheTerminal,
+            names: JudgeNames::Attempt {
+                generation: dispatched.generation.0,
+                attempt: plan.attempt.0,
+            },
+            identities: JudgeIdentities::Attempt(identities),
+            stem: "reviewer-holds-its-pair".to_owned(),
+            gates: &[],
+            reviewers: &reviewers,
+            inputs: &inputs,
+            prior_failure: None,
+            invocations: &move |pass| review::ReviewInvocations {
+                pass: identities.review_pass(pass, 0),
+                reask: identities.review_reask(pass, 0),
+            },
+        },
+        &mut NoReviewAccount,
+    )
+    .expect("the pass is judged");
+    assert!(judgement.failure.is_none() && judgement.reviews.len() == 1);
+
+    let refusal = contending
+        .refusal
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the double tried a second process of the reviewer's agent");
+    assert!(
+        refusal.contains(
+            "The coordinator never blocks on an entitlement, provisional reservation, or slot"
+        ),
+        "the second process was refused its pair by the broker: {refusal}"
+    );
+    assert!(
+        refusal.contains(&identities.review_pass(0, 0).render()),
+        "and the holder it names is the running pass, so the pass was registered and granted \
+         before its process started: {refusal}"
+    );
+
+    assert_eq!(
+        (process.ledger.completed(), process.ledger.cancelled()),
+        (2, 1),
+        "the worker and the pass ran; the refused second process was withdrawn"
+    );
+    assert_eq!(
+        (
+            process.ledger.slots().granted(),
+            process.ledger.slots().released()
+        ),
+        (2, 2),
+        "the worker and the pass each took their pair and released it once"
+    );
+    assert!(process.balances());
+    assert!(
+        !run.runner
+            .ran()
+            .iter()
+            .any(|ran| ran.invocation == identities.review_reask(0, 0)),
+        "the refused process never reached the Runner"
     );
 }
 
@@ -646,19 +824,25 @@ fn gates_take_no_slot_and_the_worker_and_reviewers_do() {
     assert!(is_slotted(&started.identities.review_pass(0, 0)));
     assert!(!is_slotted(&started.identities.gate(0, 0)));
 
+    let gate = started.identities.gate(0, 0);
     let refusal = process
-        .slots
-        .acquire(
-            &started.identities.gate(0, 0),
+        .ledger
+        .register_slotted(
+            &gate,
             SlotPair {
                 agent: "claude-code".to_owned(),
                 pool: None,
             },
+            &Standing::of(run.emitter.fold(), &gate),
         )
         .expect_err("a gate takes no pair");
     assert!(
         refusal.to_string().contains("acquires no slot"),
         "{refusal}"
+    );
+    assert!(
+        process.ledger.slots().is_empty(),
+        "the refused gate left nothing in the slot table"
     );
 
     agent_edits(&dispatched.worktree);
@@ -1013,28 +1197,50 @@ fn a_refused_slot_acquisition_settles_the_registration_it_took() {
     let plan = run.attempt_plan(ALPHA, 1);
     let mut process = Process::new();
 
-    let squatter = AttemptIdentities::new(ALPHA, GenerationId(9), AttemptNumber(9)).worker();
-    process
-        .slots
-        .acquire(
+    let squatter = crate::engine::topology::identity::PreflightIdentities::agent(AGENT, 9)
+        .expect("a probe identity of the worker's agent");
+    let admission = process
+        .ledger
+        .register_slotted(
             &squatter,
             SlotPair {
                 agent: AGENT.to_owned(),
                 pool: Some("scaffold-pool".to_owned()),
             },
+            &Standing::preflight(),
         )
-        .expect("the pair a worker's role takes");
+        .expect("the squatter registers");
+    assert_eq!(
+        admission,
+        crate::engine::topology::identity::Admission::Granted,
+        "the squatter holds the worker's agent slot, or this test proves nothing"
+    );
 
     let worker = AttemptIdentities::new(dispatched.key, dispatched.generation, plan.attempt)
         .worker()
         .render();
     let error = context!(run, process)
         .start(dispatched.site(), &plan)
-        .expect_err("a second slotted invocation is refused at max_parallel = 1");
+        .expect_err("a worker whose pair is held cannot be granted at once, and refuses");
     assert!(
-        error.to_string().contains("asked for a slot pair while"),
-        "the refusal must be the slot assertion's, and said: {error}"
+        error.to_string().contains(
+            "The coordinator never blocks on an entitlement, provisional reservation, or slot"
+        ),
+        "the refusal must carry INV-18's sentence, and said: {error}"
     );
+    assert!(
+        error.to_string().contains(&squatter.render()),
+        "the refusal must name the hold that leaked: {error}"
+    );
+    assert!(
+        process.ledger.slots().pending().is_empty(),
+        "the withdrawn request left the queue: {:?}",
+        process.ledger.slots().pending()
+    );
+    process
+        .ledger
+        .complete(&squatter)
+        .expect("the squatter's process ended");
 
     assert!(
         !process.ledger.running().contains(&worker.as_str()),
@@ -1052,7 +1258,11 @@ fn a_refused_slot_acquisition_settles_the_registration_it_took() {
         1,
         "cancelled, not completed: no process ran"
     );
-    assert_eq!(process.ledger.completed(), 0);
+    assert_eq!(
+        process.ledger.completed(),
+        1,
+        "the one completion is the squatter's, released after its process ended"
+    );
     assert_eq!(
         process.ledger.duplicates(),
         0,
@@ -1755,19 +1965,20 @@ fn halt_cancels_in_flight_attempt() {
         .expect("start");
 
     let reviewer = started.identities.review_pass(0, 0);
-    process.ledger.register(&reviewer).expect("register");
     process
-        .slots
-        .acquire(
+        .ledger
+        .register_slotted(
             &reviewer,
             SlotPair {
                 agent: "claude-code".to_owned(),
                 pool: Some("scaffold-pool".to_owned()),
             },
+            &Standing::of(run.emitter.fold(), &reviewer),
         )
         .expect("the pair its role takes");
     assert!(!process.balances(), "the run is genuinely in flight");
     assert_eq!(process.ledger.running(), vec![reviewer.render()]);
+    assert!(process.ledger.slots().holds(&reviewer));
 
     let cancelled = context!(run, process)
         .cancel_in_flight(&dispatched, crate::topology::events::AttemptNumber(1))
@@ -1776,8 +1987,8 @@ fn halt_cancels_in_flight_attempt() {
     assert_eq!(cancelled, 1, "the in-flight invocation was cancelled");
     assert!(
         process.balances(),
-        "and both ledgers balance: slots={:?} running={:?}",
-        process.slots.is_empty(),
+        "and the ledger balances, its slot table included: slots={:?} running={:?}",
+        process.ledger.slots().is_empty(),
         process.ledger.running()
     );
 

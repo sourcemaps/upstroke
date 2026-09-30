@@ -27,9 +27,11 @@ use crate::workspace_manager::{
 
 use super::dispatch::{self, Dispatched, EventEmitter};
 use super::identity::{
-    AttemptIdentities, InvocationLedger, SequenceIdentities, SlotAssertion, SlotPair, is_slotted,
+    AttemptIdentities, InvocationLedger, SequenceIdentities, SlotPair, is_slotted,
 };
+use super::preflight::{Registering, Slots};
 use super::seams::TopologyHooks;
+use super::select::Standing;
 
 #[derive(Debug, Clone)]
 pub struct ReviewerPlan {
@@ -385,7 +387,6 @@ pub struct AttemptContext<'a> {
     pub hooks: &'a mut dyn TopologyHooks,
     pub emitter: &'a mut dyn EventEmitter,
     pub runner: &'a dyn Runner,
-    pub slots: &'a mut SlotAssertion,
     pub ledger: &'a mut InvocationLedger,
     pub adapters: &'a dyn AdapterSource,
     pub paths: &'a RunPaths,
@@ -400,12 +401,12 @@ impl AttemptContext<'_> {
             .map_err(|failure| failure.discharging(self.ledger))
     }
 
-    fn judge_core(&mut self) -> Judge<'_> {
+    fn judge_core(&mut self, identities: &AttemptIdentities) -> Judge<'_> {
         Judge {
             manager: self.manager,
             hooks: &mut *self.hooks,
             runner: self.runner,
-            slots: &mut *self.slots,
+            standing: self.emitter.standing(&identities.worker()),
             ledger: &mut *self.ledger,
             adapters: self.adapters,
             paths: self.paths,
@@ -448,7 +449,9 @@ impl AttemptContext<'_> {
             plan.worker_timeout,
             invocation.clone(),
         );
-        let worker = self.judge_core().execute(&request, plan.pool.clone())?;
+        let worker = self
+            .judge_core(&identities)
+            .execute(&request, plan.pool.clone())?;
         Ok(AttemptRun { identities, worker })
     }
 
@@ -597,7 +600,9 @@ impl AttemptContext<'_> {
             prior_failure: assessed.failure.clone(),
             invocations,
         };
-        Ok(self.judge_core().judge(&subject, &mut NoReviewAccount)?)
+        Ok(self
+            .judge_core(&run.identities)
+            .judge(&subject, &mut NoReviewAccount)?)
     }
 
     pub fn settle_interrupted(
@@ -619,17 +624,14 @@ impl AttemptContext<'_> {
     }
 
     // Called between synchronous Runner invocations, after their children exit.
-    // This context cancels remaining registrations and releases the held slot pair
-    // before appending the terminal event and reclaiming the attempt's residue.
+    // This context cancels remaining registrations, which releases every held slot
+    // pair, before appending the terminal event and reclaiming the attempt's residue.
     pub fn cancel_in_flight(
         &mut self,
         dispatched: &Dispatched,
         attempt: AttemptNumber,
     ) -> Result<usize, UpstrokeError> {
         let cancelled = self.ledger.cancel_all_running();
-        if let Some(held) = self.slots.held().cloned() {
-            self.slots.release(&held)?;
-        }
         self.settle_interrupted(dispatched, attempt, AttemptOutcome::Cancelled)?;
         Ok(cancelled)
     }
@@ -704,13 +706,6 @@ impl JudgeIdentities {
             Self::Sequence(ids) => ids.gate(gate, ordinal),
         }
     }
-
-    fn review_reask(self, reask: u32, ordinal: u32) -> InvocationId {
-        match self {
-            Self::Attempt(ids) => ids.review_reask(reask, ordinal),
-            Self::Sequence(ids) => ids.review_reask(reask, ordinal),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -753,7 +748,7 @@ pub struct Judge<'a> {
     pub manager: &'a WorkspaceManager,
     pub hooks: &'a mut dyn TopologyHooks,
     pub runner: &'a dyn Runner,
-    pub slots: &'a mut SlotAssertion,
+    pub standing: Standing,
     pub ledger: &'a mut InvocationLedger,
     pub adapters: &'a dyn AdapterSource,
     pub paths: &'a RunPaths,
@@ -841,9 +836,17 @@ impl Judge<'_> {
                 })
             })?;
             let inputs = subject.inputs;
-            let outcome = self
-                .reviews
-                .run(
+            let (outcome, through_the_pair) = {
+                let ledger = std::sync::Mutex::new(&mut *self.ledger);
+                let registering = Registering::new(
+                    self.runner,
+                    &ledger,
+                    Slots::Pipeline {
+                        standing: self.standing,
+                        pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
+                    },
+                );
+                let outcome = self.reviews.run(
                     &review::ReviewCx {
                         adapter,
                         profile: reviewer.profile.clone(),
@@ -862,10 +865,12 @@ impl Judge<'_> {
                         stem: subject.stem.clone(),
                         timeout: reviewer.timeout,
                     },
-                    self.runner,
+                    &registering,
                     &(subject.invocations)(pass),
-                )
-                .map_err(JudgeError::Other)?;
+                );
+                (outcome, registering.completed())
+            };
+            let outcome = outcome.map_err(JudgeError::Other)?;
 
             let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
             let cost_usd = outcome.cost_usd;
@@ -887,15 +892,16 @@ impl Judge<'_> {
             account.charge(&record);
             reviews.push(record);
 
-            let ids = (subject.invocations)(pass);
-            for ordinal in 0..invocations {
-                let id = if ordinal == 0 {
-                    ids.pass.clone()
-                } else {
-                    subject.identities.review_reask(pass, ordinal - 1)
-                };
-                self.ledger.register(&id).map_err(JudgeError::Other)?;
-                self.ledger.complete(&id).map_err(JudgeError::Other)?;
+            if invocations != through_the_pair {
+                return Err(JudgeError::Other(UpstrokeError::Refused {
+                    message: format!(
+                        "review pass {pass} reports {invocations} process(es) and \
+                         {through_the_pair} ran through the slot pair it was handed: \
+                         `permits.agent_pool_slots` gives every review_pass and review_reask its \
+                         atomic `{{agent, pool?}}` pair, so a process the broker did not register \
+                         ran outside it"
+                    ),
+                }));
             }
 
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
@@ -917,11 +923,11 @@ impl Judge<'_> {
             .add_snapshot(self.hooks.effects(), &name, &of.input())
     }
 
-    // This sequential context owns the invocation ledger and slot assertion.
-    // Register before acquiring the atomic agent/pool pair; a refused acquisition
-    // cancels that registration. Runner::run returns before the pair is released,
-    // then each registered invocation is completed or cancelled exactly once.
-    // Keep settlement here so a run_registered error cannot leave a Running entry.
+    // This sequential context owns the invocation ledger and its slot table.
+    // A slotted invocation registers with its atomic agent/pool pair and must be
+    // granted at once; a pair that is not grantable withdraws the registration.
+    // Runner::run returns before the pair is released, then each registered
+    // invocation is completed or cancelled exactly once, which releases its pair.
     pub fn execute(
         &mut self,
         request: &RunnerRequest,
@@ -935,59 +941,52 @@ impl Judge<'_> {
         request: &RunnerRequest,
         pool: Option<String>,
     ) -> Result<ProcessOutput, JudgeError> {
-        self.ledger
-            .register(&request.invocation)
+        self.register_now(request, pool)
             .map_err(JudgeError::Other)?;
-        match self.run_registered(request, pool) {
-            Ok(Ok(output)) => {
+        match self.runner.run_blocking(request) {
+            Ok(output) => {
                 self.ledger
                     .complete(&request.invocation)
                     .map_err(JudgeError::Other)?;
                 Ok(output)
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 self.ledger
                     .cancel(&request.invocation)
                     .map_err(JudgeError::Other)?;
                 Err(JudgeError::Runner(error))
             }
-            Err(error) => {
-                drop(self.ledger.cancel(&request.invocation));
-                Err(JudgeError::Other(error))
-            }
         }
     }
 
-    fn run_registered(
+    fn register_now(
         &mut self,
         request: &RunnerRequest,
         pool: Option<String>,
-    ) -> Result<Result<ProcessOutput, RunnerError>, UpstrokeError> {
-        let slotted = is_slotted(&request.invocation);
-        if slotted {
-            let agent = request
-                .agent
-                .as_ref()
-                .ok_or_else(|| UpstrokeError::Refused {
-                    message: format!(
-                        "`{}` is a slotted invocation and its request names no agent; the pair it \
-                         would take is `{{agent, pool?}}` and there is no agent to key it by",
-                        request.invocation
-                    ),
-                })?;
-            self.slots.acquire(
-                &request.invocation,
+    ) -> Result<(), UpstrokeError> {
+        if !is_slotted(&request.invocation) {
+            return self.ledger.register_at_once(&request.invocation, None);
+        }
+        let agent = request
+            .agent
+            .as_ref()
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "`{}` is a slotted invocation and its request names no agent; the pair it \
+                     would take is `{{agent, pool?}}` and there is no agent to key it by",
+                    request.invocation
+                ),
+            })?;
+        self.ledger.register_at_once(
+            &request.invocation,
+            Some((
                 SlotPair {
                     agent: agent.as_str().to_owned(),
                     pool,
                 },
-            )?;
-        }
-        let output = self.runner.run_blocking(request);
-        if slotted {
-            self.slots.release(&request.invocation)?;
-        }
-        Ok(output)
+                &self.standing,
+            )),
+        )
     }
 
     fn verdict(
