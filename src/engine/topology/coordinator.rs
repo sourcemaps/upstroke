@@ -12512,7 +12512,7 @@ mod tests {
         const FIRED: &str = "fired-at";
 
         #[test]
-        #[ignore = "spawned by a_concurrent_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell"]
+        #[ignore = "spawned by the two width-3 finalization kill matrices (ST-18)"]
         fn finalization_kill_child_at_width_three() {
             let dir = PathBuf::from(
                 std::env::var("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
@@ -12658,138 +12658,153 @@ mod tests {
         }
 
         #[test]
-        fn a_concurrent_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()
+        fn a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()
          {
-            let mut outcomes = Vec::new();
-            for halted in [false, true] {
-                let label = if halted { "halted" } else { "complete" };
-                let mut reference = finishing(halted, &format!("interleaving-finalize-{label}"));
-                let (outcome, trace) = finish_traced(&mut reference, Killer::default());
-                let progress = outcome.unwrap_or_else(|error| panic!("{label}: {error}"));
-                assert_eq!(
-                    outcome_of(&progress),
-                    if halted {
-                        RunOutcome::Halted
-                    } else {
-                        RunOutcome::Complete
-                    },
-                    "{label}"
-                );
-                let cells = after_the_end(&trace);
-                let settled = settled_state(&reference.env);
-                assert_eq!(
-                    (settled.worktrees, settled.execution_root),
-                    (1, false),
-                    "{label}: the uninterrupted finalization left the user checkout alone"
-                );
-                assert_eq!(
-                    (settled.refs.len(), settled.retained_candidates),
-                    if halted { (2, 2) } else { (0, 0) },
-                    "{label}: Complete deletes the candidates refs, Halted retains and lists \
-                     them: {settled:?}"
-                );
+            finalization_kill_matrix(false);
+        }
+
+        #[test]
+        fn a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()
+         {
+            finalization_kill_matrix(true);
+        }
+
+        fn finalization_kill_matrix(halted: bool) {
+            let label = if halted { "halted" } else { "complete" };
+            let mut reference = finishing(halted, &format!("interleaving-finalize-{label}"));
+            let (outcome, trace) = finish_traced(&mut reference, Killer::default());
+            let progress = outcome.unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(
+                outcome_of(&progress),
+                if halted {
+                    RunOutcome::Halted
+                } else {
+                    RunOutcome::Complete
+                },
+                "{label}"
+            );
+            let cells = after_the_end(&trace);
+            let settled = settled_state(&reference.env);
+            assert_eq!(
+                (settled.worktrees, settled.execution_root),
+                (1, false),
+                "{label}: the uninterrupted finalization left the user checkout alone"
+            );
+            assert_eq!(
+                (settled.refs.len(), settled.retained_candidates),
+                if halted { (2, 2) } else { (0, 0) },
+                "{label}: Complete deletes the candidates refs, Halted retains and lists \
+                 them: {settled:?}"
+            );
+            assert!(
+                cells.len() >= 6,
+                "{label}: the report's four cells and the execution root's two at least: \
+                 {cells:?}"
+            );
+            let mut killed = Vec::new();
+            for (cell, expected) in cells.iter().enumerate() {
+                let tag = format!("{label}, cell {cell} ({} {})", expected.0, expected.1);
+                let handoff = crate::engine::topology::scaffold::kill_dir(&format!(
+                    "interleaving-finalize-{label}-{cell}"
+                ));
+                let index = cell.to_string();
+                let status = crate::workspace_manager::fixture::run_kill_child_within(
+                    FINALIZE_CHILD,
+                    &[
+                        ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
+                        ("UPSTROKE_TEST_KILL_OUTCOME", std::ffi::OsStr::new(label)),
+                        ("UPSTROKE_TEST_KILL_CELL", std::ffi::OsStr::new(&index)),
+                    ],
+                    crate::engine::topology::scaffold::KILL_CHILD_BOUND,
+                )
+                .unwrap_or_else(|| panic!("{tag}: the kill child did not end in time"));
                 assert!(
-                    cells.len() >= 6,
-                    "{label}: the report's four cells and the execution root's two at least: \
-                     {cells:?}"
+                    crate::workspace_manager::fixture::died_by_abort(&status),
+                    "{tag}: the child died by the kill: {status:?}"
                 );
-                let mut killed = Vec::new();
-                for (cell, expected) in cells.iter().enumerate() {
-                    let tag = format!("{label}, cell {cell} ({} {})", expected.0, expected.1);
-                    let handoff = crate::engine::topology::scaffold::kill_dir(&format!(
-                        "interleaving-finalize-{label}-{cell}"
-                    ));
-                    let index = cell.to_string();
-                    let status = crate::workspace_manager::fixture::run_kill_child_within(
-                        FINALIZE_CHILD,
-                        &[
-                            ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
-                            ("UPSTROKE_TEST_KILL_OUTCOME", std::ffi::OsStr::new(label)),
-                            ("UPSTROKE_TEST_KILL_CELL", std::ffi::OsStr::new(&index)),
-                        ],
-                        crate::engine::topology::scaffold::KILL_CHILD_BOUND,
-                    )
-                    .unwrap_or_else(|| panic!("{tag}: the kill child did not end in time"));
-                    assert!(
-                        crate::workspace_manager::fixture::died_by_abort(&status),
-                        "{tag}: the child died by the kill: {status:?}"
-                    );
-                    let fired: (EffectSiteId, HookPhase) = serde_json::from_str(
-                        &std::fs::read_to_string(handoff.path().join(FIRED))
-                            .unwrap_or_else(|error| panic!("{tag}: no kill was reported: {error}")),
-                    )
-                    .expect("the reported cell parses");
-                    assert_eq!(
-                        &fired, expected,
-                        "{tag}: the child died where the reference run consulted that cell"
-                    );
-                    let root = std::fs::read_to_string(handoff.path().join(KILL_HANDOFF))
-                        .unwrap_or_else(|error| panic!("{tag}: no handoff: {error}"));
-                    let mut env = crate::engine::topology::scaffold::WideEnv::adopted(
-                        PathBuf::from(root),
-                        &three(),
-                        3,
-                        WidePlans::default(),
-                    );
-                    if halted {
-                        halting(&mut env);
-                    }
-                    let log = std::fs::read(&env.log).expect("the killed run's log");
-                    let kinds = kinds_of(&env.durable_events());
-                    assert_eq!(
-                        kinds.last(),
-                        Some(&"run_finished"),
-                        "{tag}: the child ended the run before it died"
-                    );
-                    let planted = Planted::beside(&env);
-                    let (first, env) = refused_resume(env, &tag);
-                    let converged = settled_state(&env);
-                    assert_eq!(
-                        converged, settled,
-                        "{tag}: the resume finalized to what the uninterrupted finalization left"
-                    );
-                    let report =
-                        std::fs::read(env.paths.public.join("report.json")).expect("the report");
-                    let (second, env) = refused_resume(env, &tag);
-                    assert!(
-                        second.contains("the report was already current"),
-                        "{tag}: repeated finalization finds the report current: {second}"
-                    );
-                    for step in crate::engine::topology::finalize::CleanupStep::ORDER {
-                        let label = step.label();
-                        assert!(
-                            !second.contains(label) || second.contains(&format!(" 0 {label}")),
-                            "{tag}: repeated finalization removes no {label}: {second}"
-                        );
-                    }
-                    assert_eq!(
-                        settled_state(&env),
-                        converged,
-                        "{tag}: and removes nothing more"
-                    );
-                    assert_eq!(
-                        std::fs::read(env.paths.public.join("report.json")).expect("the report"),
-                        report,
-                        "{tag}: a fresh report is not rewritten"
-                    );
-                    assert_eq!(
-                        std::fs::read(&env.log).expect("the log"),
-                        log,
-                        "{tag}: neither resume appended anything, and no answer was ingested"
-                    );
-                    planted.untouched(&tag);
-                    killed.push(serde_json::json!({
-                        "cell": cell,
-                        "site": fired.0.to_string(),
-                        "phase": fired.1.to_string(),
-                        "first_resume": first,
-                        "second_resume": second,
-                        "converged": true,
-                        "idempotent": true,
-                        "answer_files_untouched": true,
-                    }));
+                let fired: (EffectSiteId, HookPhase) = serde_json::from_str(
+                    &std::fs::read_to_string(handoff.path().join(FIRED))
+                        .unwrap_or_else(|error| panic!("{tag}: no kill was reported: {error}")),
+                )
+                .expect("the reported cell parses");
+                assert_eq!(
+                    &fired, expected,
+                    "{tag}: the child died where the reference run consulted that cell"
+                );
+                let root = std::fs::read_to_string(handoff.path().join(KILL_HANDOFF))
+                    .unwrap_or_else(|error| panic!("{tag}: no handoff: {error}"));
+                let mut env = crate::engine::topology::scaffold::WideEnv::adopted(
+                    PathBuf::from(root),
+                    &three(),
+                    3,
+                    WidePlans::default(),
+                );
+                if halted {
+                    halting(&mut env);
                 }
-                outcomes.push(serde_json::json!({
+                let log = std::fs::read(&env.log).expect("the killed run's log");
+                let kinds = kinds_of(&env.durable_events());
+                assert_eq!(
+                    kinds.last(),
+                    Some(&"run_finished"),
+                    "{tag}: the child ended the run before it died"
+                );
+                let planted = Planted::beside(&env);
+                let (first, env) = refused_resume(env, &tag);
+                let converged = settled_state(&env);
+                assert_eq!(
+                    converged, settled,
+                    "{tag}: the resume finalized to what the uninterrupted finalization left"
+                );
+                let report =
+                    std::fs::read(env.paths.public.join("report.json")).expect("the report");
+                let (second, env) = refused_resume(env, &tag);
+                assert!(
+                    second.contains("the report was already current"),
+                    "{tag}: repeated finalization finds the report current: {second}"
+                );
+                for step in crate::engine::topology::finalize::CleanupStep::ORDER {
+                    let label = step.label();
+                    assert!(
+                        !second.contains(label) || second.contains(&format!(" 0 {label}")),
+                        "{tag}: repeated finalization removes no {label}: {second}"
+                    );
+                }
+                assert_eq!(
+                    settled_state(&env),
+                    converged,
+                    "{tag}: and removes nothing more"
+                );
+                assert_eq!(
+                    std::fs::read(env.paths.public.join("report.json")).expect("the report"),
+                    report,
+                    "{tag}: a fresh report is not rewritten"
+                );
+                assert_eq!(
+                    std::fs::read(&env.log).expect("the log"),
+                    log,
+                    "{tag}: neither resume appended anything, and no answer was ingested"
+                );
+                planted.untouched(&tag);
+                killed.push(serde_json::json!({
+                    "cell": cell,
+                    "site": fired.0.to_string(),
+                    "phase": fired.1.to_string(),
+                    "first_resume": first,
+                    "second_resume": second,
+                    "converged": true,
+                    "idempotent": true,
+                    "answer_files_untouched": true,
+                }));
+            }
+            export(
+                "seam/ST-18",
+                &serde_json::json!({
+                    "row": "ST-18",
+                    "width": 3,
+                    "through": "the coordinator's closure, whose finalization is the frozen \
+                                finalize.rs; each kill in a child process at one cell after \
+                                run_finished, then two resumes through the frozen recovery order",
                     "outcome": label,
                     "seed": FINALIZE_SEED,
                     "settled": {
@@ -12801,17 +12816,6 @@ mod tests {
                         "execution_root_present": settled.execution_root,
                     },
                     "kills": killed,
-                }));
-            }
-            export(
-                "seam/ST-18",
-                &serde_json::json!({
-                    "row": "ST-18",
-                    "width": 3,
-                    "through": "the coordinator's closure, whose finalization is the frozen \
-                                finalize.rs; each kill in a child process at one cell after \
-                                run_finished, then two resumes through the frozen recovery order",
-                    "outcomes": outcomes,
                 }),
             );
         }

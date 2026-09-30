@@ -1276,13 +1276,16 @@ is appended per attempt and verification in flight at it, and `run_finished(Halt
 ST-17's budget stop under six seeds: after `budget_exceeded` nothing is admitted and nothing is
 cancelled, what was in flight settles naturally, and `run_finished(BudgetExceeded)` ends the log.
 
-## `mod interleaving` › `fn a_concurrent_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()`
+## `mod interleaving` › `fn finalization_kill_matrix(halted: bool) {`
 
-ST-18 at width 3. A Complete and a Halted run (seed 13 halts with two candidates queued) are finished
-once in this process, which lists the effect and run-directory cells their finalization consults after
-`run_finished`; then, for every cell, a child (`finalization_kill_child_at_width_three`) runs the same
-seed and dies by the kill at that cell, and this process adopts its directory and resumes it twice
-through the frozen recovery order. The first resume finalizes to the state the uninterrupted
+ST-18 at width 3, one outcome per test —
+`a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell`
+and its Halted twin — so libtest runs the two matrices side by side rather than one after the other. A
+Complete or a Halted run (seed 13 halts with two candidates queued) is finished once in this process,
+which lists the effect and run-directory cells its finalization consults after `run_finished`; then,
+for every cell, a child (`finalization_kill_child_at_width_three`) runs the same seed and dies by the
+kill at that cell, and this process adopts its directory and resumes it twice through the frozen
+recovery order. The first resume finalizes to the state the uninterrupted
 finalization left (report outcome, retained candidates, refs under the run namespace, worktrees, the
 execution root); the second finds the report current, removes nothing and refuses the same run; neither
 appends, and planted answer files stay byte-identical.
