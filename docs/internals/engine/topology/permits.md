@@ -119,6 +119,13 @@ that release granted, in grant order, for the coordinator to hand on.
 Cancel an invocation — withdrawing a waiting request, or releasing a running
 one's pair after the Runner terminated it — and return what that granted.
 
+## `impl PermitBroker` › `pub fn end(`
+
+Settle an invocation by how its Runner call ended
+(`InvocationLedger::end`): completed, cancelled, or — its process fate
+unresolved — kept running with its pair, granting nothing. The coordinator
+settles every pipeline's end through it.
+
 ## `impl PermitBroker` › `pub fn shut_down(&mut self) -> ShutDown {`
 
 The broker's half of a shutdown: every provisional reservation cancelled and

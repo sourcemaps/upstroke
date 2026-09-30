@@ -5,7 +5,7 @@ use crate::runner::InvocationId;
 use crate::topology::registry::TaskKey;
 
 use super::identity::{
-    Admission, InvocationLedger, ReservationKind, Reservations, SlotLimits, SlotPair,
+    Admission, InvocationEnd, InvocationLedger, ReservationKind, Reservations, SlotLimits, SlotPair,
 };
 use super::select::{Entitlements, Standing};
 
@@ -85,6 +85,14 @@ impl PermitBroker {
         invocation: &InvocationId,
     ) -> Result<Vec<InvocationId>, UpstrokeError> {
         self.invocations.cancel(invocation)
+    }
+
+    pub fn end(
+        &mut self,
+        invocation: &InvocationId,
+        end: &InvocationEnd,
+    ) -> Result<Vec<InvocationId>, UpstrokeError> {
+        self.invocations.end(invocation, end)
     }
 
     pub fn shut_down(&mut self) -> ShutDown {

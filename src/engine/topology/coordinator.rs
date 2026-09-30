@@ -12,7 +12,9 @@ use crate::error::UpstrokeError;
 use crate::events::ReviewRecord;
 use crate::rundir::RunPaths;
 use crate::runner::{Cancellation, InvocationId, Runner};
-use crate::topology::events::{AttemptNumber, CandidateRef, GenerationId, SequenceId};
+use crate::topology::events::{
+    AttemptNumber, CandidateRef, GenerationId, SequenceId, TopologyEventBody,
+};
 use crate::topology::registry::TaskKey;
 use crate::workspace_manager::WorkspaceManager;
 
@@ -21,7 +23,9 @@ use super::attempt::{
     attempt_body,
 };
 use super::closure;
-use super::identity::{Admission, AttemptIdentities, SequenceIdentities, SlotLimits, SlotPair};
+use super::identity::{
+    Admission, AttemptIdentities, InvocationEnd, SequenceIdentities, SlotLimits, SlotPair,
+};
 use super::integrate::{self, Verified, VerifyRequest};
 use super::preflight::{Carried, Registrar};
 use super::run::{
@@ -125,7 +129,7 @@ pub enum ToCoordinator {
     Ended {
         pipeline: PipelineId,
         invocation: InvocationId,
-        completed: bool,
+        end: InvocationEnd,
     },
     SnapshotBegin {
         pipeline: PipelineId,
@@ -168,10 +172,11 @@ pub trait Quiescence {
     fn quiescent(&mut self, view: &Quiescent<'_>) -> Release;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Release {
     Invocation(InvocationId),
     Injected,
+    Append(Box<TopologyEventBody>),
     Nothing,
 }
 
@@ -239,6 +244,7 @@ impl TopologyRun {
             next: 0,
             in_verify: None,
             arrived: None,
+            abandoned: None,
             interrupt: None,
             cancelled_work: closure::Cancelled::none(),
             unresolved: Vec::new(),
@@ -288,6 +294,13 @@ impl Interrupt {
             Self::Failed(_) => "an error that ends the command",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyEnd {
+    Arrived,
+    Abandoned,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,17 +396,23 @@ impl SnapshotGate {
 // message here, one at a time; every append, grant, settlement and discard is
 // made there. Transitions of a pipeline: Running until it asks (`Admit`,
 // `SnapshotBegin`: Awaiting), then granted (Invoking; Running for a snapshot) or
-// refused (Running), an end reported (Running), its completion (Done); only
-// `retire` removes it. Under an observer a grant is handed to it at once and
+// refused (Running), an end reported (Running), its completion (Done); on
+// cancellation an Invoking pipeline is Running, an Awaiting one only once its
+// request is answered (it may still be buffered); only `retire` removes it. Under an observer a grant is handed to it at once and
 // nothing else is done until it returns, which it does when the invocation is
 // inside the Runner, so no Invoking pipeline is still on its way there when the
 // coordinator next acts. Winner and loser: a completion is settled only when its
 // pipeline is live, not cancelled, bound to the identity it names, and that
 // identity is open in the fold; any other message is discarded and counted and
-// releases nothing twice. Cleanup: an interrupt cancels every live token,
-// withdraws every pending registration and refuses every waiting reply; `finish`
-// receives until no pipeline is live, and `join` awaits every handle, a panic
-// being its pipeline's completion. The channels are bounded by this protocol, not
+// releases nothing twice; a fatal completion interrupts as it is received. An
+// invocation is released only when its end established that its process is
+// gone: one that ended unresolved, or was never reported ended, keeps its
+// registration and pair for the rest of this process, and interrupts. Every
+// admission pass first stops each pipeline whose identity the fold has closed.
+// Cleanup: an interrupt cancels every live token, withdraws every pending
+// registration and refuses every waiting reply; `finish` receives until no
+// pipeline is live, and `join` awaits every handle, a panic being its
+// pipeline's completion. The channels are bounded by this protocol, not
 // by type: a pipeline has at most one request unanswered and at most three
 // notifications (an end, a snapshot's end, its completion) sent since it, and the
 // fold's entitlements bound the pipelines. The coordinator keeps the job it
@@ -410,7 +429,8 @@ struct Coordinator<'s> {
     gate: SnapshotGate,
     next: u64,
     in_verify: Option<PipelineId>,
-    arrived: Option<(Result<Judgement, JudgeError>, Vec<ReviewRecord>)>,
+    arrived: Option<Verified>,
+    abandoned: Option<SequenceId>,
     interrupt: Option<Interrupt>,
     cancelled_work: closure::Cancelled,
     unresolved: Vec<String>,
@@ -478,6 +498,7 @@ impl Coordinator<'_> {
                         .to_owned(),
                 });
             }
+            self.reconcile();
             if ending {
                 if halted && !self.live.is_empty() {
                     self.halt();
@@ -558,9 +579,11 @@ impl Coordinator<'_> {
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
         let settled = self.run.integration_settled(key, terminal);
         self.open_gate();
+        let abandoned = self.abandoned.take() == Some(request.sequence);
         match settled {
             Ok(_) => Ok(true),
             Err(_) if self.interrupt.is_some() => Ok(false),
+            Err(_) if abandoned => Ok(true),
             Err(error) => Err(error),
         }
     }
@@ -747,35 +770,53 @@ impl Coordinator<'_> {
         let job = self.run.verification_job(request)?;
         let key = request.candidate.key;
         let sequence = request.sequence;
+        let verification = Identity::Verification {
+            sequence,
+            candidate: request.candidate.clone(),
+        };
         let pipeline = self.spawn_verification(job);
         self.in_verify = Some(pipeline);
         self.arrived = None;
         self.gate.mode = GateMode::Verifying { granting: true };
         self.grant_snapshots();
-        let arrived = loop {
+        let ended = loop {
             if let Err(error) = self.admit() {
                 self.fail(error);
             }
             if self.interrupt.is_some() {
-                break None;
+                break VerifyEnd::Interrupted;
             }
-            if self.arrived.is_some() {
+            if !verification.open_in(self.run) {
+                if !self.live.contains_key(&pipeline) {
+                    break VerifyEnd::Abandoned;
+                }
+            } else if self.arrived.is_some() {
                 self.gate.mode = GateMode::Verifying { granting: false };
                 if self.gate.live() == 0 {
-                    break self.arrived.take();
+                    break VerifyEnd::Arrived;
                 }
             }
             self.receive_one();
         };
         self.in_verify = None;
         self.gate.mode = GateMode::Closed;
-        match arrived {
-            Some((outcome, charged)) => verified(outcome, charged, sequence),
-            None => {
+        let arrived = self.arrived.take();
+        match (ended, arrived) {
+            (VerifyEnd::Arrived, Some(verified)) => Ok(verified),
+            (VerifyEnd::Abandoned, _) => {
+                self.abandoned = Some(sequence);
+                let message = format!(
+                    "the verification of sequence {} of task {key} was abandoned: the fold no \
+                     longer holds its transaction open (a decline, or a failed settlement, \
+                     failed its lineage), so its pipeline was cancelled, its late result \
+                     discarded and nothing is appended for it",
+                    sequence.0
+                );
+                self.run.warn(message.clone());
+                Err(UpstrokeError::Refused { message })
+            }
+            (VerifyEnd::Arrived | VerifyEnd::Interrupted, _) => {
                 self.cancelled_work.sequence(sequence);
-                if let Some((Err(error), _)) = self.arrived.take() {
-                    self.unresolved.extend(unresolved_judge(&error));
-                }
                 Err(UpstrokeError::Refused {
                     message: format!(
                         "the verification of sequence {} of task {key} was interrupted by {}; its \
@@ -881,6 +922,7 @@ impl Coordinator<'_> {
                 }
             }
             Release::Injected if !self.injected.is_empty() => Ok(()),
+            Release::Append(body) => self.run.emit(*body, self.seams, self.hooks),
             Release::Injected | Release::Nothing => Err(stuck(&described)),
         }
     }
@@ -919,9 +961,9 @@ impl Coordinator<'_> {
             ToCoordinator::Ended {
                 pipeline,
                 invocation,
-                completed,
+                end,
             } => {
-                self.end_invocation(origin, pipeline, &invocation, completed);
+                self.end_invocation(origin, pipeline, &invocation, &end);
                 Ok(())
             }
             ToCoordinator::SnapshotBegin { pipeline, reply } => {
@@ -1065,7 +1107,7 @@ impl Coordinator<'_> {
         origin: Origin,
         pipeline: PipelineId,
         invocation: &InvocationId,
-        completed: bool,
+        end: &InvocationEnd,
     ) {
         let current = match self.live.get_mut(&pipeline) {
             None => {
@@ -1102,16 +1144,36 @@ impl Coordinator<'_> {
             )));
             return;
         }
-        let settled = if completed {
-            self.run.broker_mut().complete(invocation)
-        } else {
-            self.run.broker_mut().cancel(invocation)
-        };
-        match settled {
+        match self.run.broker_mut().end(invocation, end) {
             Ok(granted) => self.reply_granted(granted),
             Err(error) => self.run.record_discard(Some(format!(
                 "the end of `{invocation}` was refused by the invocation ledger: {error}"
             ))),
+        }
+        if let InvocationEnd::Failed { detail, .. } = end {
+            if current && end.unresolved() {
+                self.hold_unresolved(
+                    invocation,
+                    format!("`{invocation}` ended with its process unresolved ({detail})"),
+                );
+            }
+        }
+    }
+
+    fn hold_unresolved(&mut self, invocation: &InvocationId, cause: String) {
+        let named = invocation.render();
+        if !self.unresolved.contains(&named) {
+            self.unresolved.push(named);
+        }
+        if self.interrupt.is_none() {
+            self.fail(UpstrokeError::Refused {
+                message: format!(
+                    "{cause}: its registration and its slot pair stay held for the rest of this \
+                     process, so nothing is granted on them; admission stopped, every live \
+                     pipeline was cancelled and the command ends resumably, and the next \
+                     process's census reclaims what is left"
+                ),
+            });
         }
     }
 
@@ -1145,13 +1207,13 @@ impl Coordinator<'_> {
         }
     }
 
-    fn check(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> Option<Live> {
+    fn accepts(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> bool {
         if self.run.fold().is_poisoned() {
             if origin == Origin::Pipeline {
                 self.retire(pipeline);
             }
             self.run.record_discard(None);
-            return None;
+            return false;
         }
         let Some(live) = self.live.get(&pipeline) else {
             self.run.record_discard(Some(format!(
@@ -1159,7 +1221,7 @@ impl Coordinator<'_> {
                  or duplicate); it was discarded",
                 pipeline.0
             )));
-            return None;
+            return false;
         };
         if live.identity != *identity {
             let warning = format!(
@@ -1168,14 +1230,14 @@ impl Coordinator<'_> {
                 pipeline.0, live.identity
             );
             self.run.record_discard(Some(warning));
-            return None;
+            return false;
         }
         if live.cancelled {
             if origin == Origin::Pipeline {
                 self.retire(pipeline);
             }
             self.run.record_discard(None);
-            return None;
+            return false;
         }
         if !identity.open_in(self.run) {
             if origin == Origin::Pipeline {
@@ -1185,7 +1247,7 @@ impl Coordinator<'_> {
                 "a completion for {identity:?} names an identity the fold does not hold open; \
                  it was discarded"
             )));
-            return None;
+            return false;
         }
         if origin == Origin::Injected {
             self.run.record_discard(Some(format!(
@@ -1193,25 +1255,86 @@ impl Coordinator<'_> {
                  pipeline is still running; it was discarded",
                 pipeline.0
             )));
-            return None;
+            return false;
         }
-        self.retire(pipeline)
+        true
     }
 
     fn retire(&mut self, pipeline: PipelineId) -> Option<Live> {
         self.gate.release(pipeline);
         let live = self.live.remove(&pipeline)?;
         if let Some(invocation) = live.running.as_ref() {
-            match self.run.broker_mut().cancel(invocation) {
+            self.hold_unresolved(
+                invocation,
+                format!(
+                    "pipeline {} ended without reporting the end of `{invocation}`, so the \
+                     Runner never established that its process ended",
+                    pipeline.0
+                ),
+            );
+        }
+        Some(live)
+    }
+
+    fn reconcile(&mut self) {
+        let closed: Vec<PipelineId> = self
+            .live
+            .iter()
+            .filter(|(_, live)| !live.cancelled && !live.identity.open_in(self.run))
+            .map(|(pipeline, _)| *pipeline)
+            .collect();
+        for pipeline in closed {
+            self.stop(pipeline);
+        }
+    }
+
+    fn stop(&mut self, pipeline: PipelineId) {
+        let Some(live) = self.live.get_mut(&pipeline) else {
+            return;
+        };
+        live.cancelled = true;
+        live.cancel.cancel();
+        if matches!(live.busy, Busy::Invoking(_)) {
+            live.busy = Busy::Running;
+        }
+        let identity = live.identity.clone();
+        let waiting: Vec<InvocationId> = self
+            .replies
+            .iter()
+            .filter(|(_, (owner, _))| *owner == pipeline)
+            .map(|(invocation, _)| invocation.clone())
+            .collect();
+        for invocation in waiting {
+            if let Some((_, reply)) = self.replies.remove(&invocation) {
+                let _ = reply.send(Err(cancelled(&invocation)));
+                self.set_busy(pipeline, Busy::Running);
+            }
+            match self.run.broker_mut().cancel(&invocation) {
                 Ok(granted) => self.reply_granted(granted),
                 Err(error) => self.run.warn(format!(
-                    "pipeline {} ended holding `{invocation}`, and withdrawing it failed: \
-                     {error}",
+                    "withdrawing `{invocation}` of stopped pipeline {} failed: {error}",
                     pipeline.0
                 )),
             }
         }
-        Some(live)
+        let (refused, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.gate.waiting)
+            .into_iter()
+            .partition(|(waiting, _)| *waiting == pipeline);
+        self.gate.waiting = kept.into_iter().collect();
+        for (_, reply) in refused {
+            let _ = reply.send(Err(UpstrokeError::Refused {
+                message: format!(
+                    "pipeline {} was stopped while it waited for a snapshot",
+                    pipeline.0
+                ),
+            }));
+            self.set_busy(pipeline, Busy::Running);
+        }
+        self.run.warn(format!(
+            "pipeline {} serves {identity:?}, which the fold no longer holds open; it was \
+             cancelled and its late result will be discarded",
+            pipeline.0
+        ));
     }
 
     fn judged(
@@ -1221,13 +1344,20 @@ impl Coordinator<'_> {
         identity: &Identity,
         outcome: Result<Box<Judged>, UpstrokeError>,
     ) -> Result<(), UpstrokeError> {
-        if let Err(error) = &outcome {
-            self.note_cancelled_end(origin, pipeline, unresolved_runner(error));
+        if !self.accepts(origin, pipeline, identity) {
+            return Ok(());
         }
-        let Some(live) = self.check(origin, pipeline, identity) else {
+        let judged = match outcome {
+            Ok(judged) => judged,
+            Err(error) => {
+                self.fail(error);
+                self.retire(pipeline);
+                return Ok(());
+            }
+        };
+        let Some(live) = self.retire(pipeline) else {
             return Ok(());
         };
-        let judged = outcome?;
         let Some(job) = live.job else {
             return Err(UpstrokeError::Refused {
                 message: format!(
@@ -1249,9 +1379,6 @@ impl Coordinator<'_> {
         outcome: Result<Judgement, JudgeError>,
         charged: Vec<ReviewRecord>,
     ) {
-        if let Err(error) = &outcome {
-            self.note_cancelled_end(origin, pipeline, unresolved_judge(error));
-        }
         if self.in_verify != Some(pipeline) || self.arrived.is_some() {
             if origin == Origin::Pipeline
                 && self.live.get(&pipeline).is_some_and(|live| live.cancelled)
@@ -1267,24 +1394,27 @@ impl Coordinator<'_> {
             )));
             return;
         }
-        if self.check(origin, pipeline, identity).is_some() {
-            if let Identity::Verification { candidate, .. } = identity {
-                self.run.charge_reviews(candidate.key, &charged);
-            }
-            self.arrived = Some((outcome, charged));
+        if !self.accepts(origin, pipeline, identity) {
+            return;
         }
-    }
-
-    fn note_cancelled_end(
-        &mut self,
-        origin: Origin,
-        pipeline: PipelineId,
-        unresolved: Option<String>,
-    ) {
-        let cancelled = origin == Origin::Pipeline
-            && self.live.get(&pipeline).is_some_and(|live| live.cancelled);
-        if cancelled {
-            self.unresolved.extend(unresolved);
+        let Identity::Verification {
+            sequence,
+            candidate,
+        } = identity
+        else {
+            self.retire(pipeline);
+            return;
+        };
+        self.run.charge_reviews(candidate.key, &charged);
+        match verified(outcome, charged, *sequence) {
+            Ok(verified) => {
+                self.retire(pipeline);
+                self.arrived = Some(verified);
+            }
+            Err(error) => {
+                self.fail(error);
+                self.retire(pipeline);
+            }
         }
     }
 
@@ -1322,14 +1452,15 @@ impl Coordinator<'_> {
                     }
                 }
             }
-            if live.busy != Busy::Done {
+            if matches!(live.busy, Busy::Invoking(_)) {
                 live.busy = Busy::Running;
             }
         }
         let (_, invocations) = self.run.broker_mut().halves();
         invocations.withdraw_pending();
-        for (invocation, (_, reply)) in std::mem::take(&mut self.replies) {
+        for (invocation, (pipeline, reply)) in std::mem::take(&mut self.replies) {
             let _ = reply.send(Err(cancelled(&invocation)));
+            self.set_busy(pipeline, Busy::Running);
         }
         for (pipeline, reply) in std::mem::take(&mut self.gate.waiting) {
             let _ = reply.send(Err(UpstrokeError::Refused {
@@ -1338,6 +1469,7 @@ impl Coordinator<'_> {
                     pipeline.0
                 ),
             }));
+            self.set_busy(pipeline, Busy::Running);
         }
     }
 
@@ -1355,10 +1487,10 @@ impl Coordinator<'_> {
             Some(Interrupt::Halt) => Err(UpstrokeError::Refused {
                 message: format!(
                     "the run halted, and the Runner did not establish that the process of {} \
-                     ended when its pipeline was cancelled; closure appends nothing and scrubs \
-                     nothing over a process that may still run, so the command ends and the run \
-                     is resumable: the next process's census reclaims what is left before its \
-                     recovery settles the rest",
+                     ended; closure appends nothing and scrubs nothing over a process that may \
+                     still run, so the command ends and the run is resumable: the next \
+                     process's census reclaims what is left before its recovery settles the \
+                     rest",
                     unresolved.join(", ")
                 ),
             }),
@@ -1389,8 +1521,8 @@ impl Coordinator<'_> {
             Some(Interrupt::Failed(error)) => {
                 if !unresolved.is_empty() {
                     self.run.warn(format!(
-                        "the Runner did not establish that the process of {} ended when its \
-                         pipeline was cancelled",
+                        "the Runner did not establish that the process of {} ended; its \
+                         registration and slot pair stay held for the rest of this process",
                         unresolved.join(", ")
                     ));
                 }
@@ -1476,11 +1608,11 @@ impl Registrar for Client {
         })
     }
 
-    fn ended(&self, invocation: &InvocationId, completed: bool) -> Result<(), UpstrokeError> {
+    fn ended(&self, invocation: &InvocationId, end: InvocationEnd) -> Result<(), UpstrokeError> {
         if self.send(ToCoordinator::Ended {
             pipeline: self.pipeline,
             invocation: invocation.clone(),
-            completed,
+            end,
         }) {
             Ok(())
         } else {
@@ -1519,23 +1651,6 @@ fn cancelled(invocation: &InvocationId) -> UpstrokeError {
             "`{invocation}` was not started: its pipeline was cancelled while it waited for the \
              coordinator"
         ),
-    }
-}
-
-fn unresolved_runner(error: &UpstrokeError) -> Option<String> {
-    match error {
-        UpstrokeError::Runner {
-            invocation, fate, ..
-        } if fate.is_unresolved() => Some(invocation.clone()),
-        _ => None,
-    }
-}
-
-fn unresolved_judge(error: &JudgeError) -> Option<String> {
-    match error {
-        JudgeError::Runner(error) if error.fate.is_unresolved() => Some(error.invocation.render()),
-        JudgeError::Runner(_) => None,
-        JudgeError::Other(error) => unresolved_runner(error),
     }
 }
 
@@ -2707,7 +2822,7 @@ mod tests {
                             pipeline: alpha,
                             invocation: AttemptIdentities::new(key, generation, AttemptNumber(1))
                                 .worker(),
-                            completed: true,
+                            end: InvocationEnd::Completed,
                         },
                         ToCoordinator::Verified {
                             pipeline: alpha,
@@ -2762,7 +2877,7 @@ mod tests {
                                 pipeline,
                                 invocation:
                                     AttemptIdentities::new(key, generation, attempt).worker(),
-                                completed: true,
+                                end: InvocationEnd::Completed,
                             }));
                             injected += 2;
                             return Some(Release::Injected);
@@ -2789,7 +2904,7 @@ mod tests {
                                         AttemptNumber(1),
                                     )
                                     .worker(),
-                                    completed: true,
+                                    end: InvocationEnd::Completed,
                                 })
                             );
                             return Some(Release::Injected);
@@ -5641,7 +5756,13 @@ mod tests {
             vec![1, 2],
             "the other two workers were cancelled"
         );
-        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        let gate = AttemptIdentities::new(TaskKey(0), GenerationId(0), AttemptNumber(1)).gate(0, 0);
+        settled_but(&mut wide.run, &[gate]).unwrap_or_else(|ledger| {
+            panic!(
+                "the gate whose process the Runner could not establish as ended keeps its \
+                 registration, and every other invocation is settled once: {ledger}"
+            )
+        });
         replay_equals_live(&wide);
     }
 
@@ -5664,6 +5785,708 @@ mod tests {
             error.to_string().contains("a pipeline panicked"),
             "the panic became the pipeline's completion: {error}"
         );
+        let gate = AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1)).gate(0, 0);
+        settled_but(&mut wide.run, &[gate]).unwrap_or_else(|ledger| {
+            panic!(
+                "the gate the panic unwound through never reported its end, so it keeps its \
+                 registration, and every other invocation is settled once: {ledger}"
+            )
+        });
+    }
+
+    fn settled_but(run: &mut TopologyRun, held: &[InvocationId]) -> Result<(), String> {
+        let ledger = run.broker_mut().invocations();
+        let mut running: Vec<String> = ledger.running().into_iter().map(str::to_owned).collect();
+        running.sort();
+        let mut expected: Vec<String> = held.iter().map(InvocationId::render).collect();
+        expected.sort();
+        let mut holders: Vec<String> = ledger
+            .slots()
+            .holders()
+            .into_iter()
+            .map(InvocationId::render)
+            .collect();
+        holders.sort();
+        let slotted: Vec<String> = held
+            .iter()
+            .filter(|invocation| crate::engine::topology::identity::is_slotted(invocation))
+            .map(InvocationId::render)
+            .collect();
+        let settled = ledger.completed() + ledger.cancelled();
+        if running != expected
+            || holders != slotted
+            || !ledger.pending().is_empty()
+            || !ledger.slots().pending().is_empty()
+            || settled + held.len() != ledger.registered()
+            || ledger.duplicates() != 0
+        {
+            return Err(format!(
+                "running {running:?} (expected {expected:?}), pair holders {holders:?}, pending \
+                 {:?}, registered {}, settled {settled}, duplicates {}",
+                ledger.pending(),
+                ledger.registered(),
+                ledger.duplicates()
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unresolved_end_keeps_its_pair_and_no_waiting_invocation_starts_on_it() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let alpha = AttemptIdentities::new(TaskKey(0), GenerationId(0), AttemptNumber(1)).worker();
+        let beta = AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1)).worker();
+        let base = wide_responder(&tasks, &[]);
+        let lost = alpha.clone();
+        let runner = RecordingRunner::new().answering(Box::new(move |request| {
+            if request.invocation == lost {
+                return Err(crate::runner::RunnerError::unresolved(
+                    &request.invocation,
+                    UpstrokeError::Refused {
+                        message: "the scaffold stopped supervising alpha's worker and could not \
+                                  establish that it ended"
+                            .to_owned(),
+                    },
+                ));
+            }
+            base(request)
+        }));
+        runner.hold();
+        let mut wide = Wide::started_with(
+            "coordinator-unresolved-pair",
+            &tasks,
+            2,
+            WidePlans::default(),
+            runner,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| worker(invocation) == Some(TaskKey(0)))
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines =
+            wide.env
+                .pipelines_limited(crate::engine::topology::scaffold::SlotLimitsOf::Exactly(
+                    1, 1,
+                ));
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("an unresolved process ends the command");
+        drop(scheduler);
+        assert!(
+            !wide
+                .env
+                .runner
+                .ran()
+                .iter()
+                .any(|ran| ran.invocation == beta),
+            "beta's worker never started on the pair alpha's unresolved process holds: {:?}",
+            wide.env.runner.endings()
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("could not establish that it ended"),
+            "the command ends with alpha's own error: {message}"
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"attempt_started"),
+            "nothing is appended for either attempt: {:?}",
+            kinds_of(&events)
+        );
+        settled_but(&mut wide.run, std::slice::from_ref(&alpha)).unwrap_or_else(|ledger| {
+            panic!("alpha's worker keeps its registration and its pair, beta's request is withdrawn: {ledger}")
+        });
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn an_unreported_end_keeps_its_pair_and_no_waiting_invocation_starts_on_it() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let alpha = AttemptIdentities::new(TaskKey(0), GenerationId(0), AttemptNumber(1)).worker();
+        let beta = AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1)).worker();
+        let runner = holding(&tasks, &[]);
+        runner.panic_when_released(alpha.clone());
+        let mut wide = Wide::started_with(
+            "coordinator-unreported-end",
+            &tasks,
+            2,
+            WidePlans::default(),
+            runner,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| worker(invocation) == Some(TaskKey(0)))
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines =
+            wide.env
+                .pipelines_limited(crate::engine::topology::scaffold::SlotLimitsOf::Exactly(
+                    1, 1,
+                ));
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("the panic ends the command");
+        drop(scheduler);
+        assert!(
+            !wide
+                .env
+                .runner
+                .ran()
+                .iter()
+                .any(|ran| ran.invocation == beta),
+            "beta's worker never started on the pair alpha's unreported invocation holds: {:?}",
+            wide.env.runner.endings()
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("a pipeline panicked") && message.contains("fell over"),
+            "alpha's own completion ends the command: {message}"
+        );
+        settled_but(&mut wide.run, std::slice::from_ref(&alpha)).unwrap_or_else(|ledger| {
+            panic!("alpha's worker keeps its registration and its pair, beta's request is withdrawn: {ledger}")
+        });
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_fatal_verification_completion_interrupts_on_receipt_without_waiting_for_the_snapshots() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+        ];
+        let plans = WidePlans {
+            panic_verifying: true,
+            ..WidePlans::default()
+        };
+        let mut wide = Wide::started_with(
+            "coordinator-fatal-verification",
+            &tasks,
+            3,
+            plans,
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut waited_after_arrival: Vec<Vec<InvocationId>> = Vec::new();
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                let verifying = view.run.fold().transaction().is_some();
+                let verification_live = view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }));
+                if verifying && !verification_live {
+                    waited_after_arrival.push(view.invoking.clone());
+                }
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(1)))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(2)))
+            }),
+        );
+        let error = drive(&mut wide, Some(&mut scheduler)).expect_err("the panic ends the command");
+        drop(scheduler);
+        assert!(
+            waited_after_arrival.is_empty(),
+            "the coordinator never waited, with the fatal completion received, for gamma's \
+             snapshot to drain: it waited at {waited_after_arrival:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("a pipeline panicked") && message.contains("fell over"),
+            "the verification's own error ends the command: {message}"
+        );
+        let review =
+            AttemptIdentities::new(TaskKey(2), GenerationId(0), AttemptNumber(1)).review_pass(0, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(review, crate::engine::topology::scaffold::Ending::Cancelled)),
+            "gamma's review, held when the panic arrived, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        let events = wide.env.durable_events();
+        assert_eq!(
+            kinds_of(&events).last(),
+            Some(&"merge_verification_started"),
+            "nothing is appended after the verification started: {:?}",
+            kinds_of(&events)
+        );
         assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    fn sibling_parked_on(
+        run: &TopologyRun,
+        root: TaskKey,
+        source: CandidateRef,
+    ) -> Vec<TopologyEventBody> {
+        use crate::topology::events::{
+            AttemptFinished4, AttemptSettlement, AttemptStarted4, FrozenQuestion, FrozenSpawn,
+            LeaseDisposition, LeaseGrant, SettlementTransition, SpawnAdmission, TaskDispatched,
+            TaskSpawned,
+        };
+        use crate::topology::registry::{Lineage, Origin, repair_display_id};
+        let fold = run.fold();
+        let registry = fold.registry().expect("a started run has a registry");
+        let key = TaskKey(u32::try_from(registry.len()).expect("a small registry"));
+        let parent = registry.get(root).expect("the root is registered").clone();
+        let mut entry = parent.clone();
+        entry.key = key;
+        entry.display_id =
+            crate::ir::TaskId::from(repair_display_id(1, &parent.display_id).as_str());
+        entry.origin = Origin::MergeRepair;
+        entry.deps = Vec::new();
+        entry.display_deps = Vec::new();
+        entry.lineage = Some(Lineage {
+            root,
+            parent: root,
+            index: 1,
+        });
+        let binding = fold.rung_binding(root, 0).expect("the root's first rung");
+        vec![
+            TopologyEventBody::TaskSpawned {
+                data: Box::new(TaskSpawned {
+                    spawn: FrozenSpawn {
+                        key,
+                        entry,
+                        admission: SpawnAdmission::Runnable,
+                    },
+                }),
+            },
+            TopologyEventBody::TaskDispatched {
+                data: TaskDispatched {
+                    key,
+                    generation: GenerationId(0),
+                    base_sha: source.commit_sha.clone(),
+                    worktree_path: format!("tasks/k{}-g0", key.0),
+                    lease: LeaseGrant::InheritedLineage { root },
+                    source_candidate: Some(source),
+                },
+            },
+            TopologyEventBody::AttemptStarted {
+                data: AttemptStarted4 {
+                    key,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    rung: 0,
+                    binding,
+                    pool: None,
+                    resume_session: None,
+                    materialization_observed: Some(crate::topology::events::Materialization::Clean),
+                },
+            },
+            TopologyEventBody::AttemptFinished {
+                data: Box::new(AttemptFinished4 {
+                    key,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    record: Box::new(crate::events::AttemptRecord {
+                        attempt: 1,
+                        tier: "mid".to_owned(),
+                        model: "scaffold-model".to_owned(),
+                        pool: None,
+                        resumed: false,
+                        duration: Duration::from_millis(5),
+                        cost_usd: Some(0.0),
+                        reviews: Vec::new(),
+                        session_id: None,
+                        usage: None,
+                        failure: Some(crate::events::FailureRecord {
+                            kind: crate::ladder::FailureKind::NeedsHuman,
+                            origin: crate::ladder::FailureOrigin::Worker,
+                            reason: "the sibling asks which of two formats to keep".to_owned(),
+                            detail: None,
+                        }),
+                    }),
+                    settlement: AttemptSettlement::Closed {
+                        transition: SettlementTransition::Parked {
+                            question: FrozenQuestion {
+                                id: crate::ir::QuestionId("sibling".to_owned()),
+                                key,
+                                kind: crate::ir::QuestionKind::Clarify,
+                                context: "the sibling asks which of two formats to keep".to_owned(),
+                                options: vec!["keep the first".to_owned()],
+                            },
+                        },
+                        lease: LeaseDisposition::LineageHeld,
+                    },
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_declined_embedded_question_stops_the_verification_its_lineage_had_started() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+        ];
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-declined-verification",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                let verifying = view
+                    .live
+                    .iter()
+                    .any(|(_, identity)| matches!(identity, Identity::Verification { .. }));
+                if verifying && planted.is_none() {
+                    let source = view
+                        .run
+                        .fold()
+                        .transaction()
+                        .map(|open| open.candidate.clone())
+                        .expect("beta's candidate is being verified");
+                    planted = Some(sibling_parked_on(view.run, TaskKey(1), source));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    arming.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return released(view, |invocation| attempt_key(invocation) == Some(2))
+                        .or_else(|| {
+                            released(view, |invocation| {
+                                matches!(invocation, InvocationId::Sequence { .. })
+                            })
+                        });
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(1)).or_else(|| {
+                    released(view, |invocation| {
+                        matches!(invocation, InvocationId::Sequence { .. })
+                    })
+                })
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let first = SequenceId(1);
+        assert!(
+            !events.get(decline..).unwrap_or_default().iter().any(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeVerificationUnavailable { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeVerificationInterrupted { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergePrepared { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeRejected { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::TaskMerged { data } if data.sequence == first)
+            }),
+            "nothing is appended for the cancelled verification after the decline: {kinds:?}"
+        );
+        let gate = SequenceIdentities::new(first).gate(0, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(gate, crate::engine::topology::scaffold::Ending::Cancelled)),
+            "the verification's gate, held when the decline was ingested, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        assert!(
+            wide.run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("no longer holds its transaction open")),
+            "{:?}",
+            wide.run.warnings()
+        );
+        assert_eq!(
+            count(&events, "task_merged"),
+            2,
+            "alpha and gamma merge; beta's lineage failed: {kinds:?}"
+        );
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_declined_embedded_question_stops_a_running_sibling_attempt() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-declined-sibling",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let arming = std::sync::Arc::clone(&armed);
+        let head = wide.env.head(&wide.run);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(move |view: &Quiescent<'_>| {
+                let beta_held = view
+                    .invoking
+                    .iter()
+                    .any(|invocation| worker(invocation) == Some(TaskKey(1)));
+                if beta_held && planted.is_none() {
+                    let source = CandidateRef {
+                        key: TaskKey(1),
+                        generation: GenerationId(0),
+                        commit_sha: crate::topology::events::CommitSha(head.clone()),
+                        candidate_ref: crate::topology::events::GitRef(
+                            "refs/upstroke/planted/sibling-source".to_owned(),
+                        ),
+                    };
+                    planted = Some(sibling_parked_on(view.run, TaskKey(1), source));
+                }
+                if let Some(events) = planted.as_mut() {
+                    if !events.is_empty() {
+                        return Some(Release::Append(Box::new(events.remove(0))));
+                    }
+                    arming.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(1)))
+                    .or_else(|| {
+                        released(view, |invocation| {
+                            matches!(invocation, InvocationId::Sequence { .. })
+                        })
+                    })
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let beta = AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1));
+        assert!(
+            wide.env.runner.endings().contains(&(
+                beta.worker(),
+                crate::engine::topology::scaffold::Ending::Cancelled
+            )),
+            "beta's worker, held when the decline was ingested, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        assert!(
+            !wide
+                .env
+                .runner
+                .ran()
+                .iter()
+                .any(|ran| attempt_key(&ran.invocation) == Some(1)
+                    && ran.invocation != beta.worker()),
+            "no gate or review of beta's closed generation ever started: {:?}",
+            wide.env.runner.endings()
+        );
+        let events = wide.env.durable_events();
+        assert!(
+            !events.iter().any(|event| matches!(&event.body,
+                TopologyEventBody::CandidatePrepared { data } if data.key == TaskKey(1))),
+            "beta's late result was never settled: {:?}",
+            kinds_of(&events)
+        );
+        assert_eq!(count(&events, "task_merged"), 1, "{:?}", kinds_of(&events));
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    fn bounded(what: &'static str, body: impl FnOnce() + Send + 'static) {
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("coordinator-bounded")
+            .to_owned();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                body();
+                let _ = done.send(());
+            })
+            .expect("a thread for the bounded scenario");
+        match finished.recv_timeout(BOUND) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "{what} did not end within {BOUND:?}: the coordinator waited on its inbox for a \
+                 pipeline that was itself waiting on the coordinator"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{what} failed; its own panic is reported above")
+            }
+        }
+    }
+
+    #[test]
+    fn a_halt_answers_a_request_its_intake_still_buffers() {
+        bounded("the halted run", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let runner = RecordingRunner::new().answering(
+                crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[0]),
+            );
+            runner.hold();
+            let mut wide = Wide::started_with(
+                "coordinator-halt-buffered",
+                &tasks,
+                2,
+                WidePlans::default(),
+                runner,
+            );
+            halting(&mut wide.env);
+            wide.env.answers =
+                std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(
+                &runner,
+                Box::new(move |view: &Quiescent<'_>| {
+                    let parked = view
+                        .run
+                        .fold()
+                        .open_questions()
+                        .is_some_and(|open| !open.is_empty());
+                    if !parked {
+                        return released(view, |invocation| worker(invocation) == Some(TaskKey(0)));
+                    }
+                    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    released(view, |invocation| attempt_key(invocation) == Some(1))
+                }),
+            );
+            let progress = drive(&mut wide, Some(&mut scheduler)).expect("the halt ends the run");
+            drop(scheduler);
+            assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+            let events = wide.env.durable_events();
+            let kinds = kinds_of(&events);
+            assert_eq!(
+                count(&events, "attempt_interrupted"),
+                1,
+                "beta, whose snapshot request was buffered when the halt cancelled it, is settled \
+                 interrupted: {kinds:?}"
+            );
+            assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+            replay_equals_live(&wide);
+        });
+    }
+
+    #[test]
+    fn a_stop_answers_a_request_its_intake_still_buffers() {
+        bounded("the run with a stopped verification", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut wide = Wide::started_with(
+                "coordinator-stop-buffered",
+                &tasks,
+                3,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            wide.env.answers =
+                std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut planted: Option<Vec<TopologyEventBody>> = None;
+            let mut scheduler = Scheduler::scripted(
+                &runner,
+                Box::new(move |view: &Quiescent<'_>| {
+                    if count(view.run.events(), "task_merged") == 0 {
+                        return released(view, |invocation| attempt_key(invocation) == Some(0));
+                    }
+                    let verifying = view
+                        .live
+                        .iter()
+                        .any(|(_, identity)| matches!(identity, Identity::Verification { .. }));
+                    if verifying && planted.is_none() {
+                        let source = view
+                            .run
+                            .fold()
+                            .transaction()
+                            .map(|open| open.candidate.clone())
+                            .expect("beta's candidate is being verified");
+                        planted = Some(sibling_parked_on(view.run, TaskKey(1), source));
+                    }
+                    if let Some(events) = planted.as_mut() {
+                        if !events.is_empty() {
+                            return Some(Release::Append(Box::new(events.remove(0))));
+                        }
+                        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    released(view, |invocation| attempt_key(invocation) == Some(1)).or_else(|| {
+                        released(view, |invocation| {
+                            matches!(invocation, InvocationId::Sequence { .. })
+                        })
+                    })
+                }),
+            );
+            let progress = drive(&mut wide, Some(&mut scheduler))
+                .expect("the decline fails beta's lineage and the run goes on to its end");
+            drop(scheduler);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                !wide.env.runner.ran().iter().any(
+                    |ran| matches!(ran.invocation, InvocationId::Sequence { role, .. }
+                        if role != crate::runner::invocation::SequenceRole::Gate(0))
+                ),
+                "the verification's review, requested before the decline and applied after it, \
+                 never started: {:?}",
+                wide.env.runner.endings()
+            );
+            assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+            replay_equals_live(&wide);
+        });
     }
 }

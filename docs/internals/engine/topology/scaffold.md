@@ -324,7 +324,8 @@ admitted, and the waker of the future that last polled it.
 ## `struct Control {`
 
 The runner's control state behind one lock: the declared policy, whether
-invocations are held, whether calls enter late and which are barred, the calls
+invocations are held, whether calls enter late and which are barred, which
+answer unresolved when cancelled and which panic when released, the calls
 waiting at the door, the probe failures still owed, the held invocations, the
 endings, and how many completions were refused. `changed` (a `Condvar` on the
 same lock) is notified whenever an invocation reaches or leaves the door, starts
@@ -424,6 +425,13 @@ grants, so each process starts, and reads the log it records, while the
 coordinator waits. It needs a holding runner: a call answered at once is never
 inside.
 
+## `impl RecordingRunner` › `pub(super) fn panic_when_released(&self, invocation: InvocationId) {`
+
+When this held invocation is released, its future panics on the pipeline's
+thread as it hands back the delivered result, so the Runner call unwinds and its
+caller never reports the end: the position in which a coordinator must not
+release what the pipeline held (the working record's §13, round R1).
+
 ## `impl RecordingRunner` › `pub(super) fn unresolved_when_cancelled(&self, invocation: InvocationId) {`
 
 When this invocation's call is cancelled while held, answer it with a Runner
@@ -477,9 +485,10 @@ one.
 
 ## `impl RecordingRunner` › `fn settle_held(`
 
-A later poll of a held invocation: hand back a delivered result, or end the
-invocation cancelled if its call's cancellation fired (registering the waker
-first, so a cancel racing the poll is never lost), or store the waker and wait.
+A later poll of a held invocation: hand back a delivered result (or panic, for
+an invocation `panic_when_released` names), or end the invocation cancelled if
+its call's cancellation fired (registering the waker first, so a cancel racing
+the poll is never lost), or store the waker and wait.
 
 ## `impl RecordingRunner` › `fn abandon(&self, invocation: &InvocationId) {`
 
@@ -1119,7 +1128,10 @@ dependencies and path hints as given, and one acceptance line each.
 
 The attempt and verification plans a width-N run uses: how many gates and
 reviewers each attempt and each verification has, and the pool its agent
-slots come from.
+slots come from. `panic_verifying` makes every verification's plan panic, on the
+verification pipeline's thread, as its body starts: a fatal completion the
+coordinator must classify as it arrives (round R1, the early review's
+`R1-CONC-2`).
 
 ## `pub(super) fn wide_responder(tasks: &[WideTask], failing_gates: &[(u32, u32)]) -> Responder {`
 

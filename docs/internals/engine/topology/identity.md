@@ -541,6 +541,16 @@ The invocation ledger
 What a registration came to: runnable at once without slots (a gate, the
 shell probe), granted its pair, or waiting for it.
 
+## `pub enum InvocationEnd {`
+
+How a registered invocation's Runner call ended, as its registrar reports it:
+completed, or failed with the process fate the Runner established and its own
+account of the failure. `of` reads it from the call's result. What it adds to a
+bare "completed or not" is whether the process is known to be gone: a failed
+call whose fate is `Unresolved` (`unresolved`) names a process that may still
+run, which R3 and R4 may not release (round R1 of the PR11 record, the early
+review's `R1-CONC-1`).
+
 ## `enum Registration {`
 
 What an invocation's registration is currently: waiting for its pair,
@@ -648,6 +658,26 @@ duplicate is counted, not refused.
 
 [`UpstrokeError::Refused`] when `invocation` was never registered.
 
+## `impl InvocationLedger` › `pub fn end(`
+
+Settle `invocation` by how its Runner call ended ([`InvocationEnd`]):
+completed; cancelled when the Runner established that no process of it runs
+(it never started, or it is gone); and, when the Runner could not establish
+that, **not settled** — the registration stays running and keeps its pair
+(`keep`), because `permits.protocol` cancels a granted invocation only "after
+the Runner terminated its process or container", and for an unresolved process
+that is this process's death (R3 and R4, `NoRunFinished`: "released (process
+death; empty at restart)"). Nothing is granted on the pair, and
+[`Self::balances`] stays false while it is held. Both registrars settle through
+it, so the synchronous substrate holds an unresolved invocation too; there it
+changes nothing a caller sees but the balance, since the unresolved error ends
+the command and nothing waits on that ledger.
+
+### Errors
+
+As [`Self::complete`] and [`Self::cancel`]; an unresolved end of an invocation
+still waiting for its pair is refused, since no process of it ran.
+
 ## `impl InvocationLedger` › `pub fn cancel_all_running(&mut self) -> usize {`
 
 Cancel every registration still in flight, returning how many.
@@ -656,7 +686,12 @@ Waiting requests are withdrawn first and all together, so no pending one is
 granted on the way out; then every running one is cancelled and its pair
 released. The append-error protocol's "in-flight invocations are cancelled
 through the Runner" — this is the ledger half of that; the Runner half is
-the caller's.
+the caller's. It is the one release of a granted invocation before its
+termination is established (the working record's R-AI, and round R1's class
+search): nothing can be granted after it, because the pending requests went
+first and the fold is poisoned, and each pipeline's own end report after its
+process ends is a counted duplicate — an unresolved one included, which the
+coordinator still records.
 
 ## `impl InvocationLedger` › `pub fn withdraw_pending(&mut self) -> usize {`
 
@@ -697,7 +732,9 @@ How many registrations were ever made, settled or not.
 ## `impl InvocationLedger` › `pub fn balances(&self) -> bool {`
 
 Whether every registration was settled and the slot table balances — the
-process-end condition for R3 and R4 together.
+process-end condition for R3 and R4 together. An invocation held after an
+unresolved end ([`Self::end`]) is still running, so a ledger holding one does
+not balance: it balances once process death releases it.
 
 ## `impl InvocationLedger` › `pub fn running(&self) -> Vec<&str> {`
 

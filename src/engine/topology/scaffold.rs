@@ -461,6 +461,7 @@ struct Control {
     late: bool,
     barred: Vec<InvocationId>,
     unresolved: Vec<InvocationId>,
+    panicking: Vec<InvocationId>,
     doors: Vec<Door>,
     failing: Vec<(ProbeTarget, ProbeFailure)>,
     held: Vec<Held>,
@@ -609,6 +610,10 @@ impl RecordingRunner {
 
     pub(super) fn unresolved_when_cancelled(&self, invocation: InvocationId) {
         self.control().unresolved.push(invocation);
+    }
+
+    pub(super) fn panic_when_released(&self, invocation: InvocationId) {
+        self.control().panicking.push(invocation);
     }
 
     pub(super) fn bar(&self, invocation: InvocationId) {
@@ -890,6 +895,10 @@ impl RecordingRunner {
         if let Some(result) = delivered {
             control.held.remove(index);
             self.changed.notify_all();
+            if control.panicking.contains(invocation) {
+                drop(control);
+                panic!("the scaffold's runner fell over as `{invocation}` ended");
+            }
             return Poll::Ready(result);
         }
         if cancellation.register(waker) {
@@ -2301,6 +2310,7 @@ pub(super) struct WidePlans {
     pub(super) verify_gates: usize,
     pub(super) verify_reviewers: usize,
     pub(super) pool: Option<String>,
+    pub(super) panic_verifying: bool,
 }
 
 impl WidePlans {
@@ -2407,6 +2417,10 @@ impl super::attempt::AttemptPlans for WidePlans {
         &self,
         _request: &super::attempt::VerificationRequest<'_>,
     ) -> Result<super::attempt::VerificationPlan, UpstrokeError> {
+        assert!(
+            !self.panic_verifying,
+            "the scaffold's verification plan fell over"
+        );
         Ok(super::attempt::VerificationPlan {
             gates: Self::gate_plans(self.verify_gates),
             reviewers: self.reviewer_plans(self.verify_reviewers),
@@ -2422,6 +2436,7 @@ impl Default for WidePlans {
             verify_gates: 1,
             verify_reviewers: 1,
             pool: None,
+            panic_verifying: false,
         }
     }
 }

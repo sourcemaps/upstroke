@@ -7262,6 +7262,78 @@ fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
     );
 }
 
+/// The early review's `R1-REG-1` (the PR11 record, §13, round R1): the removal
+/// held the registry lock across the whole funnel, `Before` and `After` hooks
+/// included, and `worktree_records` takes the same lock, so an observer that
+/// lists the worktrees from either hook waited for ever on the thread that
+/// called it. The removal runs on a thread of its own and is waited for a
+/// bounded time, so the regression fails here instead of hanging the suite; the
+/// thread it would leave blocked holds only this fixture's repository's lock.
+#[test]
+fn an_observer_lists_the_worktrees_from_both_hooks_of_a_removal() {
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+    type Seen = Vec<(HookPhase, Result<usize, String>)>;
+
+    struct Listing {
+        manager: WorkspaceManager,
+        site: EffectSiteId,
+        seen: Seen,
+    }
+
+    impl EffectHooks for Listing {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == self.site {
+                let listed = self
+                    .manager
+                    .worktree_records()
+                    .map(|records| records.len())
+                    .map_err(|error| error.to_string());
+                self.seen.push((phase, listed));
+            }
+            Injection::Proceed
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let fixture = Fixture::created("list-from-removal-hooks");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let mut hooks = Listing {
+        manager: fixture.manager.clone(),
+        site: slot.remove_site(),
+        seen: Vec::new(),
+    };
+    let manager = fixture.manager.clone();
+    let (done, finished) = std::sync::mpsc::channel::<(Result<(), String>, Seen)>();
+    std::thread::spawn(move || {
+        let removed = manager
+            .remove_worktree(&mut hooks, &slot)
+            .map_err(|error| error.to_string());
+        let _ = done.send((removed, hooks.seen));
+    });
+    let (removed, seen) = finished.recv_timeout(BOUND).unwrap_or_else(|_| {
+        panic!(
+            "the removal did not return within {BOUND:?}: an observer listing the worktrees from \
+             its hook waits on the registry lock its own caller holds"
+        )
+    });
+    removed.expect("the removal completes");
+    assert_eq!(
+        seen,
+        vec![(HookPhase::Before, Ok(2)), (HookPhase::After, Ok(1))],
+        "the `Before` hook lists the base checkout and the slot, the `After` hook the base \
+         checkout alone"
+    );
+    assert_eq!(
+        fixture.manager.intents().expect("intents").len(),
+        1,
+        "the removal leaves the slot's intent for its caller to remove"
+    );
+}
+
 #[test]
 fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
     let fixture = Fixture::created("snapshot-clauses");

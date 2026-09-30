@@ -14,7 +14,7 @@ use crate::runner::{
 };
 use crate::topology::events::RunnerPolicy;
 
-use super::identity::{InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
+use super::identity::{InvocationEnd, InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
 use super::select::Standing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +174,7 @@ pub trait Registrar: Sync {
         slots: Option<(SlotPair, Standing)>,
     ) -> Result<(), UpstrokeError>;
 
-    fn ended(&self, invocation: &InvocationId, completed: bool) -> Result<(), UpstrokeError>;
+    fn ended(&self, invocation: &InvocationId, end: InvocationEnd) -> Result<(), UpstrokeError>;
 
     fn snapshot_begin(&self) -> Result<(), UpstrokeError> {
         Ok(())
@@ -203,14 +203,10 @@ impl<L: BorrowMut<InvocationLedger> + Send> Registrar for Mutex<L> {
         )
     }
 
-    fn ended(&self, invocation: &InvocationId, completed: bool) -> Result<(), UpstrokeError> {
+    fn ended(&self, invocation: &InvocationId, end: InvocationEnd) -> Result<(), UpstrokeError> {
         let mut guard = self.lock().unwrap_or_else(PoisonError::into_inner);
         let ledger: &mut InvocationLedger = (*guard).borrow_mut();
-        if completed {
-            ledger.complete(invocation).map(drop)
-        } else {
-            ledger.cancel(invocation).map(drop)
-        }
+        ledger.end(invocation, &end).map(drop)
     }
 }
 
@@ -345,7 +341,7 @@ impl<R: Registrar + ?Sized> Registering<'_, R> {
             Err(failure) => RunnerError::new(&request.invocation, failure.fate, error),
         };
         self.registrar
-            .ended(&request.invocation, outcome.is_ok())
+            .ended(&request.invocation, InvocationEnd::of(&outcome))
             .map_err(settled)?;
         if outcome.is_ok() {
             self.completed.fetch_add(1, Ordering::Relaxed);

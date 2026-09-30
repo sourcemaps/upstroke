@@ -1240,13 +1240,15 @@ coordinator genuinely lost. A pair the substrate cannot be granted is not a
 lost process; it is a process that never started, and reporting it as a leak
 would spend a real signal on a bookkeeping mistake.
 
-## `impl AttemptContext<'_>` › `Ok(output) => {`
+## `impl Judge<'_> {` › `.ended(&request.invocation, InvocationEnd::of(&outcome))`
 
 `permits.protocol` settles an invocation exactly once, and the
-two settlements are not interchangeable: a process the Runner
-could not start or supervise never completed, and recording it as
-completed would put a failure in the ledger under the name of a
-success.
+settlements are not interchangeable: a process the Runner could not
+start or supervise never completed, and recording it as completed would
+put a failure in the ledger under the name of a success; and a process
+whose end the Runner could not establish is not settled at all, but
+kept with its pair (`InvocationEnd`, round R1 of the PR11 record). The
+registrar is told how the call ended, not merely whether it succeeded.
 
 ## `impl AttemptContext<'_>` › `fn pair_for(`
 
@@ -1486,10 +1488,13 @@ answers to, or a review pass that could not be run.
 ## `impl Judge<'_> {` › `fn execute_typed(`
 
 [`Self::execute`], telling a Runner error apart from a registration or slot
-refusal: the Runner's own `Err` is [`JudgeError::Runner`], ended through the
-registrar as a cancellation exactly as before. The in-memory registration
-is cancelled whatever the fate: the ledger is this process's, and a process
-the Runner could not resolve is the next incarnation's census to reclaim.
+refusal: the Runner's own `Err` is [`JudgeError::Runner`]. Either way the call
+is ended through the registrar with how it ended (`InvocationEnd::of`), so the
+fate the Runner established reaches the ledger: an error whose fate says the
+process is gone cancels the registration, and one whose fate is unresolved keeps
+it and its pair, since nothing established that the process ended (round R1 of
+the PR11 record, the early review's `R1-CONC-1`; on a pipeline, the coordinator
+also stops everything).
 
 ## `pub trait ReviewAccount {`
 

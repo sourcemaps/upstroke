@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroU32;
 
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::runner::invocation::{AttemptRole, SequenceRole};
-use crate::runner::{AgentId, InvocationId, ProbeTarget};
+use crate::runner::{AgentId, InvocationId, ProbeTarget, RunnerError};
 use crate::topology::events::{AttemptNumber, GenerationId, SequenceId};
 use crate::topology::registry::TaskKey;
 
@@ -662,6 +662,36 @@ pub enum Admission {
     Pending,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvocationEnd {
+    Completed,
+    Failed { fate: ProcessFate, detail: String },
+}
+
+impl InvocationEnd {
+    #[must_use]
+    pub fn of<T>(outcome: &Result<T, RunnerError>) -> Self {
+        match outcome {
+            Ok(_) => Self::Completed,
+            Err(error) => Self::Failed {
+                fate: error.fate,
+                detail: error.to_string(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn unresolved(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                fate: ProcessFate::Unresolved,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Registration {
     Pending,
@@ -820,6 +850,40 @@ impl InvocationLedger {
         invocation: &InvocationId,
     ) -> Result<Vec<InvocationId>, UpstrokeError> {
         self.settle(invocation, Settlement::Cancelled)
+    }
+
+    pub fn end(
+        &mut self,
+        invocation: &InvocationId,
+        end: &InvocationEnd,
+    ) -> Result<Vec<InvocationId>, UpstrokeError> {
+        match end {
+            InvocationEnd::Completed => self.complete(invocation),
+            InvocationEnd::Failed { .. } if end.unresolved() => self.keep(invocation),
+            InvocationEnd::Failed { .. } => self.cancel(invocation),
+        }
+    }
+
+    fn keep(&mut self, invocation: &InvocationId) -> Result<Vec<InvocationId>, UpstrokeError> {
+        let key = invocation.render();
+        let Some(entry) = self.entries.get(&key) else {
+            return Err(UpstrokeError::Refused {
+                message: format!("`{key}` was settled without ever being registered"),
+            });
+        };
+        match entry.state {
+            Registration::Running => Ok(Vec::new()),
+            Registration::Completed | Registration::Cancelled => {
+                self.duplicates = self.duplicates.saturating_add(1);
+                Ok(Vec::new())
+            }
+            Registration::Pending => Err(UpstrokeError::Refused {
+                message: format!(
+                    "`{key}` is still waiting for its slot pair, so no process of it ran and none \
+                     can have been left unresolved"
+                ),
+            }),
+        }
     }
 
     fn settle(

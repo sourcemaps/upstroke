@@ -231,7 +231,9 @@ pipeline's standing read from the fold by the judge that built the boundary.
 
 Where an invocation of an attempt, a verification or a pre-flight is admitted
 (`admit`: registered, and granted its `{agent, pool?}` pair when it is slotted)
-and ended (`ended`: completed or cancelled, which releases the pair), and where
+and ended (`ended`: with how its Runner call ended, `InvocationEnd` — completed
+or cancelled, which releases the pair, or kept with it when the Runner could not
+establish that the process ended), and where
 an attempt asks for and reports its snapshots (`snapshot_begin`,
 `snapshot_end`; no-ops by default). One trait, so that the one registering
 boundary below and the judge's own calls reach the broker through the same
@@ -353,6 +355,7 @@ the assertion rather than inventing a name for it.
 
 ## `impl<R: Registrar + ?Sized> Registering<'_, R>` › `fn settle(`
 
-Everything after the inner run: complete the registration on an output or
-cancel it on an error, exactly once, which releases its pair. A settlement
-failure carries the inner outcome's fate.
+Everything after the inner run: end the registration exactly once with how the
+inner run ended (`InvocationEnd::of`) — completed on an output, cancelled on an
+error whose fate establishes the process gone, kept with its pair when the fate
+is unresolved. A settlement failure carries the inner outcome's fate.

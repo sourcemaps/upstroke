@@ -18,9 +18,10 @@ It is additive: `step`, `resumed` and `RunSeams` keep their signatures, and noth
 calls this entry yet — `upstroke run` still writes schema 3, and a schema-4 run is reachable only
 from tests until PR12.
 
-The readings this module implements are the working record's R-R to R-AD
-(`reviews/2026-09-30-pr11-record.md`, "Phase 3's readings"); the sections below name them where
-they bind.
+The readings this module implements are the working record's R-R to R-AL
+(`reviews/2026-09-30-pr11-record.md`, "Phase 3's readings" and "Phase 4's readings"), as the
+early review's repairs (§13, round R1) corrected them; the sections below name them where they
+bind.
 
 ### Threads (R-R)
 
@@ -71,6 +72,30 @@ pipeline whose Runner could not establish that its process ended keeps the closu
 command ends resumably and names it. A shutdown cancels and drains the same way and appends
 nothing. An append error runs the protocol in `emit.rs` and ends the command with its report.
 
+### What an end establishes, and what closes an identity (round R1)
+
+The early review of phases 0–3 (the working record's §13, round R1) found the coordinator acting on
+less than it had been told. As repaired:
+
+- **An invocation is released only when its end established that its process is gone.** `Ended`
+  carries the Runner's process fate (`InvocationEnd`). An invocation whose Runner could not
+  establish that its process ended (`ProcessFate::Unresolved`), or whose pipeline never reported
+  its end (a panic unwound through the Runner call), keeps its registration and its slot pair for
+  the rest of this process, so nothing is granted on them — R3 and R4 release a granted invocation
+  after its termination, and for such a process that is this process's death — and it interrupts
+  the command at once, which cancels every live pipeline and withdraws every request that could
+  otherwise wait for that pair for ever (`R1-CONC-1`).
+- **A fatal completion interrupts as it is received**, inside `verify` as outside. A verification's
+  completion is mapped at receipt by the width-1 mapping (`verified`); an error ends the command
+  there and then, and only an accepted result waits for the snapshot drain its terminal needs
+  (`R1-CONC-2`).
+- **Every admission pass first stops each pipeline whose identity the fold has closed** — a decline
+  that does not halt fails its lineage, and so does a lineage member's failed settlement — and
+  `verify` unwinds when its transaction disappears, abandoning the integration without ending the
+  command (`R1-CONC-3`).
+- **A verification's review spend is charged when its completion is accepted**, before the next
+  selection (phase 4; `R1-CONC-4`).
+
 ## `pub type HooksFactory = Arc<dyn Fn() -> Box<dyn TopologyHooks + Send> + Send + Sync>;`
 
 Each pipeline's own hooks, made for it at spawn: a pipeline's effects go through hooks it owns,
@@ -116,7 +141,10 @@ stale, and is discarded.
 The protocol's messages. `Admit` and `SnapshotBegin` are requests, answered on their `reply`;
 `Ended` and `SnapshotEnd` are notifications; `Judged` and `Verified` are a pipeline's completion,
 its last message; `Shutdown` is the command's (a test's, until PR12 wires signals). A `Judged`
-outcome is boxed because a judgement is large and the channel's other messages are small.
+outcome is boxed because a judgement is large and the channel's other messages are small. `Ended`
+carries how the invocation's Runner call ended (`InvocationEnd`): completed, or failed with the
+process fate the Runner established and its account of why — which is what tells a process that is
+gone from one that may still run (round R1, `R1-CONC-1`).
 
 ## `pub trait Quiescence {`
 
@@ -136,7 +164,15 @@ a run.
 ## `pub enum Release {`
 
 The observer's choice: one held invocation to let finish (the observer delivers its result before
-it returns), a message it injected, or nothing — which ends the command as stuck.
+it returns), a message it injected, an event to append, or nothing — which ends the command as
+stuck.
+
+`Append` plants a recorded event: the coordinator appends it through its own emitter, every fold
+check applying, as a transition it made, and carries on. The live engine of this build does not
+reach every state the fold admits — it spawns a repair only from a rejection and never runs two
+members of one lineage at once — and the coordinator must still handle what the fold admits, so the
+tests that need such a state (a sibling repair's embedded question, round R1's `R1-CONC-3`) plant it
+at a quiescent point. Production passes no observer.
 
 ## `pub struct Quiescent<'a> {`
 
@@ -227,7 +263,8 @@ and the loop ends through [`Self::finish`].
 ## `impl Coordinator<'_>` › `fn admit(&mut self) -> Result<(), UpstrokeError> {`
 
 Select and start until selection has nothing to start now. Each pass reads the fold afresh
-(INV-21): a poisoned fold refuses; an ending run stops admission — a halt with pipelines live
+(INV-21): a poisoned fold refuses; every pipeline whose identity the fold no longer holds open is
+stopped (`reconcile`), before anything else is decided; an ending run stops admission — a halt with pipelines live
 cancels them, a budget stop lets them drain (R-AC); a draining gate waits; an answer ingested
 restarts the pass. Then `admitted()` — the one selection `step` makes too — and its arm: a budget
 breach appended, an integration run, a retry or a dispatch started and spawned. Backoff, hard block
@@ -244,7 +281,12 @@ integration takes no reservation: the gate closes, admission stops, messages are
 no attempt snapshot is live selection runs afresh (an answer ingested meanwhile can put another
 candidate at the head of the queue). A fast integration never reclaims and does not wait. `false`
 ends the admission pass: nothing was started, or the command is already ending — an error the
-interrupt already accounts for is not a second error.
+interrupt already accounts for is not a second error. A verification abandoned because the fold
+cancelled its transaction (`abandoned`) ends the integration without ending the command:
+`integrate()` appends nothing after `verify`'s error, and admission goes on. Its staging worktree,
+pin and snapshots are left for the terminal finalization or the next resume's reclaim, which remove
+any staging and pin no open transaction owns; the snapshots are its own sequence's, and a later
+stale integration's reclaim takes them too.
 
 ## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -269,19 +311,25 @@ review passes come back with its completion and are charged by the coordinator.
 The coordinator's `verify`, re-entrant (R-V): the frozen `integrate()` calls
 [`Verification::verify`] on the [`DrivenJournal`], which lands here. It spawns the verification
 and keeps running the loop — admission, settlements, dispatch, promotion — until the
-verification's completion arrives and no attempt snapshot is live, then charges the passes and maps
-the outcome through [`verified`], the width-1 mapping. The gate grants during the verification and
-stops granting once its completion has arrived, so every snapshot the reclaim that follows removes
-is the integration's own.
+verification's result has been accepted and no attempt snapshot is live, then returns it as it was
+mapped at receipt ([`verified`], the width-1 mapping; the passes were charged there too). A fatal
+completion never waits for the drain: it interrupts as it is received (round R1, `R1-CONC-2`). The
+gate grants during the verification and stops granting once its result has arrived, so every
+snapshot the reclaim that follows removes is the integration's own. When the fold stops holding
+the transaction open — a decline, or a lineage member's failed settlement, failed its lineage — the
+admission pass has stopped the verification; `verify` waits for its pipeline to end and returns an
+error that abandons the integration (`R1-CONC-3`), so it never waits on an inbox its verification
+will not write to.
 
 ### Errors
 
 A refusal when asked inside another verification (one transaction is open at a time); the
 verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
 it — the pipeline was cancelled, and `integrate()` appends nothing further for it. The sequence is
-recorded as cancelled, whether or not its completion had already arrived, so a halt's closure
-settles the transaction with `merge_verification_interrupted` (R-AF); an arrived completion whose
-Runner left its process unresolved is recorded as such, and keeps the closure out.
+recorded as cancelled, whether or not its result had already arrived, so a halt's closure settles
+the transaction with `merge_verification_interrupted` (R-AF). And, when the fold no longer holds
+the transaction open, a refusal naming the abandonment, which `integrate` reads through `abandoned`
+and does not treat as the command's end.
 
 ## `impl Coordinator<'_>` › `fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {`
 
@@ -315,53 +363,100 @@ release frees alike.
 
 ## `impl Coordinator<'_>` › `fn end_invocation(`
 
-A pipeline's `Ended`: completed or cancelled in the broker, and whatever that frees granted. An end
-from a pipeline that is not live, for an invocation its identity does not own, or for an invocation
-it is not running and the ledger never settled, is discarded and counted, and releases nothing.
+A pipeline's `Ended`: settled in the broker by its fate (`PermitBroker::end`) — completed; cancelled
+when the Runner established that no process of it runs; kept, registration and pair, when it could
+not — and whatever that frees granted. An unresolved end of the invocation the pipeline is running
+is then held (`hold_unresolved`). An end from a pipeline that is not live, for an invocation its
+identity does not own, or for an invocation it is not running and the ledger never settled, is
+discarded and counted, and releases nothing.
+
+## `impl Coordinator<'_>` › `fn hold_unresolved(&mut self, invocation: &InvocationId, cause: String) {`
+
+An invocation whose Runner could not establish that its process ended — its end was unresolved, or
+its pipeline ended without reporting it — keeps its registration and its slot pair for the rest of
+this process (R3, R4: released after termination, which for it is this process's death), so nothing
+is granted on them. It is recorded in `unresolved`, and unless the command is already ending it is
+the interrupt: admission stops and every live pipeline is cancelled at once, which also withdraws
+every request waiting for a pair, so no request waits for ever on the pair that is never released.
+The command ends resumably and the next process's census reclaims what is left (round R1,
+`R1-CONC-1`). The phase-3 shape settled such an end as a cancellation, released the pair, and could
+grant it to a waiting invocation whose process then started beside one that might still run.
 
 ## `impl Coordinator<'_>` › `fn begin_snapshot(`
 
 A pipeline's `SnapshotBegin`: refused when injected, when the pipeline is not live or is being
 cancelled, or when the command is ending; granted at once when the gate grants; queued otherwise.
 
-## `impl Coordinator<'_>` › `fn check(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> Option<Live> {`
+## `impl Coordinator<'_>` › `fn accepts(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> bool {`
 
 The identity check every completion passes before anything is settled (R-AA), in order: a poisoned
 fold discards it silently (the command is already ending); a pipeline that is not live makes it
 stale or a duplicate; an identity that is not the pipeline's is a mismatch; a cancelled pipeline's
 completion is the expected end of its cancellation and is discarded silently; an identity the fold
 no longer holds open is stale; and an injected completion for a pipeline still running is
-discarded. Only then is the pipeline retired and its entry returned. Every discard is counted
-(`TopologyRun::discarded`), and all but the silent ones are warned about.
+discarded. What it discards it retires where the pipeline is ending (a poisoned fold's, a cancelled
+pipeline's, a closed identity's); an accepted completion is retired by its caller, after the caller
+has classified it (round R1: a fatal completion interrupts before anything is retired or granted).
+Every discard is counted (`TopologyRun::discarded`), and all but the silent ones are warned about.
 
 ## `impl Coordinator<'_>` › `fn retire(&mut self, pipeline: PipelineId) -> Option<Live> {`
 
-Remove a pipeline: its snapshot grants and waits released, and an invocation it still holds
-withdrawn from the broker, whatever that frees granted.
+Remove a pipeline: its snapshot grants and waits released. An invocation it still holds is one it
+never reported ended — a panic unwound through the Runner call — so nothing established that its
+process ended: it keeps its registration and pair (`hold_unresolved`), where the phase-3 shape
+withdrew it and could grant its pair on (round R1, `R1-CONC-1`).
+
+## `impl Coordinator<'_>` › `fn reconcile(&mut self) {`
+
+After an append that can close an identity a live pipeline serves — an ingested decline fails its
+lineage (`design/26_design_merge_queue_protocol.md`: "A decline fails every unmerged lineage member
+… A matching `VerificationStarted` transaction is cancelled"), and so does a lineage member's
+failed settlement — each live, uncancelled pipeline whose identity the fold no longer holds open is
+stopped. The design's words for the concurrent driver: it "must stop the affected work and discard
+late results before appending their completion". Run first in every admission pass, which follows
+every message applied and every answer ingested, inside `verify` as outside (round R1,
+`R1-CONC-3`). In this build's live engine no such pipeline exists — at most one member of a lineage
+is ever live, and a lineage question blocks the others' dispatch, start and integration — but the
+fold admits the state, and the design requires it handled.
+
+## `impl Coordinator<'_>` › `fn stop(&mut self, pipeline: PipelineId) {`
+
+One pipeline's cancellation, outside an interrupt: its token cancelled (the Runner terminates its
+process), its request waiting for a pair withdrawn from the broker and refused, its snapshot request
+refused, a warning naming it. Its late completion is then discarded as a cancelled pipeline's, and
+its invocation ends released or held by the fate its end reports. It is not recorded in
+`cancelled_work`: the fold has already closed its identity, so no closure settles it.
 
 ## `impl Coordinator<'_>` › `fn judged(`
 
-An attempt's completion, checked and then settled by `settle_judged`, the function `step` settles
-through. A pipeline's error ends the command (R-AB).
+An attempt's completion, checked, then classified before anything else: an error is the interrupt at
+once, every other pipeline cancelled, and only then is the pipeline retired (round R1: a fatal
+completion interrupts as it is received, and nothing it held is granted on). A judgement is settled
+by `settle_judged`, the function `step` settles through. A pipeline's error ends the command
+(R-AB).
 
 ## `impl Coordinator<'_>` › `fn verified_arrived(`
 
-A verification's completion, held for `verify_concurrently` once checked, its review records charged
-to the run's spend at once, so the next selection's ceiling check counts them (R-AH; the early
-review's `R1-CONC-4`). One that no open verification awaits is a cancelled pipeline's end (silent)
-or stale (warned).
-
-## `impl Coordinator<'_>` › `fn note_cancelled_end(`
-
-Read a cancelled pipeline's completion before it is discarded: an error whose Runner fate is
-unresolved names a process that may still run, and is recorded (R-AF).
+A verification's completion, once checked: its review records charged to the run's spend at once, so
+the next selection's ceiling check counts them (R-AH; the early review's `R1-CONC-4`), and its
+outcome mapped at receipt by [`verified`]. An error — a caught panic, a Runner error the mapping
+does not settle — is the interrupt there and then, with no wait for the snapshots (round R1,
+`R1-CONC-2`); a result is held for `verify_concurrently`. One that no open verification awaits is a
+cancelled pipeline's end (silent) or stale (warned).
 
 ## `impl Coordinator<'_>` › `fn cancel_all(&mut self) {`
 
 Cancel every live pipeline's token, withdraw every pending registration, and refuse every reply
 still owed — so no pipeline waits on a coordinator that is ending, and every one of them reaches its
-completion. Registrations already granted are released as their pipelines end them. Each identity
-cancelled here is recorded, for a halt's closure to settle.
+completion. Registrations already granted are released as their pipelines end them, by the fate each
+end reports. Each identity cancelled here is recorded, for a halt's closure to settle.
+
+A pipeline inside an invocation is `Running` again, since its cancellation ends that invocation; one
+waiting for a reply is `Running` only once its reply is refused here. A request the deterministic
+intake has buffered but not applied is answered when it is applied, so its pipeline stays
+`Awaiting`: marked `Running`, it would make the intake wait on the inbox for a pipeline that is
+itself waiting on the intake (round R1's class search found the phase-3 shape doing that here, and
+`stop` doing it first).
 
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -378,12 +473,18 @@ The in-flight identities this coordinator cancelled or abandoned, which a halt's
 
 ## `struct Coordinator<'s>` › `unresolved: Vec<String>,`
 
-The invocations a cancelled pipeline reported with an unresolved process fate.
+The invocations whose ends did not establish that their processes ended — reported unresolved, or
+never reported: each keeps its registration and pair, and together they keep a halt's closure out.
 
-## `fn unresolved_runner(error: &UpstrokeError) -> Option<String> {`
+## `struct Coordinator<'s>` › `abandoned: Option<SequenceId>,`
 
-The invocation an error names when its process fate is unresolved, with `unresolved_judge` for the
-verification's error type.
+The sequence whose verification `verify` abandoned because the fold cancelled its transaction; read
+once by `integrate`, which tells that from an error.
+
+## `enum VerifyEnd {`
+
+How `verify_concurrently`'s wait ended: its verification's result accepted and the attempt snapshots
+drained, its transaction gone from the fold, or an interrupt.
 
 ## `impl Drop for Coordinator<'_>` › `fn drop(&mut self) {`
 
@@ -503,7 +604,8 @@ is current, so a halting drain settlement is planted on a width-three prefix (R-
 
 R-AF's guard, the phase-4 side of the early review's `R1-CONC-1`: the double reports a cancelled
 worker's process unresolved (`RecordingRunner::unresolved_when_cancelled`), and the closure is not
-entered.
+entered. Since round R1 the unresolved fate reaches the coordinator in the worker's `Ended` too, and
+the worker keeps its registration.
 
 ## `mod tests` › `fn a_closure_never_settles_in_flight_work_its_coordinator_did_not_cancel() {`
 
@@ -570,4 +672,88 @@ Deadlock freedom: one slot per agent and per pool, seeded orders, every run reac
 
 ## `mod tests` › `fn a_pipeline_error_cancels_the_others_and_ends_the_command_resumably() {`
 
-A pipeline that fails, with `a_panicking_pipeline_ends_the_command_with_a_defined_error`.
+A pipeline that fails, with `a_panicking_pipeline_ends_the_command_with_a_defined_error`. Since round
+R1 each asserts the ledger with `settled_but`: the gate whose process was unresolved, and the gate
+the panic unwound through, keep their registrations, and every other invocation is settled once.
+
+## `mod tests` › `fn settled_but(run: &mut TopologyRun, held: &[InvocationId]) -> Result<(), String> {`
+
+The ledger after the command ended: every registration settled exactly once but the ones in `held`,
+whose processes the Runner could not establish as ended. Those stay running and keep their slot
+pairs for the rest of this process — R3 and R4 release them at process death — and nothing is
+pending and no settlement was a duplicate. This is what "the ledgers balance" means once an
+invocation is held (round R1, `R1-CONC-1`).
+
+## `mod tests` › `fn an_unresolved_end_keeps_its_pair_and_no_waiting_invocation_starts_on_it() {`
+
+The early review's `R1-CONC-1` (the working record's §13, round R1). At width two with one slot for
+the agent, alpha's worker holds the pair and beta's waits for it. Alpha's process ends unresolved —
+the Runner could not establish that it is gone — and alpha reports that end before its error
+completion. The phase-3 `Ended` carried no fate, so the coordinator released the pair at once and
+granted it to beta, whose process started while alpha's might still run. Now beta's worker never
+starts, the command ends with alpha's own error, and alpha's worker keeps its registration and pair.
+
+## `mod tests` › `fn an_unreported_end_keeps_its_pair_and_no_waiting_invocation_starts_on_it() {`
+
+`R1-CONC-1`'s other release: the double panics on alpha's thread as alpha's worker ends
+(`RecordingRunner::panic_when_released`), so alpha never reports the end and its caught panic is its
+completion. `retire` used to withdraw the invocation alpha still held and grant its pair to beta.
+
+## `mod tests` › `fn a_fatal_verification_completion_interrupts_on_receipt_without_waiting_for_the_snapshots() {`
+
+The early review's `R1-CONC-2`. Gamma holds a review snapshot, granted inside the verification,
+when the verification's body panics (`WidePlans::panic_verifying`); the caught panic is the
+verification's completion. The phase-3 coordinator kept it in `arrived` until every attempt snapshot
+had drained, so gamma was not cancelled, ran its review to the end and settled first. Now the
+coordinator is never asked, with that completion received, to wait for the drain; gamma's held
+review is cancelled; nothing is appended after `merge_verification_started`.
+
+## `mod tests` › `fn sibling_parked_on(`
+
+The sibling repair of `root` that the fold's own sibling-repair tests build
+(`topology/fold/tests/questions.rs`): spawned, dispatched and started, then parked on an embedded
+question — four events a test plants through `Release::Append`, because the live engine of this build
+spawns a repair only from a rejection and never runs two members of one lineage at once.
+
+## `mod tests` › `fn a_declined_embedded_question_stops_the_verification_its_lineage_had_started() {`
+
+The early review's `R1-CONC-3`, in the state the fold's
+`declining_an_embedded_question_cancels_its_lineages_unprepared_verification` builds. Beta's
+candidate is being verified, its gate held, when a sibling repair of beta parks on an embedded
+question and a decline that does not halt is ingested (in the pass gamma's worker ending opens).
+The fold fails the lineage and cancels the transaction. The phase-3 coordinator neither cancelled
+the verification nor unwound `verify`: it discarded the late completion without setting `arrived`
+and then waited for a message nothing would send — a stuck quiescent point with an observer,
+`blocking_recv` for ever without one — or, with other work ready, selected that work's integration
+inside `verify` and ended the command. Now the verification's gate is cancelled, nothing is appended
+for its sequence, and the run goes on to merge gamma.
+
+## `mod tests` › `fn a_declined_embedded_question_stops_a_running_sibling_attempt() {`
+
+`R1-CONC-3`'s attempt side, in the state the fold's
+`declining_an_embedded_question_closes_a_running_sibling_and_refuses_its_late_result` builds: beta's
+worker is held when the decline closes beta's in-flight generation. The phase-3 coordinator let
+beta's pipeline run on — its gate was registered and run for a generation the fold had closed — and
+only discarded its completion. Now beta's worker is cancelled and nothing more of beta starts.
+
+## `mod tests` › `fn bounded(what: &'static str, body: impl FnOnce() + Send + 'static) {`
+
+Run a scenario on a thread named after the test's, and wait for it a bounded time: the regression the
+two tests below guard against is a coordinator that waits for ever, and it must fail the test, not
+hang the suite. A scenario that never ends leaves only its own fixture's thread blocked.
+
+## `mod tests` › `fn a_halt_answers_a_request_its_intake_still_buffers() {`
+
+Round R1's class search (the working record's §13): beta reports its worker's end and asks for its gate
+snapshot before the deterministic intake applies either, and the pass after the end ingests a halting
+decline, so `cancel_all` meets beta with its request still buffered. The phase-3 transition marked
+every cancelled pipeline `Running`, and the intake then waited on the inbox for beta, which was waiting
+on it. Now the buffered request is applied, refused, and beta's attempt is settled interrupted by the
+closure.
+
+## `mod tests` › `fn a_stop_answers_a_request_its_intake_still_buffers() {`
+
+The same position through `stop`: the verification reports its gate's end and asks for its review
+pair before either is applied, and the pass after the end ingests the decline that fails its lineage.
+Without the reconcile the run is stuck; with the reconcile and the phase-3 transition it waits for
+ever; as repaired the review request is refused and never starts, and the run completes.

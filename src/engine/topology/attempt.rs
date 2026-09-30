@@ -27,7 +27,7 @@ use crate::workspace_manager::{
 
 use super::dispatch::{self, Dispatched, EventEmitter};
 use super::identity::{
-    AttemptIdentities, InvocationLedger, SequenceIdentities, SlotPair, is_slotted,
+    AttemptIdentities, InvocationEnd, InvocationLedger, SequenceIdentities, SlotPair, is_slotted,
 };
 use super::preflight::{Carried, Registering, Registrar, Slots};
 use super::seams::TopologyHooks;
@@ -1170,20 +1170,11 @@ impl Judge<'_> {
         self.registrar
             .admit(&request.invocation, slots)
             .map_err(JudgeError::Other)?;
-        match self.runner.run_blocking_with(request, self.carried.call()) {
-            Ok(output) => {
-                self.registrar
-                    .ended(&request.invocation, true)
-                    .map_err(JudgeError::Other)?;
-                Ok(output)
-            }
-            Err(error) => {
-                self.registrar
-                    .ended(&request.invocation, false)
-                    .map_err(JudgeError::Other)?;
-                Err(JudgeError::Runner(error))
-            }
-        }
+        let outcome = self.runner.run_blocking_with(request, self.carried.call());
+        self.registrar
+            .ended(&request.invocation, InvocationEnd::of(&outcome))
+            .map_err(JudgeError::Other)?;
+        outcome.map_err(JudgeError::Runner)
     }
 
     fn pair_for(
