@@ -425,3 +425,35 @@ fn the_debug_rendering_names_the_boundary_and_not_the_ledgers() {
         "the ledgers are not part of the rendering: {rendered}"
     );
 }
+
+#[test]
+fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/preflight.md");
+    const HEADING: &str = "`impl RunnerPreflight for RunPreflight<'_>` › `fn certify(&self, \
+                           policy: &RunnerPolicy) -> Result<(), UpstrokeError> {`";
+
+    let certify = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with(HEADING))
+        .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
+    for pin in [
+        "a probe whose process the Runner could not establish as ended (`ProcessFate::Unresolved`) \
+         is not settled",
+        "keeps its pair until this process exits",
+        "the ledger does not balance",
+    ] {
+        assert!(
+            certify.contains(pin),
+            "the refusal must state that an unresolved probe keeps its registration; looked for \
+             {pin:?} in:\n{certify}"
+        );
+    }
+    assert!(
+        !certify.contains(
+            "is cancelled and every slot pair released, so the ledger balances on both paths"
+        ),
+        "the retired promise that every refusal releases and balances must not come back — \
+         `InvocationLedger::end` keeps an unresolved invocation:\n{certify}"
+    );
+}

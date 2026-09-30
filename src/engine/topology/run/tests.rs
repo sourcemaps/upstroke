@@ -491,6 +491,47 @@ fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {
 }
 
 #[test]
+fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_refuses() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+    const HEADING: &str = "`pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::Performed,`";
+
+    let closure = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with(HEADING))
+        .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
+    for (proposition, pin) in [
+        (
+            "closure under concurrency is phase 4's, in `close_run`",
+            "The concurrent half of closure is PR11 phase 4's, done in the same `close_run`",
+        ),
+        (
+            "a halt's vouched identities are settled interrupted",
+            "settles interrupted with their residue",
+        ),
+        (
+            "a budget stop drains before the closure runs",
+            "a budget stop drains its pipelines before the closure runs",
+        ),
+        (
+            "what is still refused is in-flight work nothing vouches for",
+            "is in-flight work nothing vouches for",
+        ),
+    ] {
+        assert!(
+            closure.contains(pin),
+            "the `Self::Closure` section must state that {proposition}; looked for {pin:?} \
+             in:\n{closure}"
+        );
+    }
+    assert!(
+        !closure.contains("is refused by `closure::refuse_unclosable` naming PR11"),
+        "the retired claim that closure under concurrency is refused must not come back — \
+         `TopologyRun::close_run` settles, promotes and publishes it:\n{closure}"
+    );
+}
+
+#[test]
 fn a_cancelled_verification_is_never_classified_as_an_outage() {
     use crate::engine::topology::attempt::JudgeError;
     use crate::engine::topology::integrate::Verified;

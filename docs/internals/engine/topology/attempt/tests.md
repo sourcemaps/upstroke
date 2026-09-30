@@ -1524,3 +1524,12 @@ disk), stages the resolution, keeps every spelling of the name out of the
 candidate where the two are one file, and removes it under that spelling;
 where they are two files, the variant is a second file of the repository's,
 captured as one, and the manifest spelt as written is excluded and removed.
+
+## `fn the_registration_notes_keep_an_invocation_whose_process_is_unresolved() {`
+
+Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `execute` section of
+`docs/internals/engine/topology/attempt.md` said an invocation is ended completed or cancelled and that
+both of the Runner call's answers settle its registration — false since round R1, where an unresolved
+end keeps the registration running and its pair held until this process exits
+(`InvocationLedger::end`). The pin holds the retention, in both of the section's paragraphs that state
+it, and that the two retired sentences do not come back.

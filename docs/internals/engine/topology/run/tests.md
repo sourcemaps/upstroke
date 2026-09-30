@@ -371,3 +371,14 @@ Through a real consumer: the production shell probe (`host::run_shell_probe`) re
 double was told to fail the next shell probe with an exit code, and passes on the one after, since a
 failure is used once; an agent probe told to never start is a `NeverStarted` error that is not a
 cancellation. Failed probes are recorded like any request.
+
+## `fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_refuses() {`
+
+Review round 2's `R2-REG-1` (the PR11 record, §13, round R2). The `Self::Closure` section of
+`docs/internals/engine/topology/run.md` still said the concurrent half of closure — in-flight
+cancellation, the budget drain, promotion and publication inside closure — was refused by
+`closure::refuse_unclosable` naming PR11, after phase 4 had built all of it into
+[`TopologyRun::close_run`]. The pin holds what the section says now — the concurrent half done in
+`close_run`, a halt's vouched identities settled, a budget stop drained, only unvouched in-flight work
+refused — and that the retired sentence does not come back. It matches on the prose with its whitespace
+collapsed, as the pins above do.

@@ -5486,3 +5486,38 @@ fn an_untracked_file_of_the_manifests_name_in_another_case_is_the_workers_where_
     }
     assert!(process.balances());
 }
+
+#[test]
+fn the_registration_notes_keep_an_invocation_whose_process_is_unresolved() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/attempt.md");
+    const HEADING: &str = "`impl AttemptContext<'_>` › `fn execute(`";
+
+    let execute = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with(HEADING))
+        .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
+    for pin in [
+        "failed with its process unresolved, which keeps the registration running and its pair \
+         held until this process exits",
+        "settles nothing: `InvocationLedger::end` keeps the registration running and its pair held \
+         until this process exits",
+    ] {
+        assert!(
+            execute.contains(pin),
+            "the registration protocol must state that an unresolved invocation is kept; looked \
+             for {pin:?} in:\n{execute}"
+        );
+    }
+    for retired in [
+        "end it completed or cancelled: the ending releases the pair",
+        "both of its answers settle",
+    ] {
+        assert!(
+            !execute.contains(retired),
+            "the retired promise that every Runner outcome settles the registration must not come \
+             back — `InvocationLedger::end` keeps an unresolved invocation; found {retired:?} \
+             in:\n{execute}"
+        );
+    }
+}
