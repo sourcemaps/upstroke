@@ -1,9 +1,15 @@
 //! Extended notes: `docs/internals/engine/topology/closure.md`
 
+use std::collections::BTreeSet;
+
 use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
-use crate::topology::events::{DerivedOutcome, RunFinished4};
-use crate::topology::fold::{GenerationClass, TaskState, TopologyFold};
+use crate::topology::events::{
+    AttemptInterrupted4, AttemptNumber, CommitSha, DerivedOutcome, GenerationId, GitRef,
+    LeaseDisposition, MergeVerificationInterrupted, RunFinished4, SequenceId, TopologyEventBody,
+    VerificationBasis,
+};
+use crate::topology::fold::{GenerationClass, TaskState, TopologyFold, TransactionClass};
 use crate::topology::registry::TaskKey;
 
 use super::report::{merged_and_parked, outcome_label};
@@ -34,48 +40,214 @@ pub fn ending_outcome(fold: &TopologyFold) -> Result<RunOutcome, UpstrokeError> 
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InFlight {
+    Attempt {
+        key: TaskKey,
+        generation: GenerationId,
+        attempt: AttemptNumber,
+        lease: LeaseDisposition,
+    },
+    Verification {
+        sequence: SequenceId,
+        key: TaskKey,
+        pin: Option<(GitRef, CommitSha)>,
+    },
+}
+
+impl InFlight {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Attempt {
+                key,
+                generation,
+                attempt,
+                ..
+            } => format!(
+                "task k{} generation {} is in flight (attempt {})",
+                key.0, generation.0, attempt.0
+            ),
+            Self::Verification { sequence, key, .. } => format!(
+                "integration sequence {} of task k{} is unresolved",
+                sequence.0, key.0
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn interrupted(&self) -> TopologyEventBody {
+        match self {
+            Self::Attempt {
+                key,
+                generation,
+                attempt,
+                lease,
+            } => TopologyEventBody::AttemptInterrupted {
+                data: AttemptInterrupted4 {
+                    key: *key,
+                    generation: *generation,
+                    attempt: *attempt,
+                    lease: *lease,
+                    detail: "the run halted while this attempt was in flight: the coordinator \
+                             cancelled its pipeline and the Runner terminated its processes \
+                             before this was appended; the spend is unknown"
+                        .to_owned(),
+                },
+            },
+            Self::Verification { sequence, .. } => {
+                TopologyEventBody::MergeVerificationInterrupted {
+                    data: MergeVerificationInterrupted {
+                        sequence: *sequence,
+                        detail: "the run halted while this verification was in flight: the \
+                             coordinator cancelled its pipeline and the Runner terminated its \
+                             processes before this was appended; nothing was judged and the \
+                             candidate stays queued"
+                            .to_owned(),
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn in_flight(fold: &TopologyFold) -> Vec<InFlight> {
+    let mut found = Vec::new();
+    for key in keys(fold) {
+        let Some(task) = fold.task(key) else { continue };
+        for generation in &task.generations {
+            if let GenerationClass::InFlight { attempt } = generation.class {
+                found.push(InFlight::Attempt {
+                    key,
+                    generation: generation.id,
+                    attempt,
+                    lease: generation.lease.expected(false),
+                });
+            }
+        }
+    }
+    if let Some(transaction) = fold.transaction() {
+        if let TransactionClass::VerificationStarted {
+            basis,
+            proposed_sha,
+            ..
+        } = &transaction.class
+        {
+            found.push(InFlight::Verification {
+                sequence: transaction.sequence,
+                key: transaction.candidate.key,
+                pin: match basis {
+                    VerificationBasis::StaleClean { prepared_ref } => {
+                        Some((prepared_ref.clone(), proposed_sha.clone()))
+                    }
+                    VerificationBasis::AlreadyPresent => None,
+                },
+            });
+        }
+    }
+    found
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cancelled {
+    attempts: BTreeSet<(TaskKey, GenerationId, AttemptNumber)>,
+    sequences: BTreeSet<SequenceId>,
+}
+
+impl Cancelled {
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn attempt(&mut self, key: TaskKey, generation: GenerationId, attempt: AttemptNumber) {
+        self.attempts.insert((key, generation, attempt));
+    }
+
+    pub fn sequence(&mut self, sequence: SequenceId) {
+        self.sequences.insert(sequence);
+    }
+
+    #[must_use]
+    pub fn vouches(&self, item: &InFlight) -> bool {
+        match item {
+            InFlight::Attempt {
+                key,
+                generation,
+                attempt,
+                ..
+            } => self.attempts.contains(&(*key, *generation, *attempt)),
+            InFlight::Verification { sequence, .. } => self.sequences.contains(sequence),
+        }
+    }
+}
+
+pub fn settleable(
+    fold: &TopologyFold,
+    outcome: &RunOutcome,
+    cancelled: &Cancelled,
+) -> Result<Vec<InFlight>, UpstrokeError> {
+    let found = in_flight(fold);
+    let unvouched: Vec<String> = found
+        .iter()
+        .filter(|item| !cancelled.vouches(item))
+        .map(InFlight::describe)
+        .collect();
+    if !unvouched.is_empty() {
+        return Err(unvouched_refusal(&unvouched));
+    }
+    if !found.is_empty() && *outcome != RunOutcome::Halted {
+        return Err(refused(&format!(
+            "run-end closure as `{}` found in-flight work its coordinator cancelled: {}. Only a \
+             halt cancels in-flight work; a budget stop drains it to its natural settlements, so \
+             nothing was appended",
+            outcome_label(outcome),
+            found
+                .iter()
+                .map(InFlight::describe)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    Ok(found)
+}
+
 pub fn refuse_unclosable(fold: &TopologyFold) -> Result<(), UpstrokeError> {
     let unclosable = unclosable(fold);
     if unclosable.is_empty() {
         return Ok(());
     }
-    Err(refused(&format!(
-        "run-end closure at max_parallel = 1 found work the synchronous loop never leaves open \
-         and that a fresh process's recovery settles before the loop runs: {}. Closure under \
-         concurrency (in-flight cancellation, the budget drain, promotion and publication \
-         completion inside closure) is PR11's; nothing was appended",
-        unclosable.join("; ")
-    )))
+    Err(unvouched_refusal(&unclosable))
+}
+
+fn unvouched_refusal(found: &[String]) -> UpstrokeError {
+    refused(&format!(
+        "run-end closure found in-flight work no pipeline of this process was cancelled for: {}. \
+         The synchronous loop never leaves an attempt or a verification in flight, a fresh \
+         process's recovery settles those a dead coordinator left before the loop runs, and \
+         PR11's coordinator settles interrupted only those whose pipelines it cancelled and saw \
+         end; nothing was appended",
+        found.join("; ")
+    ))
 }
 
 #[must_use]
 pub fn unclosable(fold: &TopologyFold) -> Vec<String> {
-    let mut found = Vec::new();
-    for key in keys(fold) {
-        let Some(task) = fold.task(key) else { continue };
-        for generation in &task.generations {
-            match &generation.class {
-                GenerationClass::InFlight { attempt } => found.push(format!(
-                    "task k{} generation {} is in flight (attempt {})",
-                    key.0, generation.id.0, attempt.0
-                )),
-                GenerationClass::Promoting => found.push(format!(
-                    "task k{} generation {} is promoting",
-                    key.0, generation.id.0
-                )),
-                GenerationClass::OpenNoAttempt
-                | GenerationClass::RetainedIdle { .. }
-                | GenerationClass::Closed => {}
-            }
-        }
-    }
-    if let Some(transaction) = fold.transaction() {
-        found.push(format!(
-            "integration sequence {} of task k{} is unresolved",
-            transaction.sequence.0, transaction.candidate.key.0
-        ));
-    }
-    found
+    in_flight(fold).iter().map(InFlight::describe).collect()
+}
+
+#[must_use]
+pub fn promoting(fold: &TopologyFold) -> Vec<TaskKey> {
+    keys(fold)
+        .filter(|key| {
+            fold.task(*key).is_some_and(|task| {
+                task.generations
+                    .iter()
+                    .any(|generation| generation.class == GenerationClass::Promoting)
+            })
+        })
+        .collect()
 }
 
 #[must_use]
@@ -141,11 +313,23 @@ pub fn blockers(fold: &TopologyFold) -> Vec<String> {
                     "task k{} generation {} is retained idle from epoch {}",
                     key.0, generation.id.0, incarnation.0
                 )),
+                GenerationClass::Promoting => found.push(format!(
+                    "task k{} generation {} is promoting",
+                    key.0, generation.id.0
+                )),
                 _ => {}
             }
         }
         if task.state == TaskState::Deferred {
             found.push(format!("task k{} is deferred (backoff pending)", key.0));
+        }
+    }
+    if let Some(transaction) = fold.transaction() {
+        if matches!(transaction.class, TransactionClass::Prepared { .. }) {
+            found.push(format!(
+                "integration sequence {} of task k{} is prepared and not yet published",
+                transaction.sequence.0, transaction.candidate.key.0
+            ));
         }
     }
     if let Some(queue) = fold.queue() {

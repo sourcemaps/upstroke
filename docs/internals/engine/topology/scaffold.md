@@ -296,7 +296,11 @@ How an invocation this runner was handed ended: completed (an output),
 failed (a Runner error the test delivered, or a probe told to never start),
 cancelled (its call's cancellation fired while it was held), cancelled before
 start (its call was cancelled before the runner started it: no process, nothing
-in [`RecordingRunner::ran`]), abandoned (its future was dropped while held).
+in [`RecordingRunner::ran`]), cancelled unresolved (cancelled while held, and
+answered with a Runner error whose process fate is unresolved, as a container
+runner answers when it cannot establish that the container is gone —
+[`RecordingRunner::unresolved_when_cancelled`]), abandoned (its future was
+dropped while held).
 Recorded once per invocation, in the order the endings happened; for a completion
 the moment is the test's delivery, so the order is the test's and not the order
 the driving threads happened to resume. Cancellations that one interrupt fires
@@ -412,12 +416,20 @@ when it lands between a grant and the Runner. It then ends
 
 ## `impl RecordingRunner` › `pub(super) fn admit(&self, invocation: &InvocationId, within: Duration) -> bool {`
 
-A grant's other half: wait until the call reaches the door, let it in, and return
-once it is held — or at once when it is barred and at the door — or `false` when
-`within` passes. A test scheduler calls it for every invocation the coordinator
+A grant's other half: under late entry, wait until the call reaches the door,
+let it in, and return once it is held — or at once when it is barred and at the
+door; without late entry, wait until the call is held — or `false` when `within`
+passes. A test scheduler calls it for every invocation the coordinator
 grants, so each process starts, and reads the log it records, while the
 coordinator waits. It needs a holding runner: a call answered at once is never
 inside.
+
+## `impl RecordingRunner` › `pub(super) fn unresolved_when_cancelled(&self, invocation: InvocationId) {`
+
+When this invocation's call is cancelled while held, answer it with a Runner
+error whose process fate is unresolved rather than a cancellation, and record it
+[`Ending::CancelledUnresolved`]: the position a coordinator's halt must not close
+over (the working record's R-AF).
 
 ## `impl RecordingRunner` › `pub(super) fn inside(&self, invocation: &InvocationId) -> bool {`
 
@@ -1147,3 +1159,64 @@ defaulted from the width or given exactly.
 ## `pub(super) enum SlotLimitsOf {`
 
 How a test chooses the coordinator's slot limits.
+
+## `impl Wide` › `pub(super) fn started_under(`
+
+[`Wide::started_with`] under a spend ceiling, for the budget stop's tests.
+
+## `pub(super) const DURABLE_INCARNATION: &str = "inc-1";`
+
+The incarnation a durable run is created under, and the one the workspace
+fixture's manager carries.
+
+## `pub(super) struct Certifying;`
+
+A pre-flight that certifies every recorded runner: a durable run's resume
+probes nothing, since the scaffold runner is not a process.
+
+## `fn await_release_of_the_previous_process(public: &Path) {`
+
+Before a resume takes the run's locks, wait — at most
+`PREVIOUS_PROCESS_RELEASE_BOUND` — until no cleanup hold on the run's public
+directory is observed. A child another test thread forked while the first
+process held its lock can keep an inherited descriptor for about a millisecond;
+the recovery trunks' tests wait the same way before they resume.
+
+## `fn durable_paths(fixture: &Fixture) -> crate::rundir::RunPaths {`
+
+The run directories run creation lays out: the public half beside the
+repository, the private half at `<private root>/runs/<run id>`.
+
+## `impl Wide` › `pub(super) fn durable(`
+
+A width-N run the frozen recovery order can resume
+([`Wide::durable_under`] without a ceiling).
+
+## `impl Wide` › `pub(super) fn durable_under(`
+
+What run creation leaves, without its probes: the log at the public
+directory's `events.jsonl` holding `run_started`, the private half's owner and
+commit records agreeing with it, one run id and incarnation throughout (the
+workspace fixture's), and the integration ref at the base; the run and worktree
+locks are taken before any ref is written, as [`Wide::started_with`] takes them.
+The phase-3 fixture is not this one: its log and private directory are laid out
+for driving only, and no recovery could adopt them (the working record's R-AL).
+
+## `impl Wide` › `pub(super) fn resume(`
+
+Drop this process's run — its locks and fold with it — and hand the directory to
+[`WideEnv::resume`].
+
+## `impl WideEnv` › `pub(super) fn adopted(`
+
+The environment over a durable run a killed child left, rebuilt from its root:
+the parent never trusts what the child believed about its own state.
+
+## `impl WideEnv` › `pub(super) fn resume(`
+
+The next process: disarm the harness, wait for the previous process's release,
+derive a manager under the new incarnation, and run the frozen
+`recover::run_recovery_order` with test seams — a fake container runtime and
+owner liveness, a disposable Git view, [`Certifying`], the manager as the ref
+funnel — then build the run from the handle it returns, with a fresh runner and
+the given ceiling.

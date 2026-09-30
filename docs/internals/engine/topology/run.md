@@ -1389,22 +1389,81 @@ verify is what makes the claim true.
 
 ## `impl TopologyRun` › `fn close_run(`
 
-Run-end closure, the acting half of `closure.md`: the ending outcome is
-read first (`closure::ending_outcome`), the shapes this build cannot close
-are refused (`closure::refuse_unclosable`, naming PR11), every closable
-generation is closed `RunEnding { outcome }` with its close appended and
-its slot scrubbed after the append, a provisional reservation still held
-is cancelled with a warning, the derivation is confirmed against the
-closed fold, `run_finished` is appended, and terminal finalization runs
+Run-end closure, the acting half of `closure.md`, in `closure_procedure`'s
+order. The ending outcome is read first (`closure::ending_outcome`). Step (2):
+the in-flight work its caller vouches for (`closure::Cancelled`) is settled
+interrupted — each attempt's `attempt_interrupted`, then its own snapshots and
+its task worktree reclaimed; the verification's `merge_verification_interrupted`,
+then its pin deleted expected-old, its staging removed and this sequence's
+snapshots reclaimed ([`Self::reclaim_interrupted`]) — and any other in-flight
+work is refused before any append (`closure::settleable`). Steps (3) and (4):
+a promoting generation is promoted and an authorized publication completed
+([`Self::complete_promotions`], [`Self::complete_publication`]). Then every
+closable generation is closed `RunEnding { outcome }` with its close appended
+and its slot scrubbed after the append, a provisional reservation still held is
+cancelled with a warning, the derivation is confirmed against the closed fold,
+`run_finished` is appended, and terminal finalization runs
 (`finalize::finalize`). The `Progress::Finished` it returns carries what
 finalization did.
 
+`step` and the coordinator's idle arm vouch for nothing, so at width 1 step (2)
+is PR10's refusal unchanged; the coordinator's halt hands over the identities
+whose pipelines it cancelled and saw end (`coordinator.md`, `finish`). Each
+effect of steps (2)–(4) is the one recovery's steps (d) and (f) perform, through
+the same public functions of the frozen modules and the same `WorkspaceManager`
+funnels, on this run's own journal: recovery's own helpers take its typestate,
+and `integrate.rs`'s reclaim helpers are private (the working record's R-AF,
+R-AG).
+
 A kill or an append error inside the sequence leaves a prefix the next
-process's recovery completes: a `generation_closed` without its
-`run_finished` is a closed generation the sweep reclaims and a closure the
-next loop repeats; a torn `run_finished` is truncated by the next open and
+process's recovery completes: an in-flight identity left without its terminal is
+settled by recovery step (d) or (f), a `generation_closed` without its
+`run_finished` is a closed generation the sweep reclaims and a closure the next
+loop repeats, and a torn `run_finished` is truncated by the next open and
 appended again (ST-17, `kill_inside_closure_recovers`,
-`append_error_inside_closure_ends_command_and_resume_completes_closure`).
+`append_error_inside_closure_ends_command_and_resume_completes_closure`, and at
+width three the coordinator's `kill_inside_closure_recovers_at_width_three` and
+`append_error_inside_closure_ends_command_and_resume_completes_closure_at_width_three`).
+
+## `impl TopologyRun` › `fn reclaim_interrupted(`
+
+The residue of what step (2) just settled, after its terminal: an attempt's own
+snapshots (the names `JudgeNames::Attempt` owns, R-Y's scope) and its task
+worktree, the effects `AttemptContext::discard_residue` performs; a
+verification's pin, staging and the snapshots `JudgeNames::Integration` owns for
+its sequence — never another sequence's or an attempt's, which at width > 1 may
+still be another pipeline's (R-W).
+
+## `impl TopologyRun` › `fn complete_promotions(`
+
+Step (3): each promoting generation's candidates ref (created if absent),
+`task_candidate_created`, then its pin pruned and its worktree reclaimed —
+`candidate::recovery_for` supplies the typestate value recovery's step (f)
+starts from.
+
+## `impl TopologyRun` › `fn complete_publication(`
+
+Step (4): an authorized transaction (`integrate::Authorized::from_fold`, which is
+`None` for a verification still started) is published by the frozen
+`integrate::publish` — `assert_publishable`, the CAS when the ref is at the
+expected head, `task_merged`, the pin and staging reclaimed. A halt never
+publishes unverified work: only a prepared transaction is authorized.
+
+## `impl IntegrationJournal for RunJournal<'_, '_> {`
+
+The journal step (4) publishes through: the run's own emitter, discharging an
+append error's in-flight obligation against the run's ledger exactly as the
+candidate journal does.
+
+## `impl TopologyRun` › `pub(super) fn cancel_provisional(&mut self) -> bool {`
+
+Cancel any provisional reservation still held and say whether there was one:
+the coordinator's shutdown, which must cancel provisional reservations and
+normally finds none.
+
+## `fn reclaim_snapshots_of(`
+
+Remove every snapshot intent and worktree whose name `names` owns, and no other.
 
 ## `impl TopologyRun` › `fn settle(`
 

@@ -51,11 +51,25 @@ creates its worktree, where `eligible_continuation` would select it a second tim
 ### Budget overshoot
 
 `select` checks the ceiling against the **settled** spend only, and a pipeline's spend is known
-when its completion is settled. So a run can overrun its ceiling by the unknown spend of at most
+when its completion is settled — a verification's review spend when its completion is accepted,
+before the next selection (R-AH). So a run can overrun its ceiling by the unknown spend of at most
 `max_parallel` live pipelines, each running one invocation at a time: the breach is seen at the
 next selection after a settlement crosses the ceiling, and the pipelines live at that moment are
-not stopped — a budget stop drains them (R-AC). This bound is stated here and, from phase 4, in the
-report text; it is never a durable field ("durable_events: none new").
+not stopped — a budget stop drains them. This bound is stated here only: the report carries no
+width and admits no field this slice would add, and it is never a durable field
+("durable_events: none new").
+
+### The run's end (phase 4)
+
+The closure under concurrency is the working record's R-AF..R-AK. A halt cancels every live
+pipeline at once, waits for each to end, and hands the closure the identities it cancelled
+(`closure::Cancelled`); the closure settles exactly those interrupted and completes promotions and
+authorized publications. A budget stop admits nothing and drains: live pipelines settle as they
+would have, and the closure runs once none is live; a halting settlement drained while others are
+live makes the next admission pass cancel them, so the closure runs as Halted. A cancelled
+pipeline whose Runner could not establish that its process ended keeps the closure out: the
+command ends resumably and names it. A shutdown cancels and drains the same way and appends
+nothing. An append error runs the protocol in `emit.rs` and ends the command with its report.
 
 ## `pub type HooksFactory = Arc<dyn Fn() -> Box<dyn TopologyHooks + Send> + Send + Sync>;`
 
@@ -148,10 +162,12 @@ the runtime and drives. It joins every pipeline's handle before it returns, what
 A refusal before anything is spawned: slot limits that cannot replace the broker's (something is
 outstanding in it), or a runtime that could not be built. After that, whatever ends the command: a
 pipeline's error or panic, a coordinator-side error (a settlement's Git failure, a refused
-dispatch, a poisoned fold), a shutdown, or a halt whose closure is refused (phase 3 does not close a
-run with work in flight; phase 4 does). Every one of them ends the command resumably: live
-pipelines are cancelled and waited for, what they return is discarded, and no `attempt_interrupted`
-is appended live — the next resume settles the open attempts interrupted (R-AB).
+dispatch, a poisoned fold), an append error (its protocol's report), a shutdown, a halt whose
+cancelled process the Runner could not establish as ended, or a closure step's own error. Every one
+of them ends the command resumably: live pipelines are cancelled and waited for, what they return is
+discarded, and no `attempt_interrupted` is appended by an error or a shutdown — the next resume
+settles the open attempts interrupted (R-AB). Only a halt's closure appends it, for the attempts it
+cancelled (R-AF).
 
 ## `enum Busy {`
 
@@ -262,8 +278,10 @@ is the integration's own.
 
 A refusal when asked inside another verification (one transaction is open at a time); the
 verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
-it — the pipeline was cancelled, and `integrate()` appends nothing further for it. A halt inside
-`verify` leaves the transaction `VerificationStarted`, for the closure's refusal (R-AC).
+it — the pipeline was cancelled, and `integrate()` appends nothing further for it. The sequence is
+recorded as cancelled, whether or not its completion had already arrived, so a halt's closure
+settles the transaction with `merge_verification_interrupted` (R-AF); an arrived completion whose
+Runner left its process unresolved is recorded as such, and keeps the closure out.
 
 ## `impl Coordinator<'_>` › `fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {`
 
@@ -328,20 +346,44 @@ through. A pipeline's error ends the command (R-AB).
 
 ## `impl Coordinator<'_>` › `fn verified_arrived(`
 
-A verification's completion, held for `verify_concurrently` once checked. One that no open
-verification awaits is a cancelled pipeline's end (silent) or stale (warned).
+A verification's completion, held for `verify_concurrently` once checked, its review records charged
+to the run's spend at once, so the next selection's ceiling check counts them (R-AH; the early
+review's `R1-CONC-4`). One that no open verification awaits is a cancelled pipeline's end (silent)
+or stale (warned).
+
+## `impl Coordinator<'_>` › `fn note_cancelled_end(`
+
+Read a cancelled pipeline's completion before it is discarded: an error whose Runner fate is
+unresolved names a process that may still run, and is recorded (R-AF).
 
 ## `impl Coordinator<'_>` › `fn cancel_all(&mut self) {`
 
 Cancel every live pipeline's token, withdraw every pending registration, and refuse every reply
 still owed — so no pipeline waits on a coordinator that is ending, and every one of them reaches its
-completion. Registrations already granted are released as their pipelines end them.
+completion. Registrations already granted are released as their pipelines end them. Each identity
+cancelled here is recorded, for a halt's closure to settle.
 
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
-End the command: cancel, apply messages until no pipeline is live, then close the run after a halt
-(the closure refuses what it cannot close in phase 3), or return the shutdown's or the error's
-refusal.
+End the command: cancel, apply messages until no pipeline is live, then act on the interrupt.
+After a halt the closure runs with the identities this coordinator cancelled — unless a cancelled
+pipeline ended with its process unresolved, in which case nothing is appended and the command ends
+resumably naming it. A shutdown cancels any provisional reservation still held (none is expected)
+and ends resumably, appending nothing. An error is returned as it is: after an append error it is
+the protocol's report, and no closure, report or cleanup follows.
+
+## `struct Coordinator<'s>` › `cancelled_work: closure::Cancelled,`
+
+The in-flight identities this coordinator cancelled or abandoned, which a halt's closure settles.
+
+## `struct Coordinator<'s>` › `unresolved: Vec<String>,`
+
+The invocations a cancelled pipeline reported with an unresolved process fate.
+
+## `fn unresolved_runner(error: &UpstrokeError) -> Option<String> {`
+
+The invocation an error names when its process fate is unresolved, with `unresolved_judge` for the
+verification's error type.
 
 ## `impl Drop for Coordinator<'_>` › `fn drop(&mut self) {`
 
@@ -396,8 +438,69 @@ Acceptance item 2, with `disjoint_hints_dispatch_together_overlapping_and_absent
 
 ## `mod tests` › `fn the_coordinator_settles_promotes_and_dispatches_while_a_verification_is_open() {`
 
-R-E and R-V: the coordinator inside `verify`, with
-`a_halt_inside_verification_cancels_it_and_leaves_the_transaction_for_closure`.
+R-E and R-V: the coordinator inside `verify`, with `halt_interrupts_verification`.
+
+## `mod tests` › `fn halt_cancels_in_flight_attempt_at_width_three() {`
+
+T-ATTEMPT at width three: a decline halts the run while alpha is at its gate and beta at its worker;
+both are terminated, each released once after its termination, and the closure appends one
+`attempt_interrupted` per attempt, then reclaims its snapshot and worktree, before `run_finished`.
+`Watching` records the execution root's intents after every append, which is how the order of
+terminal and reclaim is read. With `halt_interrupts_verification` (T-VERIFY: a halt inside
+`verify`, settled by `merge_verification_interrupted`, the pin deleted and this sequence's staging
+and snapshots reclaimed before the end), the phase-3 test that held the closure's refusal is gone.
+
+## `mod tests` › `fn a_shutdown_with_pipelines_in_flight_is_settled_by_the_next_resume_whose_ledgers_start_empty()`
+
+G6's shutdown row, resumed through the frozen recovery order itself (`Wide::durable`,
+`Wide::resume`, `scaffold.md`).
+
+## `mod tests` › `fn append_error_under_concurrency_cancels_pipelines_and_folds_nothing_from_memory() {`
+
+The slice contract's named test, at each T-APPEND error-return shape — a partial write, a flush
+error after the full line, a sync error — injected at the settlement of one pipeline while two
+others are in flight, and the resume following the surviving prefix (R-AI).
+
+## `mod tests` › `fn kill_inside_closure_recovers_at_width_three() {`
+
+T-FINISH at width three, with
+`append_error_inside_closure_ends_command_and_resume_completes_closure_at_width_three`: `HaltArming`
+arms the fault at the first append after the halt is folded, which is the closure's first terminal;
+the child (`closure_kill_child_at_width_three`) dies inside it, torn or complete, and the next
+process repeats the closure from the surviving prefix.
+
+## `mod tests` › `fn prepared_publication_completed_at_run_end() {`
+
+T-PREPARED's closure half, on a state built by making the fast integration's CAS fail once (R-AG).
+
+## `mod tests` › `fn over_budget_prefix_without_budget_exceeded_is_not_ending_at_width_three() {`
+
+With `a_budget_stop_drains_live_pipelines_to_their_settlements_and_ends_budget_exceeded`, G6's budget
+row: `budget_exceeded` before any budget-driven end, the drain, the end. `Recording` keeps the fold
+after every append, and `ending_as` asks it what the fold would say to a `run_finished`.
+
+## `mod tests` › `fn run_finished_budget_exceeded_refused_after_halting_drain_settlement_at_width_three() {`
+
+In this build a halting settlement is a declined answer, which the fold refuses while a budget stop
+is current, so a halting drain settlement is planted on a width-three prefix (R-AH).
+
+## `mod tests` › `fn a_halt_whose_cancelled_process_is_unresolved_ends_the_command_without_closing() {`
+
+R-AF's guard, the phase-4 side of the early review's `R1-CONC-1`: the double reports a cancelled
+worker's process unresolved (`RecordingRunner::unresolved_when_cancelled`), and the closure is not
+entered.
+
+## `mod tests` › `fn a_closure_never_settles_in_flight_work_its_coordinator_did_not_cancel() {`
+
+R-AF's vouching, from the other side: a second coordinator in the same process, which cancelled
+nothing, meets a halt with two attempts still in flight from the first; its closure refuses them,
+appending nothing, and the next process's recovery settles them.
+
+## `mod tests` › `fn a_verifications_review_spend_is_charged_before_the_next_selection() {`
+
+R-AH's current spend, the phase-4 side of the early review's `R1-CONC-4`: a verification's
+completion arrives while an attempt snapshot keeps `verify` waiting, a third task settles, and the
+selection it opens meets a ceiling only the verification's review spend has crossed.
 
 ## `mod tests` › `fn stale_duplicate_and_mismatched_completions_are_discarded_with_a_warning_and_counted() {`
 

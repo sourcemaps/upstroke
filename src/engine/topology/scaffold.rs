@@ -436,6 +436,7 @@ pub(super) enum Ending {
     Failed,
     Cancelled,
     CancelledBeforeStart,
+    CancelledUnresolved,
     Abandoned,
 }
 
@@ -459,6 +460,7 @@ struct Control {
     holding: bool,
     late: bool,
     barred: Vec<InvocationId>,
+    unresolved: Vec<InvocationId>,
     doors: Vec<Door>,
     failing: Vec<(ProbeTarget, ProbeFailure)>,
     held: Vec<Held>,
@@ -603,6 +605,10 @@ impl RecordingRunner {
 
     pub(super) fn enter_late(&self) {
         self.control().late = true;
+    }
+
+    pub(super) fn unresolved_when_cancelled(&self, invocation: InvocationId) {
+        self.control().unresolved.push(invocation);
     }
 
     pub(super) fn bar(&self, invocation: InvocationId) {
@@ -888,14 +894,30 @@ impl RecordingRunner {
         }
         if cancellation.register(waker) {
             control.held.remove(index);
-            control
-                .endings
-                .push((invocation.clone(), Ending::Cancelled));
+            let unresolved = control.unresolved.contains(invocation);
+            control.endings.push((
+                invocation.clone(),
+                if unresolved {
+                    Ending::CancelledUnresolved
+                } else {
+                    Ending::Cancelled
+                },
+            ));
             self.changed.notify_all();
-            return Poll::Ready(Err(crate::runner::RunnerError::cancelled(
-                invocation,
-                crate::error::ProcessFate::Gone,
-            )));
+            return Poll::Ready(Err(if unresolved {
+                crate::runner::RunnerError::new(
+                    invocation,
+                    crate::error::ProcessFate::Unresolved,
+                    UpstrokeError::Refused {
+                        message: format!(
+                            "the scaffold could not establish that `{invocation}` ended after its \
+                             cancellation"
+                        ),
+                    },
+                )
+            } else {
+                crate::runner::RunnerError::cancelled(invocation, crate::error::ProcessFate::Gone)
+            }));
         }
         if let Some(held) = control.held.get_mut(index) {
             held.waker = Some(waker.clone());
@@ -2495,6 +2517,24 @@ impl Wide {
         plans: WidePlans,
         runner: RecordingRunner,
     ) -> Self {
+        Self::started_under(
+            tag,
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            super::select::Ceiling::unlimited(),
+        )
+    }
+
+    pub(super) fn started_under(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+    ) -> Self {
         let fixture = Fixture::created(tag);
         let plan = wide_plan(tasks);
         let started = run_started_of(&fixture, &plan, max_parallel, plans.reviewers >= 2);
@@ -2545,11 +2585,7 @@ impl Wide {
         let mut handle =
             super::recover::RunHandle::created(started, digest, log, fold, lock, worktree);
         handle.events.push(checked);
-        let run = super::run::TopologyRun::resumed(
-            handle,
-            inputs.clone(),
-            super::select::Ceiling::unlimited(),
-        );
+        let run = super::run::TopologyRun::resumed(handle, inputs.clone(), ceiling);
         runner.watching(&log_path);
         let paths = scaffold_run_paths(&fixture);
         Self {
@@ -2654,4 +2690,286 @@ impl WideEnv {
 pub(super) enum SlotLimitsOf {
     Defaulted,
     Exactly(u32, u32),
+}
+
+pub(super) const DURABLE_INCARNATION: &str = "inc-1";
+
+const PREVIOUS_PROCESS_RELEASE_BOUND: Duration = Duration::from_secs(20);
+
+fn await_release_of_the_previous_process(public: &Path) {
+    let started = std::time::Instant::now();
+    while crate::rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks)
+        && started.elapsed() < PREVIOUS_PROCESS_RELEASE_BOUND
+    {
+        crate::workspace_manager::fixture::rest_within(
+            Duration::from_millis(50),
+            PREVIOUS_PROCESS_RELEASE_BOUND.saturating_sub(started.elapsed()),
+        );
+    }
+}
+
+pub(super) struct Certifying;
+
+impl crate::runner::container::resolve::RunnerPreflight for Certifying {
+    fn certify(&self, _policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
+        Ok(())
+    }
+}
+
+fn durable_paths(fixture: &Fixture) -> crate::rundir::RunPaths {
+    crate::rundir::RunPaths::with_private_root(
+        &fixture.base,
+        crate::workspace_manager::fixture::RUN_ID,
+        &fixture.private,
+    )
+}
+
+fn durable_repo_key(fixture: &Fixture) -> crate::rundir::RepoKey {
+    crate::rundir::RepoKey::v1(
+        &std::fs::canonicalize(fixture.base.join(".git")).expect("the fixture's git dir"),
+    )
+}
+
+impl Wide {
+    pub(super) fn durable(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+    ) -> Self {
+        Self::durable_under(
+            tag,
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            super::select::Ceiling::unlimited(),
+        )
+    }
+
+    pub(super) fn durable_under(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+    ) -> Self {
+        let fixture = Fixture::created(tag);
+        let run_id = crate::workspace_manager::fixture::RUN_ID;
+        let plan = wide_plan(tasks);
+        let paths = durable_paths(&fixture);
+        paths.create().expect("the durable run's directories");
+        let started = RunStarted4 {
+            run_id: run_id.to_owned(),
+            incarnation: IncarnationId(DURABLE_INCARNATION.to_owned()),
+            branch: format!("upstroke/run-{run_id}"),
+            integration_ref: GitRef(format!("refs/heads/upstroke/run-{run_id}")),
+            private_dir: paths.private.to_string_lossy().into_owned(),
+            ..run_started_of(&fixture, &plan, max_parallel, plans.reviewers >= 2)
+        };
+        let inputs = FrozenInputs {
+            plan,
+            normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
+        };
+        let lock = crate::rundir::RunLock::acquire(&paths.public).expect("the run lock");
+        let worktree =
+            crate::rundir::WorktreeLock::acquire_in(&fixture.base, &fixture.base.join(".git"))
+                .expect("the worktree lease");
+        let log_path = paths.public.join(crate::rundir::EVENT_LOG);
+        let mut log = EventLog::open(EventSite::OpenLog, &log_path, &mut Vec::new())
+            .expect("open the durable run's log");
+        let event = TopologyEvent {
+            ts: <super::seams::SystemClock as super::seams::TimeSource>::now_rfc3339(
+                &super::seams::SystemClock,
+            ),
+            body: TopologyEventBody::RunStarted {
+                data: Box::new(started.clone()),
+            },
+        };
+        let (line, checked) = TopologyLine::round_trip(&event).expect("run_started round-trips");
+        let mut fold = TopologyFold::new(inputs.clone());
+        let delta = fold
+            .plan_transition(&checked)
+            .expect("the fold takes run_started");
+        log.append_topology_hooked(
+            site_for(&checked.body),
+            &line,
+            &mut crate::events::log::NoEventHooks,
+        )
+        .expect("append run_started");
+        fold.apply_delta(delta);
+        let digest = crate::events::log::first_line_digest(line.committed_bytes())
+            .expect("a committed first line");
+
+        let repo_key = durable_repo_key(&fixture);
+        let public = std::fs::canonicalize(&paths.public)
+            .expect("the public directory")
+            .display()
+            .to_string();
+        crate::rundir::stage_owner_record(
+            &paths.private,
+            &crate::rundir::OwnerRecord {
+                run_id: run_id.to_owned(),
+                repo_key: repo_key.as_str().to_owned(),
+                public_dir: public.clone(),
+                incarnation: DURABLE_INCARNATION.to_owned(),
+                runner: started.runner.clone(),
+            },
+            &mut crate::rundir::NoHooks,
+        )
+        .expect("stage the owner record");
+        crate::rundir::publish_owner_record(&paths.private, &mut crate::rundir::NoHooks)
+            .expect("publish the owner record");
+        crate::rundir::stage_commit_record(
+            &paths.private,
+            &crate::rundir::CommitRecord {
+                run_id: run_id.to_owned(),
+                repo_key: repo_key.as_str().to_owned(),
+                public_dir: public,
+                incarnation: DURABLE_INCARNATION.to_owned(),
+                run_started_sha256: digest.clone(),
+            },
+            &mut crate::rundir::NoHooks,
+        )
+        .expect("stage the commit record");
+        crate::rundir::publish_commit_record(&paths.private, &mut crate::rundir::NoHooks)
+            .expect("publish the commit record");
+        fixture
+            .manager
+            .create_ref_zero_old(
+                &mut crate::workspace_manager::NoHooks,
+                crate::topology::effects::RefSite::CreateIntegration,
+                started.integration_ref.as_str(),
+                &fixture.head,
+            )
+            .expect("the integration ref");
+
+        let mut handle =
+            super::recover::RunHandle::created(started, digest, log, fold, lock, worktree);
+        handle.events.push(checked);
+        let run = super::run::TopologyRun::resumed(handle, inputs.clone(), ceiling);
+        runner.watching(&log_path);
+        Self {
+            run,
+            env: WideEnv {
+                answers: Arc::new(crate::interaction::UnattendedAnswers),
+                halts_run: false,
+                harness: Arc::new(Mutex::new(HookHarness::new())),
+                runner: Arc::new(runner),
+                adapters: Arc::new(ScaffoldAdapters::new()),
+                plans: Arc::new(plans),
+                paths,
+                log: log_path,
+                inputs,
+                max_parallel,
+                fixture,
+            },
+        }
+    }
+
+    pub(super) fn resume(
+        self,
+        incarnation: &str,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+    ) -> Result<(super::recover::Recovered, Self), UpstrokeError> {
+        let Self { run, env } = self;
+        drop(run);
+        env.resume(incarnation, runner, ceiling)
+    }
+}
+
+impl WideEnv {
+    pub(super) fn adopted(
+        root: PathBuf,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+    ) -> Self {
+        let fixture = Fixture::adopt(root);
+        let paths = durable_paths(&fixture);
+        let log = paths.public.join(crate::rundir::EVENT_LOG);
+        Self {
+            answers: Arc::new(crate::interaction::UnattendedAnswers),
+            halts_run: false,
+            harness: Arc::new(Mutex::new(HookHarness::new())),
+            runner: Arc::new(RecordingRunner::new()),
+            adapters: Arc::new(ScaffoldAdapters::new()),
+            plans: Arc::new(plans),
+            paths,
+            log,
+            inputs: FrozenInputs {
+                plan: wide_plan(tasks),
+                normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
+            },
+            max_parallel,
+            fixture,
+        }
+    }
+
+    pub(super) fn resume(
+        mut self,
+        incarnation: &str,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+    ) -> Result<(super::recover::Recovered, Wide), UpstrokeError> {
+        let run_id = crate::workspace_manager::fixture::RUN_ID;
+        self.harness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disarm();
+        await_release_of_the_previous_process(&self.paths.public);
+        let manager = WorkspaceManager::derive(
+            &self.fixture.base,
+            &self.fixture.private,
+            run_id,
+            incarnation,
+        )?;
+        let root = super::recover::chain::RootDerived::derive_with(
+            &self.fixture.base,
+            run_id,
+            None,
+            TOPOLOGY_SCHEMA,
+        )?;
+        let git_dir = self.fixture.base.join(".git");
+        let repo_key = durable_repo_key(&self.fixture);
+        let runtime = crate::runner::container::FakeRuntime::new(
+            crate::runner::container::runtime::ContainerTrace::default(),
+        );
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let view = crate::runner::container::DisposableDirView::new(
+            crate::runner::container::runtime::ContainerTrace::default(),
+        );
+        let today = crate::config::RunnerSelection::host_default();
+        let incarnation = IncarnationId(incarnation.to_owned());
+        let mut hooks = self.hooks();
+        let mut warnings = Vec::new();
+        let (recovered, handle) = super::recover::run_recovery_order(
+            root,
+            &super::recover::ResumeSeams {
+                repo_root: &self.fixture.base,
+                worktree_git_dir: &git_dir,
+                repo_key: &repo_key,
+                incarnation: &incarnation,
+                inputs: self.inputs.clone(),
+                today: &today,
+                runtime: &runtime,
+                liveness: &liveness,
+                view: &view,
+                preflight: &Certifying,
+                refs: &manager,
+                manager: &manager,
+                clock: &super::seams::SystemClock,
+            },
+            &mut hooks,
+            &mut warnings,
+        )?;
+        self.fixture.manager = manager;
+        runner.watching(&self.log);
+        self.runner = Arc::new(runner);
+        let run = super::run::TopologyRun::resumed(handle, self.inputs.clone(), ceiling);
+        Ok((recovered, Wide { run, env: self }))
+    }
 }
