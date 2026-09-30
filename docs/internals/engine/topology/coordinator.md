@@ -1116,3 +1116,169 @@ held or reserved (`balanced_at_end`); at the next start the process holds nothin
 and a resumable end's broker starts empty (`broker_is_empty`), while a Complete or Halted run is
 finalized and refused before any broker is built. The killed coordinator's end is the process's
 death, and its next start is asserted empty in the ST-16 (f) and (g) tests and the reaper test.
+
+## `mod tests` › `mod interleaving {`
+
+Phase 6's interleaving suite: the packet's seam rows under seeded permutations through this
+coordinator at width 3, deadlock-freedom under reduced limits and adverse completion orders, the
+runtime pool tests (acceptance item 3 through the coordinator on its Tokio blocking pool), and the raw
+outputs G6 asks for (`required_artifacts`). A nested module of the coordinator's inline tests, so it
+uses the scheduler's fixtures and the coordinator's private types without a new test file; its tests
+are `engine::topology::coordinator::tests::interleaving::*`, which is also the filter the G6 gate runs.
+
+Every run is driven by an [`Interleaver`] (below): no test sleeps, every wait is a handshake with the
+double, and a seed reproduces a run (R-AD), so each assertion made for a seed is made for that exact
+schedule on every machine. Seed counts are bounded by cost, not by coverage claims: eight seeds for the
+per-run rows (ST-04, ST-05, ST-13, the chain), sixteen for the independent projection, three to four
+per configuration for the pool tests, and five orders per limit configuration for deadlock-freedom
+(the record's R-AS says why).
+
+## `mod interleaving` › `fn export(kind: &str, value: &serde_json::Value) {`
+
+The G6 exporter. When `UPSTROKE_G6_EXPORT` names a directory, a test writes what it measured as
+pretty JSON to `<dir>/<kind>/<test>.json`, `<test>` being the last segment of the calling thread's
+name, which libtest sets to the test's path (the observation export keys on the same name,
+`observations.md`). Kinds: `seam/<row>` (the seam-test
+outputs, one file per test that claims the row), `projection/<plan>` (the permutation projection
+equivalence report: per seed, each key's projection digest and the final tree), and
+`ledgers/<ledger>` (`slot`, `invocation`, `provisional`, `entitlement`, `container`). Unset, nothing
+is written. The record's §3 R-AU gives the gate's command.
+
+## `mod interleaving` › `struct Interleaver<'r> {`
+
+The suite's [`Quiescence`] observer. Like the parent module's `Scheduler` it owns the double's door
+(`enter_late`, `admit` in `granted`, `inside` checked at every quiescent point) and releases exactly
+one held invocation per point, so the number of points is the number of processes released. It adds:
+a record of every point (the invocations held, the provisional entitlements outstanding, the
+reservation peak, the discard and duplicate counters, the injections made so far); four release
+orders (`Adverse`: seeded, newest-granted-first, oldest-granted-first, gates first and agents last);
+an optional injector, consulted on a second seeded stream at about one point in four, whose message
+goes through the coordinator's injector and costs the point instead of a release — so the release
+sequence of an injected run is the uninjected run's for the same seed; an optional watch run at every
+point; and `STEPS`, beyond which it releases nothing, which the coordinator turns into its stuck
+error: a run that did not finish within the bound fails, and never hangs.
+
+## `mod interleaving` › `fn aliases(`
+
+ST-04's oracle over one whole run, from the durable log and the double's record of every process:
+every `InvocationId` started once; every task worktree and snapshot path used by exactly one owner
+(a task's generation for its worktree; an attempt's gates or a reviewer's pass and re-ask, or a
+sequence's integration gate or reviewer, for a snapshot) and every owner in exactly one path; each
+generation dispatched once; each attempt started once and settled once (`candidate_prepared`,
+`attempt_finished` or `attempt_interrupted`); each candidate ref created once and each prepared pin
+taken once; each sequence claimed by one candidate, in log order; integration in
+`task_candidate_created` order and each sequence merged once.
+
+## `mod interleaving` › `fn duplicating() -> Inject<'static> {`
+
+ST-05's injector, which also carries ST-01, ST-02 and ST-06 under interleaving: at a seeded point it
+offers one of a duplicate end of an invocation already settled (the ledger counts it as a duplicate
+when its pipeline is live, the coordinator discards it otherwise), an end of a running invocation from
+outside its pipeline, a snapshot end nobody holds, a stale completion (a retired pipeline's own
+identity, remembered from earlier points, or a pipeline that never existed), a registration offered
+through the injector, or a completion naming another live pipeline's identity (or a mismatched attempt
+or sequence). Every one of them is refused or counted, once, and none reaches the log.
+
+## `mod interleaving` › `struct Tracing {`
+
+The coordinator's hooks for ST-13, ST-10 and ST-18: the harness adapters, with the effect and
+run-directory families wrapped to record every consultation, in order, into one trace beside every
+append (its kind, the fold-derived pipeline and merge holdings after it, which reservation kind it
+converts, whether it is `merge_prepared(fast)`), and every fold state for the replay check. Only the
+coordinator thread's effects are traced: each pipeline takes its own hooks from the factory.
+`Killer` counts the consultations after `run_finished` is folded and answers `Kill` at the armed one,
+through the observation export as the harness adapters do, having written the cell it fires at to a
+report file first — which is how ST-18's parent learns where its child died.
+
+## `mod interleaving` › `fn provisional_problems(`
+
+ST-13's oracle over the trace. At every append the derived holdings are within `max_parallel` and one
+merge; each first append — `task_dispatched`, a retry's `attempt_started`,
+`merge_verification_started`, `merge_prepared(fast)` — moves them by exactly its reservation's
+entitlements in one step (the fast and stale integrations' pair from no merge to one); no staging
+effect (the staging intent and worktree, the prepared pin, the proposal cherry-pick) falls between a
+fast integration's selection and its `merge_prepared`, or before its `task_merged`; the fast CAS's two
+hook phases see the merge held; and `task_merged` releases both holdings at once. The reservation
+ledger itself is read at every quiescent point and at the end, since the append hook does not carry it
+(R-AT).
+
+## `mod interleaving` › `fn seeded_runs_alias_no_task_generation_attempt_invocation_snapshot_ref_pin_sequence_or_queue_position()`
+
+ST-04 over eight seeded runs of a four-task plan with a dependent, a same-generation retry and two
+reviewers per attempt and per verification, with ST-15 (the retry re-gates on a fresh snapshot of its
+own in every seed, and runs beside another task's process in some).
+
+## `mod interleaving` › `fn injected_duplicates_at_seeded_points_release_nothing_twice_and_change_nothing_durable() {`
+
+ST-05 (with ST-01, ST-02 and ST-06): each seed is run twice, without and with the injector; between
+consecutive points the discard and duplicate counters move by exactly the injections made, and the
+injected run releases, starts and logs byte for byte what the uninjected one did, with the same
+registrations, settlements, slot grants and releases and reservation conversions.
+
+## `mod interleaving` › `fn every_provisional_reservation_converts_at_its_first_append_under_seeded_permutations() {`
+
+ST-13 at every append of eight seeded runs (`provisional_problems`), no reservation outstanding at any
+quiescent point, and at the end one conversion per first append with none cancelled or duplicated;
+ST-10 on the same runs (the live fold equals a replay of its own log after every append).
+
+## `mod interleaving` › `fn a_chain_projects_at_width_three_as_at_width_one_under_every_seed() {`
+
+ST-08's chain half under eight seeds, each byte-identical to the width-1 loop's canonical projection.
+
+## `mod interleaving` › `fn independent_tasks_project_identically_per_key_under_every_seed_and_report_it() {`
+
+ST-08's independent half (and ST-03) under sixteen seeds: every task dispatched before any completion
+on one base, integration in `task_candidate_created` order, and each key's attempt-level projection and
+the final tree equal to the first seed's.
+
+## `mod interleaving` › `fn reduced_limits_and_adverse_completion_orders_reach_run_finished_within_the_step_bound() {`
+
+Deadlock-freedom: one slot per agent and per pool; two agents sharing one pool, each in its own, none
+pooled, and one unpooled beside a pooled one; review re-asks taking pairs in two of the four; and each
+under two seeds and three fixed adverse orders. Every run completes within `STEPS`, no point holds a
+pair over a limit, every pair granted is released once, and a verification runs beside attempts.
+
+## `mod interleaving` › `fn a_scheduler_that_stops_releasing_ends_the_run_as_stuck_rather_than_hanging() {`
+
+The bound's other half: a scheduler that stops releasing ends the run with the stuck error, every held
+process cancelled and every registration settled, and nothing appended.
+
+## `mod interleaving` › `fn runtime_pool_same_agent_and_pool_with_opposing_limits_serialize_on_the_binding_limit() {`
+
+Acceptance item 3 at runtime, with the four `runtime_pool_*` tests after it: the processes held at
+every quiescent point are what runs at once, so a limit that binds shows as a ceiling on them and one
+that does not as two at once.
+
+## `mod interleaving` › `fn runtime_pool_agent_probes_take_and_release_their_pair_at_preflight_before_admission() {`
+
+A width-3 run resumed through the frozen recovery order with a real `RunPreflight` over a double: the
+shell probe, then one probe per recorded agent, each under its own probe-role `InvocationId`, each
+settled once; the pre-flight's ledger balanced before admission; the coordinator's broker empty when it
+starts, and the run completing on its pool.
+
+## `mod interleaving` › `fn seeded_contained_runs_never_reuse_a_container_name_intent_or_view() {`
+
+ST-04's container rows (names and intent paths) with R19 and R26 under seeds: at every point the
+containers running, the intents and the views are exactly the held invocations', and no name is
+created twice.
+
+## `mod interleaving` › `fn a_halt_under_every_seed_interrupts_exactly_what_is_in_flight_and_ends_halted() {`
+
+ST-17's halt under eight seeds: after the halting decline nothing is admitted, one interrupted terminal
+is appended per attempt and verification in flight at it, and `run_finished(Halted)` ends the log.
+
+## `mod interleaving` › `fn a_budget_stop_under_every_seed_drains_without_cancelling_and_ends_budget_exceeded() {`
+
+ST-17's budget stop under six seeds: after `budget_exceeded` nothing is admitted and nothing is
+cancelled, what was in flight settles naturally, and `run_finished(BudgetExceeded)` ends the log.
+
+## `mod interleaving` › `fn a_concurrent_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()`
+
+ST-18 at width 3. A Complete and a Halted run (seed 13 halts with two candidates queued) are finished
+once in this process, which lists the effect and run-directory cells their finalization consults after
+`run_finished`; then, for every cell, a child (`finalization_kill_child_at_width_three`) runs the same
+seed and dies by the kill at that cell, and this process adopts its directory and resumes it twice
+through the frozen recovery order. The first resume finalizes to the state the uninterrupted
+finalization left (report outcome, retained candidates, refs under the run namespace, worktrees, the
+execution root); the second finds the report current, removes nothing and refuses the same run; neither
+appends, and planted answer files stay byte-identical.

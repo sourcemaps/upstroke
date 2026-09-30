@@ -1110,6 +1110,24 @@ not the adapter, decides what a worker or reviewer said.
 
 The same two agents, each echoing its process.
 
+## `impl AnsweringAdapter` › `pub(super) const fn probing(id: &'static str) -> Self {`
+
+A passing adapter that also answers the pre-flight: its `probe` runs `<id> --version` through the
+runner it is handed, under the agent's own probe-role `InvocationId` (`agent::probe_request`, ordinal
+0), and reports fixed capabilities when the process exits 0. It is how a width-3 run resumed through
+the frozen recovery order sends its agent probes through a real `RunPreflight` (phase 6's
+`runtime_pool_agent_probes_take_and_release_their_pair_at_preflight_before_admission`); every other
+adapter of this file still refuses to probe.
+
+## `impl crate::agent::AgentAdapter for AnsweringAdapter` › `fn probe(&self, runner: &dyn Runner) -> Result<crate::agent::Caps, UpstrokeError> {`
+
+An adapter built without `probing` fails the assertion that it is one: the scaffold's attempts never
+pre-flight, and a probe reaching such an adapter is a fixture wired to the wrong boundary.
+
+## `impl ScaffoldAdapters` › `pub(super) const fn probing() -> Self {`
+
+The same two agents, each answering its pre-flight probe.
+
 ## `pub(super) struct NoSleep;`
 
 A sleeper that returns at once, so a backoff costs a test nothing.
@@ -1131,7 +1149,17 @@ reviewers each attempt and each verification has, and the pool its agent
 slots come from. `panic_verifying` makes every verification's plan panic, on the
 verification pipeline's thread, as its body starts: a fatal completion the
 coordinator must classify as it arrives (round R1, the early review's
-`R1-CONC-2`).
+`R1-CONC-2`). `pools` names a pool per agent, overriding `pool` for the agents it
+lists — an entry of `None` gives that agent no pool while the others keep theirs —
+which is how phase 6's runtime pool tests give two agents pools of their own, or one
+agent none beside a pooled one.
+
+## `impl WidePlans` › `fn pool_of(&self, agent: &str) -> Option<String> {`
+
+The pool an agent's pairs name: its `pools` entry when it has one, else `pool`. The
+worker's (`plan`, and `pool_for`, which the retry path asks) and every reviewer's
+(`reviewer_plans`, whose profile carries it) come from here, so one run's attempts,
+retries and verifications agree on each agent's pool.
 
 ## `pub(super) fn wide_responder(tasks: &[WideTask], failing_gates: &[(u32, u32)]) -> Responder {`
 

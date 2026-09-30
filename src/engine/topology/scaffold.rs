@@ -1103,6 +1103,7 @@ pub(super) struct AnsweringAdapter {
     verdict: &'static str,
     status: crate::ir::OutcomeStatus,
     echo: bool,
+    probes: bool,
 }
 
 impl AnsweringAdapter {
@@ -1134,6 +1135,14 @@ impl AnsweringAdapter {
             verdict: PASSING_VERDICT,
             status: crate::ir::OutcomeStatus::Completed,
             echo: false,
+            probes: false,
+        }
+    }
+
+    pub(super) const fn probing(id: &'static str) -> Self {
+        Self {
+            probes: true,
+            ..Self::passing(id)
         }
     }
 
@@ -1150,8 +1159,32 @@ impl crate::agent::AgentAdapter for AnsweringAdapter {
         self.id
     }
 
-    fn probe(&self, _runner: &dyn Runner) -> Result<crate::agent::Caps, UpstrokeError> {
-        panic!("the scaffold's attempts do not pre-flight; `preflight.rs` owns that path")
+    fn probe(&self, runner: &dyn Runner) -> Result<crate::agent::Caps, UpstrokeError> {
+        assert!(
+            self.probes,
+            "the scaffold's attempts do not pre-flight; `preflight.rs` owns that path"
+        );
+        let request = crate::agent::probe_request(
+            self.id,
+            CommandSpec::new(self.id).arg("--version"),
+            0,
+            Duration::from_secs(10),
+        )?;
+        let output = runner.run_blocking(&request)?;
+        if output.code != Some(0) {
+            return Err(UpstrokeError::Agent {
+                message: format!("`{} --version` exited {:?}", self.id, output.code),
+            });
+        }
+        Ok(crate::agent::Caps {
+            version: "9.9.9".to_owned(),
+            json_output: true,
+            session_resume: true,
+            cost_reporting: true,
+            read_only_mode: false,
+            acp: false,
+            model_list: false,
+        })
     }
 
     fn build(&self, run: &crate::agent::TaskRun) -> Result<CommandSpec, UpstrokeError> {
@@ -1233,6 +1266,13 @@ impl ScaffoldAdapters {
         Self {
             primary: AnsweringAdapter::echoing(AGENT),
             second: AnsweringAdapter::echoing(REVIEW_AGENT),
+        }
+    }
+
+    pub(super) const fn probing() -> Self {
+        Self {
+            primary: AnsweringAdapter::probing(AGENT),
+            second: AnsweringAdapter::probing(REVIEW_AGENT),
         }
     }
 }
@@ -2310,10 +2350,18 @@ pub(super) struct WidePlans {
     pub(super) verify_gates: usize,
     pub(super) verify_reviewers: usize,
     pub(super) pool: Option<String>,
+    pub(super) pools: Vec<(&'static str, Option<String>)>,
     pub(super) panic_verifying: bool,
 }
 
 impl WidePlans {
+    fn pool_of(&self, agent: &str) -> Option<String> {
+        self.pools
+            .iter()
+            .find(|(named, _)| *named == agent)
+            .map_or_else(|| self.pool.clone(), |(_, pool)| pool.clone())
+    }
+
     fn gate_plans(count: usize) -> Vec<GatePlan> {
         (0..count)
             .map(|index| {
@@ -2352,7 +2400,7 @@ impl WidePlans {
         .take(count)
         .map(|(agent, model, name, lens)| {
             let mut profile = crate::review::profile_for(agent, model, name, Effort::High);
-            profile.pool = self.pool.clone().unwrap_or_default();
+            profile.pool = self.pool_of(agent).unwrap_or_default();
             ReviewerPlan {
                 agent: AgentId::new(agent),
                 profile,
@@ -2381,8 +2429,8 @@ impl super::attempt::AttemptPlans for WidePlans {
         })
     }
 
-    fn pool_for(&self, _agent: &str) -> Option<String> {
-        self.pool.clone()
+    fn pool_for(&self, agent: &str) -> Option<String> {
+        self.pool_of(agent)
     }
 
     fn plan(
@@ -2401,7 +2449,7 @@ impl super::attempt::AttemptPlans for WidePlans {
             attempt: request.attempt,
             rung: request.rung,
             binding: request.binding.clone(),
-            pool: self.pool.clone(),
+            pool: self.pool_of(&request.binding.agent),
             resume_session: request.resume_session.clone(),
             materialization_observed: request.materialization_observed,
             agent: AgentId::new(&request.binding.agent),
@@ -2436,6 +2484,7 @@ impl Default for WidePlans {
             verify_gates: 1,
             verify_reviewers: 1,
             pool: None,
+            pools: Vec::new(),
             panic_verifying: false,
         }
     }
