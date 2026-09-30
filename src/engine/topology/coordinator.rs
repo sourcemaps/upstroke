@@ -11471,11 +11471,6 @@ mod tests {
 
         #[test]
         fn reduced_limits_and_adverse_completion_orders_reach_run_finished_within_the_step_bound() {
-            bounded("the reduced-limit runs", reduced_limit_runs);
-        }
-
-        fn reduced_limit_runs() {
-            let tasks = mixed();
             let orders = [
                 (Adverse::Seeded, 0xDEAD_0001_u64),
                 (Adverse::Seeded, 0xDEAD_0002),
@@ -11487,105 +11482,21 @@ mod tests {
             let mut beside = 0_usize;
             for limited in reduced() {
                 for (order, seed) in orders {
-                    let tag = format!("interleaving-deadlock-{}", runs.len());
-                    let plans = WidePlans {
+                    let index = runs.len();
+                    let limits = Limited {
+                        name: limited.name,
                         pool: limited.pool.clone(),
                         pools: limited.pools.clone(),
-                        ..two_reviewers()
+                        reasks: limited.reasks,
                     };
-                    let judge = WidePlans {
-                        pool: limited.pool.clone(),
-                        pools: limited.pools.clone(),
-                        ..two_reviewers()
-                    };
-                    let runner = if limited.reasks {
-                        reasking(&tasks, &BETA_RETRIES)
-                    } else {
-                        holding(&tasks, &BETA_RETRIES)
-                    };
-                    let mut wide = Wide::started_with(&tag, &tasks, 3, plans, runner);
-                    if limited.reasks {
-                        wide.env.adapters = std::sync::Arc::new(
-                            crate::engine::topology::scaffold::ScaffoldAdapters::echoing(),
-                        );
-                    }
-                    let double = std::sync::Arc::clone(&wide.env.runner);
-                    let mut interleaver = Interleaver::new(&double, seed, order);
-                    let mut hooks = wide.env.hooks();
-                    let pipelines = wide.env.pipelines_limited(SlotLimitsOf::Exactly(1, 1));
-                    let outcome = wide.run.run_concurrently(
-                        &wide.env.seams(),
-                        &pipelines,
-                        &mut hooks,
-                        Some(&mut interleaver),
-                    );
-                    let what = format!("{} / {} {seed:#x}", limited.name, order.name());
-                    let progress = outcome.unwrap_or_else(|error| panic!("{what}: {error}"));
-                    assert_eq!(outcome_of(&progress), RunOutcome::Complete, "{what}");
-                    let points = std::mem::take(&mut interleaver.points);
-                    drop(interleaver);
-                    assert!(
-                        points.len() <= STEPS,
-                        "{what}: {} scheduler steps against a bound of {STEPS}",
-                        points.len()
-                    );
-                    let ran = wide.env.runner.ran();
-                    let over = held_over_limits(&points, &ran, &judge, 1, 1);
-                    assert!(over.is_empty(), "{what}: {over:#?}");
-                    let reasks = ran
-                        .iter()
-                        .filter(|entry| {
-                            matches!(
-                                entry.invocation,
-                                InvocationId::Attempt {
-                                    role: AttemptRole::ReviewReask(_),
-                                    ..
-                                } | InvocationId::Sequence {
-                                    role: SequenceRole::ReviewReask(_),
-                                    ..
-                                }
-                            )
-                        })
-                        .count();
-                    assert_eq!(reasks > 0, limited.reasks, "{what}: {reasks} re-asks");
-                    let verifying_beside_attempts = points.iter().any(|point| {
-                        point
-                            .invoking
-                            .iter()
-                            .any(|held| matches!(held, InvocationId::Sequence { .. }))
-                            && point
-                                .invoking
-                                .iter()
-                                .any(|held| matches!(held, InvocationId::Attempt { .. }))
+                    let (sent, received) = std::sync::mpsc::channel();
+                    bounded("a reduced-limit run", move || {
+                        let _ = sent.send(reduced_limit_run(index, &limits, order, seed));
                     });
+                    let (row, verifying_beside_attempts) =
+                        received.recv().expect("the bounded run reported its row");
                     beside += usize::from(verifying_beside_attempts);
-                    let slotted = ran
-                        .iter()
-                        .filter(|entry| is_slotted(&entry.invocation))
-                        .count();
-                    let ledger = wide.run.broker_mut().invocations();
-                    assert!(ledger.balances(), "{what}");
-                    assert_eq!(
-                        (
-                            usize::try_from(ledger.slots().granted()).expect("a small count"),
-                            usize::try_from(ledger.slots().released()).expect("a small count"),
-                        ),
-                        (slotted, slotted),
-                        "{what}: every pair granted was released once"
-                    );
-                    runs.push(serde_json::json!({
-                        "limits": limited.name,
-                        "per_agent": 1,
-                        "per_pool": 1,
-                        "reasks": reasks,
-                        "order": order.name(),
-                        "seed": seed,
-                        "steps": points.len(),
-                        "processes": ran.len(),
-                        "pairs_granted_and_released": slotted,
-                        "a_verification_beside_attempts": verifying_beside_attempts,
-                        "outcome": "Complete",
-                    }));
+                    runs.push(row);
                 }
             }
             assert!(
@@ -11605,6 +11516,116 @@ mod tests {
                     "runs": runs,
                 }),
             );
+        }
+
+        fn reduced_limit_run(
+            index: usize,
+            limited: &Limited,
+            order: Adverse,
+            seed: u64,
+        ) -> (serde_json::Value, bool) {
+            let tasks = mixed();
+            let tag = format!("interleaving-deadlock-{index}");
+            let plans = WidePlans {
+                pool: limited.pool.clone(),
+                pools: limited.pools.clone(),
+                ..two_reviewers()
+            };
+            let judge = WidePlans {
+                pool: limited.pool.clone(),
+                pools: limited.pools.clone(),
+                ..two_reviewers()
+            };
+            let runner = if limited.reasks {
+                reasking(&tasks, &BETA_RETRIES)
+            } else {
+                holding(&tasks, &BETA_RETRIES)
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 3, plans, runner);
+            if limited.reasks {
+                wide.env.adapters = std::sync::Arc::new(
+                    crate::engine::topology::scaffold::ScaffoldAdapters::echoing(),
+                );
+            }
+            let double = std::sync::Arc::clone(&wide.env.runner);
+            let mut interleaver = Interleaver::new(&double, seed, order);
+            let mut hooks = wide.env.hooks();
+            let pipelines = wide.env.pipelines_limited(SlotLimitsOf::Exactly(1, 1));
+            let outcome = wide.run.run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut interleaver),
+            );
+            let what = format!("{} / {} {seed:#x}", limited.name, order.name());
+            let progress = outcome.unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete, "{what}");
+            let points = std::mem::take(&mut interleaver.points);
+            drop(interleaver);
+            assert!(
+                points.len() <= STEPS,
+                "{what}: {} scheduler steps against a bound of {STEPS}",
+                points.len()
+            );
+            let ran = wide.env.runner.ran();
+            let over = held_over_limits(&points, &ran, &judge, 1, 1);
+            assert!(over.is_empty(), "{what}: {over:#?}");
+            let reasks = ran
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.invocation,
+                        InvocationId::Attempt {
+                            role: AttemptRole::ReviewReask(_),
+                            ..
+                        } | InvocationId::Sequence {
+                            role: SequenceRole::ReviewReask(_),
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(reasks > 0, limited.reasks, "{what}: {reasks} re-asks");
+            let verifying_beside_attempts = points.iter().any(|point| {
+                point
+                    .invoking
+                    .iter()
+                    .any(|held| matches!(held, InvocationId::Sequence { .. }))
+                    && point
+                        .invoking
+                        .iter()
+                        .any(|held| matches!(held, InvocationId::Attempt { .. }))
+            });
+            let slotted = ran
+                .iter()
+                .filter(|entry| is_slotted(&entry.invocation))
+                .count();
+            let ledger = wide.run.broker_mut().invocations();
+            assert!(ledger.balances(), "{what}");
+            assert_eq!(
+                (
+                    usize::try_from(ledger.slots().granted()).expect("a small count"),
+                    usize::try_from(ledger.slots().released()).expect("a small count"),
+                ),
+                (slotted, slotted),
+                "{what}: every pair granted was released once"
+            );
+            (
+                serde_json::json!({
+                    "limits": limited.name,
+                    "per_agent": 1,
+                    "per_pool": 1,
+                    "reasks": reasks,
+                    "order": order.name(),
+                    "seed": seed,
+                    "steps": points.len(),
+                    "processes": ran.len(),
+                    "pairs_granted_and_released": slotted,
+                    "a_verification_beside_attempts": verifying_beside_attempts,
+                    "outcome": "Complete",
+                }),
+                verifying_beside_attempts,
+            )
         }
 
         #[test]
