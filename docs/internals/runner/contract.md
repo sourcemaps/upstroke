@@ -254,9 +254,10 @@ end). The only constructor that marks an error cancelled.
 Whether this error is a cancellation rather than a failure. Callers that
 settle outages on a Runner error must ask this first: a cancellation is the
 coordinator's own decision (halt, shutdown, an append error), never an outage
-of the boundary, and `IntegrationCx::verify` and the attempt's settlement map a
-`Gone` failure to an infrastructure outage today (the PR11 record, R-E). The
-field behind it is private, so no error outside this file can claim to be a
+of the boundary, and today a `Gone` failure is read as one in two places:
+`IntegrationCx::verify` maps it to an infrastructure outage, and a review pass
+(`review::run_review`) reports the review unavailable (the PR11 record, R-E).
+The field behind it is private, so no error outside this file can claim to be a
 cancellation.
 
 ## `pub type RunFuture<'a> =`
