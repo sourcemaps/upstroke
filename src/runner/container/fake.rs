@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 
 use super::runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError,
-    RuntimeOp, Settled, StopMode,
+    DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp,
+    Settled, StopMode,
 };
 use super::{ContainerHooks, DockerCli};
 use crate::runner::Cancellation;
@@ -63,7 +63,11 @@ struct Starting(Option<StartPolicy>);
 
 impl std::fmt::Debug for Starting {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(if self.0.is_some() { "Starting(policy)" } else { "Starting(hold)" })
+        formatter.write_str(if self.0.is_some() {
+            "Starting(policy)"
+        } else {
+            "Starting(hold)"
+        })
     }
 }
 
@@ -855,7 +859,8 @@ impl ContainerRuntime for LinkedRuntime {
     }
 
     fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.call(RuntimeOp::Start, json!({"name": name})).map(|_| ())
+        self.call(RuntimeOp::Start, json!({"name": name}))
+            .map(|_| ())
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -990,7 +995,9 @@ fn spec_json(spec: &CreateSpec) -> Value {
                 source,
                 target,
                 read_only,
-            } => json!({"path": source.to_string_lossy(), "target": target, "read_only": read_only}),
+            } => {
+                json!({"path": source.to_string_lossy(), "target": target, "read_only": read_only})
+            }
             Mount::Volume {
                 name,
                 target,

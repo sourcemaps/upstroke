@@ -3200,7 +3200,10 @@ pub(super) fn exiting() -> crate::runner::container::StartPolicy {
 
 pub(super) fn exiting_probes() -> crate::runner::container::StartPolicy {
     Arc::new(|launch: &crate::runner::container::Launch<'_>| {
-        if matches!(launched_invocation(launch), Some(InvocationId::Probe { .. })) {
+        if matches!(
+            launched_invocation(launch),
+            Some(InvocationId::Probe { .. })
+        ) {
             crate::runner::container::Start::Exit(exit_zero())
         } else {
             crate::runner::container::Start::Hold
@@ -3210,7 +3213,10 @@ pub(super) fn exiting_probes() -> crate::runner::container::StartPolicy {
 
 type Expected = Arc<Mutex<std::collections::BTreeMap<String, RunnerRequest>>>;
 
-fn played_by(double: Arc<RecordingRunner>, expected: Expected) -> crate::runner::container::StartPolicy {
+fn played_by(
+    double: Arc<RecordingRunner>,
+    expected: Expected,
+) -> crate::runner::container::StartPolicy {
     Arc::new(move |launch: &crate::runner::container::Launch<'_>| {
         let request = launch
             .labels
@@ -3258,7 +3264,10 @@ impl Runner for Contained {
 }
 
 impl WideEnv {
-    pub(super) fn identity(&self, incarnation: &str) -> crate::runner::container::exec::RunIdentity {
+    pub(super) fn identity(
+        &self,
+        incarnation: &str,
+    ) -> crate::runner::container::exec::RunIdentity {
         crate::runner::container::exec::RunIdentity {
             private_root: self.fixture.private.clone(),
             run_id: crate::workspace_manager::fixture::RUN_ID.to_owned(),
@@ -3288,7 +3297,10 @@ impl WideEnv {
         })
     }
 
-    pub(super) fn pipelines_over(&self, runner: Arc<dyn Runner>) -> super::coordinator::PipelineSeams {
+    pub(super) fn pipelines_over(
+        &self,
+        runner: Arc<dyn Runner>,
+    ) -> super::coordinator::PipelineSeams {
         super::coordinator::PipelineSeams {
             runner,
             ..self.pipelines()

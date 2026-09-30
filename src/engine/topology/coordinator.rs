@@ -7232,21 +7232,20 @@ mod tests {
     }
 
     fn views_under(root: &std::path::Path) -> Vec<String> {
-        let mut views: Vec<String> = match std::fs::read_dir(
-            root.join(crate::runner::container::census::VIEWS_DIR),
-        ) {
-            Ok(entries) => entries
-                .map(|entry| {
-                    entry
-                        .expect("a views entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => panic!("read the views directory: {error}"),
-        };
+        let mut views: Vec<String> =
+            match std::fs::read_dir(root.join(crate::runner::container::census::VIEWS_DIR)) {
+                Ok(entries) => entries
+                    .map(|entry| {
+                        entry
+                            .expect("a views entry")
+                            .file_name()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("read the views directory: {error}"),
+            };
         views.sort();
         views
     }
@@ -7349,23 +7348,39 @@ mod tests {
             .map(|entry| entry.target.as_str())
             .collect();
         let ran = double.ran();
-        assert_eq!(created.len(), ran.len(), "one container per process the double ran");
+        assert_eq!(
+            created.len(),
+            ran.len(),
+            "one container per process the double ran"
+        );
         let mut created_sorted = created.clone();
         created_sorted.sort_unstable();
         created_sorted.dedup();
-        assert_eq!(created_sorted.len(), created.len(), "no name was created twice");
+        assert_eq!(
+            created_sorted.len(),
+            created.len(),
+            "no name was created twice"
+        );
         let mut removed_sorted = removed.clone();
         removed_sorted.sort_unstable();
-        assert_eq!(created_sorted, removed_sorted, "each container was removed once");
+        assert_eq!(
+            created_sorted, removed_sorted,
+            "each container was removed once"
+        );
         let ran_names = container_names_of(
             &wide,
             INC_A,
-            &ran.iter().map(|ran| ran.invocation.clone()).collect::<Vec<_>>(),
+            &ran.iter()
+                .map(|ran| ran.invocation.clone())
+                .collect::<Vec<_>>(),
         );
-        assert_eq!(created_sorted, ran_names, "each container is its own invocation's");
+        assert_eq!(
+            created_sorted, ran_names,
+            "each container is its own invocation's"
+        );
         for ran in &ran {
-            let name = container_names_of(&wide, INC_A, std::slice::from_ref(&ran.invocation))
-                .remove(0);
+            let name =
+                container_names_of(&wide, INC_A, std::slice::from_ref(&ran.invocation)).remove(0);
             let volumes = journal
                 .iter()
                 .find(|entry| entry.op == RuntimeOp::Create && entry.target == name)
@@ -7424,7 +7439,9 @@ mod tests {
             ),
         };
         crate::runner::RunnerRequest {
-            command: crate::runner::CommandSpec::new("sh").arg("-c").arg("exit 0"),
+            command: crate::runner::CommandSpec::new("sh")
+                .arg("-c")
+                .arg("exit 0"),
             workspace: workspace.to_path_buf(),
             role: crate::runner::ExecutionRole::Probe(target),
             timeout: Duration::from_secs(600),
@@ -7840,13 +7857,21 @@ mod tests {
             !crate::rundir::is_running(&dead_dir),
             "the dead owner's lock hold (R17) went with its process"
         );
-        assert_eq!(running_in(&host), dead, "the dead owner's containers outlive it");
+        assert_eq!(
+            running_in(&host),
+            dead,
+            "the dead owner's containers outlive it"
+        );
 
         let repo_y = second_repository(&root);
         let contained = wide.env.contained(&host, INC_A);
         let double = std::sync::Arc::clone(&wide.env.runner);
-        let mut census: Option<(serde_json::Value, serde_json::Value, Vec<String>, Vec<String>)> =
-            None;
+        let mut census: Option<(
+            serde_json::Value,
+            serde_json::Value,
+            Vec<String>,
+            Vec<String>,
+        )> = None;
         let mut scheduler = Scheduler::scripted(
             &double,
             Box::new(|view: &Quiescent<'_>| {
@@ -7895,7 +7920,11 @@ mod tests {
             .cloned()
             .collect();
         live.sort();
-        assert_eq!(live.len(), 3, "the live coordinator had three containers running");
+        assert_eq!(
+            live.len(),
+            3,
+            "the live coordinator had three containers running"
+        );
         assert_eq!(report["prelock_refused"], true, "{report}");
         assert_eq!(report["report"]["census"], "complete", "{report}");
         assert_eq!(
@@ -7969,7 +7998,11 @@ mod tests {
                 .filter(|entry| entry.target == *name && entry.op == RuntimeOp::Remove)
                 .map(|entry| entry.actor.as_str())
                 .collect();
-            assert_eq!(removers, [INC_A], "`{name}` was released by its own coordinator only");
+            assert_eq!(
+                removers,
+                [INC_A],
+                "`{name}` was released by its own coordinator only"
+            );
         }
         assert!(
             host.container_names().is_empty()
@@ -7998,7 +8031,11 @@ mod tests {
     struct LedgerWatch<'p> {
         harness: crate::runner::container::HarnessHooks,
         preflight: &'p crate::engine::topology::preflight::RunPreflight<'p>,
-        seen: Vec<(crate::topology::effects::EffectSiteId, (usize, usize), usize)>,
+        seen: Vec<(
+            crate::topology::effects::EffectSiteId,
+            (usize, usize),
+            usize,
+        )>,
     }
 
     impl crate::runner::container::ContainerHooks for LedgerWatch<'_> {
@@ -8077,7 +8114,10 @@ mod tests {
         );
         await_starts(host, INC_1, 3);
         let died = first.kill();
-        assert!(!died.success(), "the first incarnation was killed: {died:?}");
+        assert!(
+            !died.success(),
+            "the first incarnation was killed: {died:?}"
+        );
         drop(first);
         let started = sorted(by(
             &host.journal(),
@@ -8142,7 +8182,10 @@ mod tests {
         );
         await_starts(&host, INC_2, 1);
         let died = second.kill();
-        assert!(!died.success(), "the second incarnation was killed: {died:?}");
+        assert!(
+            !died.success(),
+            "the second incarnation was killed: {died:?}"
+        );
         drop(second);
         let journal = host.journal();
         assert_eq!(
@@ -8151,7 +8194,11 @@ mod tests {
             "the second incarnation's census reclaimed the first incarnation's containers"
         );
         let orphan = by(&journal, INC_2, RuntimeOp::Start);
-        assert_eq!(orphan.len(), 1, "it died inside its own shell probe: {orphan:?}");
+        assert_eq!(
+            orphan.len(),
+            1,
+            "it died inside its own shell probe: {orphan:?}"
+        );
         let orphan = orphan[0].clone();
         assert_eq!(running_in(&host), std::slice::from_ref(&orphan));
         holds_nothing(&env.paths.public, &env.fixture.base)
@@ -8203,7 +8250,10 @@ mod tests {
             .expect("the third incarnation resumes");
         let seen = std::mem::take(&mut hooks.watch.seen);
         drop(hooks);
-        assert_eq!(recovered.interrupted, 3, "the first incarnation's three attempts");
+        assert_eq!(
+            recovered.interrupted, 3,
+            "the first incarnation's three attempts"
+        );
         broker_is_empty(&mut wide.run).expect("the broker starts empty");
 
         let journal = host.journal();
@@ -8250,7 +8300,11 @@ mod tests {
             "the census finished with the orphan ({last_reclaim}) before this incarnation's first \
              container operation ({first_own})"
         );
-        let reclaims: Vec<&(crate::topology::effects::EffectSiteId, (usize, usize), usize)> = seen
+        let reclaims: Vec<&(
+            crate::topology::effects::EffectSiteId,
+            (usize, usize),
+            usize,
+        )> = seen
             .iter()
             .filter(|(site, _, _)| {
                 matches!(
@@ -8264,7 +8318,10 @@ mod tests {
                 )
             })
             .collect();
-        assert!(!reclaims.is_empty(), "the census's reclaim steps were observed: {seen:?}");
+        assert!(
+            !reclaims.is_empty(),
+            "the census's reclaim steps were observed: {seen:?}"
+        );
         for (site, settled, running) in &reclaims {
             assert_eq!(
                 (*settled, *running),
@@ -8272,7 +8329,11 @@ mod tests {
                 "{site:?}: the pre-flight's ledger held nothing while the census reclaimed"
             );
         }
-        assert_eq!(preflight.settlements(), (1, 0), "then its shell probe ran and settled");
+        assert_eq!(
+            preflight.settlements(),
+            (1, 0),
+            "then its shell probe ran and settled"
+        );
 
         let repo_y = second_repository(&root);
         let contained = wide.env.contained(&host, INC_3);
@@ -8360,7 +8421,10 @@ mod tests {
         );
         await_starts(&host, INC_2, 4);
         let died = second.kill();
-        assert!(!died.success(), "the second incarnation was killed: {died:?}");
+        assert!(
+            !died.success(),
+            "the second incarnation was killed: {died:?}"
+        );
         drop(second);
         let journal = host.journal();
         let probe_hash = crate::runner::container::intent::invocation_hash(
@@ -8490,7 +8554,10 @@ mod tests {
                 .collect()
         };
         let (one, two, three) = (by_hash(INC_1), by_hash(INC_2), by_hash(INC_3));
-        let shared: Vec<&String> = two.keys().filter(|hash| three.contains_key(*hash)).collect();
+        let shared: Vec<&String> = two
+            .keys()
+            .filter(|hash| three.contains_key(*hash))
+            .collect();
         assert!(
             shared.contains(&&probe_hash),
             "the second and third incarnations ran one deterministic probe identity: {shared:?}"
@@ -8503,7 +8570,11 @@ mod tests {
             let mut unique = names.clone();
             unique.sort();
             unique.dedup();
-            assert_eq!(unique.len(), names.len(), "{hash}: one name per incarnation");
+            assert_eq!(
+                unique.len(),
+                names.len(),
+                "{hash}: one name per incarnation"
+            );
         }
         assert_eq!(
             count(&wide.env.durable_events(), "attempt_interrupted"),
@@ -8524,7 +8595,7 @@ mod tests {
 
     #[test]
     fn a_foreign_census_and_a_resuming_incarnation_converge_on_one_dead_container_as_two_processes()
-     {
+    {
         use crate::runner::container::runtime::RuntimeOp;
         use std::ffi::OsStr;
         let tasks = three();
@@ -8603,10 +8674,9 @@ mod tests {
         assert_eq!(recovered.interrupted, 0);
         assert_eq!(report["report"]["census"], "complete", "{report}");
         assert!(
-            census_names(&report, "reclaimed")
-                .iter()
-                .any(|(name, ownership)| *name == contested
-                    && ownership == "foreign-run-dead-owner"),
+            census_names(&report, "reclaimed").iter().any(
+                |(name, ownership)| *name == contested && ownership == "foreign-run-dead-owner"
+            ),
             "the foreign command reclaimed the contested container: {report}"
         );
         let journal = host.journal();
@@ -8680,9 +8750,9 @@ mod tests {
         });
         let mut scheduler = shutdown_at_first_point(&double);
         let mut hooks = wide.env.hooks();
-        let pipelines =
-            wide.env
-                .pipelines_over(std::sync::Arc::clone(&carrying) as std::sync::Arc<dyn crate::runner::Runner>);
+        let pipelines = wide.env.pipelines_over(
+            std::sync::Arc::clone(&carrying) as std::sync::Arc<dyn crate::runner::Runner>
+        );
         let error = wide
             .run
             .run_concurrently(
@@ -8788,12 +8858,13 @@ mod tests {
             request: &'a crate::runner::RunnerRequest,
             call: crate::runner::RunnerCall<'a>,
         ) -> crate::runner::RunFuture<'a> {
-            let pidfile = self.pids.join(format!("{}.pid", request.invocation.render()));
+            let pidfile = self
+                .pids
+                .join(format!("{}.pid", request.invocation.render()));
             let held = crate::runner::RunnerRequest {
-                command: crate::runner::CommandSpec::new("sh").arg("-c").arg(format!(
-                    "echo $$ > '{}'; exec sleep 600",
-                    pidfile.display()
-                )),
+                command: crate::runner::CommandSpec::new("sh")
+                    .arg("-c")
+                    .arg(format!("echo $$ > '{}'; exec sleep 600", pidfile.display())),
                 timeout: Duration::from_secs(900),
                 ..request.clone()
             };
@@ -8879,10 +8950,14 @@ mod tests {
                 })
                 .collect()
         };
-        within(BOUND, "three pipeline processes started", || read_pids().len() == 3);
+        within(BOUND, "three pipeline processes started", || {
+            read_pids().len() == 3
+        });
         let started = read_pids();
-        let public =
-            crate::rundir::public_dir(&root.join("repo"), crate::workspace_manager::fixture::RUN_ID);
+        let public = crate::rundir::public_dir(
+            &root.join("repo"),
+            crate::workspace_manager::fixture::RUN_ID,
+        );
         assert!(
             crate::rundir::is_running(&public),
             "the coordinator holds its run lock"
@@ -8897,14 +8972,20 @@ mod tests {
         let died = child.kill();
         assert!(!died.success(), "the coordinator was killed: {died:?}");
         drop(child);
-        within(BOUND, "every pipeline process settled by its reaper", || {
-            started
-                .iter()
-                .all(|pid| !crate::workspace_manager::fixture::process_exists(*pid))
-        });
-        within(BOUND, "the reapers' holds released once their groups settled", || {
-            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks)
-        });
+        within(
+            BOUND,
+            "every pipeline process settled by its reaper",
+            || {
+                started
+                    .iter()
+                    .all(|pid| !crate::workspace_manager::fixture::process_exists(*pid))
+            },
+        );
+        within(
+            BOUND,
+            "the reapers' holds released once their groups settled",
+            || !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+        );
         let env = crate::engine::topology::scaffold::WideEnv::adopted(
             root,
             &tasks,
@@ -8987,7 +9068,7 @@ mod tests {
 
     #[test]
     fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()
-     {
+    {
         use crate::topology::effects::SubEffectPoint;
         let tasks = three();
         let answering = || RecordingRunner::new().answering(wide_responder(&tasks, &[]));

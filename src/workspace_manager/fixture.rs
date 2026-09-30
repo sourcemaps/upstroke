@@ -3014,14 +3014,17 @@ impl LinkedChild {
         test: &str,
         env: &[(&str, &OsStr)],
         stderr: &Path,
-    ) -> (
-        std::sync::Arc<Self>,
-        std::sync::mpsc::Receiver<String>,
-    ) {
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
         let log = fs::File::create(stderr).expect("the linked child's stderr log");
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
         command
-            .args(["--exact", test, "--ignored", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log));
