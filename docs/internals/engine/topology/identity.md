@@ -491,6 +491,13 @@ is ending, so it cancels what it holds rather than asserting what that is.
 Since PR11 that is every outstanding reservation, not the one the sequential
 substrate held.
 
+## `impl Reservations` › `pub const fn peak(&self) -> usize {`
+
+The most reservations ever outstanding at once in this ledger, updated as each
+is taken. The coordinator converts every provisional reservation at its first
+append, on its own thread, before it selects again, so at any width the peak is
+one (memo §5; the coordinator's ST-04 witness reads it).
+
 ## `impl Reservations` › `fn settle(`
 
 The one place a reservation leaves `held`: converted or cancelled once, a
@@ -656,6 +663,14 @@ the caller's.
 Cancel every waiting request, granting nothing — shutdown's "pending
 requests cancelled". Running invocations are left for the caller to cancel
 once the Runner reports them terminated.
+
+## `impl InvocationLedger` › `pub fn settled(&self, invocation: &InvocationId) -> bool {`
+
+Whether `invocation` has already been completed or cancelled here. The
+coordinator reads it before it hands a pipeline's end of an invocation to the
+ledger: an end for an invocation the pipeline is not running is discarded
+unless the ledger already settled it, in which case the ledger's own duplicate
+refusal counts it.
 
 ## `impl InvocationLedger` › `pub const fn duplicates(&self) -> u32 {`
 

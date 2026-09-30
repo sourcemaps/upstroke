@@ -1550,6 +1550,50 @@ fn remove_tree_once_handles_close(path: &Path) -> std::io::Result<()> {
 #[inline]
 fn note_removal_attempt(_attempt: u32) {}
 
+/// One lock per repository's worktree registry (`<common git dir>/worktrees`),
+/// shared by every [`WorkspaceManager`] of that repository in this process.
+///
+/// **Why a lock, and why here.** From PR11 several pipelines of one run add and
+/// remove snapshots while the coordinator adds and removes task and staging
+/// worktrees, all through clones of one manager, and Git 2.43's registry is not
+/// safe against itself: `git worktree add` makes the administrative directory
+/// before it writes `locked`, `gitdir` and `commondir`, a plain `git worktree
+/// prune` removes a directory with no `gitdir`, and every enumeration — `git
+/// worktree list`, the one `add` makes of its siblings, and this module's own
+/// scan in [`WorkspaceManager::remove_worktree_proving`] — reads each entry's
+/// files and dies (or, here, refuses) on one half written. Measured with four
+/// concurrent loops: an add raced by a prune failed 2–3 times in 600
+/// (`~/orch-pr11/logs/pr11_research_c/git-worktree-add-prune-race-*.log`), and a
+/// `git worktree list` raced by adds and prunes failed 7–10 times in about 7,500,
+/// and once in about 2,000 against adds alone
+/// (`~/orch-pr11/logs/pr11_impl_c/git-worktree-list-race.log`); serially, never.
+///
+/// **What it guards.** No data: it orders every registry access this process
+/// makes — the `git worktree add` child, a removal from its registration scan to
+/// its prune, `git worktree list`, and the torn-registration plan's scan — so
+/// none of them sees another half done. **Protocol.** Keyed by the canonical
+/// common git directory, so two managers of one repository share it; taken
+/// around one Git child or one removal and released before the funnel returns;
+/// never taken twice on one thread, and a holder waits only for its own Git
+/// child and filesystem calls, so it adds no wait cycle. A poisoned lock is
+/// taken anyway: it protects an ordering, not a value. **What it cannot guard:**
+/// another process — or an agent running Git in its own worktree — that edits
+/// the registry is outside it (the PR11 record, §11).
+///
+/// The table holds one entry per repository this process has managed and is
+/// never pruned; shared ownership is the lifecycle — each manager of the
+/// repository holds the `Arc` only while it holds the lock.
+static REGISTRY_LOCKS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut table = REGISTRY_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(table.entry(common_git_dir.to_path_buf()).or_default())
+}
+
 impl WorkspaceManager {
     /// Derive the execution root of `run_id` from the managed base and the
     /// authorized private root, and refuse every containment condition
@@ -2651,6 +2695,10 @@ impl WorkspaceManager {
                 Self::WORKTREE_ADD_ARGV.iter().map(OsString::from).collect();
             argv.push(path.as_os_str().to_os_string());
             argv.push(OsString::from(commit));
+            let registry = registry_lock_of(&self.common_git_dir);
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.git_ok(&self.base, &argv)?;
             Ok(path)
         })
@@ -2915,6 +2963,11 @@ impl WorkspaceManager {
     /// finalization's scrub and the live loop's; its error is the funnel's,
     /// never absorbed.
     ///
+    /// The whole removal — the registration scan, the checkout, the
+    /// administrative directory and the prune — holds the repository's
+    /// registry lock (`REGISTRY_LOCKS`), so the scan never reads an add this
+    /// process has in flight and the prune never removes one.
+    ///
     /// # Errors
     ///
     /// The containment refusals, or a Git or I/O error.
@@ -2925,6 +2978,10 @@ impl WorkspaceManager {
         proof: WriterProof,
     ) -> Result<Vec<PathBuf>, UpstrokeError> {
         let path = self.slot_target(slot)?;
+        let registry = registry_lock_of(&self.common_git_dir);
+        let _serialized = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let RemovalBinding {
             admin: registration,
             passed_over,
@@ -4962,15 +5019,21 @@ impl WorkspaceManager {
     ///
     /// A Git error.
     pub fn worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
-        let output = self.git_ok(
-            &self.base,
-            &[
-                OsString::from("worktree"),
-                OsString::from("list"),
-                OsString::from("--porcelain"),
-                OsString::from("-z"),
-            ],
-        )?;
+        let registry = registry_lock_of(&self.common_git_dir);
+        let output = {
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.git_ok(
+                &self.base,
+                &[
+                    OsString::from("worktree"),
+                    OsString::from("list"),
+                    OsString::from("--porcelain"),
+                    OsString::from("-z"),
+                ],
+            )?
+        };
         parse_worktree_records(&output)
     }
 
@@ -5253,6 +5316,10 @@ impl WorkspaceManager {
         &self,
         excluding: Option<&Slot>,
     ) -> Result<Vec<Slot>, UpstrokeError> {
+        let registry = registry_lock_of(&self.common_git_dir);
+        let _serialized = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut torn = Vec::new();
         for slot in self.intents()? {
             if excluding == Some(&slot) {

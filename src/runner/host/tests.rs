@@ -6948,3 +6948,71 @@ fn a_runner_level_observer_still_takes_invocations_one_at_a_time() {
          outlived its wait for the other: {codes:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {
+    let tree = scratch_tree("carried-leases");
+    let dir = tree.path().to_path_buf();
+    let public = dir.join("public");
+    std::fs::create_dir_all(&public).expect("a run directory");
+    let lock = crate::rundir::RunLock::acquire(&public).expect("the run lock");
+    let leases = {
+        let _scope = lock.enter_cleanup_scope();
+        crate::rundir::active_cleanup_lease_paths()
+    };
+    assert_eq!(leases.len(), 1, "the run has one cleanup lease: {leases:?}");
+    assert!(
+        crate::rundir::active_cleanup_lease_paths().is_empty(),
+        "this thread has left the run's scope, like a pipeline thread that never entered it"
+    );
+
+    for carried in [false, true] {
+        let ready = dir.join(format!("ready-{carried}"));
+        let mut command = native().spec(": > \"$UPSTROKE_READY\"; sleep 300");
+        command.env.push((
+            "UPSTROKE_READY".to_owned(),
+            ready.to_string_lossy().into_owned(),
+        ));
+        let request = crate::runner::gate_request(
+            command,
+            dir.clone(),
+            Duration::from_secs(600),
+            gate_invocation(),
+        );
+        let runner = HostRunner::new();
+        let cancellation = crate::runner::Cancellation::new();
+        let held_while_running = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| {
+                let call = RunnerCall::new(cancellation.clone());
+                let call = if carried {
+                    call.holding_cleanup_leases(&leases)
+                } else {
+                    call
+                };
+                runner.run_blocking_with(&request, call)
+            });
+            let started = wait_for_file(&ready, Duration::from_secs(60));
+            let held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            cancellation.cancel();
+            let outcome = driver.join().expect("the driving thread");
+            assert!(
+                started,
+                "carried {carried}: the child never announced itself"
+            );
+            let error = outcome.expect_err("the cancelled child reports cancelled");
+            assert!(error.is_cancelled(), "carried {carried}: {error}");
+            held
+        });
+        assert_eq!(
+            held_while_running, carried,
+            "carried {carried}: the reaper holds the run's cleanup lease exactly when the call \
+             carries it"
+        );
+        assert!(
+            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "carried {carried}: the hold ended with the reaper"
+        );
+    }
+    drop(lock);
+}

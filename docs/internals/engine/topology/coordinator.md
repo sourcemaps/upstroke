@@ -1,0 +1,400 @@
+# `src/engine/topology/coordinator.rs`
+
+Extended notes for [`src/engine/topology/coordinator.rs`](../../../../src/engine/topology/coordinator.rs).
+
+The code is the authority for what it does; this file is the whole of its prose but for the
+concurrency protocol standards §10 places at its site, which the source keeps in four comments:
+above `PipelineSeams` (what the shared handles are shared for), `SnapshotGate` (the snapshot gate),
+`Coordinator` (the coordinator's protocol) and `Client` (a pipeline's side of it). Each section
+here is headed by the line of code it describes, spelled as it is in the source, so the heading is
+the grep string that finds the code.
+
+## Module
+
+PR11 phase 3: the Tokio coordinator. [`TopologyRun::run_concurrently`] drives a schema-4 run at
+width > 1 through the same transition functions [`TopologyRun::step`] drives at width 1 (`run.rs`),
+with an attempt's body and a verification's body running as *pipelines* on Tokio's blocking pool.
+It is additive: `step`, `resumed` and `RunSeams` keep their signatures, and nothing in production
+calls this entry yet — `upstroke run` still writes schema 3, and a schema-4 run is reachable only
+from tests until PR12.
+
+The readings this module implements are the working record's R-R to R-AD
+(`reviews/2026-09-30-pr11-record.md`, "Phase 3's readings"); the sections below name them where
+they bind.
+
+### Threads (R-R)
+
+The coordinator is the caller's thread. It never enters the runtime: its only waits are
+`blocking_recv` on the channel its pipelines send to (and, when a test's observer is present, a
+`try_recv` of the injector's), and the `block_on` that joins every pipeline's handle at the end.
+Pipelines run on `spawn_blocking` and drive the Runner through `run_blocking_with`, which polls the
+Runner's future to completion on the pipeline's own thread — the same substrate `step` uses. The
+one thing a pipeline's thread lacks is the run's cleanup scope, which is thread-local; the pipeline
+carries the scope's lease paths into every call instead (R-Z: `Carried`,
+`RunnerCall::holding_cleanup_leases`).
+
+Tokio is `=1.53.1` with `rt`, `rt-multi-thread` and `sync` only. The runtime has one worker thread,
+on which nothing runs, and at most `max_parallel` blocking threads — the fold's pipeline
+entitlements bound the live pipelines at that, a verification included. Every thread is named
+after the caller's thread, because the test observation export attributes a record to the current
+thread's name: a pipeline's records are the test's that started it.
+
+### The cut (R-S)
+
+Selection, admission, dispatch, `attempt_started`, every append, every settlement and every
+integration run on the coordinator's thread. The attempt's body (the worker, the capture, the
+assessment, the gates and reviews — [`attempt_body`]) and the verification's body
+([`verification_body`]) run on pipelines, and append nothing. Dispatch and `attempt_started` stay
+together on the coordinator so the fold never shows a generation `OpenNoAttempt` while a pipeline
+creates its worktree, where `eligible_continuation` would select it a second time.
+
+### Budget overshoot
+
+`select` checks the ceiling against the **settled** spend only, and a pipeline's spend is known
+when its completion is settled. So a run can overrun its ceiling by the unknown spend of at most
+`max_parallel` live pipelines, each running one invocation at a time: the breach is seen at the
+next selection after a settlement crosses the ceiling, and the pipelines live at that moment are
+not stopped — a budget stop drains them (R-AC). This bound is stated here and, from phase 4, in the
+report text; it is never a durable field ("durable_events: none new").
+
+## `pub type HooksFactory = Arc<dyn Fn() -> Box<dyn TopologyHooks + Send> + Send + Sync>;`
+
+Each pipeline's own hooks, made for it at spawn: a pipeline's effects go through hooks it owns,
+since the coordinator's hooks are the coordinator's thread's.
+
+## `pub type Reply = oneshot::Sender<Result<(), UpstrokeError>>;`
+
+The coordinator's answer to a pipeline's request — a grant or a refusal — on the oneshot the
+request carried.
+
+## `pub struct PipelineSeams {`
+
+What a spawned pipeline takes to its thread: owned seams, where `RunSeams` borrows. The source
+keeps why each `Arc` is shared beside the struct (standards §6, §10). `slots` are the command's
+`[engine]` slot limits (R-K), installed in the broker before anything is admitted.
+
+## `pub struct PipelineId(pub u64);`
+
+A pipeline's number within this call, from 1 in spawn order. The deterministic intake orders
+buffered messages by it.
+
+## `pub enum Identity {`
+
+What a pipeline was spawned for: an attempt (its key, generation and attempt number), or a
+verification (its sequence and candidate). Every message a pipeline sends names its pipeline, and a
+completion names the identity too, so the coordinator can check the two agree (R-AA).
+
+## `impl Identity` › `fn owns(&self, invocation: &InvocationId) -> bool {`
+
+Whether `invocation` belongs to this identity: an attempt's invocations share its key, generation
+and attempt; a verification's share its sequence. An invocation offered or ended by a pipeline that
+does not own it is refused and counted.
+
+## `impl Identity` › `fn open_in(&self, run: &TopologyRun) -> bool {`
+
+Whether the fold still holds this identity open: an attempt's worker standing is a pipeline
+entitlement's, a verification's gate standing holds the pipeline and merge entitlements and the
+open transaction is its candidate's. A completion for an identity the fold does not hold open is
+stale, and is discarded.
+
+## `pub enum ToCoordinator {`
+
+The protocol's messages. `Admit` and `SnapshotBegin` are requests, answered on their `reply`;
+`Ended` and `SnapshotEnd` are notifications; `Judged` and `Verified` are a pipeline's completion,
+its last message; `Shutdown` is the command's (a test's, until PR12 wires signals). A `Judged`
+outcome is boxed because a judgement is large and the channel's other messages are small.
+
+## `pub trait Quiescence {`
+
+A test's hook into the deterministic intake (R-AD): called when every live pipeline is waiting on
+the coordinator or on a held invocation and nothing is buffered, it chooses what happens next.
+
+## `pub enum Release {`
+
+The observer's choice: one held invocation to let finish (the observer delivers its result before
+it returns), a message it injected, or nothing — which ends the command as stuck.
+
+## `pub struct Quiescent<'a> {`
+
+What the observer sees: the invocations the live pipelines are running, the live pipelines and
+their identities, the run, and the injector.
+
+## `pub struct Injector(mpsc::UnboundedSender<ToCoordinator>);`
+
+How a test forges a message — a stale, duplicate or mismatched completion — to prove the
+coordinator discards it. An injected message is never trusted as a pipeline's: it is checked, and
+anything it would settle or release is refused.
+
+## `impl TopologyRun` › `pub fn run_concurrently(`
+
+Run the schema-4 loop at the run's width until it finishes, or until the command ends.
+
+It enters the run's cleanup scope on the caller's thread, reads the scope's lease paths once (Unix;
+elsewhere there are none) for every pipeline to carry, installs the command's slot limits, builds
+the runtime and drives. It joins every pipeline's handle before it returns, whatever the outcome.
+
+### Errors
+
+A refusal before anything is spawned: slot limits that cannot replace the broker's (something is
+outstanding in it), or a runtime that could not be built. After that, whatever ends the command: a
+pipeline's error or panic, a coordinator-side error (a settlement's Git failure, a refused
+dispatch, a poisoned fold), a shutdown, or a halt whose closure is refused (phase 3 does not close a
+run with work in flight; phase 4 does). Every one of them ends the command resumably: live
+pipelines are cancelled and waited for, what they return is discarded, and no `attempt_interrupted`
+is appended live — the next resume settles the open attempts interrupted (R-AB).
+
+## `enum Busy {`
+
+What a live pipeline is doing as the coordinator knows it, updated at the receipt of each message:
+`Running` on its own, `Awaiting` a reply, `Invoking` a granted invocation, `Done` once its
+completion is received. With an observer, the coordinator applies buffered messages only when no
+pipeline is `Running`, which is what makes the order it applies them in independent of thread
+timing.
+
+## `struct Live {`
+
+A live pipeline's entry: its identity, its cancellation, whether it was cancelled, what it is doing,
+the invocation it is running (to withdraw from the broker if it ends holding it), and, for an
+attempt, the job the coordinator settles against.
+
+## `enum Interrupt {`
+
+Why the command is ending: a halting settlement (`Halt`), a shutdown, or an error. The first one
+recorded is the one the command ends with; a later error is a warning.
+
+## `enum Origin {`
+
+Whether a message came from a pipeline or through the injector. An injected request, end or
+completion never moves a pipeline's `Busy` state and never settles or releases anything; an
+injected `Shutdown` is the command's own.
+
+## `enum GateMode {`
+
+The snapshot gate's three modes (R-W): `Open` grants at once; `Closed` queues; `Verifying` grants
+until the verification's completion has arrived and queues after it.
+
+## `struct SnapshotGate {`
+
+The source keeps the gate's protocol beside the struct (§10). Why it exists: the frozen
+`integrate()` reclaims **every** snapshot intent of the execution root on a stale terminal
+(`integrate.md`, `reclaim_snapshots`), a rationale that rests on one judgement at a time. The gate
+is isolated in this one type so that, should the owner later take option A (a three-line edit of
+the frozen file; R-W), it can be deleted without touching anything else.
+
+## `impl SnapshotGate` › `fn take_granted(&mut self) -> Vec<(PipelineId, Reply)> {`
+
+Grant every waiting pipeline when the gate grants, in the order they asked.
+
+## `struct Coordinator<'s> {`
+
+The source keeps the coordinator's protocol beside the struct (§10): the owner of every shared
+state, the linearization point, a pipeline's transitions, which completion wins, the cleanup after
+an interrupt, and why the unbounded channels are bounded.
+
+## `impl Coordinator<'_>` › `fn drive(&mut self) -> Result<Progress, UpstrokeError> {`
+
+Admit everything selection admits; end the command on an interrupt; when nothing is live, take the
+idle-only arms; otherwise apply the next message. An error anywhere is recorded as the interrupt
+and the loop ends through [`Self::finish`].
+
+## `impl Coordinator<'_>` › `fn admit(&mut self) -> Result<(), UpstrokeError> {`
+
+Select and start until selection has nothing to start now. Each pass reads the fold afresh
+(INV-21): a poisoned fold refuses; an ending run stops admission — a halt with pipelines live
+cancels them, a budget stop lets them drain (R-AC); a draining gate waits; an answer ingested
+restarts the pass. Then `admitted()` — the one selection `step` makes too — and its arm: a budget
+breach appended, an integration run, a retry or a dispatch started and spawned. Backoff, hard block
+and closure are taken only when no pipeline is live (R-AB), so with pipelines live they end the
+pass; the cost is latency, and a `defer_wait_elapsed` is never placed among in-flight settlements.
+
+## `impl Coordinator<'_>` › `fn integrate(&mut self, candidate: CandidateRef) -> Result<bool, UpstrokeError> {`
+
+An integration, on the coordinator's thread, through the frozen `integrate()` over
+[`DrivenJournal`]. Stale is predicted before anything is taken — the candidate's recorded base is
+not the log's authorized head, which is `decide`'s own test once the ref is not foreign (a foreign
+head refuses before any staging or reclaim) — and while an attempt snapshot is live a stale
+integration takes no reservation: the gate closes, admission stops, messages are applied, and when
+no attempt snapshot is live selection runs afresh (an answer ingested meanwhile can put another
+candidate at the head of the queue). A fast integration never reclaims and does not wait. `false`
+ends the admission pass: nothing was started, or the command is already ending — an error the
+interrupt already accounts for is not a second error.
+
+## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
+
+The idle-only arms, by the functions `step` runs: the backoff, the hard block, the closure. Any
+other arm here is a refusal, because the admission pass takes it first.
+
+## `impl Coordinator<'_>` › `fn spawn_attempt(&mut self, job: AttemptJob) {`
+
+An attempt's body on a pipeline: its standing read from the fold once, after `attempt_started`; a
+[`Carried`] with its own cancellation and the run's lease paths; a gated `Client`; its own hooks; a
+copy of the job (the coordinator keeps the original to settle against). A panic inside the body is
+caught and becomes the pipeline's completion (`panicked`), so a pipeline always reports.
+
+## `impl Coordinator<'_>` › `fn spawn_verification(&mut self, job: VerificationJob) -> PipelineId {`
+
+A verification's body on a pipeline, with an ungated `Client` — the verification's snapshots are
+the integration's own, the ones the reclaim is for — and a [`SpendAccount`] with no `Spend`: its
+review passes come back with its completion and are charged by the coordinator.
+
+## `impl Coordinator<'_>` › `fn verify_concurrently(`
+
+The coordinator's `verify`, re-entrant (R-V): the frozen `integrate()` calls
+[`Verification::verify`] on the [`DrivenJournal`], which lands here. It spawns the verification
+and keeps running the loop — admission, settlements, dispatch, promotion — until the
+verification's completion arrives and no attempt snapshot is live, then charges the passes and maps
+the outcome through [`verified`], the width-1 mapping. The gate grants during the verification and
+stops granting once its completion has arrived, so every snapshot the reclaim that follows removes
+is the integration's own.
+
+### Errors
+
+A refusal when asked inside another verification (one transaction is open at a time); the
+verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
+it — the pipeline was cancelled, and `integrate()` appends nothing further for it. A halt inside
+`verify` leaves the transaction `VerificationStarted`, for the closure's refusal (R-AC).
+
+## `impl Coordinator<'_>` › `fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {`
+
+Without an observer — the production shape — the next message in arrival order. With one, the
+deterministic intake (R-AD): an injected message first; otherwise buffer everything that has
+arrived, wait while any pipeline is `Running`, then apply the buffered message that sorts first by
+pipeline and arrival; when nothing is buffered, every live pipeline is waiting, and the observer
+chooses what happens next.
+
+## `impl Coordinator<'_>` › `fn observe(&mut self) -> Result<(), UpstrokeError> {`
+
+Ask the observer. A released invocation's pipeline is `Running` again; an injection must have put
+something in the injector; nothing released is `stuck`, which ends the command resumably.
+
+## `impl Coordinator<'_>` › `fn admit_invocation(`
+
+A pipeline's `Admit`: refused and counted when injected, from a pipeline that is not live, or for
+an invocation its identity does not own; refused as cancelled when its pipeline was cancelled or
+the command is ending; otherwise registered with the broker against the invocation's standing —
+granted at once (the reply is sent), or pending until a slot pair frees (the reply waits in
+`replies`). A grant whose pipeline stopped waiting is withdrawn, and whatever that frees is granted.
+
+## `impl Coordinator<'_>` › `fn end_invocation(`
+
+A pipeline's `Ended`: completed or cancelled in the broker, and whatever that frees granted. An end
+from a pipeline that is not live, for an invocation its identity does not own, or for an invocation
+it is not running and the ledger never settled, is discarded and counted, and releases nothing.
+
+## `impl Coordinator<'_>` › `fn begin_snapshot(`
+
+A pipeline's `SnapshotBegin`: refused when injected, when the pipeline is not live or is being
+cancelled, or when the command is ending; granted at once when the gate grants; queued otherwise.
+
+## `impl Coordinator<'_>` › `fn check(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> Option<Live> {`
+
+The identity check every completion passes before anything is settled (R-AA), in order: a poisoned
+fold discards it silently (the command is already ending); a pipeline that is not live makes it
+stale or a duplicate; an identity that is not the pipeline's is a mismatch; a cancelled pipeline's
+completion is the expected end of its cancellation and is discarded silently; an identity the fold
+no longer holds open is stale; and an injected completion for a pipeline still running is
+discarded. Only then is the pipeline retired and its entry returned. Every discard is counted
+(`TopologyRun::discarded`), and all but the silent ones are warned about.
+
+## `impl Coordinator<'_>` › `fn retire(&mut self, pipeline: PipelineId) -> Option<Live> {`
+
+Remove a pipeline: its snapshot grants and waits released, and an invocation it still holds
+withdrawn from the broker, whatever that frees granted.
+
+## `impl Coordinator<'_>` › `fn judged(`
+
+An attempt's completion, checked and then settled by `settle_judged`, the function `step` settles
+through. A pipeline's error ends the command (R-AB).
+
+## `impl Coordinator<'_>` › `fn verified_arrived(`
+
+A verification's completion, held for `verify_concurrently` once checked. One that no open
+verification awaits is a cancelled pipeline's end (silent) or stale (warned).
+
+## `impl Coordinator<'_>` › `fn cancel_all(&mut self) {`
+
+Cancel every live pipeline's token, withdraw every pending registration, and refuse every reply
+still owed — so no pipeline waits on a coordinator that is ending, and every one of them reaches its
+completion. Registrations already granted are released as their pipelines end them.
+
+## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
+
+End the command: cancel, apply messages until no pipeline is live, then close the run after a halt
+(the closure refuses what it cannot close in phase 3), or return the shutdown's or the error's
+refusal.
+
+## `impl Drop for Coordinator<'_>` › `fn drop(&mut self) {`
+
+Cancel whatever is still live and drop every reply still owed, so that a coordinator unwinding
+leaves no pipeline waiting on it.
+
+## `impl Driver for Coordinator<'_>` › `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {`
+
+The frozen `integrate()`'s verification, run concurrently.
+
+## `struct Client {`
+
+The source keeps a pipeline's side of the protocol beside the struct (§10). `gated` is true for an
+attempt's pipeline and false for a verification's.
+
+## `impl Client` › `fn ask(&self, message: impl FnOnce(Reply) -> ToCoordinator) -> Result<(), UpstrokeError> {`
+
+Send a request and wait for its reply on the pipeline's thread. A coordinator that has stopped
+listening is a refusal, never a hang.
+
+## `impl Registrar for Client {`
+
+A pipeline's registrar (R-U): `admit` asks and waits for the grant, `ended` notifies, and the two
+snapshot calls ask and notify when the pipeline is gated.
+
+## `mod tests`
+
+The scheduler first: `Seeded` is a splitmix64 stream; a `Scheduler` is a [`Quiescence`] observer
+releasing the first held invocation, a seeded choice, or what a script chooses, and records the
+widest set of invocations — and of slotted invocations — it saw granted at once. The tests hold
+every invocation (`RecordingRunner::hold`) and answer it with the fixture's responder, so the order
+of completions is the scheduler's and never the threads'.
+
+## `mod tests` › `fn canonical(events: &[TopologyEvent], run_id: &str) -> Vec<serde_json::Value> {`
+
+The packet's `canonical_trace_projection`, for schema-4 events: drop the run's identity and
+environment and the scheduling configuration, keep everything else, and label every commit SHA by
+first appearance (tree OIDs literal).
+
+## `mod tests` › `fn two_independent_tasks_overlap_merge_through_one_queue_and_the_dependent_starts_on_both() {`
+
+Acceptance item 2, with `disjoint_hints_dispatch_together_overlapping_and_absent_hints_serialize`.
+
+## `mod tests` › `fn the_coordinator_settles_promotes_and_dispatches_while_a_verification_is_open() {`
+
+R-E and R-V: the coordinator inside `verify`, with
+`a_halt_inside_verification_cancels_it_and_leaves_the_transaction_for_closure`.
+
+## `mod tests` › `fn stale_duplicate_and_mismatched_completions_are_discarded_with_a_warning_and_counted() {`
+
+ST-01, ST-02 and ST-06, through the injector; `a_shutdown_cancels_every_live_pipeline_and_ends_the_command_resumably`
+follows them.
+
+## `mod tests` › `fn out_of_order_completions_bind_to_their_own_identities_under_seeded_permutations() {`
+
+ST-03 and ST-08 under seeded permutations, with
+`independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed` and
+`a_chain_plan_projects_identically_at_widths_three_and_one`.
+
+## `mod tests` › `fn concurrent_attempts_at_one_generation_and_attempt_use_distinct_snapshot_slots() {`
+
+ST-04 — at most one provisional reservation, read through `Reservations::peak` — with distinct
+snapshot names (R-Y); `live_state_equals_replay_after_every_append_at_width_three` is ST-10.
+
+## `mod tests` › `fn a_retained_retry_is_admitted_beside_other_pipelines_and_regates_on_fresh_snapshots() {`
+
+ST-15.
+
+## `mod tests` › `fn adversarial_orders_with_one_slot_per_agent_and_pool_always_reach_run_finished() {`
+
+Deadlock freedom: one slot per agent and per pool, seeded orders, every run reaches
+`run_finished`.
+
+## `mod tests` › `fn a_pipeline_error_cancels_the_others_and_ends_the_command_resumably() {`
+
+A pipeline that fails, with `a_panicking_pipeline_ends_the_command_with_a_defined_error`.

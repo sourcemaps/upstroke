@@ -431,6 +431,7 @@ impl ReservationKind {
 pub struct Reservations {
     held: BTreeMap<TaskKey, ReservationKind>,
     taken_ever: BTreeSet<(TaskKey, ReservationKind)>,
+    peak: usize,
     taken: u32,
     converted: u32,
     cancelled: u32,
@@ -528,6 +529,12 @@ impl Reservations {
         self.held.insert(key, kind);
         self.taken_ever.insert((key, kind));
         self.taken = self.taken.saturating_add(1);
+        self.peak = self.peak.max(self.held.len());
+    }
+
+    #[must_use]
+    pub const fn peak(&self) -> usize {
+        self.peak
     }
 
     pub fn convert(&mut self, key: TaskKey, kind: ReservationKind) -> Result<(), UpstrokeError> {
@@ -922,6 +929,16 @@ impl InvocationLedger {
     #[must_use]
     pub fn running(&self) -> Vec<&str> {
         self.in_state(Registration::Running)
+    }
+
+    #[must_use]
+    pub fn settled(&self, invocation: &InvocationId) -> bool {
+        self.entries.get(&invocation.render()).is_some_and(|entry| {
+            matches!(
+                entry.state,
+                Registration::Completed | Registration::Cancelled
+            )
+        })
     }
 
     #[must_use]

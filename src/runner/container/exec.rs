@@ -152,7 +152,7 @@ fn worktree_namespaces(execution_root: &Path) -> Vec<PathBuf> {
         },
         Slot::Staging { sequence: 0 },
         Slot::Snapshot {
-            name: SnapshotName::gates(0, 0),
+            name: SnapshotName::gates(0, 0, 0),
         },
     ];
     let mut namespaces: Vec<PathBuf> = representatives

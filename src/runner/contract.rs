@@ -355,6 +355,7 @@ impl Cancellation {
 
 pub struct RunnerCall<'a> {
     cancellation: Cancellation,
+    leases: &'a [std::path::PathBuf],
     spawn: Option<&'a mut (dyn SpawnHooks + Send)>,
     container: Option<&'a mut (dyn ContainerHooks + Send)>,
 }
@@ -369,6 +370,7 @@ impl std::fmt::Debug for RunnerCall<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RunnerCall")
             .field("cancellation", &self.cancellation)
+            .field("leases", &self.leases)
             .field("spawn", &self.spawn.is_some())
             .field("container", &self.container.is_some())
             .finish()
@@ -380,9 +382,16 @@ impl<'a> RunnerCall<'a> {
     pub fn new(cancellation: Cancellation) -> Self {
         Self {
             cancellation,
+            leases: &[],
             spawn: None,
             container: None,
         }
+    }
+
+    #[must_use]
+    pub const fn holding_cleanup_leases(mut self, leases: &'a [std::path::PathBuf]) -> Self {
+        self.leases = leases;
+        self
     }
 
     #[must_use]
@@ -409,6 +418,7 @@ impl<'a> RunnerCall<'a> {
     pub fn into_parts(self) -> CallParts<'a> {
         CallParts {
             cancellation: self.cancellation,
+            leases: self.leases,
             spawn: self.spawn,
             container: self.container,
         }
@@ -417,6 +427,7 @@ impl<'a> RunnerCall<'a> {
 
 pub struct CallParts<'a> {
     pub cancellation: Cancellation,
+    pub leases: &'a [std::path::PathBuf],
     pub spawn: Option<&'a mut (dyn SpawnHooks + Send)>,
     pub container: Option<&'a mut (dyn ContainerHooks + Send)>,
 }

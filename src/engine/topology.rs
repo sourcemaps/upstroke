@@ -10,6 +10,7 @@
 pub mod attempt;
 pub mod candidate;
 pub mod closure;
+pub mod coordinator;
 pub mod coverage;
 pub mod create;
 pub mod dispatch;

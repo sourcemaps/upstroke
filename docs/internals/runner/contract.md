@@ -379,19 +379,34 @@ take turns; an observer carried by the call is the invocation's alone, and the
 runner takes no lock for it. Each runner honours the observer of its own kind
 and ignores the other.
 
-`Default` is a fresh cancellation nobody holds and no observers — what
-[`Runner::run_blocking`] passes. `Debug` prints whether an observer is present,
+Since PR11 phase 3 it also carries the run's cleanup-lease paths
+([`RunnerCall::holding_cleanup_leases`]): a coordinator's pipeline runs on a
+thread that never entered the run's cleanup scope, which is thread-local, so a
+process it starts would otherwise be reaped by a reaper holding no lease (the
+working record's R-Z). A runner that reaps (the host runner on Unix) hands them
+to its funnel; the others ignore them.
+
+`Default` is a fresh cancellation nobody holds, no observers and no lease
+paths — what [`Runner::run_blocking`] passes. `Debug` prints whether an observer is present,
 since a `dyn` observer has no `Debug` of its own.
+
+## `impl<'a> RunnerCall<'a>` › `pub const fn holding_cleanup_leases(mut self, leases: &'a [std::path::PathBuf]) -> Self {`
+
+The call carries these cleanup-lease paths, which the Unix reaper of its
+process holds in addition to the ones its own thread's scope holds (R-Z).
+Borrowed, like the observers: the pipeline owns the paths for as long as it
+makes calls.
 
 ## `impl<'a> RunnerCall<'a>` › `pub fn into_parts(self) -> CallParts<'a> {`
 
-How a runner takes the call apart: the cancellation by value, each observer
-as the `&mut` it was given. [`CallParts`] names the three so a runner does not
-destructure a struct whose fields are private.
+How a runner takes the call apart: the cancellation by value, the lease paths
+as the slice it was given, each observer as the `&mut` it was given.
+[`CallParts`] names the four so a runner does not destructure a struct whose
+fields are private.
 
 ## `pub struct CallParts<'a> {`
 
-The three parts of a [`RunnerCall`], owned by the runner for the invocation.
+The four parts of a [`RunnerCall`], owned by the runner for the invocation.
 
 ## `struct Unpark(std::thread::Thread);`
 

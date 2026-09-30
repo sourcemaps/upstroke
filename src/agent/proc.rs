@@ -121,6 +121,7 @@ pub fn run_with_timeout_at(
         command,
         stdin_data,
         timeout,
+        &[],
         &|| false,
         hooks,
     )
@@ -133,12 +134,17 @@ pub struct ProcessFailure {
     pub error: UpstrokeError,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the funnel's public supervised entry: two sites, the command and its input, the timeout, the cleanup leases a spawning thread outside the run's scope carries, and the stop predicate are each a caller's choice"
+)]
 pub fn run_with_timeout_classified(
     spawn_site: ProcessSite,
     terminate_site: ProcessSite,
     command: Command,
     stdin_data: &[u8],
     timeout: Duration,
+    leases: &[std::path::PathBuf],
     stop: &dyn Fn() -> bool,
     hooks: &mut dyn SpawnHooks,
 ) -> Result<ProcessOutput, ProcessFailure> {
@@ -153,6 +159,7 @@ pub fn run_with_timeout_classified(
         stdin_data,
         timeout,
         OUTPUT_LIMIT_BYTES,
+        leases,
         stop,
         hooks,
     )
@@ -176,7 +183,7 @@ fn validate_process_sites(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the funnel's one supervised entry: two sites, the command and its input, and the three bounds that end a run early (timeout, output limit, stop) are each a caller's choice"
+    reason = "the funnel's one supervised entry: two sites, the command and its input, the three bounds that end a run early (timeout, output limit, stop) and the cleanup leases the reaper takes are each a caller's choice"
 )]
 fn run_with_timeout_and_limit(
     spawn_site: ProcessSite,
@@ -185,9 +192,12 @@ fn run_with_timeout_and_limit(
     stdin_data: &[u8],
     timeout: Duration,
     output_limit: usize,
+    leases: &[std::path::PathBuf],
     stop: &dyn Fn() -> bool,
     hooks: &mut dyn SpawnHooks,
 ) -> Result<ProcessOutput, ProcessFailure> {
+    #[cfg(not(unix))]
+    let _ = leases;
     let fate = std::cell::Cell::new(ProcessFate::NeverStarted);
     validate_process_sites(spawn_site, terminate_site).map_err(|error| ProcessFailure {
         fate: fate.get(),
@@ -202,7 +212,7 @@ fn run_with_timeout_and_limit(
             })?;
 
         #[cfg(unix)]
-        let mut termination = termination::Supervisor::begin(terminate_site)?;
+        let mut termination = termination::Supervisor::begin(terminate_site, leases)?;
         #[cfg(unix)]
         apply(
             hooks.point(SubEffectPoint::ReaperStarted),
@@ -1684,7 +1694,10 @@ mod termination {
     }
 
     impl Supervisor {
-        pub(super) fn begin(terminate_site: ProcessSite) -> Result<Self, UpstrokeError> {
+        pub(super) fn begin(
+            terminate_site: ProcessSite,
+            leases: &[PathBuf],
+        ) -> Result<Self, UpstrokeError> {
             if terminate_site != ProcessSite::Terminate {
                 return Err(UpstrokeError::Agent {
                     message: format!(
@@ -1693,15 +1706,16 @@ mod termination {
                     ),
                 });
             }
-            Self::begin_with_state(shared_state()?, terminate_site)
+            Self::begin_with_state(shared_state()?, terminate_site, leases)
         }
 
         fn begin_with_state(
             state: Arc<Mutex<State>>,
             terminate_site: ProcessSite,
+            leases: &[PathBuf],
         ) -> Result<Self, UpstrokeError> {
             claim_launch(&state)?;
-            let reaper = match spawn_reaper() {
+            let reaper = match spawn_reaper(leases) {
                 Ok(reaper) => reaper,
                 Err(message) => {
                     release_launch(&state);
@@ -2481,12 +2495,18 @@ mod termination {
         AbandonedHelper,
     }
 
-    fn spawn_reaper() -> Result<Reaper, String> {
+    fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String> {
         use std::os::unix::ffi::OsStrExt;
 
         verify_group_scanner()?;
         let parent = unsafe { libc::getpid() };
-        let cleanup_paths = crate::rundir::active_cleanup_lease_paths()
+        let mut leases = crate::rundir::active_cleanup_lease_paths();
+        for path in carried {
+            if !leases.contains(path) {
+                leases.push(path.clone());
+            }
+        }
+        let cleanup_paths = leases
             .into_iter()
             .map(|path| {
                 std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
@@ -5181,7 +5201,7 @@ mod termination {
             );
             let (target, _parent_lifetime) = spawn_sigchld_target();
 
-            let reaper = spawn_reaper().expect("spawn private reaper");
+            let reaper = spawn_reaper(&[]).expect("spawn private reaper");
             assert!(reaper.register_raw(target), "register target group");
             assert!(reaper.cleanup(target), "cleanup target group");
             let started = Instant::now();
@@ -5240,7 +5260,7 @@ mod termination {
             let (target, parent_lifetime) = spawn_sigchld_target();
             let refusal = std::panic::catch_unwind(move || {
                 let _parent_lifetime = parent_lifetime;
-                let _reaper = spawn_reaper().expect("forced reaper startup refusal");
+                let _reaper = spawn_reaper(&[]).expect("forced reaper startup refusal");
             });
             let exited = wait_for_lifetime_target(target);
             if exited.is_none() {
@@ -5345,7 +5365,7 @@ mod termination {
                 return;
             }
             let started = Instant::now();
-            let launch = spawn_reaper();
+            let launch = spawn_reaper(&[]);
             let elapsed = started.elapsed();
             assert!(
                 launch.is_err(),
@@ -5957,7 +5977,7 @@ mod termination {
                 job_control: false,
             };
             let launches = [
-                ("Unix cleanup reaper", spawn_reaper().err()),
+                ("Unix cleanup reaper", spawn_reaper(&[]).err()),
                 ("Unix job-control guard", spawn_guard(policy).err()),
             ];
             for (prefix, launch) in launches {
@@ -6263,7 +6283,7 @@ mod termination {
                 std::io::Error::last_os_error()
             );
 
-            let launch = spawn_reaper();
+            let launch = spawn_reaper(&[]);
             drop(holder);
             drop(scope);
             drop(lock);
@@ -6532,7 +6552,7 @@ mod termination {
             };
             assert_eq!(helper_identity_path_on(), named, "the fixture's switch");
 
-            let reaper = spawn_reaper().expect("spawn private reaper");
+            let reaper = spawn_reaper(&[]).expect("spawn private reaper");
             if named {
                 assert_identity_names("reaper", reaper.pid, reaper.identity);
             } else {
@@ -6677,7 +6697,7 @@ mod termination {
         #[cfg(target_os = "linux")]
         fn launch_failures_before_ready() -> [(&'static str, String); 2] {
             let launches = [
-                ("Unix cleanup reaper", spawn_reaper().err()),
+                ("Unix cleanup reaper", spawn_reaper(&[]).err()),
                 (
                     "Unix job-control guard",
                     spawn_guard(quiet_signal_policy()).err(),
@@ -6949,7 +6969,7 @@ mod termination {
             answer_the_identity_call_with(&which, libc::SECCOMP_RET_KILL_PROCESS);
             match shape.as_str() {
                 "launch" => {
-                    let reaper = spawn_reaper().unwrap_or_else(|error| {
+                    let reaper = spawn_reaper(&[]).unwrap_or_else(|error| {
                         panic!("a launch under a policy fatal on {which}: {error}")
                     });
                     assert_eq!(reaper.identity, NO_HELPER_IDENTITY);
@@ -7158,7 +7178,7 @@ mod termination {
             // Exactly the launch's two pipes fit; the descriptor that would
             // name the helper does not.
             let (held, ceiling) = fill_descriptors_leaving(4);
-            let launch = spawn_reaper();
+            let launch = spawn_reaper(&[]);
             release_descriptors(held, ceiling);
             let Err(message) = launch else {
                 panic!("a launch that could not take an identity started a helper anyway")
@@ -7198,7 +7218,7 @@ mod termination {
             );
             answer_call_with(libc::SYS_clone3, seccomp_refuse_with(libc::ENOSYS));
             for (prefix, launch) in [
-                ("Unix cleanup reaper", spawn_reaper().err()),
+                ("Unix cleanup reaper", spawn_reaper(&[]).err()),
                 (
                     "Unix job-control guard",
                     spawn_guard(quiet_signal_policy()).err(),
@@ -7256,7 +7276,7 @@ mod termination {
             };
             answer_call_with(libc::SYS_pidfd_send_signal, seccomp_refuse_with(errno));
             let started = Instant::now();
-            let launch = spawn_reaper();
+            let launch = spawn_reaper(&[]);
             let elapsed = started.elapsed();
             let Err(message) = launch else {
                 panic!("a reaper that missed its READY deadline was accepted as initialized")
@@ -7401,7 +7421,7 @@ mod termination {
             answer_call_with(libc::SYS_pidfd_open, libc::SECCOMP_RET_KILL_PROCESS);
             match shape.as_str() {
                 "launch" => {
-                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    let reaper = spawn_reaper(&[]).expect("spawn private reaper");
                     reaper.cancel();
                     let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
                     assert_guard_ended(guard.abort_setup(), "the guard aborted with the path on");
@@ -8301,9 +8321,9 @@ mod termination {
                     // (`spawn_group_anchor` asks `WUNTRACED`) and the claim
                     // here is about the waits *this* process makes.
                     let (target, target_lifetime) = spawn_sigchld_target();
-                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    let reaper = spawn_reaper(&[]).expect("spawn private reaper");
                     assert!(reaper.register_raw(target), "register the target group");
-                    let cancelled = spawn_reaper().expect("spawn a second private reaper");
+                    let cancelled = spawn_reaper(&[]).expect("spawn a second private reaper");
                     answer_a_wait_by_number_with_options_with(libc::SECCOMP_RET_KILL_PROCESS);
                     // CLEANUP, then CANCEL: each acknowledges and exits, and
                     // each is followed by this process's acknowledged-exit
@@ -8529,7 +8549,7 @@ mod termination {
         /// collects it on its first ask whatever the scheduler does.
         #[cfg(target_os = "linux")]
         fn a_reaper_that_has_already_exited() -> Reaper {
-            let reaper = spawn_reaper().expect("spawn private reaper");
+            let reaper = spawn_reaper(&[]).expect("spawn private reaper");
             // SAFETY: `reaper.pid` is this fixture's own unreaped child.
             let killed = unsafe { libc::kill(reaper.pid, libc::SIGKILL) };
             assert_eq!(
@@ -8574,10 +8594,10 @@ mod termination {
                     // in the by-number `syscall` witness: the claim is about
                     // the waits this process makes.
                     let (target, target_lifetime) = spawn_sigchld_target();
-                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    let reaper = spawn_reaper(&[]).expect("spawn private reaper");
                     assert!(reaper.identity >= 0, "the reaper has no descriptor");
                     assert!(reaper.register_raw(target), "register the target group");
-                    let cancelled = spawn_reaper().expect("spawn a second private reaper");
+                    let cancelled = spawn_reaper(&[]).expect("spawn a second private reaper");
                     answer_a_wait_on_a_descriptor_with_options_other_than(
                         libc::WEXITED,
                         libc::SECCOMP_RET_KILL_PROCESS,
@@ -8631,9 +8651,9 @@ mod termination {
                 }
                 "acknowledged-by-number" => {
                     let (target, target_lifetime) = spawn_sigchld_target();
-                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    let reaper = spawn_reaper(&[]).expect("spawn private reaper");
                     assert!(reaper.register_raw(target), "register the target group");
-                    let cancelled = spawn_reaper().expect("spawn a second private reaper");
+                    let cancelled = spawn_reaper(&[]).expect("spawn a second private reaper");
                     answer_a_wait_by_number_with_options_with(libc::SECCOMP_RET_KILL_PROCESS);
                     assert!(reaper.cleanup(target), "CLEANUP is acknowledged");
                     cancelled.cancel();

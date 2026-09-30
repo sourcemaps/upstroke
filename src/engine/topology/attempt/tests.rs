@@ -289,7 +289,8 @@ fn a_completed_review_is_charged_before_its_processes_are_checked_against_the_gr
         hooks: &mut run.hooks,
         runner: &run.runner,
         standing: Standing::of(run.emitter.fold(), &identities.gate(0, 0)),
-        ledger: &mut process.ledger,
+        registrar: &std::sync::Mutex::new(&mut process.ledger),
+        carried: &crate::engine::topology::preflight::Carried::default(),
         adapters: &adapters,
         paths: &run.paths,
         reviews: &reviews,
@@ -456,7 +457,8 @@ fn a_review_pass_registers_and_holds_its_pair_while_its_process_runs() {
         hooks: &mut run.hooks,
         runner: &run.runner,
         standing: Standing::of(run.emitter.fold(), &identities.worker()),
-        ledger: &mut process.ledger,
+        registrar: &std::sync::Mutex::new(&mut process.ledger),
+        carried: &crate::engine::topology::preflight::Carried::default(),
         adapters: &adapters,
         paths: &run.paths,
         reviews: &contending,
@@ -466,6 +468,7 @@ fn a_review_pass_registers_and_holds_its_pair_while_its_process_runs() {
             snapshot: SnapshotOf::Commit(proposed),
             disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Attempt {
+                key: dispatched.key.0,
                 generation: dispatched.generation.0,
                 attempt: plan.attempt.0,
             },
@@ -2007,6 +2010,56 @@ fn halt_cancels_in_flight_attempt() {
     assert!(
         !dispatched.worktree.exists(),
         "and the residue is discarded, the same way an interruption discards it"
+    );
+}
+
+#[test]
+fn an_interrupted_attempt_discards_its_own_snapshots_and_leaves_every_other() {
+    let mut run = Run::started("scoped-residue");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("start");
+
+    let head = ObjectId::new(run.fixture.head.clone()).expect("the fixture's head is an object id");
+    let own = [
+        SnapshotName::gates(ALPHA.0, 0, 1),
+        SnapshotName::review(ALPHA.0, 0, 1, 0),
+        SnapshotName::review(ALPHA.0, 0, 1, 1),
+    ];
+    let others = [
+        SnapshotName::gates(crate::engine::topology::scaffold::BETA.0, 0, 1),
+        SnapshotName::review(crate::engine::topology::scaffold::BETA.0, 0, 1, 0),
+        SnapshotName::gates(ALPHA.0, 0, 2),
+        SnapshotName::integration(0),
+    ];
+    for name in own.iter().chain(others.iter()) {
+        run.fixture
+            .manager
+            .add_snapshot(&mut NoHooks, name, &SnapshotInput::Commit(head.clone()))
+            .unwrap_or_else(|error| panic!("the snapshot `{name}`: {error}"));
+    }
+
+    context!(run, process)
+        .settle_interrupted(
+            &dispatched,
+            crate::topology::events::AttemptNumber(1),
+            AttemptOutcome::Interrupted,
+        )
+        .expect("settle");
+
+    let mut expected: Vec<Slot> = others
+        .iter()
+        .map(|name| Slot::Snapshot { name: name.clone() })
+        .collect();
+    expected.sort();
+    assert_eq!(
+        run.fixture.manager.intents().expect("intents"),
+        expected,
+        "only the interrupted attempt's own snapshots were reclaimed: another task's, a later \
+         attempt's and an integration's are not this attempt's to remove"
     );
 }
 

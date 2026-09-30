@@ -433,6 +433,14 @@ neither: an unavailable verdict lets the caller settle a terminal that
 reclaims the snapshot the process may still be running in, so the Runner's
 own error is returned as it is (`crate::error::ProcessFate`).
 
+A **cancelled** Runner error is returned as it is too, whatever its fate: only
+PR11's coordinator cancels a review's process — a halt, a shutdown or an error
+that ends the command — and what follows is the coordinator's to decide, so an
+unavailable verdict with an outage cause would record something that did not
+happen (the working record's R-AB).
+`a_cancelled_review_process_propagates_instead_of_reporting_the_review_unavailable`
+holds it.
+
 ## `let full_prompt = materialize_prompt(cx)?;`
 
 Validate the complete evidence before permission files are written or an

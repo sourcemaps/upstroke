@@ -1010,8 +1010,8 @@ reviewer on its own.
 `decisions.workspace_candidates.snapshots`: "exact snapshot worktrees
 (R24) are the only places gates and reviewers execute … one snapshot for
 the gate set and one fresh snapshot per reviewer, **never reused across
-roles or attempts**, cleaned on completion". The name carries the
-generation, the attempt and the role, so "never reused" is a property of
+roles or attempts**, cleaned on completion". The name carries the task,
+the generation, the attempt and the role, so "never reused" is a property of
 [`SnapshotName`] rather than of this loop's discipline — and, on the
 attempt path, each snapshot is removed before the next is created, so a
 reviewer cannot inherit the previous one's checkout even by mistake.
@@ -1029,23 +1029,20 @@ durable. A removal that fails can then no longer strand a completed
 judgement behind an unterminated verification, which is what the reviews
 of `3414dc58` found (`pr8-triage.md`, F4).
 
-### What the name does not carry, and where that is owed
+### The name carries the task
 
-The **task key**. [`SnapshotName::gates`] is `g<gen>-a<attempt>-gates`
-and [`SnapshotName::review`] is `g<gen>-a<attempt>-review<pass>`, so two
-*different tasks* at the same generation and attempt name the same slot.
-"Never reused" is therefore a property of the name **within** a task and
-a property of the substrate **across** tasks: at `max_parallel = 1` one
-attempt runs to completion before the next begins, so no two live
-snapshots can collide and the claim above holds exactly.
-
-This is the same PR11 debt [`Self::settle_interrupted`] records for the
-reclaim scope, reached from the other side — that one would remove a
-sibling's snapshot, this one would hand a sibling the same slot to
-create. A wider substrate owes the name a key; it is recorded here
-rather than approximated, because a snapshot name is what
-`WorkspaceManager` derives a path from and two tasks deriving one path
-is a collision no assertion in this module could see.
+Since PR11 phase 3 (the working record's R-Y), [`SnapshotName::gates`] is
+`k<key>-g<gen>-a<attempt>-gates` and [`SnapshotName::review`] is
+`k<key>-g<gen>-a<attempt>-review<pass>`: the task key is the first parameter of
+both constructors, and no constructor was added. Before it, two *different
+tasks* at the same generation and attempt named the same slot, which the
+sequential substrate never exercised — one attempt ran to completion before
+the next began — and the coordinator does at every width above one, where
+attempts of different tasks are judged at once. A snapshot name is what
+`WorkspaceManager` derives a path from, so two tasks deriving one path would be
+a collision no assertion in this module could see; the key makes "never reused"
+a property of the name across tasks too. The Windows 220-character budget for a
+path ending in `/.git` was re-measured with the longer names (the record's §8).
 
 O26 lives inside [`WorkspaceManager::add_snapshot`], which for a
 tree-only input performs commit-tree → intent → add in that order. This
@@ -1153,13 +1150,13 @@ contained, idempotent, and never establishes authority").
 
 ### Scope of the snapshot reclaim
 
-Every snapshot intent of this execution root, not only this attempt's.
-That is what the sentence above says, and at `max_parallel = 1` it is
-exact: the sequential substrate runs one attempt to completion, so the
-snapshot namespace holds this attempt's snapshots and nothing else. PR11
-widens the substrate and owes this a per-attempt scope; it is recorded
-here rather than approximated, because a reclaim that quietly removed a
-sibling's snapshot would take its gates down with it.
+This attempt's own snapshots, and nothing else in the snapshot namespace: the
+gate snapshot and every review snapshot its [`JudgeNames`] produce
+([`JudgeNames::owns`]). At `max_parallel = 1` that was every snapshot intent
+of the execution root, and the reclaim used to remove them all; since PR11 phase
+3 another task's attempt may be judging beside this one, and a reclaim that
+removed a sibling's snapshot would take its gates down with it. A later attempt
+of this task and an integration's snapshots are not this attempt's either.
 
 ### Errors
 
@@ -1197,31 +1194,43 @@ the ledger unbalanced at process end with nothing to say so. The pair goes
 with the registration because the table is inside the ledger, so the two
 cannot disagree.
 
-## `impl AttemptContext<'_>` › `fn discard_residue(&mut self, dispatched: &Dispatched) -> Result<(), UpstrokeError> {`
+## `impl AttemptContext<'_>` › `fn discard_residue(`
 
-Snapshots reclaimed, then the task worktree scrubbed with force.
+This attempt's snapshots reclaimed, then the task worktree scrubbed with force.
+The attempt number is the caller's, so the names are the ones this attempt's
+judge would have produced.
 
 ## `impl AttemptContext<'_>` › `fn execute(`
 
 The source retains the registration, slot and settlement protocol required by §10.
 
-Register with the slot pair if the identity is slotted, run, complete or
-cancel — the settlement releases the pair.
+Admit the invocation through the judge's registrar — with its slot pair if the
+identity is slotted — run it, and end it completed or cancelled: the ending
+releases the pair.
 
 `permits.protocol` in order: "register(invocation_id, slots) -> if
 slotted, wait for the atomic pair grant … -> Runner spawn ->
-complete(invocation_id) releasing any slots". Nothing waits here: this is
-the synchronous substrate, where the coordinator runs the process itself,
-and INV-18's coordinator "never blocks on an entitlement, provisional
-reservation, or slot" — so a pair that is not grantable at once is a leaked
-hold rather than contention, and [`InvocationLedger::register_at_once`]
-withdraws the request and refuses it.
+complete(invocation_id) releasing any slots". Who waits depends on the
+registrar ([`crate::engine::topology::preflight::Registrar`]). The
+synchronous one, which `step` and every width-1 caller use, is the ledger
+itself, and nothing waits: the coordinator runs the process on its own thread,
+INV-18's coordinator "never blocks on an entitlement, provisional reservation,
+or slot", so a pair not grantable at once is a leaked hold rather than
+contention, and [`InvocationLedger::register_at_once`] withdraws the request and
+refuses it (R-O). A spawned pipeline's registrar is the coordinator's channel
+client: it waits — on its own thread — for the grant the coordinator loop sends
+when both slots are free (`coordinator.md`).
+
+The call carries the judge's [`Carried`]: at width 1 a fresh cancellation that
+never fires and no lease paths, so the call is the one `run_blocking` made; in
+a pipeline the pipeline's cancellation, which the coordinator fires on a halt,
+a shutdown or an error, and the run's cleanup-lease paths (R-Z).
 
 ### The registration is settled on every path out
 
-[`Self::register_now`] either leaves a registration running (its pair
-granted) or leaves none unsettled: a refused request was withdrawn inside
-the ledger, registered and cancelled once. From there the only step between
+`admit` either leaves a registration running (its pair granted) or leaves none
+unsettled: a refused request was withdrawn inside the ledger, registered and
+cancelled once. From there the only step between
 the registration and its settlement is the Runner call, and both of its
 answers settle. `permits.protocol` settles an invocation "exactly once", and
 [`InvocationLedger::balances`] states that as "no entry is `Pending` or
@@ -1239,12 +1248,11 @@ could not start or supervise never completed, and recording it as
 completed would put a failure in the ledger under the name of a
 success.
 
-## `impl AttemptContext<'_>` › `fn register_now(`
+## `impl AttemptContext<'_>` › `fn pair_for(`
 
-The registration before the run. An unslotted invocation — a gate —
-registers; a slotted one registers with its pair, `{agent, pool?}` with the
-agent from the request and the pool from the plan, under the Judge's
-standing, and is granted at once or withdrawn and refused.
+What the registration asks for. An unslotted invocation — a gate — asks for no
+pair; a slotted one asks for `{agent, pool?}`, with the agent from the request
+and the pool from the plan, under the judge's standing.
 
 A slotted request naming no agent is refused before anything is
 registered: the pair it would take has no agent to key it by. Every error
@@ -1291,10 +1299,12 @@ Every recorded gate and every review pass an integration reruns on the
 proposed tree: `DESIGN.md` §26.3, "rerun every recorded gate and review on
 the proposed integrated tree".
 
-## `impl AttemptContext<'_> {` › `fn judge_core(&mut self, identities: &AttemptIdentities) -> Judge<'_> {`
+## `impl AttemptContext<'_>` › `let ledger = std::sync::Mutex::new(&mut *self.ledger);`
 
-The judge over this context's ledger, reborrowed for one worker, one gate
-set or one review, carrying the standing of the attempt `identities` names.
+The judge [`Self::run_worker`] and [`Self::judge`] build: over this context's
+ledger as the synchronous registrar, reborrowed for one worker or one judgement,
+with a [`Carried`] that cancels nothing, and carrying the standing of the attempt
+the run's identities name.
 
 The standing is read from the fold through the emitter
 ([`EventEmitter::standing`]), because the fold is the emitter's to hold and
@@ -1399,26 +1409,45 @@ same protocol run once.
 
 The standing of the pipeline this judgement runs for — an attempt in flight,
 or a verification started — read from the fold by whoever built the judge
-and presented with every slotted registration it makes. Read once: nothing
-is appended while a judgement runs, so the fold it was read from cannot move
-under it.
+and presented with every slotted registration it makes. The synchronous
+registrar checks it: at width 1 nothing is appended while a judgement runs, so
+the fold it was read from cannot move under it. A spawned pipeline's registrar
+does not use it: the coordinator appends while pipelines run, so it reads the
+pipeline's standing again, from the fold, when it processes each registration
+(the working record's R-N and R-U); the value here is the spawn-time read.
 
-## `impl Judge<'_> {` › `let ledger = std::sync::Mutex::new(&mut *self.ledger);`
+## `pub struct Judge<'a>` › `pub registrar: &'a dyn Registrar,`
+
+Where every invocation of this judgement is admitted and ended: the ledger
+behind a `Mutex` for the synchronous substrate, the coordinator's channel
+client for a spawned pipeline. The judge's own calls and the registering
+boundary around each review pass go through the same one, so there is one
+registration path whichever thread runs the judgement.
+
+## `pub struct Judge<'a>` › `pub carried: &'a Carried,`
+
+What every Runner call of this judgement carries: the pipeline's cancellation
+and the run's cleanup-lease paths. The judge builds its own calls from it and
+the registering boundary rebuilds a review pass's calls with it.
+
+## `impl Judge<'_> {` › `.carrying(self.carried);`
 
 Each review pass runs through a registering boundary over this judge's
-ledger, so each of its processes — the pass, and a re-ask — is registered
-with its pair before it starts and settled after it ends. This closes
+registrar, so each of its processes — the pass, and a re-ask — is registered
+with its pair before it starts and settled after it ends, and each carries the
+judge's cancellation and lease paths. This closes
 `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`: the pass used to be handed the
 raw runner and entered in the ledger only after it returned, holding no
-pair while it ran.
+pair while it ran. In a spawned pipeline the registration is the
+coordinator's, made when it processes the pass's `Admit`.
 
-The lock is the boundary's, not the ledger's owner's: the boundary is a
-`Runner`, `Runner::run` takes `&self`, and a `Runner` is `Send + Sync`, so the
-ledger it registers into sits behind a `Mutex` for the length of one pass.
-It guards the ledger's register and settle calls only, never the Runner call
-between them, and nothing else locks it: a pass runs one process at a time
-on this thread. `src/review.rs` is not touched, so the legacy engine's review
-path — which calls the same `run_review` with its own runner — is unchanged.
+The registrar is behind `&dyn Registrar`, which is `Sync`: the boundary is a
+`Runner`, `Runner::run` takes `&self`, and a `Runner` is `Send + Sync`. The
+synchronous registrar's lock guards the ledger's register and settle calls
+only, never the Runner call between them. `src/review.rs` tests
+`RunnerError::is_cancelled` first since PR11 phase 3 (a cancelled pass is an
+error, never an unavailable reviewer); the legacy engine never cancels, so its
+review path is otherwise unchanged.
 
 ## `impl Judge<'_> {` › `if invocations != through_the_pair {`
 
@@ -1456,9 +1485,9 @@ answers to, or a review pass that could not be run.
 
 ## `impl Judge<'_> {` › `fn execute_typed(`
 
-[`Self::execute`], telling a Runner error apart from a ledger or slot
-refusal: the Runner's own `Err` is [`JudgeError::Runner`], settled in
-the ledger as a cancellation exactly as before. The in-memory registration
+[`Self::execute`], telling a Runner error apart from a registration or slot
+refusal: the Runner's own `Err` is [`JudgeError::Runner`], ended through the
+registrar as a cancellation exactly as before. The in-memory registration
 is cancelled whatever the fate: the ledger is this process's, and a process
 the Runner could not resolve is the next incarnation's census to reclaim.
 
@@ -1508,3 +1537,89 @@ and the next iteration's snapshot creation all return early from here on.
 The record is built first and charged from, then pushed, so the account and
 `reviews` hold the same value and the charge still sits above every `?` that
 follows. Nothing fallible runs between the pass returning and the charge.
+
+## `impl JudgeNames` › `pub fn owns(self, name: &SnapshotName) -> bool {`
+
+Whether `name` is one of the snapshots these names produce: the gate snapshot,
+or a review snapshot of any pass. The review stem is derived from the
+constructor itself (`review(0)` without its trailing `0`), so the format is
+written once, in `naming.rs`, and a name only matches when what follows the
+stem is a pass number. It scopes an interrupted attempt's reclaim
+([`AttemptContext::settle_interrupted`]).
+
+## `impl JudgeNames` › `const fn gated(self) -> bool {`
+
+Only an attempt's snapshots go through the coordinator's snapshot gate
+(`coordinator.md`, R-W): the frozen stale integration reclaims every snapshot
+of the execution root, so an attempt's may not be live while it does; an
+integration's own snapshots are the ones it reclaims.
+
+## `impl Judge<'_> {` › `fn snapshot(`
+
+One exact snapshot of the subject, taken after the registrar grants it
+(`snapshot_begin`): the synchronous registrar grants at once, a pipeline's
+asks the coordinator's snapshot gate and waits.
+
+## `impl Judge<'_> {` › `fn release(`
+
+The snapshot removed, then reported to the registrar (`snapshot_end`), so the
+gate counts it gone only once it is.
+
+## `impl AttemptContext<'_>` › `pub fn announce(`
+
+`attempt_started` alone, for the callers that append it and run the attempt
+apart: the width-1 loop and the coordinator both announce on the coordinator
+thread and then run [`attempt_body`] (inline or spawned). [`Self::start`] is
+announce then [`Self::run_worker`], for the callers that do both at once.
+
+## `impl Judge<'_> {` › `pub fn run_worker(`
+
+The worker's request, built from the plan and the site, executed through the
+registrar. Shared by [`AttemptContext::run_worker`] and [`attempt_body`].
+
+## `impl Judge<'_> {` › `pub fn judge_attempt(`
+
+An attempt's judgement: the captured tree on its recorded parent, snapshots as
+each role finishes, the attempt's names and identities. Shared by
+[`AttemptContext::judge`] and [`attempt_body`].
+
+## `fn capture_tree(`
+
+The capture, as a function of the manager, the hooks and the site, so the
+pipeline body runs it without an emitter. The comment inside is the capture's
+own contract, unchanged.
+
+## `struct Assessor<'a> {`
+
+The assessment's two seams, so [`AttemptContext::assess`] and [`attempt_body`]
+run one implementation.
+
+## `pub struct AttemptJob {`
+
+Everything an attempt's body needs that the coordinator knows when it starts
+the attempt: the site (key, generation, base, slot, worktree), the plan and the
+frozen registry entry, owned, so it can move to a pipeline's thread. The
+coordinator keeps its own copy for the settlement.
+
+## `pub struct Judged {`
+
+What an attempt's body returns and a settlement consumes: the capture, the
+assessment and the judgement. It is the payload of the coordinator's `Judged`
+hand-back, bound there to the attempt's identity.
+
+## `pub struct Work<'a> {`
+
+Everything an attempt's or a verification's body touches — and nothing it must
+not: no emitter and no fold, because a body runs between two appends of one
+identity and appends nothing (the working record's R-S). The width-1 loop
+builds it from its own seams with the synchronous registrar; the coordinator's
+pipelines build it from owned seams with the channel client.
+
+## `pub fn attempt_body(`
+
+The attempt between `attempt_started` and its settlement: the worker, the
+capture, the candidate diff, the assessment, the review inputs and the
+judgement, in the order `step` ran them before PR11 phase 3. `step` runs it
+inline on its own thread with its own hooks object, so every kill point and
+hook test keeps its meaning; the coordinator runs the same function on a
+pipeline thread.

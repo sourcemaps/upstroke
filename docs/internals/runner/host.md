@@ -210,7 +210,8 @@ ordering predicate ("resolved once per spawn, before any of the spawn") and the 
 
 `run` returns the boxed future the contract promises, and the future does the whole of the work in
 its first poll, on the polling thread, through `HostRunner::supervise` — the synchronous body `run`
-had before PR11, unchanged except for the three things the call now carries. Why on the polling
+had before PR11, unchanged except for the three things the call now carries — and, since PR11
+phase 3, the run's cleanup-lease paths, which it hands on. Why on the polling
 thread is `docs/internals/runner/contract.md`'s ("Where the work happens"): the reaper's cleanup
 lease is thread-scoped, and so is the observation export.
 
@@ -233,6 +234,12 @@ grandchild hold a fifo open, and the fifo reads end of file once the Runner has 
 
 **The observer.** The call's own `SpawnHooks` observer when it carries one, with no lock; otherwise
 the runner-level observer under its guard when one is installed; otherwise a local `NoHooks`.
+
+**The leases.** The call's cleanup-lease paths go to `proc::run_with_timeout_classified`, whose
+Unix reaper holds them together with the ones the supervising thread's scope holds, deduplicated —
+so a process a coordinator's pipeline starts, on a thread that never entered the run's scope, is
+reaped by a reaper holding the run's lease (the working record's R-Z).
+`a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them` holds it.
 
 ### What the error says about the process
 

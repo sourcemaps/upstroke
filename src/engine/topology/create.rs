@@ -275,7 +275,7 @@ impl<'a> ProbePair<'a> {
 /// [`super::preflight::Registering`] makes that decision, because it is the one
 /// place register/slot/run/settle is implemented.
 pub struct ShellProbe<'a> {
-    through: super::preflight::Registering<'a, InvocationLedger>,
+    through: super::preflight::Registering<'a, std::sync::Mutex<InvocationLedger>>,
 }
 
 impl Runner for ShellProbe<'_> {
@@ -291,7 +291,7 @@ impl Runner for ShellProbe<'_> {
 /// INV-23's asymmetry: the shell probe is the one non-slotted probe and it does
 /// not run on this path.
 pub struct AgentProbe<'a> {
-    through: super::preflight::Registering<'a, InvocationLedger>,
+    through: super::preflight::Registering<'a, std::sync::Mutex<InvocationLedger>>,
 }
 
 impl Runner for AgentProbe<'_> {

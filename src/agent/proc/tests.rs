@@ -132,6 +132,7 @@ fn excessive_output_is_bounded_and_terminates_the_tree() {
         b"",
         Duration::from_secs(30),
         TEST_LIMIT,
+        &[],
         &|| false,
         &mut NoHooks,
     )
@@ -159,6 +160,7 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
         &|| false,
         &mut NoHooks,
     )
@@ -188,6 +190,7 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
         &|| false,
         &mut NoHooks,
     )
@@ -402,6 +405,7 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         command,
         b"",
         Duration::from_secs(3),
+        &[],
         &|| false,
         &mut hooks,
     )
@@ -466,6 +470,7 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         shell("echo next"),
         b"",
         Duration::from_secs(30),
+        &[],
         &|| false,
         &mut hooks,
     )
@@ -572,6 +577,7 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         command,
         b"",
         Duration::from_secs(30),
+        &[],
         &|| false,
         &mut hooks,
     )
@@ -670,8 +676,8 @@ fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {
 fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {
     use std::os::unix::process::ExitStatusExt;
 
-    let supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "sleep 60"])
@@ -772,8 +778,8 @@ impl Drop for ReapedChild {
 #[cfg(unix)]
 #[test]
 fn an_exited_but_unreaped_child_still_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "read line; exit 0"])
@@ -878,8 +884,8 @@ fn a_child_left_in_this_processs_group_never_answers_for_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_reaped_childs_pid_never_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = shell("read line; exit 0");
     command
         .stdin(Stdio::piped())
@@ -1483,8 +1489,8 @@ fn unix_reaper_reparent_helper() {
     }
     let ready = std::path::PathBuf::from(std::env::var_os("UPSTROKE_READY").expect("ready path"));
     let agent = std::path::PathBuf::from(std::env::var_os("UPSTROKE_AGENT").expect("agent path"));
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -2004,6 +2010,7 @@ fn the_output_limit_path_settles_a_windows_grandchild_too() {
         b"",
         Duration::from_secs(60),
         64 * 1024,
+        &[],
         &|| false,
         &mut NoHooks,
     )
@@ -3257,8 +3264,8 @@ fn unix_reaper_container_helper() {
             .expect("a scope");
     super::set_container_reclaim_scope(Some(&scope)).expect("arm the reaper");
 
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -4157,6 +4164,7 @@ fn a_spawn_that_fails_before_any_process_exists_is_never_started() {
         Command::new("upstroke-no-such-program-a5f2"),
         b"",
         Duration::from_secs(30),
+        &[],
         &|| false,
         &mut NoHooks,
     )
@@ -4203,6 +4211,7 @@ fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
             shell("sleep 30"),
             b"",
             Duration::from_secs(30),
+            &[],
             &|| false,
             &mut hooks,
         )

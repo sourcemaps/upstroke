@@ -343,7 +343,9 @@ Read `log` at the instant of every request, so an ordering clause about
 
 ## `impl RecordingRunner` › `fn durable_now(&self) -> Vec<String> {`
 
-The kinds the log on disk holds right now.
+The kinds the log on disk holds right now, read through its last newline: at
+width > 1 a pipeline's process can start while the coordinator is mid-append,
+and a torn last line is the append in flight, not a log that fails to parse.
 
 ## `impl RecordingRunner` › `pub(super) fn ran(&self) -> Vec<Ran> {`
 
@@ -395,7 +397,8 @@ test chooses, with the result it chooses, each exactly once.
 
 The first poll of an invocation: record it (with the declared policy and image
 id), answer a probe the test told to fail, hold it when holding, or answer at
-once from the queued codes.
+once — from the responder when one is set ([`RecordingRunner::answering`]),
+otherwise from the queued codes.
 
 ## `fn start(&self, request: &RunnerRequest) -> Started` › `let durable_at_spawn = self.durable_now();`
 
@@ -899,8 +902,8 @@ engine-topology test while `verification_isolation` was violated, because
 this double and the driven loop's both read only the profile
 (`PR8-R4-REVIEW-ORACLE`), the third time a review double ignoring its
 workspace had hidden a defect on that branch. A Runner error is answered
-the way `run_review` answers it: an unresolved fate propagates, anything
-else is an unavailable review.
+the way `run_review` answers it: a cancelled error or an unresolved fate
+propagates, anything else is an unavailable review.
 
 ## `pub(super) enum VerifyReview {`
 
@@ -962,3 +965,116 @@ answered `false` here would make
 unwritable and the arm untestable — the same shape as the review doubles that
 ignored the workspace they were handed and hid the isolation defect of the
 round before.
+
+## `fn run_started_of(`
+
+`run_started` for a plan, a width and a review shape: `max_parallel` is the
+width the coordinator's tests run at, and `second_opinion` records the
+second review pass for every task, so a plan whose reviewers number two
+freezes the passes its judgements will record.
+
+## `pub(super) type Responder =`
+
+An invocation's result as a function of its request alone.
+
+## `pub(super) struct RecordingRunner` › `respond: Mutex<Option<Responder>>,`
+
+When set, every request is answered by the responder instead of the queued
+codes — held or not — so what a process returns never depends on the order in
+which concurrent pipelines reached the runner.
+
+## `impl std::fmt::Debug for RecordingRunner {`
+
+By hand, because a responder is a closure and has no `Debug`.
+
+## `impl RecordingRunner` › `pub(super) fn answering(self, respond: Responder) -> Self {`
+
+Answer every request with `respond`.
+
+## `impl RecordingRunner` › `pub(super) fn await_held(&self, invocation: &InvocationId, within: Duration) -> bool {`
+
+Block until `invocation` is held with no result delivered, or `within` passes.
+
+## `impl RecordingRunner` › `pub(super) fn release(`
+
+Deliver a held invocation the result its responder gives its recorded request
+(an exit 0 when no responder is set): the step a deterministic schedule takes
+to let one chosen invocation finish.
+
+## `pub(super) fn exited(code: i32, stdout: String) -> ProcessOutput {`
+
+A process that exited `code` having printed `stdout`.
+
+## `pub(super) const PASSING_VERDICT: &str =`
+
+A reviewer's passing verdict, as the answering adapter echoes it from its
+process's output; `WORKER_QUESTION` is a worker's question, in the marker
+form the worker adapter parses.
+
+## `impl AnsweringAdapter` › `pub(super) const fn echoing(id: &'static str) -> Self {`
+
+An adapter whose outcome's `detail` is its process's output, so the responder,
+not the adapter, decides what a worker or reviewer said.
+
+## `impl ScaffoldAdapters` › `pub(super) const fn echoing() -> Self {`
+
+The same two agents, each echoing its process.
+
+## `pub(super) struct NoSleep;`
+
+A sleeper that returns at once, so a backoff costs a test nothing.
+
+## `pub(super) struct WideTask {`
+
+One task of a width-N plan: its id, its conflict hints, what it depends on and
+the file its worker writes.
+
+## `pub(super) fn wide_plan(tasks: &[WideTask]) -> Plan {`
+
+The plan the tasks describe, built directly rather than parsed: each task's
+dependencies and path hints as given, and one acceptance line each.
+
+## `pub(super) struct WidePlans {`
+
+The attempt and verification plans a width-N run uses: how many gates and
+reviewers each attempt and each verification has, and the pool its agent
+slots come from.
+
+## `pub(super) fn wide_responder(tasks: &[WideTask], failing_gates: &[(u32, u32)]) -> Responder {`
+
+Every invocation's result as a function of its request, so an outcome never
+depends on which pipeline started first: a worker writes its task's file into
+the worktree it runs in and exits 0; a gate exits 0 unless its (task, attempt)
+is listed as failing; every other process exits 0.
+
+## `pub(super) fn wide_responder_asking(`
+
+[`wide_responder`], with the workers of the listed task keys asking a
+question instead of working.
+
+## `pub(super) struct WideEnv {`
+
+Everything a width-N run's seams borrow or share: the answer source, the
+runner and adapters behind `Arc`s a coordinator's pipelines share, the plans,
+the paths, the log and the fixture.
+
+## `pub(super) struct Wide {`
+
+A started width-N run and its environment.
+
+## `impl Wide` › `pub(super) fn started_with(`
+
+A run started as `create` would leave it: the run lock and worktree lease
+taken, `run_started` appended and folded, the integration ref created, and a
+[`super::run::TopologyRun`] resumed over the handle — so the coordinator's tests
+drive the real transitions from the first selection on.
+
+## `impl WideEnv` › `pub(super) fn pipelines_limited(`
+
+The coordinator's pipeline seams over the same runner, adapters and plans,
+each pipeline's hooks recording into the one harness, with the slot limits
+defaulted from the width or given exactly.
+
+## `pub(super) enum SlotLimitsOf {`
+
+How a test chooses the coordinator's slot limits.

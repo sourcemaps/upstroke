@@ -4524,7 +4524,7 @@ fn an_add_without_a_durable_intent_refuses_and_leaves_nothing_registered() {
         fixture.task("alpha", 1),
         Slot::Staging { sequence: 7 },
         Slot::Snapshot {
-            name: SnapshotName::gates(1, 1),
+            name: SnapshotName::gates(0, 1, 1),
         },
     ];
     assert_eq!(
@@ -7080,7 +7080,7 @@ fn an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git() {
         .snapshot_commit_tree(&mut hooks, &tree, &fixture.head)
         .expect("ephemeral commit");
     let slot = Slot::Snapshot {
-        name: SnapshotName::gates(1, 1),
+        name: SnapshotName::gates(0, 1, 1),
     };
     assert!(
         !fixture.manager.intent_path(&slot).exists(),
@@ -7125,7 +7125,7 @@ fn an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git() {
         .manager
         .add_snapshot(
             &mut measured,
-            &SnapshotName::gates(2, 1),
+            &SnapshotName::gates(0, 2, 1),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&fixture.head),
@@ -7195,7 +7195,73 @@ fn an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git() {
 /// The two axes are the *input variant* and the *name*, and this test is one
 /// test rather than two because the surviving pair is one function: every
 /// other `add_snapshot` call in the tree holds both constant at
-/// `Tree`/`gates(1, 1)`.
+/// `Tree`/`gates(0, 1, 1)`.
+/// PR11's registry lock (the working record's R-X). Threads add and remove
+/// snapshots through their own clones of one manager, as the coordinator's
+/// pipelines do beside its task and staging worktrees: every removal prunes the
+/// repository's registry and every funnel enumerates it, and Git 2.43's registry
+/// is not safe against itself (`git worktree add` raced by `prune` or `list`
+/// fails, measured in the record's §8), so the lock is what keeps every cycle
+/// here from failing.
+#[test]
+fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
+    const THREADS: u32 = 4;
+    const ROUNDS: u32 = 30;
+
+    let fixture = Fixture::created("registry-lock");
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let manager = fixture.manager.clone();
+                let head = fixture.head.clone();
+                scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for round in 1..=ROUNDS {
+                        let name = SnapshotName::gates(thread, 0, round);
+                        match manager.add_snapshot(
+                            &mut NoHooks,
+                            &name,
+                            &SnapshotInput::Commit(oid(&head)),
+                        ) {
+                            Ok(snapshot) => {
+                                if let Err(error) = manager.remove_snapshot(&mut NoHooks, &snapshot)
+                                {
+                                    failures.push(format!("removing {name}: {error}"));
+                                }
+                            }
+                            Err(error) => failures.push(format!("adding {name}: {error}")),
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("a worker thread"))
+            .collect()
+    });
+    assert!(
+        failures.is_empty(),
+        "{} of {} add/remove cycles failed: {failures:#?}",
+        failures.len(),
+        THREADS * ROUNDS
+    );
+    assert!(
+        fixture.manager.intents().expect("intents").is_empty(),
+        "every snapshot went with its intent"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("the registry enumerates")
+            .len(),
+        1,
+        "only the base checkout is still registered"
+    );
+}
+
 #[test]
 fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
     let fixture = Fixture::created("snapshot-clauses");
@@ -7243,7 +7309,7 @@ fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(1, 1),
+            &SnapshotName::gates(0, 1, 1),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&fixture.head),
@@ -7254,7 +7320,7 @@ fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::review(1, 1, 0),
+            &SnapshotName::review(0, 1, 1, 0),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&fixture.head),
@@ -7292,7 +7358,7 @@ fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(1, 2),
+            &SnapshotName::gates(0, 1, 2),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&fixture.head),
@@ -7394,7 +7460,7 @@ fn a_snapshot_input_spelt_as_hexadecimal_of_the_other_formats_length_is_refused_
             ),
         ];
         for (attempt, input, role, resolved, value) in cases {
-            let slot_name = SnapshotName::gates(1, attempt);
+            let slot_name = SnapshotName::gates(0, 1, attempt);
             let error = fixture
                 .manager
                 .add_snapshot(&mut NoHooks, &slot_name, &input)
@@ -7467,7 +7533,7 @@ fn a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_
             .manager
             .add_snapshot(
                 &mut NoHooks,
-                &SnapshotName::gates(1, 1),
+                &SnapshotName::gates(0, 1, 1),
                 &SnapshotInput::Tree {
                     tree: oid(&tree),
                     parent: oid(&fixture.head),
@@ -7584,7 +7650,7 @@ fn snapshot_replacement_helper() {
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(1, 1),
+            &SnapshotName::gates(0, 1, 1),
             &SnapshotInput::Tree {
                 tree: oid(&judged_tree),
                 parent: oid(&other_commit),
@@ -7827,7 +7893,7 @@ fn role_process_replacement_helper() {
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(1, 1),
+            &SnapshotName::gates(0, 1, 1),
             &SnapshotInput::Tree {
                 tree: oid(&judged_tree),
                 parent: oid(&other_commit),
@@ -8537,7 +8603,7 @@ fn a_full_id_of_the_wrong_object_type_is_refused_naming_the_type_its_role_requir
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(2, 1),
+            &SnapshotName::gates(0, 2, 1),
             &SnapshotInput::Tree {
                 tree: oid(&commit),
                 parent: oid(&commit),
@@ -8573,7 +8639,7 @@ fn a_full_id_of_the_wrong_object_type_is_refused_naming_the_type_its_role_requir
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(2, 2),
+            &SnapshotName::gates(0, 2, 2),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&tree),
@@ -8606,7 +8672,7 @@ fn a_full_id_of_the_wrong_object_type_is_refused_naming_the_type_its_role_requir
         .manager
         .add_snapshot(
             &mut NoHooks,
-            &SnapshotName::gates(2, 3),
+            &SnapshotName::gates(0, 2, 3),
             &SnapshotInput::Commit(oid(&absent)),
         )
         .expect_err("no such object");
@@ -11304,7 +11370,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
                 EffectSiteId::Worktree(WorktreeSite::Add) => fixture.task("alpha", 1),
                 EffectSiteId::Worktree(WorktreeSite::AddStaging) => Slot::Staging { sequence: 1 },
                 _ => Slot::Snapshot {
-                    name: SnapshotName::gates(1, 1),
+                    name: SnapshotName::gates(0, 1, 1),
                 },
             };
             let path = fixture.manager.slot_path(&slot);
@@ -11632,7 +11698,7 @@ fn construct_and_recover(site: EffectSiteId, element: ResidueElement) -> Synthet
         }
         EffectSiteId::Snapshot(SnapshotSite::Add) => {
             let slot = Slot::Snapshot {
-                name: SnapshotName::gates(1, 1),
+                name: SnapshotName::gates(0, 1, 1),
             };
             fixture
                 .manager
@@ -13268,7 +13334,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
     let snapshot = manager
         .add_snapshot(
             &mut hooks,
-            &SnapshotName::gates(1, 1),
+            &SnapshotName::gates(0, 1, 1),
             &SnapshotInput::Tree {
                 tree: oid(&tree),
                 parent: oid(&fixture.head),

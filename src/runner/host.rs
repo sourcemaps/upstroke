@@ -253,6 +253,7 @@ impl HostRunner {
             }
             requested
         };
+        let leases = parts.leases;
         let supervised = |hooks: &mut dyn SpawnHooks| {
             proc::run_with_timeout_classified(
                 ProcessSite::Spawn,
@@ -260,6 +261,7 @@ impl HostRunner {
                 command,
                 &request.command.stdin,
                 request.timeout,
+                leases,
                 &stop,
                 hooks,
             )

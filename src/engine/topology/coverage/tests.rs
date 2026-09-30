@@ -1394,7 +1394,7 @@ fn remaining_slot(
             sequence: 100 + u64::from(run),
         },
         EffectSiteId::Snapshot(SnapshotSite::Add) => Slot::Snapshot {
-            name: SnapshotName::gates(run, 1),
+            name: SnapshotName::gates(0, run, 1),
         },
         _ => fixture.task("sample", run),
     }

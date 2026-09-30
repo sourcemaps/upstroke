@@ -490,6 +490,50 @@ fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {
     );
 }
 
+#[test]
+fn a_cancelled_verification_is_never_classified_as_an_outage() {
+    use crate::engine::topology::attempt::JudgeError;
+    use crate::engine::topology::integrate::Verified;
+    use crate::error::ProcessFate;
+    use crate::runner::RunnerError;
+    use crate::topology::events::SequenceId;
+
+    let invocation =
+        crate::engine::topology::identity::SequenceIdentities::new(SequenceId(3)).gate(0, 0);
+    let cancelled = RunnerError::cancelled(&invocation, ProcessFate::Gone);
+    let error = super::verified(
+        Err(JudgeError::Runner(cancelled)),
+        Vec::new(),
+        SequenceId(3),
+    )
+    .err()
+    .expect("a cancelled verification is an error, not a verdict");
+    assert!(
+        matches!(
+            error,
+            crate::error::UpstrokeError::Runner {
+                fate: ProcessFate::Gone,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    let gone = RunnerError::gone(
+        &invocation,
+        crate::error::UpstrokeError::Refused {
+            message: "the runtime lost the process".to_owned(),
+        },
+    );
+    assert!(
+        matches!(
+            super::verified(Err(JudgeError::Runner(gone)), Vec::new(), SequenceId(3)),
+            Ok(Verified::Unavailable { .. })
+        ),
+        "the control: a process the Runner lost, uncancelled, is still an outage"
+    );
+}
+
 mod scaffold_runner {
     use std::task::{Context, Waker};
     use std::time::Duration;

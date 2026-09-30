@@ -223,13 +223,34 @@ cancelled tree is terminated by the code a timed-out tree is. `run_with_timeout_
 passes a predicate that never stops, so every caller that predates PR11 behaves as
 it did.
 
+**`leases`**, since PR11 phase 3: cleanup-lease paths the spawning thread carries
+rather than holds. The Unix reaper takes its shared R28 hold on the run directories
+of the thread that starts it (`rundir::active_cleanup_lease_paths`, a
+`thread_local!`), and a coordinator's pipeline runs on a blocking-pool thread that
+never entered the run's scope — the scope is `!Send` and its owner is the
+coordinator's thread. The coordinator reads its own scope's paths and every
+pipeline passes them here through its `RunnerCall`, so the reaper of a process a
+pipeline spawns holds the lease exactly as the reaper of a process spawned on the
+stepping thread does. The reaper takes the union of the two, so a caller inside the
+scope loses nothing by carrying the paths too, and every caller that carries none
+(`run_with_timeout_at`, the legacy engine, the width-1 loop) behaves as it did. On
+Windows there is no reaper and no lease; the paths are unused there.
+
+## `pub fn run_with_timeout_classified(` › `#[expect(`
+
+Eight parameters where clippy's default is seven: the two sites, the command and its
+input, the timeout, the carried leases, the stop predicate and the observer are each
+a caller's choice. Bundling any two of them would make the funnel's public entry take
+a struct its one production caller (the host Runner) builds for this call alone. The
+reason string is on the attribute.
+
 ## `run_with_timeout_and_limit` › `#[expect(`
 
-Eight parameters where clippy's default is seven: the two sites, the command and
-its input, the three bounds that end a run early (timeout, output limit, stop) and
-the observer are each a caller's choice, and bundling any two of them would make
-the one supervised entry take a struct its two callers build for this call alone.
-The reason string is on the attribute.
+Nine parameters where clippy's default is seven: the two sites, the command and
+its input, the three bounds that end a run early (timeout, output limit, stop), the
+carried leases and the observer are each a caller's choice, and bundling any two of
+them would make the one supervised entry take a struct its two callers build for
+this call alone. The reason string is on the attribute.
 
 ## `run_with_timeout_and_limit` › `} else if stop() {`
 
@@ -237,12 +258,13 @@ After the output bound and the timeout, so a run that reaches either in the same
 tick is reported as that; `stopped` then selects the kill grace for the drains, as
 a timeout does.
 
-## `let mut termination = termination::Supervisor::begin(terminate_site)?;`
+## `let mut termination = termination::Supervisor::begin(terminate_site, leases)?;`
 
 Enter before `spawn`: if an interrupt arrives in the narrow interval
 between creating the child and learning its pid, the signal monitor
 waits for this registration rather than terminating Upstroke first and
-orphaning the new process group.
+orphaning the new process group. The carried leases go to the reaper
+`begin` starts (`spawn_reaper`'s union).
 
 ## `apply(`
 
@@ -1246,7 +1268,16 @@ helper that will not die does not become collectable however long the
 wait is, so the unbounded form buys a wedged parent beside the wedged
 child rather than a released lease.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut leases = crate::rundir::active_cleanup_lease_paths();`
+
+The leases the reaper holds are the union of the spawning thread's scope and what
+the call carried (PR11 phase 3; `run_with_timeout_classified`'s `leases`), each
+once. A thread inside the run's scope that also carries its paths takes one hold
+per lease, not two; a pipeline thread outside every scope takes the carried ones;
+a caller with neither takes none, as before. Rendered before the fork, with the
+rest, because the reaper may not allocate.
+
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
 A helper that ends before it writes READY, so the failure path is
 driven with no clock in it at all: the parent's wait ends on the
@@ -1262,14 +1293,14 @@ same exit status afterwards, which is how the defect was found
 (`a_helper_that_never_acknowledged_reports_what_ending_it_answered`
 took ~4 s on macOS against ~6 ms on Linux in run 33987067020).
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let containers = container_scope_for_a_new_reaper();`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let containers = container_scope_for_a_new_reaper();`
 
 Rendered BEFORE the fork, like `cleanup_paths` above and for the same
 reason: the reaper may not allocate. `None` is the ordinary state of
 every run today — nothing selects a container Runner until PR12 — and
 costs the reaper nothing at all.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let (pid, identity) = match fork_helper() {`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let (pid, identity) = match fork_helper() {`
 
 The fork, and with the identity path on the name that comes with it.
 `fork_helper` answers `Err` only where no child exists — a `fork` that
@@ -1281,7 +1312,7 @@ takes the `pid == 0` arm below with `identity == NO_HELPER_IDENTITY`
 whichever way it was created, and the arm is master's. `spawn_guard`
 makes the same call and takes the same shape.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
 
 A separate process group is the crucial boundary: an
 uncatchable kill of Upstroke's foreground job must not also kill
@@ -1311,12 +1342,12 @@ to be left behind, and the launch fails at the READY wait. The
 child-side call remains checked, and its failure is reported by step
 and errno.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let mut delay_left = ready_delay_ms;`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut delay_left = ready_delay_ms;`
 
 Test subprocesses can hold READY back past the parent's deadline
 so the late-reaper path is driven deterministically.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
 
 How the wait ended, in the message: the helper's own report of the
 step that refused, the pipe closing with no report, the budget
@@ -1325,7 +1356,7 @@ report is decoded with the lease paths this launch rendered before
 the fork, so the lease a refused `open` or `flock` names is the path,
 not a position.
 
-## `fn spawn_reaper() -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
 
 With the identity path off the teardown is master's, unchanged and in
 master's order; what it answered becomes the diagnostic. Nothing is
@@ -2833,7 +2864,7 @@ has no flag proving that EOF was observed.
 
 Captured stderr with the same grace and decoding policy as `stdout`.
 
-## `run_with_timeout_and_limit` › `let mut termination = termination::Supervisor::begin(terminate_site)?;`
+## `run_with_timeout_and_limit` › `let mut termination = termination::Supervisor::begin(terminate_site, leases)?;`
 
 Enter before `spawn`: if an interrupt arrives in the narrow interval
 between creating the child and learning its pid, the signal monitor
@@ -2915,7 +2946,7 @@ has registered its separate process group.
 Poll a child owned by the isolated lifetime helper. That helper
 installs SIG_DFL for SIGCHLD and has no other waiter or child.
 
-## `sigchld_target_setup_failure_helper` › `let _reaper = spawn_reaper().expect("forced reaper startup refusal");`
+## `sigchld_target_setup_failure_helper` › `let _reaper = spawn_reaper(&[]).expect("forced reaper startup refusal");`
 
 The outer test makes the reaper exit without READY. This
 forces startup refusal regardless of process scheduling.

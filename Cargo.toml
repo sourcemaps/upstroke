@@ -51,6 +51,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# The schema-4 coordinator's scheduler (PR11): pipelines run on the runtime's blocking pool
+# and hand typed completions back over its channels, while the coordinator stays a plain
+# thread. `rt`, `rt-multi-thread` and `sync` and nothing else: no `process`, `fs`, `net`,
+# `signal` or `io-*`, because Tokio schedules and never spawns or touches a file, no `time`,
+# because nothing waits on Tokio's clock, and no `macros`, whose proc-macro tree nothing here
+# needs. Pinned exactly for `globset`'s reason: 1.53.1 declares rust-version 1.71, and
+# Tokio's MSRV rolls forward.
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
 toml = "0.8"
 
 # TEST-ONLY, and the shipped library carries no YAML parser: the CI workflow-shape
@@ -78,13 +86,6 @@ toml = "0.8"
 # crate's floor exactly, so the next minor is free to leave the contract.
 [dev-dependencies]
 yaml-rust2 = { version = "=0.12.0", default-features = false }
-# TEST-ONLY until the coordinator lands (PR11 phase 3 moves it to [dependencies]): the
-# Runner's boxed future is driven from a real multi-thread runtime in the runner tests, the
-# way the coordinator's pipelines will drive it. `rt-multi-thread` (which implies `rt`) and
-# nothing else: no `process`, `fs`, `net` or `signal`, because Tokio schedules and never
-# spawns, and no `macros`, whose proc-macro tree nothing here needs. Pinned exactly for
-# `globset`'s reason: 1.53.1 declares rust-version 1.71, and Tokio's MSRV rolls forward.
-tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread"] }
 
 # `fcntl(F_SETLK)` for the run lock, which std does not expose — std's
 # `File::try_lock` is `flock`, and `flock` is inherited across `fork`. See

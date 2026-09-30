@@ -110,7 +110,15 @@ pub(super) const NORMALIZED_DIGEST: &str =
     "sha256:1010101010101010101010101010101010101010101010101010101010101010";
 
 fn run_started(fixture: &Fixture) -> RunStarted4 {
-    let plan = plan();
+    run_started_of(fixture, &plan(), 1, false)
+}
+
+fn run_started_of(
+    fixture: &Fixture,
+    plan: &Plan,
+    max_parallel: u32,
+    second_opinion: bool,
+) -> RunStarted4 {
     let unauthenticated = RunStarted4 {
         schema: TOPOLOGY_SCHEMA,
         upstroke_version: "0.2.0-scaffold".to_owned(),
@@ -143,7 +151,7 @@ fn run_started(fixture: &Fixture) -> RunStarted4 {
             grammar: PathGrammar::Globset,
         },
         limits: TopologyLimits {
-            max_parallel: 1,
+            max_parallel,
             max_defers: 2,
             max_merge_repairs: 3,
         },
@@ -169,11 +177,14 @@ fn run_started(fixture: &Fixture) -> RunStarted4 {
             pass_timeout_secs: Some(900),
             primary: Some(PassBinding::new(AGENT, "opus")),
             alternative: Some(PassBinding::new(REVIEW_AGENT, "gpt")),
-            second_opinion: vec![None, None],
+            second_opinion: vec![
+                second_opinion.then(|| PassBinding::new(REVIEW_AGENT, "gpt"));
+                plan.tasks.len()
+            ],
         },
     };
     let digest = TaskRegistry::originals_with_agents(
-        &plan,
+        plan,
         &unauthenticated.registry_record(),
         &unauthenticated.probed_agents,
     )
@@ -407,6 +418,12 @@ pub(super) struct Ran {
 
 pub(super) const GATE_DIAGNOSTIC: &str = "scaffold gate rejected the diff";
 
+pub(super) const PASSING_VERDICT: &str =
+    "```json\n{\"pass\": true, \"reasons\": [], \"required_changes\": []}\n```";
+
+pub(super) const WORKER_QUESTION: &str = "UPSTROKE-QUESTION: the spec names two incompatible \
+                                           formats and I should not pick one alone";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProbeFailure {
     Exit { code: i32, stderr: String },
@@ -438,13 +455,27 @@ struct Control {
     refused: u32,
 }
 
-#[derive(Debug, Default)]
+pub(super) type Responder =
+    Box<dyn Fn(&RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> + Send + Sync>;
+
+#[derive(Default)]
 pub(super) struct RecordingRunner {
     ran: Mutex<Vec<Ran>>,
     codes: Mutex<Vec<i32>>,
     log: Mutex<Option<PathBuf>>,
     control: Mutex<Control>,
     changed: Condvar,
+    respond: Mutex<Option<Responder>>,
+}
+
+impl std::fmt::Debug for RecordingRunner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RecordingRunner")
+            .field("ran", &self.ran)
+            .field("control", &self.control)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RecordingRunner {
@@ -480,6 +511,69 @@ impl RecordingRunner {
 
     pub(super) fn hold(&self) {
         self.control().holding = true;
+    }
+
+    pub(super) fn answering(self, respond: Responder) -> Self {
+        *self
+            .respond
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(respond);
+        self
+    }
+
+    fn respond_to(
+        &self,
+        request: &RunnerRequest,
+    ) -> Option<Result<ProcessOutput, crate::runner::RunnerError>> {
+        self.respond
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|respond| respond(request))
+    }
+
+    pub(super) fn await_held(&self, invocation: &InvocationId, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        let mut control = self.control();
+        loop {
+            if control
+                .held
+                .iter()
+                .any(|held| held.invocation == *invocation && held.delivered.is_none())
+            {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            control = self
+                .changed
+                .wait_timeout(control, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub(super) fn release(
+        &self,
+        invocation: &InvocationId,
+        within: Duration,
+    ) -> Result<(), String> {
+        if !self.await_held(invocation, within) {
+            return Err(format!("`{invocation}` was not held within {within:?}"));
+        }
+        let request = self
+            .ran()
+            .into_iter()
+            .rev()
+            .find(|ran| ran.invocation == *invocation)
+            .map(|ran| ran.request)
+            .ok_or_else(|| format!("`{invocation}` is held and was never recorded"))?;
+        let result = self
+            .respond_to(&request)
+            .unwrap_or_else(|| Ok(exited(0, String::new())));
+        self.complete(invocation, result)
     }
 
     pub(super) fn stop_holding(&self) {
@@ -569,7 +663,12 @@ impl RecordingRunner {
         let Ok(bytes) = std::fs::read(&path) else {
             return Vec::new();
         };
-        TopologyFold::parse_log(&bytes)
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .and_then(|end| bytes.get(..=end))
+            .unwrap_or_default();
+        TopologyFold::parse_log(complete)
             .map(|events| {
                 events
                     .iter()
@@ -662,10 +761,22 @@ impl RecordingRunner {
             self.changed.notify_all();
             return Started::Held;
         }
-        control
+        drop(control);
+        if let Some(result) = self.respond_to(request) {
+            let ending = if result.is_ok() {
+                Ending::Completed
+            } else {
+                Ending::Failed
+            };
+            self.control()
+                .endings
+                .push((request.invocation.clone(), ending));
+            self.changed.notify_all();
+            return Started::Ended(result);
+        }
+        self.control()
             .endings
             .push((request.invocation.clone(), Ending::Completed));
-        drop(control);
         let mut codes = self
             .codes
             .lock()
@@ -748,6 +859,17 @@ impl RecordingRunner {
     }
 }
 
+pub(super) fn exited(code: i32, stdout: String) -> ProcessOutput {
+    ProcessOutput {
+        code: Some(code),
+        stdout,
+        stderr: String::new(),
+        duration: Duration::from_millis(1),
+        timed_out: false,
+        output_limited: false,
+    }
+}
+
 fn waiting_in(control: &Control) -> Vec<InvocationId> {
     control
         .held
@@ -826,6 +948,7 @@ pub(super) struct AnsweringAdapter {
     id: &'static str,
     verdict: &'static str,
     status: crate::ir::OutcomeStatus,
+    echo: bool,
 }
 
 impl AnsweringAdapter {
@@ -854,8 +977,16 @@ impl AnsweringAdapter {
     pub(super) const fn passing(id: &'static str) -> Self {
         Self {
             id,
-            verdict: "```json\n{\"pass\": true, \"reasons\": [], \"required_changes\": []}\n```",
+            verdict: PASSING_VERDICT,
             status: crate::ir::OutcomeStatus::Completed,
+            echo: false,
+        }
+    }
+
+    pub(super) const fn echoing(id: &'static str) -> Self {
+        Self {
+            echo: true,
+            ..Self::passing(id)
         }
     }
 }
@@ -886,7 +1017,11 @@ impl crate::agent::AgentAdapter for AnsweringAdapter {
         Ok(crate::ir::Outcome {
             status: self.status,
             diff: String::new(),
-            detail: Some(self.verdict.to_owned()),
+            detail: Some(if self.echo {
+                out.stdout.clone()
+            } else {
+                self.verdict.to_owned()
+            }),
             session_id: Some(format!("{}-session", self.id)),
             usage: None,
             cost_usd: Some(0.25),
@@ -937,6 +1072,13 @@ impl ScaffoldAdapters {
         Self {
             primary: AnsweringAdapter::passing(AGENT),
             second: AnsweringAdapter::passing(REVIEW_AGENT),
+        }
+    }
+
+    pub(super) const fn echoing() -> Self {
+        Self {
+            primary: AnsweringAdapter::echoing(AGENT),
+            second: AnsweringAdapter::echoing(REVIEW_AGENT),
         }
     }
 }
@@ -1029,7 +1171,7 @@ impl super::attempt::ReviewPasses for ScaffoldReviews {
             invocations.pass.clone(),
         );
         if let Err(error) = runner.run_blocking(&request) {
-            if error.fate.is_unresolved() {
+            if error.is_cancelled() || error.fate.is_unresolved() {
                 return Err(error.into());
             }
             let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
@@ -1121,7 +1263,8 @@ impl super::integrate::Verification for Run {
             hooks: &mut self.hooks,
             runner: &self.runner,
             standing: super::select::Standing::of(self.emitter.fold(), &identities.gate(0, 0)),
-            ledger: &mut self.invocations,
+            registrar: &std::sync::Mutex::new(&mut self.invocations),
+            carried: &super::preflight::Carried::default(),
             adapters: &adapters,
             paths: &self.paths,
             reviews: &reviews,
@@ -1938,3 +2081,454 @@ pub(super) fn kill_child_environment() -> (PathBuf, String) {
 }
 
 pub(super) const OUTCOME: RunOutcome = RunOutcome::Complete;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct NoSleep;
+
+impl crate::interaction::Sleeper for NoSleep {
+    fn sleep(&self, _duration: Duration) {}
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct WideTask {
+    pub(super) id: &'static str,
+    pub(super) hints: Vec<String>,
+    pub(super) depends_on: Vec<&'static str>,
+    pub(super) writes: String,
+}
+
+impl WideTask {
+    pub(super) fn independent(id: &'static str) -> Self {
+        Self {
+            id,
+            hints: vec![format!("src/{id}/")],
+            depends_on: Vec::new(),
+            writes: format!("src/{id}/work.txt"),
+        }
+    }
+
+    pub(super) fn after(id: &'static str, depends_on: &[&'static str]) -> Self {
+        Self {
+            depends_on: depends_on.to_vec(),
+            ..Self::independent(id)
+        }
+    }
+
+    pub(super) fn hinted(id: &'static str, hints: &[&str], writes: &str) -> Self {
+        Self {
+            id,
+            hints: hints.iter().map(|hint| (*hint).to_owned()).collect(),
+            depends_on: Vec::new(),
+            writes: writes.to_owned(),
+        }
+    }
+}
+
+pub(super) fn wide_plan(tasks: &[WideTask]) -> Plan {
+    Plan {
+        source: PlanSource {
+            adapter: "markdown".to_owned(),
+            hash: "scaffold-plan-hash".to_owned(),
+        },
+        tasks: tasks
+            .iter()
+            .map(|task| Task {
+                id: TaskId::from(task.id),
+                kind: TaskKind::Refactor,
+                title: format!("{} title", task.id),
+                body: format!("{} body", task.id),
+                depends_on: task.depends_on.iter().map(|id| TaskId::from(*id)).collect(),
+                acceptance: vec![format!("{} passes", task.id)],
+                path_hints: task.hints.clone(),
+                suggested_tier: None,
+                min_tier: None,
+                artifacts_in: Vec::new(),
+                artifacts_out: Vec::new(),
+            })
+            .collect(),
+        artifacts: Vec::new(),
+    }
+}
+
+pub(super) struct WidePlans {
+    pub(super) gates: usize,
+    pub(super) reviewers: usize,
+    pub(super) verify_gates: usize,
+    pub(super) verify_reviewers: usize,
+    pub(super) pool: Option<String>,
+}
+
+impl WidePlans {
+    fn gate_plans(count: usize) -> Vec<GatePlan> {
+        (0..count)
+            .map(|index| {
+                let (command, timeout) = crate::gates::ShellGate {
+                    name: format!("scaffold-{index}"),
+                    cmd: "gate --check".to_owned(),
+                    timeout: Duration::from_secs(60),
+                    shell: crate::gates::ShellKind::native(),
+                }
+                .command();
+                GatePlan {
+                    name: format!("scaffold-{index}"),
+                    command,
+                    timeout,
+                }
+            })
+            .collect()
+    }
+
+    fn reviewer_plans(&self, count: usize) -> Vec<ReviewerPlan> {
+        [
+            (
+                AGENT,
+                "scaffold-model",
+                "primary",
+                crate::review::Lens::Acceptance,
+            ),
+            (
+                REVIEW_AGENT,
+                "scaffold-second-model",
+                "second_opinion",
+                crate::review::Lens::SecondOpinion,
+            ),
+        ]
+        .into_iter()
+        .take(count)
+        .map(|(agent, model, name, lens)| {
+            let mut profile = crate::review::profile_for(agent, model, name, Effort::High);
+            profile.pool = self.pool.clone().unwrap_or_default();
+            ReviewerPlan {
+                agent: AgentId::new(agent),
+                profile,
+                lens,
+                preflight_cli_version: None,
+                timeout: Duration::from_secs(120),
+            }
+        })
+        .collect()
+    }
+}
+
+impl super::attempt::AttemptPlans for WidePlans {
+    fn inputs(
+        &self,
+        request: &super::attempt::InputsRequest<'_>,
+    ) -> Result<super::attempt::ReviewInputs, UpstrokeError> {
+        Ok(super::attempt::ReviewInputs {
+            title: request.entry.spec.title.clone(),
+            body: request.entry.spec.body.clone(),
+            acceptance: request.entry.spec.acceptance.clone(),
+            diff: request.diff.clone(),
+            artifacts: Vec::new(),
+            decisions: Vec::new(),
+            stem: crate::util::filename_component(request.entry.display_id.as_str()),
+        })
+    }
+
+    fn pool_for(&self, _agent: &str) -> Option<String> {
+        self.pool.clone()
+    }
+
+    fn plan(
+        &self,
+        request: &super::attempt::PlanRequest<'_>,
+    ) -> Result<AttemptPlan, UpstrokeError> {
+        let display = request.entry.display_id.as_str().to_owned();
+        let worker = CommandSpec::new(request.binding.agent.as_str())
+            .arg("--implement")
+            .arg(display);
+        let worker = match &request.resume_session {
+            Some(session) => worker.arg("--resume").arg(session.0.clone()),
+            None => worker,
+        };
+        Ok(AttemptPlan {
+            attempt: request.attempt,
+            rung: request.rung,
+            binding: request.binding.clone(),
+            pool: self.pool.clone(),
+            resume_session: request.resume_session.clone(),
+            materialization_observed: request.materialization_observed,
+            agent: AgentId::new(&request.binding.agent),
+            session_resume: true,
+            worker,
+            worker_timeout: Duration::from_secs(300),
+            gates: Self::gate_plans(self.gates),
+            reviewers: self.reviewer_plans(self.reviewers),
+        })
+    }
+
+    fn verification(
+        &self,
+        _request: &super::attempt::VerificationRequest<'_>,
+    ) -> Result<super::attempt::VerificationPlan, UpstrokeError> {
+        Ok(super::attempt::VerificationPlan {
+            gates: Self::gate_plans(self.verify_gates),
+            reviewers: self.reviewer_plans(self.verify_reviewers),
+        })
+    }
+}
+
+impl Default for WidePlans {
+    fn default() -> Self {
+        Self {
+            gates: 1,
+            reviewers: 1,
+            verify_gates: 1,
+            verify_reviewers: 1,
+            pool: None,
+        }
+    }
+}
+
+pub(super) fn wide_responder(tasks: &[WideTask], failing_gates: &[(u32, u32)]) -> Responder {
+    wide_responder_asking(tasks, failing_gates, &[])
+}
+
+pub(super) fn wide_responder_asking(
+    tasks: &[WideTask],
+    failing_gates: &[(u32, u32)],
+    asking: &[u32],
+) -> Responder {
+    let writes: Vec<(String, &'static str)> = tasks
+        .iter()
+        .map(|task| (task.writes.clone(), task.id))
+        .collect();
+    let failing = failing_gates.to_vec();
+    let asking = asking.to_vec();
+    Box::new(move |request: &RunnerRequest| {
+        let role = match &request.invocation {
+            InvocationId::Attempt { role, .. } => Some(*role),
+            InvocationId::Sequence { .. } | InvocationId::Probe { .. } => None,
+        };
+        if matches!(request.role, ExecutionRole::Review) {
+            return Ok(exited(0, PASSING_VERDICT.to_owned()));
+        }
+        let InvocationId::Attempt { key, attempt, .. } = &request.invocation else {
+            return Ok(exited(0, String::new()));
+        };
+        let Some(role) = role else {
+            return Ok(exited(0, String::new()));
+        };
+        match role {
+            crate::runner::invocation::AttemptRole::Worker if asking.contains(&key.0) => {
+                Ok(exited(0, WORKER_QUESTION.to_owned()))
+            }
+            crate::runner::invocation::AttemptRole::Worker => {
+                let (path, id) = writes
+                    .get(key.0 as usize)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("unknown-{}.txt", key.0), "unknown"));
+                write_file(
+                    &request.workspace.join(&path),
+                    format!("{id} attempt {}\n", attempt.0).as_bytes(),
+                );
+                Ok(exited(0, format!("{id} worked\n")))
+            }
+            crate::runner::invocation::AttemptRole::Gate(_)
+                if failing.contains(&(key.0, attempt.0)) =>
+            {
+                Ok(exited(1, format!("{GATE_DIAGNOSTIC} (exit 1)\n")))
+            }
+            _ => Ok(exited(0, String::new())),
+        }
+    })
+}
+
+pub(super) struct WideEnv {
+    pub(super) answers: Arc<dyn crate::interaction::AnswerSource + Send + Sync>,
+    pub(super) halts_run: bool,
+    pub(super) harness: Arc<Mutex<HookHarness>>,
+    pub(super) runner: Arc<RecordingRunner>,
+    pub(super) adapters: Arc<ScaffoldAdapters>,
+    pub(super) plans: Arc<WidePlans>,
+    pub(super) paths: crate::rundir::RunPaths,
+    pub(super) log: PathBuf,
+    pub(super) inputs: FrozenInputs,
+    pub(super) max_parallel: u32,
+    pub(super) fixture: Fixture,
+}
+
+pub(super) struct Wide {
+    pub(super) run: super::run::TopologyRun,
+    pub(super) env: WideEnv,
+}
+
+impl Wide {
+    pub(super) fn started(tag: &str, tasks: &[WideTask], max_parallel: u32) -> Self {
+        Self::started_with(
+            tag,
+            tasks,
+            max_parallel,
+            WidePlans::default(),
+            RecordingRunner::new().answering(wide_responder(tasks, &[])),
+        )
+    }
+
+    pub(super) fn started_with(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+    ) -> Self {
+        let fixture = Fixture::created(tag);
+        let plan = wide_plan(tasks);
+        let started = run_started_of(&fixture, &plan, max_parallel, plans.reviewers >= 2);
+        let inputs = FrozenInputs {
+            plan,
+            normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
+        };
+        let public =
+            crate::rundir::public_dir(&fixture.base, crate::workspace_manager::fixture::RUN_ID);
+        let lock = crate::rundir::RunLock::acquire(&public).expect("the run lock");
+        let worktree =
+            crate::rundir::WorktreeLock::acquire_in(&fixture.base, &fixture.base.join(".git"))
+                .expect("the worktree lease");
+        let log_path = fixture.private.join("events.jsonl");
+        let mut log = EventLog::open(EventSite::OpenLog, &log_path, &mut Vec::new())
+            .expect("open the schema-4 log");
+        let event = TopologyEvent {
+            ts: <super::seams::SystemClock as super::seams::TimeSource>::now_rfc3339(
+                &super::seams::SystemClock,
+            ),
+            body: TopologyEventBody::RunStarted {
+                data: Box::new(started.clone()),
+            },
+        };
+        let (line, checked) = TopologyLine::round_trip(&event).expect("run_started round-trips");
+        let mut fold = TopologyFold::new(inputs.clone());
+        let delta = fold
+            .plan_transition(&checked)
+            .expect("the fold takes run_started");
+        log.append_topology_hooked(
+            site_for(&checked.body),
+            &line,
+            &mut crate::events::log::NoEventHooks,
+        )
+        .expect("append run_started");
+        fold.apply_delta(delta);
+        fixture
+            .manager
+            .create_ref_zero_old(
+                &mut crate::workspace_manager::NoHooks,
+                crate::topology::effects::RefSite::CreateIntegration,
+                started.integration_ref.as_str(),
+                &fixture.head,
+            )
+            .expect("the integration ref");
+        let digest = crate::events::log::first_line_digest(line.committed_bytes())
+            .expect("a committed first line");
+        let mut handle =
+            super::recover::RunHandle::created(started, digest, log, fold, lock, worktree);
+        handle.events.push(checked);
+        let run = super::run::TopologyRun::resumed(
+            handle,
+            inputs.clone(),
+            super::select::Ceiling::unlimited(),
+        );
+        runner.watching(&log_path);
+        let paths = scaffold_run_paths(&fixture);
+        Self {
+            run,
+            env: WideEnv {
+                answers: Arc::new(crate::interaction::UnattendedAnswers),
+                halts_run: false,
+                harness: Arc::new(Mutex::new(HookHarness::new())),
+                runner: Arc::new(runner),
+                adapters: Arc::new(ScaffoldAdapters::new()),
+                plans: Arc::new(plans),
+                paths,
+                log: log_path,
+                inputs,
+                max_parallel,
+                fixture,
+            },
+        }
+    }
+}
+
+impl WideEnv {
+    pub(super) fn seams(&self) -> super::run::RunSeams<'_> {
+        super::run::RunSeams {
+            manager: &self.fixture.manager,
+            clock: &super::seams::SystemClock,
+            sleeper: &NoSleep,
+            runner: &*self.runner,
+            adapters: &*self.adapters,
+            paths: &self.paths,
+            plans: &*self.plans,
+            reviews: &crate::engine::attempt::LegacyReviewPasses,
+            input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+            answers: &*self.answers,
+            ids: &super::seams::RealIds,
+            halts_run: self.halts_run,
+        }
+    }
+
+    pub(super) fn pipelines(&self) -> super::coordinator::PipelineSeams {
+        self.pipelines_limited(SlotLimitsOf::Defaulted)
+    }
+
+    pub(super) fn pipelines_limited(
+        &self,
+        limits: SlotLimitsOf,
+    ) -> super::coordinator::PipelineSeams {
+        let harness = Arc::clone(&self.harness);
+        let slots = match limits {
+            SlotLimitsOf::Defaulted => super::identity::SlotLimits::defaulted(self.max_parallel),
+            SlotLimitsOf::Exactly(per_agent, per_pool) => {
+                super::identity::SlotLimits::new(per_agent, per_pool).expect("slot limits")
+            }
+        };
+        let runner: Arc<dyn Runner> = Arc::clone(&self.runner) as Arc<dyn Runner>;
+        let adapters: Arc<dyn crate::agent::AdapterSource + Send + Sync> =
+            Arc::clone(&self.adapters) as Arc<dyn crate::agent::AdapterSource + Send + Sync>;
+        let plans: Arc<dyn super::attempt::AttemptPlans + Send + Sync> =
+            Arc::clone(&self.plans) as Arc<dyn super::attempt::AttemptPlans + Send + Sync>;
+        super::coordinator::PipelineSeams {
+            manager: self.fixture.manager.clone(),
+            runner,
+            adapters,
+            paths: self.paths.clone(),
+            plans,
+            reviews: Arc::new(crate::engine::attempt::LegacyReviewPasses),
+            input_policy: Arc::new(crate::engine::attempt::LegacyReviewInputPolicy),
+            hooks: Arc::new(move || {
+                Box::new(super::seams::HarnessTopologyHooks::new(Arc::clone(
+                    &harness,
+                ))) as Box<dyn super::seams::TopologyHooks + Send>
+            }),
+            slots,
+        }
+    }
+
+    pub(super) fn hooks(&self) -> super::seams::HarnessTopologyHooks {
+        super::seams::HarnessTopologyHooks::new(Arc::clone(&self.harness))
+    }
+
+    pub(super) fn durable_events(&self) -> Vec<TopologyEvent> {
+        let bytes = std::fs::read(&self.log).expect("read the log back");
+        TopologyFold::parse_log(&bytes).expect("the log parses")
+    }
+
+    pub(super) fn head(&self, run: &super::run::TopologyRun) -> String {
+        let integration = run
+            .fold()
+            .started()
+            .expect("started")
+            .integration_ref
+            .clone();
+        self.fixture
+            .manager
+            .direct_ref_target(integration.as_str())
+            .expect("read the integration ref")
+            .expect("the integration ref exists")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SlotLimitsOf {
+    Defaulted,
+    Exactly(u32, u32),
+}

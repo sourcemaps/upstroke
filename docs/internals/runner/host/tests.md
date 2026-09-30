@@ -3192,3 +3192,11 @@ overlap.
 The control, and the contract kept for every test that installs an observer: under `with_hooks` the
 same pair takes turns, so exactly one child outlives its (shortened) wait for the other. It also
 shows the rendezvous oracle can fail.
+
+## `fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {`
+
+PR11's carried cleanup leases (the working record's R-Z). A pipeline thread
+has not entered the run's cleanup scope — the scope is thread-local and its
+owner is the coordinator's thread — so the Unix reaper of a process it spawns
+holds the run's R28 lease only if the call carries the lease paths. The
+control carries none, and nothing holds the lease while its child runs.

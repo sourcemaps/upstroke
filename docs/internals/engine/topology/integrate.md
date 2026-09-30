@@ -539,6 +539,12 @@ longer strand a completed judgement behind an unterminated verification.
 Every snapshot intent is reclaimed rather than an exact list, because a
 judgement that returned an error after adding a snapshot has no list to
 hand back, and this sequential coordinator runs one judgement at a time.
+At width > 1 that premise is not this module's to keep — PR11 freezes it — and
+the coordinator keeps it instead: its snapshot gate
+(`docs/internals/engine/topology/coordinator.md`, the working record's R-W)
+admits no attempt snapshot while a stale integration runs outside its
+verification, and lets `verify` return only when none is live, so every
+snapshot this removes is the integration's own.
 
 ## `fn reclaim_staging(`
 

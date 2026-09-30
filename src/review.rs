@@ -546,7 +546,9 @@ pub fn run_review(
         );
         let output = match runner.run_blocking(&request) {
             Ok(output) => output,
-            Err(error) if error.fate.is_unresolved() => return Err(error.into()),
+            Err(error) if error.is_cancelled() || error.fate.is_unresolved() => {
+                return Err(error.into());
+            }
             Err(error) => {
                 let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
                 let mut outcome = unavailable_after_error(
@@ -1222,6 +1224,61 @@ mod tests {
                  reviewer's own `AgentError` cannot say so"
             );
         }
+    }
+
+    struct CancellingRunner;
+
+    impl crate::runner::contract::tests::InlineRunner for CancellingRunner {
+        fn run_inline(
+            &self,
+            request: &RunnerRequest,
+        ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
+            Err(crate::runner::RunnerError::cancelled(
+                &request.invocation,
+                crate::error::ProcessFate::Gone,
+            ))
+        }
+    }
+
+    #[test]
+    fn a_cancelled_review_process_propagates_instead_of_reporting_the_review_unavailable() {
+        let task = task();
+        let tree = review_tree("review-cancelled");
+        let root = tree.path().to_path_buf();
+        let adapter = UnavailableAdapter {
+            stage: UnavailableStage::Spawn,
+        };
+        let cx = ReviewCx {
+            adapter: &adapter,
+            profile: profile_for("cancel-test", "test-model", "review", Effort::High),
+            lens: Lens::Acceptance,
+            task: ReviewSubject::of(&task),
+            diff: "diff --git a/a.rs b/a.rs\n+++ b/a.rs\n+fn x() {}\n",
+            artifacts: &[],
+            decisions: &[],
+            workspace: &root,
+            settings_dir: &root,
+            reviews_dir: &root,
+            stem: "cancelled".to_owned(),
+            timeout: Duration::from_secs(60),
+        };
+        let error = run_review(&cx, &CancellingRunner, &review_ids()).expect_err(
+            "a process its pipeline's cancellation ended is not an unavailable reviewer",
+        );
+        assert!(
+            matches!(
+                error,
+                UpstrokeError::Runner {
+                    fate: crate::error::ProcessFate::Gone,
+                    ..
+                }
+            ),
+            "the cancellation reaches the caller as the Runner's error: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("cancelled"),
+            "and says it was cancelled: {error}"
+        );
     }
 
     #[test]
