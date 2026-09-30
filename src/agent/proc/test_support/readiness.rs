@@ -247,6 +247,7 @@ pub(crate) struct Producer {
     framed: Receiver<Framed>,
 }
 
+#[cfg(unix)]
 pub(crate) fn unstartable_reader() -> thread::Builder {
     thread::Builder::new().stack_size(1 << (usize::BITS - 2))
 }

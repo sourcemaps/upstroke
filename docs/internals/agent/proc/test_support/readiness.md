@@ -388,7 +388,10 @@ space maps, so `spawn` fails in the OS itself — `pthread_create` answers `EAGA
 fixture's reader thread fail to start after its child was spawned
 (`a_producer_whose_reader_cannot_be_started_is_killed_and_reaped`,
 `a_linked_child_whose_reader_cannot_be_started_is_killed_and_reaped`,
-review round 4's `R4-REG-1`).
+review round 4's `R4-REG-1`). Unix only, because both callers are — each finds its child gone by
+its pid with `fixture::process_exists` — and an ungated definition with only Unix callers is dead
+code on the Windows legs, which `-D warnings` makes a build error there (the Windows-target clippy on
+this box found it).
 
 ## `impl Producer` › `pub(crate) fn adopt(child: Child) -> Self {`
 
