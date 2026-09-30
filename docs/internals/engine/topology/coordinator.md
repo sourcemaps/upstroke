@@ -20,8 +20,8 @@ from tests until PR12.
 
 The readings this module implements are the working record's R-R to R-AL
 (`reviews/2026-09-30-pr11-record.md`, "Phase 3's readings" and "Phase 4's readings"), as the
-early review's repairs (§13, round R1) corrected them; the sections below name them where they
-bind.
+early review's repairs (§13, round R1) and review round 2's (§13, round R2) corrected them; the
+sections below name them where they bind.
 
 ### Threads (R-R)
 
@@ -95,6 +95,28 @@ less than it had been told. As repaired:
   command (`R1-CONC-3`).
 - **A verification's review spend is charged when its completion is accepted**, before the next
   selection (phase 4; `R1-CONC-4`).
+
+### What a halt interrupts, where admission stops, and whom a grant reaches (round R2)
+
+Review round 2 (the working record's §13, round R2) found three places where the coordinator read its
+own table where the fold is the authority. As repaired:
+
+- **A halt interrupts every in-flight identity the fold shows**, not only the live pipelines. A
+  verification whose result has arrived — its pipeline retired, its judgement held for `verify` — is
+  still in flight until `integrate()` appends its terminal, so a halt recorded then ends `verify` as
+  interrupted, and the closure settles the transaction with `merge_verification_interrupted`, its pin
+  deleted expected-old and its sequence's staging and snapshots reclaimed; it is never prepared or
+  published (`R2-CONC4-1`). A budget stop, which drains, still lets it reach its natural terminal.
+- **While `verify`'s own transaction is gone, an admission pass selects nothing** — no integration,
+  retry, dispatch, budget stop or answer — until `verify` has seen its pipeline end and unwound; the
+  pass after it goes on outside `verify`, and a candidate already queued is integrated next
+  (`R2-DECLINE-QUEUED`). Round R1's repair held only for a candidate that became eligible after
+  `verify` had unwound.
+- **A grant reaches only a pipeline that receives it**: live, not cancelled, its identity open in
+  the fold, and no interrupt recorded (`receives`). A pair freed for any other — by the stop of
+  another closed pipeline, by an end, by a withdrawn grant — is withdrawn undelivered and its request
+  refused, so no process starts for an identity the fold has closed; a registration or a snapshot such
+  a pipeline asks for, or waits for, is refused the same way (`R2-RECONCILE-GRANT`).
 
 ## `pub type HooksFactory = Arc<dyn Fn() -> Box<dyn TopologyHooks + Send> + Send + Sync>;`
 
@@ -264,12 +286,32 @@ and the loop ends through [`Self::finish`].
 
 Select and start until selection has nothing to start now. Each pass reads the fold afresh
 (INV-21): a poisoned fold refuses; every pipeline whose identity the fold no longer holds open is
-stopped (`reconcile`), before anything else is decided; an ending run stops admission — a halt with pipelines live
-cancels them, a budget stop lets them drain (R-AC); a draining gate waits; an answer ingested
-restarts the pass. Then `admitted()` — the one selection `step` makes too — and its arm: a budget
+stopped (`reconcile`), before anything else is decided; an ending run stops admission — a halt with
+anything in flight (`any_in_flight`) interrupts it, a budget stop lets it drain (R-AC, R-AH); while
+`verify`'s transaction is gone the pass ends there, so `verify` unwinds before anything else is
+selected (`abandoning`, round R2); a draining gate waits; an answer ingested restarts the pass. Then `admitted()` — the one selection `step` makes too — and its arm: a budget
 breach appended, an integration run, a retry or a dispatch started and spawned. Backoff, hard block
 and closure are taken only when no pipeline is live (R-AB), so with pipelines live they end the
 pass; the cost is latency, and a `defer_wait_elapsed` is never placed among in-flight settlements.
+
+## `impl Coordinator<'_>` › `fn any_in_flight(&self) -> bool {`
+
+Whether a halt has anything to interrupt: a live pipeline, or in-flight work the fold shows
+(`closure::in_flight`). With no pipeline live, that is the verification `verify` still holds after its
+result arrived. The phase-4 guard read the live table alone, so a halt ingested in the pass after the
+verification's result was accepted — its pipeline already retired — was not acted on: `verify`
+returned the result and `integrate()` prepared and published it after the halt (round R2,
+`R2-CONC4-1`). In-flight work the fold shows that no pipeline of this coordinator served is not
+settled by the halt either: the closure refuses what it is not vouched for.
+
+## `impl Coordinator<'_>` › `fn abandoning(&self) -> bool {`
+
+Whether `verify` is on the stack and the fold no longer holds its transaction open — a decline, or a
+lineage member's failed settlement, failed the lineage, and `reconcile` has stopped the verification's
+pipeline. Admission ends its pass while it is, so the next thing `verify` does is wait for that
+pipeline to end and unwind. Selection would otherwise see the transaction gone and admit other work
+under a `verify` that is still returning; a candidate already queued was selected for integration and
+refused inside `verify`, which ended the command (round R2, `R2-DECLINE-QUEUED`).
 
 ## `impl Coordinator<'_>` › `fn integrate(&mut self, candidate: CandidateRef) -> Result<bool, UpstrokeError> {`
 
@@ -327,9 +369,11 @@ A refusal when asked inside another verification (one transaction is open at a t
 verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
 it — the pipeline was cancelled, and `integrate()` appends nothing further for it. The sequence is
 recorded as cancelled, whether or not its result had already arrived, so a halt's closure settles
-the transaction with `merge_verification_interrupted` (R-AF). And, when the fold no longer holds
-the transaction open, a refusal naming the abandonment, which `integrate` reads through `abandoned`
-and does not treat as the command's end.
+the transaction with `merge_verification_interrupted` (R-AF) — a halt recorded after the result
+arrived and before this returned included (round R2: the admission pass's halt check reads the fold's
+in-flight work, not the live table). And, when the fold no longer holds the transaction open, a
+refusal naming the abandonment, which `integrate` reads through `abandoned` and does not treat as the
+command's end; admission selects nothing until then (`abandoning`).
 
 ## `impl Coordinator<'_>` › `fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {`
 
@@ -348,10 +392,28 @@ something in the injector; nothing released is `stuck`, which ends the command r
 ## `impl Coordinator<'_>` › `fn admit_invocation(`
 
 A pipeline's `Admit`: refused and counted when injected, from a pipeline that is not live, or for
-an invocation its identity does not own; refused as cancelled when its pipeline was cancelled or
-the command is ending; otherwise registered with the broker against the invocation's standing —
-granted at once (the reply is sent), or pending until a slot pair frees (the reply waits in
-`replies`). A grant whose pipeline stopped waiting is withdrawn, and whatever that frees is granted.
+an invocation its identity does not own; refused as cancelled when its pipeline was cancelled, the
+command is ending, or the fold no longer holds its identity open (round R2 — the broker checks the
+standing of a slotted request, and a gate or the shell probe has none to check); otherwise
+registered with the broker against the invocation's standing — granted at once (the reply is sent),
+or pending until a slot pair frees (the reply waits in `replies`). A grant whose pipeline stopped
+waiting is withdrawn, and whatever that frees is handed on by `reply_granted`.
+
+## `impl Coordinator<'_>` › `fn receives(&self, pipeline: PipelineId) -> bool {`
+
+Whether `pipeline` may be handed a grant — a slot pair or a snapshot: it is live, not cancelled, the
+fold holds its identity open, and no interrupt is recorded. Every place a grant is delivered asks it
+(round R2, `R2-RECONCILE-GRANT`).
+
+## `impl Coordinator<'_>` › `fn reply_granted(&mut self, granted: Vec<InvocationId>) {`
+
+Hand on what a settlement granted. The broker grants by its queue alone and knows nothing of the
+fold, so each waiting pipeline is asked `receives` first: one that does is sent the grant; any other
+is refused, its grant withdrawn from the broker undelivered — no process of it started — and whatever
+that frees handed on the same way, with a warning. The phase-3 shape sent every grant: stopping one
+closed pipeline withdrew its request, which, at the head of the queue, had reserved a pool another
+closed pipeline's request waited for, and the pair went to that pipeline before it was stopped
+(round R2).
 
 ## `impl Coordinator<'_>` › `fn started(&mut self, origin: Origin, pipeline: PipelineId, invocation: InvocationId) {`
 
@@ -384,8 +446,14 @@ grant it to a waiting invocation whose process then started beside one that migh
 
 ## `impl Coordinator<'_>` › `fn begin_snapshot(`
 
-A pipeline's `SnapshotBegin`: refused when injected, when the pipeline is not live or is being
-cancelled, or when the command is ending; granted at once when the gate grants; queued otherwise.
+A pipeline's `SnapshotBegin`: refused when injected, or when the pipeline does not receive grants
+(`receives`: not live, cancelled, its identity closed, or the command ending); granted at once when
+the gate grants; queued otherwise.
+
+## `impl Coordinator<'_>` › `fn grant_snapshots(&mut self) {`
+
+Grant every snapshot the gate releases to a pipeline that still receives grants, and refuse the others
+(round R2).
 
 ## `impl Coordinator<'_>` › `fn accepts(&mut self, origin: Origin, pipeline: PipelineId, identity: &Identity) -> bool {`
 
@@ -417,7 +485,9 @@ late results before appending their completion". Run first in every admission pa
 every message applied and every answer ingested, inside `verify` as outside (round R1,
 `R1-CONC-3`). In this build's live engine no such pipeline exists — at most one member of a lineage
 is ever live, and a lineage question blocks the others' dispatch, start and integration — but the
-fold admits the state, and the design requires it handled.
+fold admits the state, and the design requires it handled. When several close at once, stopping one
+can free a pair another's waiting request is granted; `reply_granted` withdraws that grant undelivered,
+so none of them starts a process (round R2, `R2-RECONCILE-GRANT`).
 
 ## `impl Coordinator<'_>` › `fn stop(&mut self, pipeline: PipelineId) {`
 
@@ -726,7 +796,10 @@ the verification nor unwound `verify`: it discarded the late completion without 
 and then waited for a message nothing would send — a stuck quiescent point with an observer,
 `blocking_recv` for ever without one — or, with other work ready, selected that work's integration
 inside `verify` and ended the command. Now the verification's gate is cancelled, nothing is appended
-for its sequence, and the run goes on to merge gamma.
+for its sequence, and the run goes on to merge gamma. As built in round R1 that held only because
+gamma's candidate became eligible after `verify` had unwound; with it queued before the decline, the
+pass went on selecting and refused it inside `verify` (round R2,
+`a_decline_that_cancels_the_open_verification_goes_on_to_integrate_the_queued_candidate`).
 
 ## `mod tests` › `fn a_declined_embedded_question_stops_a_running_sibling_attempt() {`
 
@@ -757,3 +830,61 @@ The same position through `stop`: the verification reports its gate's end and as
 pair before either is applied, and the pass after the end ingests the decline that fails its lineage.
 Without the reconcile the run is stuck; with the reconcile and the phase-3 transition it waits for
 ever; as repaired the review request is refused and never starts, and the run completes.
+
+## `mod tests` › `struct DecliningAtPoll(std::sync::Arc<std::sync::atomic::AtomicUsize>);`
+
+An answer source that declines at the n-th poll after it is armed with n: each admission pass polls
+an open question once, so a scheduler that arms it with 2 as it releases a pipeline's last process
+places the decline in the pass after that pipeline's completion is applied, the end having been
+applied in the pass before.
+
+## `mod tests` › `fn a_halt_after_the_verifications_result_arrived_interrupts_it_and_publishes_nothing() {`
+
+Review round 2's `R2-CONC4-1`. Gamma is parked on a question and alpha has merged; beta's
+verification is the only live pipeline, and its last process, a review, is released with the decline
+armed for the pass after the verification's completion. That completion is accepted — nothing is
+discarded — and its pipeline retired, so the halt is ingested with no pipeline live and the
+transaction still `VerificationStarted`. The phase-4 guard read the live table and did not act:
+`verify` returned the result and `integrate()` appended `merge_prepared` and `task_merged` after
+`question_answered`. Now the halt interrupts `verify`, and the closure appends
+`merge_verification_interrupted`, deletes the pin and reclaims the staging and the sequence's
+snapshots before `run_finished`.
+
+## `mod tests` › `fn a_decline_that_cancels_the_open_verification_goes_on_to_integrate_the_queued_candidate() {`
+
+Review round 2's `R2-DECLINE-QUEUED`: round R1's verification witness with gamma's candidate queued
+before the decline. Alpha merges, which lets delta dispatch; beta's candidate is under verification
+with its gate held; gamma runs to its candidate inside `verify`; a sibling repair of beta parks; and
+delta's worker ending opens the pass that ingests the decline. The phase-4 coordinator stopped the
+verification and went on selecting in the same pass, found gamma's integration eligible with the
+transaction gone, and refused it inside `verify` — the command ended. Now the pass ends, `verify`
+waits for its cancelled pipeline and unwinds, and gamma's candidate is integrated next.
+
+## `mod tests` › `fn with_two_closed_siblings<T>(`
+
+The state review round 2's `R2-RECONCILE-GRANT` names, built on a coordinator the test assembles
+itself, since the live engine never runs two members of one lineage at once. The root and an unrelated
+holder are dispatched and started; a sibling repair of the root is planted running; the broker, at one
+slot per agent and per pool, holds the holder's worker on agent `a`, the root's worker waiting for
+`{a, p}` at the head of the queue — reserving pool `p` — and the sibling's waiting for `{b, p}` behind
+that reservation; a second sibling parks on an embedded question, and its decline, which does not
+halt, closes the root's and the first sibling's attempts. Three live pipelines stand for the three
+attempts and the two requests wait on their replies; `body` acts on the coordinator before its next
+admission pass, and what each reply was answered with and what the observer was handed as granted come
+back.
+
+## `mod tests` › `fn stopping_two_closed_pipelines_grants_neither_the_pair_the_first_one_frees() {`
+
+`R2-RECONCILE-GRANT`: `reconcile` stops the root first, and withdrawing its request frees the pool the
+sibling waits for. The phase-4 coordinator sent the sibling the grant before it stopped the sibling,
+whose process could then start for a closed identity. Now the grant is withdrawn undelivered, both
+requests are refused and settled cancelled, and the holder keeps its pair.
+
+## `mod tests` › `fn a_pipeline_whose_identity_closed_is_granted_nothing_before_it_is_stopped() {`
+
+`R2-RECONCILE-GRANT`'s class: every other place a grant is delivered, reached in the step between an
+append that closes an identity and the admission pass that stops its pipeline — the order the
+production intake keeps and an observer's `Release::Append` does not. The closed sibling's gate
+registration, its snapshot request, its queued snapshot when the gate opens, and the pair the holder's
+end frees (granted to the closed root, then, withdrawn, to the closed sibling) are all refused; the
+phase-4 coordinator granted every one of them.

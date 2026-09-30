@@ -1205,8 +1205,10 @@ judge would have produced.
 The source retains the registration, slot and settlement protocol required by §10.
 
 Admit the invocation through the judge's registrar — with its slot pair if the
-identity is slotted — run it, and end it completed or cancelled: the ending
-releases the pair.
+identity is slotted — run it, and report how it ended: completed or cancelled,
+which releases the pair, or failed with its process unresolved, which keeps
+the registration running and its pair held until this process exits (round R1
+of the PR11 record).
 
 `permits.protocol` in order: "register(invocation_id, slots) -> if
 slotted, wait for the atomic pair grant … -> Runner spawn ->
@@ -1226,15 +1228,21 @@ never fires and no lease paths, so the call is the one `run_blocking` made; in
 a pipeline the pipeline's cancellation, which the coordinator fires on a halt,
 a shutdown or an error, and the run's cleanup-lease paths (R-Z).
 
-### The registration is settled on every path out
+### The registration's end is reported on every path out
 
 `admit` either leaves a registration running (its pair granted) or leaves none
 unsettled: a refused request was withdrawn inside the ledger, registered and
 cancelled once. From there the only step between
-the registration and its settlement is the Runner call, and both of its
-answers settle. `permits.protocol` settles an invocation "exactly once", and
+the registration and the report of its end is the Runner call, and both of its
+answers are reported. A success settles it completed, and a failure whose
+process the Runner established as gone settles it cancelled. A failure whose
+process the Runner could not establish as ended (`ProcessFate::Unresolved`)
+settles nothing: `InvocationLedger::end` keeps the registration running and
+its pair held until this process exits, because `permits.protocol` releases a
+granted invocation only after its termination, and the ledger does not balance
+while it is held. `permits.protocol` settles an invocation "exactly once", and
 [`InvocationLedger::balances`] states that as "no entry is `Pending` or
-`Running`" — so a `?` between the register and the settlement would abandon
+`Running`" — so a `?` between the register and the end report would abandon
 an entry that at process end is **indistinguishable** from a process this
 coordinator genuinely lost. A pair the substrate cannot be granted is not a
 lost process; it is a process that never started, and reporting it as a leak

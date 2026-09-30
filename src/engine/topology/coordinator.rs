@@ -408,7 +408,12 @@ impl SnapshotGate {
 // invocation is released only when its end established that its process is
 // gone: one that ended unresolved, or was never reported ended, keeps its
 // registration and pair for the rest of this process, and interrupts. Every
-// admission pass first stops each pipeline whose identity the fold has closed.
+// admission pass first stops each pipeline whose identity the fold has closed,
+// and selects nothing while `verify`'s own transaction is gone. A grant, of a
+// pair or a snapshot, reaches only a live, uncancelled pipeline whose identity
+// the fold holds open, with no interrupt recorded; one freed for any other is
+// withdrawn and its request refused. A halt interrupts every in-flight identity
+// the fold shows, a verification whose result has arrived unprepared included.
 // Cleanup: an interrupt cancels every live token, withdraws every pending
 // registration and refuses every waiting reply; `finish` receives until no
 // pipeline is live, and `join` awaits every handle, a panic being its
@@ -428,7 +433,7 @@ struct Coordinator<'s> {
     replies: BTreeMap<InvocationId, (PipelineId, Reply)>,
     gate: SnapshotGate,
     next: u64,
-    in_verify: Option<PipelineId>,
+    in_verify: Option<(PipelineId, Identity)>,
     arrived: Option<Verified>,
     abandoned: Option<SequenceId>,
     interrupt: Option<Interrupt>,
@@ -500,9 +505,12 @@ impl Coordinator<'_> {
             }
             self.reconcile();
             if ending {
-                if halted && !self.live.is_empty() {
+                if halted && self.any_in_flight() {
                     self.halt();
                 }
+                return Ok(());
+            }
+            if self.abandoning() {
                 return Ok(());
             }
             if self.gate.draining() {
@@ -566,6 +574,16 @@ impl Coordinator<'_> {
         }
     }
 
+    fn any_in_flight(&self) -> bool {
+        !self.live.is_empty() || !closure::in_flight(self.run.fold()).is_empty()
+    }
+
+    fn abandoning(&self) -> bool {
+        self.in_verify
+            .as_ref()
+            .is_some_and(|(_, verification)| !verification.open_in(self.run))
+    }
+
     fn integrate(&mut self, candidate: CandidateRef) -> Result<bool, UpstrokeError> {
         let request = self.run.integration_request(&candidate)?;
         let stale = request.base_sha != request.authorized.head;
@@ -598,7 +616,17 @@ impl Coordinator<'_> {
 
     fn grant_snapshots(&mut self) {
         for (pipeline, reply) in self.gate.take_granted() {
-            if reply.send(Ok(())).is_ok() {
+            if !self.receives(pipeline) {
+                self.gate.end(pipeline);
+                let _ = reply.send(Err(UpstrokeError::Refused {
+                    message: format!(
+                        "pipeline {} is cancelled or serves an identity the fold no longer holds \
+                         open, so the snapshot it waited for was not granted",
+                        pipeline.0
+                    ),
+                }));
+                self.set_busy(pipeline, Busy::Running);
+            } else if reply.send(Ok(())).is_ok() {
                 self.set_busy(pipeline, Busy::Running);
             } else {
                 self.gate.end(pipeline);
@@ -775,7 +803,7 @@ impl Coordinator<'_> {
             candidate: request.candidate.clone(),
         };
         let pipeline = self.spawn_verification(job);
-        self.in_verify = Some(pipeline);
+        self.in_verify = Some((pipeline, verification.clone()));
         self.arrived = None;
         self.gate.mode = GateMode::Verifying { granting: true };
         self.grant_snapshots();
@@ -1028,6 +1056,11 @@ impl Coordinator<'_> {
                 }
                 return;
             }
+            Some(live) if live.identity.owns(&invocation) && !live.identity.open_in(self.run) => {
+                let _ = reply.send(Err(cancelled(&invocation)));
+                self.set_busy(pipeline, Busy::Running);
+                return;
+            }
             Some(live) if !live.identity.owns(&invocation) => Some(format!(
                 "`{invocation}` was offered by pipeline {}, whose identity is {:?}",
                 pipeline.0, live.identity
@@ -1080,10 +1113,18 @@ impl Coordinator<'_> {
         match self.run.broker_mut().cancel(invocation) {
             Ok(granted) => self.reply_granted(granted),
             Err(error) => self.run.warn(format!(
-                "`{invocation}` was granted to a pipeline that had stopped waiting, and \
-                 withdrawing it failed: {error}"
+                "`{invocation}` was granted and not delivered, and withdrawing the grant \
+                 failed: {error}"
             )),
         }
+    }
+
+    fn receives(&self, pipeline: PipelineId) -> bool {
+        self.interrupt.is_none()
+            && self
+                .live
+                .get(&pipeline)
+                .is_some_and(|live| !live.cancelled && live.identity.open_in(self.run))
     }
 
     fn reply_granted(&mut self, granted: Vec<InvocationId>) {
@@ -1094,6 +1135,18 @@ impl Coordinator<'_> {
                 ));
                 continue;
             };
+            if !self.receives(pipeline) {
+                let _ = reply.send(Err(cancelled(&invocation)));
+                self.set_busy(pipeline, Busy::Running);
+                self.run.warn(format!(
+                    "the broker granted `{invocation}` to pipeline {}, which is cancelled or \
+                     serves an identity the fold no longer holds open; the grant was withdrawn \
+                     and the request refused, so no process of it started",
+                    pipeline.0
+                ));
+                self.abandoned(&invocation);
+                continue;
+            }
             if reply.send(Ok(())).is_ok() {
                 self.started(Origin::Pipeline, pipeline, invocation);
             } else {
@@ -1178,15 +1231,12 @@ impl Coordinator<'_> {
     }
 
     fn begin_snapshot(&mut self, origin: Origin, pipeline: PipelineId, reply: Reply) {
-        let known = origin == Origin::Pipeline
-            && self
-                .live
-                .get(&pipeline)
-                .is_some_and(|live| !live.cancelled && self.interrupt.is_none());
+        let known = origin == Origin::Pipeline && self.receives(pipeline);
         if !known {
             let _ = reply.send(Err(UpstrokeError::Refused {
                 message: format!(
-                    "pipeline {} asked for a snapshot and is not live or is being cancelled",
+                    "pipeline {} asked for a snapshot and is not live, is being cancelled, or \
+                     serves an identity the fold no longer holds open",
                     pipeline.0
                 ),
             }));
@@ -1379,7 +1429,9 @@ impl Coordinator<'_> {
         outcome: Result<Judgement, JudgeError>,
         charged: Vec<ReviewRecord>,
     ) {
-        if self.in_verify != Some(pipeline) || self.arrived.is_some() {
+        if self.in_verify.as_ref().map(|(verifying, _)| *verifying) != Some(pipeline)
+            || self.arrived.is_some()
+        {
             if origin == Origin::Pipeline
                 && self.live.get(&pipeline).is_some_and(|live| live.cancelled)
             {
@@ -6488,5 +6540,661 @@ mod tests {
             assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
             replay_equals_live(&wide);
         });
+    }
+
+    struct DecliningAtPoll(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::interaction::AnswerSource for DecliningAtPoll {
+        fn id(&self) -> &'static str {
+            "declining-at-poll"
+        }
+
+        fn resolve(
+            &self,
+            question: &crate::ir::Question,
+        ) -> Result<crate::ir::Answer, UpstrokeError> {
+            self.poll(question)
+        }
+
+        fn poll(
+            &self,
+            _question: &crate::ir::Question,
+        ) -> Result<crate::ir::Answer, UpstrokeError> {
+            let armed = self.0.load(std::sync::atomic::Ordering::SeqCst);
+            self.0
+                .store(armed.saturating_sub(1), std::sync::atomic::Ordering::SeqCst);
+            Ok(if armed == 1 {
+                crate::ir::Answer::Declined
+            } else {
+                crate::ir::Answer::Unanswered
+            })
+        }
+    }
+
+    #[test]
+    fn a_halt_after_the_verifications_result_arrived_interrupts_it_and_publishes_nothing() {
+        let mut wide = halting_on_gamma("coordinator-halt-after-arrival");
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        wide.env.answers = std::sync::Arc::new(DecliningAtPoll(std::sync::Arc::clone(&polls)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let manager = wide.env.fixture.manager.clone();
+        let mut last_released: Option<(SequenceId, Option<String>)> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if !view.run.fold().questions_open() {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                let last = released(view, |invocation| {
+                    matches!(
+                        invocation,
+                        InvocationId::Sequence {
+                            role: crate::runner::invocation::SequenceRole::ReviewPass(0),
+                            ..
+                        }
+                    )
+                })?;
+                assert_eq!(
+                    view.live.len(),
+                    1,
+                    "the verification is the only live pipeline: {:?}",
+                    view.live
+                );
+                assert!(last_released.is_none(), "its last process is released once");
+                let pin =
+                    crate::engine::topology::integrate::prepared_pin_ref(&run_id, open.sequence);
+                last_released = Some((
+                    open.sequence,
+                    manager
+                        .direct_ref_target(pin.as_str())
+                        .expect("the pin is readable"),
+                ));
+                polls.store(2, std::sync::atomic::Ordering::SeqCst);
+                Some(last)
+            }),
+        );
+        let (progress, watching) = drive_watching(&mut wide, &mut scheduler);
+        drop(scheduler);
+        let progress = progress.expect("the halted run closes and ends");
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        let (sequence, pinned) =
+            last_released.expect("the verification's last process was released");
+        assert!(
+            pinned.is_some(),
+            "the verification held its pin while it ran"
+        );
+
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let halted = position(&kinds, "question_answered", 0);
+        assert_eq!(
+            &kinds[halted..],
+            &[
+                "question_answered",
+                "merge_verification_interrupted",
+                "run_finished"
+            ],
+            "the verification whose result had arrived is settled interrupted by the closure, \
+             never prepared: {kinds:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(&event.body,
+                TopologyEventBody::MergePrepared { data } if data.sequence == sequence)
+                || matches!(&event.body,
+                    TopologyEventBody::TaskMerged { data } if data.sequence == sequence)),
+            "halting never publishes unverified work: {kinds:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(&event.body,
+                TopologyEventBody::MergeVerificationInterrupted { data }
+                    if data.sequence == sequence && data.detail.contains("halted"))),
+            "{kinds:?}"
+        );
+        assert_eq!(
+            wide.run.discarded(),
+            0,
+            "the verification's result was accepted before the halt was ingested, not \
+             discarded as a cancelled pipeline's: {:?}",
+            wide.run.warnings()
+        );
+        let verification_endings: Vec<_> = wide
+            .env
+            .runner
+            .endings()
+            .into_iter()
+            .filter(|(invocation, _)| matches!(invocation, InvocationId::Sequence { .. }))
+            .collect();
+        assert!(
+            !verification_endings.is_empty()
+                && verification_endings.iter().all(|(_, ending)| {
+                    *ending == crate::engine::topology::scaffold::Ending::Completed
+                }),
+            "every process of the verification ran to its end before the halt: \
+             {verification_endings:?}"
+        );
+        let pin = crate::engine::topology::integrate::prepared_pin_ref(&run_id, sequence);
+        assert_eq!(
+            manager
+                .direct_ref_target(pin.as_str())
+                .expect("the pin is readable"),
+            None,
+            "the prepared pin was deleted expected-old"
+        );
+        let at_end = watching.intents_when("run_finished");
+        assert!(
+            !at_end
+                .iter()
+                .any(|slot| matches!(slot, crate::workspace_manager::Slot::Staging { .. }))
+                && snapshot_names(at_end).is_empty(),
+            "before `run_finished` the closure had removed the staging and this sequence's \
+             snapshots: {at_end:?}"
+        );
+        assert!(wide.run.fold().transaction().is_none());
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        assert_eq!(wide.run.broker_duplicates(), 0);
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_decline_that_cancels_the_open_verification_goes_on_to_integrate_the_queued_candidate() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+            WideTask::independent("delta"),
+        ];
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wide = Wide::started_with(
+            "coordinator-declined-with-queued",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut planted: Option<Vec<TopologyEventBody>> = None;
+        let mut at_decline: Option<(SequenceId, bool)> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if count(view.run.events(), "task_merged") == 0 {
+                    return released(view, |invocation| attempt_key(invocation) == Some(0));
+                }
+                if at_decline.is_some() {
+                    return None;
+                }
+                let Some(open) = view.run.fold().transaction() else {
+                    return released(view, |invocation| attempt_key(invocation) == Some(1));
+                };
+                let queued = view
+                    .run
+                    .fold()
+                    .queue()
+                    .is_some_and(|queue| queue.holds_task(TaskKey(2)));
+                if !queued {
+                    return released(view, |invocation| attempt_key(invocation) == Some(2));
+                }
+                let events = planted.get_or_insert_with(|| {
+                    sibling_parked_on(view.run, TaskKey(1), open.candidate.clone())
+                });
+                if !events.is_empty() {
+                    return Some(Release::Append(Box::new(events.remove(0))));
+                }
+                let gate = SequenceIdentities::new(open.sequence).gate(0, 0);
+                at_decline = Some((open.sequence, view.invoking.contains(&gate)));
+                armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                released(view, |invocation| worker(invocation) == Some(TaskKey(3)))
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler))
+            .expect("the decline fails beta's lineage and the run goes on to its end");
+        drop(scheduler);
+        let (first, gate_held) = at_decline.expect("the decline was armed");
+        assert!(
+            gate_held,
+            "the verification's gate was held when the decline was armed"
+        );
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let decline = position(&kinds, "question_answered", 0);
+        let queued_before = events
+            .iter()
+            .take(decline)
+            .any(|event| matches!(&event.body,
+                TopologyEventBody::TaskCandidateCreated { data } if data.candidate.key == TaskKey(2)));
+        assert!(
+            queued_before,
+            "gamma's candidate was queued before the decline: {kinds:?}"
+        );
+        let after = events.get(decline..).unwrap_or_default();
+        assert!(
+            !after.iter().any(|event| {
+                matches!(&event.body,
+                    TopologyEventBody::MergeVerificationStarted { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeVerificationUnavailable { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeVerificationInterrupted { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergePrepared { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::MergeRejected { data } if data.sequence == first)
+                    || matches!(&event.body,
+                        TopologyEventBody::TaskMerged { data } if data.sequence == first)
+            }),
+            "nothing is appended for the cancelled verification after the decline: {kinds:?}"
+        );
+        let gamma = after
+            .iter()
+            .find_map(|event| match &event.body {
+                TopologyEventBody::MergePrepared { data } if data.key == TaskKey(2) => {
+                    Some(data.sequence)
+                }
+                _ => None,
+            })
+            .expect("gamma's queued candidate was integrated after the decline");
+        assert!(
+            after.iter().any(|event| matches!(&event.body,
+                TopologyEventBody::TaskMerged { data } if data.sequence == gamma)),
+            "{kinds:?}"
+        );
+        let gate = SequenceIdentities::new(first).gate(0, 0);
+        assert!(
+            wide.env
+                .runner
+                .endings()
+                .contains(&(gate, crate::engine::topology::scaffold::Ending::Cancelled)),
+            "the verification's gate, held when the decline was ingested, was cancelled: {:?}",
+            wide.env.runner.endings()
+        );
+        assert!(
+            wide.run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("no longer holds its transaction open")),
+            "{:?}",
+            wide.run.warnings()
+        );
+        assert_eq!(
+            count(&events, "task_merged"),
+            3,
+            "alpha, gamma and delta merge; beta's lineage failed: {kinds:?}"
+        );
+        assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
+        replay_equals_live(&wide);
+    }
+
+    #[derive(Default)]
+    struct GrantLog(Vec<InvocationId>);
+
+    impl Quiescence for GrantLog {
+        fn granted(&mut self, invocation: &InvocationId) {
+            self.0.push(invocation.clone());
+        }
+
+        fn quiescent(&mut self, _view: &Quiescent<'_>) -> Release {
+            Release::Nothing
+        }
+    }
+
+    struct Siblings {
+        root: InvocationId,
+        sibling: InvocationId,
+        holder: InvocationId,
+    }
+
+    type Answer = oneshot::Receiver<Result<(), UpstrokeError>>;
+
+    struct ClosedSiblings<T> {
+        wide: Wide,
+        ids: Siblings,
+        granted: Vec<InvocationId>,
+        root: Answer,
+        sibling: Answer,
+        found: T,
+    }
+
+    fn attempt_identity(key: u32) -> Identity {
+        Identity::Attempt {
+            key: TaskKey(key),
+            generation: GenerationId(0),
+            attempt: AttemptNumber(1),
+        }
+    }
+
+    fn with_two_closed_siblings<T>(
+        tag: &str,
+        body: impl FnOnce(&mut Coordinator<'_>, &Siblings) -> T,
+    ) -> ClosedSiblings<T> {
+        let tasks = [
+            WideTask::independent("root"),
+            WideTask::independent("holder"),
+        ];
+        let mut wide =
+            Wide::started_with(tag, &tasks, 4, WidePlans::default(), holding(&tasks, &[]));
+        wide.run
+            .limit_slots(SlotLimits::new(1, 1).expect("positive limits"))
+            .expect("an empty broker");
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        for key in [TaskKey(0), TaskKey(1)] {
+            wide.run
+                .begin_dispatch(key, GenerationId(0), false, &seams, &mut hooks)
+                .expect("the root and the unrelated holder start");
+        }
+        let source = CandidateRef {
+            key: TaskKey(0),
+            generation: GenerationId(0),
+            commit_sha: crate::topology::events::CommitSha(wide.env.head(&wide.run)),
+            candidate_ref: crate::topology::events::GitRef(
+                "refs/upstroke/planted/sibling-source".to_owned(),
+            ),
+        };
+        let mut running = sibling_parked_on(&wide.run, TaskKey(0), source.clone());
+        running.pop();
+        for event in running {
+            wide.run
+                .emit(event, &seams, &mut hooks)
+                .expect("a fold-valid running sibling");
+        }
+        let ids = Siblings {
+            root: AttemptIdentities::new(TaskKey(0), GenerationId(0), AttemptNumber(1)).worker(),
+            sibling: AttemptIdentities::new(TaskKey(2), GenerationId(0), AttemptNumber(1)).worker(),
+            holder: AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1)).worker(),
+        };
+        for (invocation, agent, pool, admission) in [
+            (&ids.holder, "a", None, Admission::Granted),
+            (&ids.root, "a", Some("p"), Admission::Pending),
+            (&ids.sibling, "b", Some("p"), Admission::Pending),
+        ] {
+            let standing = Standing::of(wide.run.fold(), invocation);
+            let pair = SlotPair {
+                agent: agent.to_owned(),
+                pool: pool.map(str::to_owned),
+            };
+            assert_eq!(
+                wide.run
+                    .broker_mut()
+                    .register(&standing, invocation, Some(pair))
+                    .expect("the identity is open"),
+                admission,
+                "`{invocation}`"
+            );
+        }
+        let mut asking = sibling_parked_on(&wide.run, TaskKey(0), source);
+        if let Some(TopologyEventBody::TaskSpawned { data }) = asking.first_mut() {
+            data.spawn.entry.display_id = crate::ir::TaskId::from(
+                crate::topology::registry::repair_display_id(2, &crate::ir::TaskId::from("root"))
+                    .as_str(),
+            );
+            if let Some(lineage) = data.spawn.entry.lineage.as_mut() {
+                lineage.index = 2;
+            }
+        }
+        for event in asking {
+            wide.run
+                .emit(event, &seams, &mut hooks)
+                .expect("a fold-valid embedded question");
+        }
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        wide.run
+            .ingest_answers(&seams, &mut hooks)
+            .expect("the decline is ingested")
+            .expect("an answer");
+        assert!(
+            !wide.run.fold().run_is_ending(),
+            "the decline does not halt"
+        );
+
+        let pipelines = wide.env.pipelines();
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("a runtime");
+        let (root_reply, root) = oneshot::channel();
+        let (sibling_reply, sibling) = oneshot::channel();
+        let live = BTreeMap::from([
+            (
+                PipelineId(1),
+                Live {
+                    identity: attempt_identity(0),
+                    cancel: Cancellation::new(),
+                    cancelled: false,
+                    busy: Busy::Awaiting,
+                    running: None,
+                    job: None,
+                },
+            ),
+            (
+                PipelineId(2),
+                Live {
+                    identity: attempt_identity(2),
+                    cancel: Cancellation::new(),
+                    cancelled: false,
+                    busy: Busy::Awaiting,
+                    running: None,
+                    job: None,
+                },
+            ),
+            (
+                PipelineId(3),
+                Live {
+                    identity: attempt_identity(1),
+                    cancel: Cancellation::new(),
+                    cancelled: false,
+                    busy: Busy::Invoking(ids.holder.clone()),
+                    running: Some(ids.holder.clone()),
+                    job: None,
+                },
+            ),
+        ]);
+        let replies = BTreeMap::from([
+            (ids.root.clone(), (PipelineId(1), root_reply)),
+            (ids.sibling.clone(), (PipelineId(2), sibling_reply)),
+        ]);
+        let mut log = GrantLog::default();
+        let found = {
+            let mut coordinator = Coordinator {
+                run: &mut wide.run,
+                seams: &seams,
+                hooks: &mut hooks,
+                pipelines: &pipelines,
+                observer: Some(&mut log),
+                leases: Vec::new(),
+                live,
+                replies,
+                gate: SnapshotGate::default(),
+                next: 3,
+                in_verify: None,
+                arrived: None,
+                abandoned: None,
+                interrupt: None,
+                cancelled_work: closure::Cancelled::none(),
+                unresolved: Vec::new(),
+                buffer: Vec::new(),
+                arrivals: 0,
+                handles: Vec::new(),
+                inbox,
+                outbox,
+                injected,
+                injector: Injector(injector),
+                runtime,
+            };
+            assert!(
+                coordinator.live.iter().all(|(pipeline, live)| {
+                    live.identity.open_in(coordinator.run) == (*pipeline == PipelineId(3))
+                }),
+                "the decline closed the root's and the sibling's attempts, not the holder's"
+            );
+            body(&mut coordinator, &ids)
+        };
+        ClosedSiblings {
+            wide,
+            ids,
+            granted: log.0,
+            root,
+            sibling,
+            found,
+        }
+    }
+
+    fn answered(answer: &mut Answer) -> Option<bool> {
+        answer.try_recv().ok().map(|result| result.is_ok())
+    }
+
+    #[test]
+    fn stopping_two_closed_pipelines_grants_neither_the_pair_the_first_one_frees() {
+        let mut closed =
+            with_two_closed_siblings("coordinator-reconcile-grants", |coordinator, _| {
+                coordinator.reconcile();
+                (
+                    coordinator
+                        .live
+                        .get(&PipelineId(2))
+                        .map(|live| live.cancelled),
+                    coordinator.run.warnings().to_vec(),
+                )
+            });
+        let (sibling_cancelled, warnings) = closed.found;
+        assert_eq!(
+            answered(&mut closed.root),
+            Some(false),
+            "the root's pending request was refused"
+        );
+        assert_eq!(
+            answered(&mut closed.sibling),
+            Some(false),
+            "the sibling's request, granted the pair the root's withdrawal freed, was refused, \
+             not answered with the grant: granted {:?}",
+            closed.granted
+        );
+        assert!(
+            closed.granted.is_empty(),
+            "no invocation of a closed identity was handed out as granted: {:?}",
+            closed.granted
+        );
+        assert_eq!(sibling_cancelled, Some(true), "the sibling was stopped too");
+        assert!(
+            warnings.iter().any(|warning| warning.contains(&format!(
+                "the broker granted `{}` to pipeline 2",
+                closed.ids.sibling
+            ))),
+            "{warnings:?}"
+        );
+        let ledger = closed.wide.run.broker_mut().invocations();
+        assert!(
+            ledger.settled(&closed.ids.root) && ledger.settled(&closed.ids.sibling),
+            "both closed requests are settled cancelled: running {:?}, pending {:?}",
+            ledger.running(),
+            ledger.pending()
+        );
+        assert!(
+            !ledger.slots().holds(&closed.ids.sibling) && ledger.slots().holds(&closed.ids.holder),
+            "the sibling holds no pair and the unrelated holder keeps its own"
+        );
+        assert_eq!(ledger.running(), vec![closed.ids.holder.render().as_str()]);
+        assert!(ledger.pending().is_empty());
+    }
+
+    #[test]
+    fn a_pipeline_whose_identity_closed_is_granted_nothing_before_it_is_stopped() {
+        let sibling_gate =
+            AttemptIdentities::new(TaskKey(2), GenerationId(0), AttemptNumber(1)).gate(0, 0);
+        let mut closed =
+            with_two_closed_siblings("coordinator-closed-granted-nothing", |coordinator, ids| {
+                let (admit_reply, mut admitted) = oneshot::channel();
+                coordinator
+                    .handle(
+                        Origin::Pipeline,
+                        ToCoordinator::Admit {
+                            pipeline: PipelineId(2),
+                            invocation: sibling_gate.clone(),
+                            pair: None,
+                            reply: admit_reply,
+                        },
+                    )
+                    .expect("an admission is handled");
+                let (snapshot_reply, mut snapshot) = oneshot::channel();
+                coordinator
+                    .handle(
+                        Origin::Pipeline,
+                        ToCoordinator::SnapshotBegin {
+                            pipeline: PipelineId(2),
+                            reply: snapshot_reply,
+                        },
+                    )
+                    .expect("a snapshot request is handled");
+                let (waiting_reply, mut waited) = oneshot::channel();
+                coordinator.gate.mode = GateMode::Closed;
+                coordinator
+                    .gate
+                    .waiting
+                    .push_back((PipelineId(2), waiting_reply));
+                coordinator.open_gate();
+                coordinator
+                    .handle(
+                        Origin::Pipeline,
+                        ToCoordinator::Ended {
+                            pipeline: PipelineId(3),
+                            invocation: ids.holder.clone(),
+                            end: InvocationEnd::Completed,
+                        },
+                    )
+                    .expect("an end is handled");
+                (
+                    answered(&mut admitted),
+                    answered(&mut snapshot),
+                    answered(&mut waited),
+                    coordinator.gate.live(),
+                )
+            });
+        let (admitted, snapshot, waited, snapshots_held) = closed.found;
+        let freed = (answered(&mut closed.root), answered(&mut closed.sibling));
+        assert_eq!(
+            (
+                admitted,
+                snapshot,
+                waited,
+                snapshots_held,
+                freed,
+                closed.granted.clone()
+            ),
+            (
+                Some(false),
+                Some(false),
+                Some(false),
+                0,
+                (Some(false), Some(false)),
+                Vec::new()
+            ),
+            "every grant a closed pipeline asked for or was queued for was refused: its gate's \
+             registration, its snapshot request, its queued snapshot when the gate opened, and \
+             the pair the holder's end freed (to the closed root, then to the closed sibling); \
+             (admitted, snapshot, queued snapshot, snapshots held, (root, sibling), handed out)"
+        );
+        let ledger = closed.wide.run.broker_mut().invocations();
+        assert!(
+            ledger.running().is_empty() && ledger.pending().is_empty(),
+            "running {:?}, pending {:?}",
+            ledger.running(),
+            ledger.pending()
+        );
+        assert!(
+            !ledger.settled(&sibling_gate) && ledger.registered() == 3,
+            "the closed sibling's gate was never registered"
+        );
     }
 }

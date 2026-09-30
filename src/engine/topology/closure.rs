@@ -99,10 +99,11 @@ impl InFlight {
                 TopologyEventBody::MergeVerificationInterrupted {
                     data: MergeVerificationInterrupted {
                         sequence: *sequence,
-                        detail: "the run halted while this verification was in flight: the \
-                             coordinator cancelled its pipeline and the Runner terminated its \
-                             processes before this was appended; nothing was judged and the \
-                             candidate stays queued"
+                        detail: "the run halted while this verification was in flight: its \
+                             pipeline had ended, cancelled by the coordinator or with a result \
+                             the halt discards unprepared, and the Runner had established the end \
+                             of each of its processes before this was appended; nothing was \
+                             published and the candidate stays queued"
                             .to_owned(),
                     },
                 }

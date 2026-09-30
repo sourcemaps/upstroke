@@ -174,8 +174,13 @@ named in the refusal, which is what a caller needs it for.
 ### Errors
 
 [`UpstrokeError::Refused`] naming the shell or the agent whose CLI did
-not answer. Every invocation registered before the refusal is cancelled
-and every slot pair released, so the ledger balances on both paths.
+not answer. Every invocation registered before the refusal is settled —
+completed, or cancelled with its slot pair released — so the ledger
+balances on both paths, with one exception: a probe whose process the
+Runner could not establish as ended (`ProcessFate::Unresolved`) is not
+settled. Its registration stays running and keeps its pair until this
+process exits (`InvocationLedger::end`, round R1 of the PR11 record), so
+after that refusal `running()` names it and the ledger does not balance.
 
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let shell_id = PreflightIdentities::shell(0)?;`
 

@@ -74,8 +74,12 @@ The line a refusal or a diagnostic names it by.
 ## `impl InFlight` › `pub fn interrupted(&self) -> TopologyEventBody {`
 
 The terminal a halt appends for it: `attempt_interrupted` or `merge_verification_interrupted`, each
-saying the run halted and that the coordinator cancelled the pipeline and the Runner terminated its
-processes before the terminal was appended — which is what vouching for it means.
+saying the run halted. An attempt's says the coordinator cancelled its pipeline and the Runner
+terminated its processes before the terminal was appended. A verification's says its pipeline had
+ended — cancelled by the coordinator, or with a result the halt discards unprepared, since a halt
+recorded after the result arrived and before `integrate()` prepared it still interrupts it (the
+working record's round R2) — and that the Runner had established the end of each of its processes.
+Either is what vouching for it means.
 
 ## `pub fn in_flight(fold: &TopologyFold) -> Vec<InFlight> {`
 
@@ -86,8 +90,9 @@ order, step (d) before step (f).
 
 The in-flight identities a coordinator vouches for: attempts by key, generation and attempt, and
 verifications by sequence. The coordinator records each identity when it cancels its pipeline, and a
-verification's sequence when an interrupt ends `verify`; it hands the set over only after every
-pipeline has ended with its termination established (`coordinator.md`, `finish`).
+verification's sequence when an interrupt ends `verify`, whether or not its result had arrived; it
+hands the set over only after every pipeline has ended with its termination established
+(`coordinator.md`, `finish`).
 
 ## `impl Cancelled` › `pub fn vouches(&self, item: &InFlight) -> bool {`
 

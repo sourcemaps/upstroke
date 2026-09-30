@@ -272,9 +272,16 @@ procedure at `max_parallel = 1` (`closure.md`), appends `run_finished`, and
 finalizes (`finalize.md`). What does not cross is `Poisoned` (the absence of
 a branch), `NotStarted` (an unstarted fold admits nothing) and `Finished` (a
 finished run is refused continuation after its finalization). The
-concurrent half of closure — in-flight cancellation, the budget drain,
-promotion and publication completion inside closure — is refused by
-`closure::refuse_unclosable` naming PR11.
+concurrent half of closure is PR11 phase 4's, done in the same `close_run`:
+a halt's coordinator cancels its in-flight pipelines, waits for each to end
+and hands over the identities it vouches for, which step (2) settles
+interrupted with their residue; a budget stop drains its pipelines before
+the closure runs; and a promoting generation or an authorized publication
+is completed wherever the closure finds one (`closure.md`,
+`coordinator.md`). What is still refused, before any append and in the
+sentence `closure::refuse_unclosable` keeps for the frozen recovery tests,
+is in-flight work nothing vouches for: `step` vouches for nothing, and the
+synchronous loop never leaves an attempt or a verification in flight.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
 

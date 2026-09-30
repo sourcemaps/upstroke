@@ -13,7 +13,8 @@ The `RunnerPreflight` implementation, on its own.
 `recover/tests.rs` drives this through the whole recovery order; these are
 the claims about the pre-flight itself — what it probes, in which order,
 which of its processes take a slot pair, and that both ledgers balance on
-the refusal path as well as the successful one.
+the refusal path as well as the successful one (every refusal here is of a
+process the Runner saw end; one it could not is kept, `preflight.md`).
 
 ## `struct Recording {`
 
