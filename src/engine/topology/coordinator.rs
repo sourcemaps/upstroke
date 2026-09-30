@@ -408,16 +408,18 @@ impl SnapshotGate {
 // invocation is released only when its end established that its process is
 // gone: one that ended unresolved, or was never reported ended, keeps its
 // registration and pair for the rest of this process, and interrupts. Every
-// admission pass first stops each pipeline whose identity the fold has closed,
-// and selects nothing while `verify`'s own transaction is gone. A grant, of a
-// pair or a snapshot, reaches only a live, uncancelled pipeline whose identity
-// the fold holds open, with no interrupt recorded; one freed for any other is
-// withdrawn and its request refused. A halt interrupts every in-flight identity
-// the fold shows, a verification whose result has arrived unprepared included.
-// Cleanup: an interrupt cancels every live token, withdraws every pending
-// registration and refuses every waiting reply; `finish` receives until no
-// pipeline is live, and `join` awaits every handle, a panic being its
-// pipeline's completion. The channels are bounded by this protocol, not
+// admission pass first acts on a halt the fold records, before it reconciles
+// anything, then stops each pipeline whose identity the fold has closed, and
+// selects nothing while `verify`'s own transaction is gone. A grant, of a pair
+// or a snapshot, reaches only a live, uncancelled pipeline whose identity the
+// fold holds open, with no interrupt recorded and no halt in the fold; one freed
+// for any other is withdrawn and its request refused. A halt interrupts every
+// in-flight identity the fold shows, a verification whose result has arrived
+// unprepared included; a budget stop interrupts nothing, and the pipelines it
+// drains are granted as before. Cleanup: an interrupt cancels every live token,
+// withdraws every pending registration and refuses every waiting reply; `finish`
+// receives until no pipeline is live, and `join` awaits every handle, a panic
+// being its pipeline's completion. The channels are bounded by this protocol, not
 // by type: a pipeline has at most one request unanswered and at most three
 // notifications (an end, a snapshot's end, its completion) sent since it, and the
 // fold's entitlements bound the pipelines. The coordinator keeps the job it
@@ -503,11 +505,12 @@ impl Coordinator<'_> {
                         .to_owned(),
                 });
             }
+            if halted && self.any_in_flight() {
+                self.halt();
+                return Ok(());
+            }
             self.reconcile();
             if ending {
-                if halted && self.any_in_flight() {
-                    self.halt();
-                }
                 return Ok(());
             }
             if self.abandoning() {
@@ -620,8 +623,9 @@ impl Coordinator<'_> {
                 self.gate.end(pipeline);
                 let _ = reply.send(Err(UpstrokeError::Refused {
                     message: format!(
-                        "pipeline {} is cancelled or serves an identity the fold no longer holds \
-                         open, so the snapshot it waited for was not granted",
+                        "pipeline {} is cancelled, serves an identity the fold no longer holds \
+                         open, or is ending with the command (an interrupt is recorded, or the \
+                         fold records a halt), so the snapshot it waited for was not granted",
                         pipeline.0
                     ),
                 }));
@@ -1049,7 +1053,7 @@ impl Coordinator<'_> {
                 "`{invocation}` was offered by pipeline {}, which is not live",
                 pipeline.0
             )),
-            Some(live) if live.cancelled || self.interrupt.is_some() => {
+            Some(live) if live.cancelled || self.interrupted() => {
                 let _ = reply.send(Err(cancelled(&invocation)));
                 if origin == Origin::Pipeline {
                     self.set_busy(pipeline, Busy::Running);
@@ -1119,8 +1123,12 @@ impl Coordinator<'_> {
         }
     }
 
+    fn interrupted(&self) -> bool {
+        self.interrupt.is_some() || self.run.fold().halted_at().is_some()
+    }
+
     fn receives(&self, pipeline: PipelineId) -> bool {
-        self.interrupt.is_none()
+        !self.interrupted()
             && self
                 .live
                 .get(&pipeline)
@@ -1139,8 +1147,9 @@ impl Coordinator<'_> {
                 let _ = reply.send(Err(cancelled(&invocation)));
                 self.set_busy(pipeline, Busy::Running);
                 self.run.warn(format!(
-                    "the broker granted `{invocation}` to pipeline {}, which is cancelled or \
-                     serves an identity the fold no longer holds open; the grant was withdrawn \
+                    "the broker granted `{invocation}` to pipeline {}, which is cancelled, serves \
+                     an identity the fold no longer holds open, or is ending with the command (an \
+                     interrupt is recorded, or the fold records a halt); the grant was withdrawn \
                      and the request refused, so no process of it started",
                     pipeline.0
                 ));
@@ -1235,8 +1244,9 @@ impl Coordinator<'_> {
         if !known {
             let _ = reply.send(Err(UpstrokeError::Refused {
                 message: format!(
-                    "pipeline {} asked for a snapshot and is not live, is being cancelled, or \
-                     serves an identity the fold no longer holds open",
+                    "pipeline {} asked for a snapshot and is not live, is being cancelled, serves \
+                     an identity the fold no longer holds open, or is ending with the command (an \
+                     interrupt is recorded, or the fold records a halt)",
                     pipeline.0
                 ),
             }));
@@ -7195,6 +7205,487 @@ mod tests {
         assert!(
             !ledger.settled(&sibling_gate) && ledger.registered() == 3,
             "the closed sibling's gate was never registered"
+        );
+    }
+
+    struct Waiting {
+        root: InvocationId,
+        holder: InvocationId,
+        waiter: InvocationId,
+        asker: InvocationId,
+    }
+
+    struct BehindADecline<T> {
+        wide: Wide,
+        ids: Waiting,
+        granted: Vec<InvocationId>,
+        root: Answer,
+        waiter: Answer,
+        found: T,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Decline {
+        Halting,
+        UnderABudgetStop,
+    }
+
+    fn with_a_waiter_behind_a_decline<T>(
+        tag: &str,
+        decline: Decline,
+        body: impl FnOnce(&mut Coordinator<'_>, &Waiting) -> T,
+    ) -> BehindADecline<T> {
+        let tasks = [
+            WideTask::independent("root"),
+            WideTask::independent("holder"),
+            WideTask::independent("waiter"),
+            WideTask::independent("asker"),
+        ];
+        let mut wide =
+            Wide::started_with(tag, &tasks, 5, WidePlans::default(), holding(&tasks, &[]));
+        wide.run
+            .limit_slots(SlotLimits::new(1, 1).expect("positive limits"))
+            .expect("an empty broker");
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        wide.env.halts_run = decline == Decline::Halting;
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        for key in [TaskKey(0), TaskKey(1), TaskKey(2), TaskKey(3)] {
+            wide.run
+                .begin_dispatch(key, GenerationId(0), false, &seams, &mut hooks)
+                .expect("four unrelated attempts start");
+        }
+        let worker =
+            |key| AttemptIdentities::new(TaskKey(key), GenerationId(0), AttemptNumber(1)).worker();
+        let ids = Waiting {
+            root: worker(0),
+            holder: worker(1),
+            waiter: worker(2),
+            asker: worker(3),
+        };
+        for (invocation, agent, pool, admission) in [
+            (&ids.holder, "a", None, Admission::Granted),
+            (&ids.root, "a", Some("p"), Admission::Pending),
+            (&ids.waiter, "b", Some("p"), Admission::Pending),
+        ] {
+            let standing = Standing::of(wide.run.fold(), invocation);
+            let pair = SlotPair {
+                agent: agent.to_owned(),
+                pool: pool.map(str::to_owned),
+            };
+            assert_eq!(
+                wide.run
+                    .broker_mut()
+                    .register(&standing, invocation, Some(pair))
+                    .expect("the identity is open"),
+                admission,
+                "`{invocation}`"
+            );
+        }
+        let source = CandidateRef {
+            key: TaskKey(0),
+            generation: GenerationId(0),
+            commit_sha: crate::topology::events::CommitSha(wide.env.head(&wide.run)),
+            candidate_ref: crate::topology::events::GitRef(
+                "refs/upstroke/planted/sibling-source".to_owned(),
+            ),
+        };
+        for event in sibling_parked_on(&wide.run, TaskKey(0), source) {
+            wide.run
+                .emit(event, &seams, &mut hooks)
+                .expect("a fold-valid embedded question");
+        }
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        wide.run
+            .ingest_answers(&seams, &mut hooks)
+            .expect("the decline is ingested")
+            .expect("an answer");
+        if decline == Decline::UnderABudgetStop {
+            let epoch = wide.run.fold().epoch().expect("started");
+            wide.run
+                .emit(
+                    TopologyEventBody::BudgetExceeded {
+                        data: crate::topology::events::BudgetExceeded4 {
+                            epoch,
+                            budget: crate::events::BudgetKind::Run,
+                            limit_usd: 0.4,
+                            spent_usd: 0.5,
+                            key: None,
+                        },
+                    },
+                    &seams,
+                    &mut hooks,
+                )
+                .expect("the fold takes the budget stop after the decline");
+        }
+        let fold = wide.run.fold();
+        assert_eq!(
+            (
+                fold.run_is_ending(),
+                fold.halted_at(),
+                fold.budget_stop().is_some()
+            ),
+            match decline {
+                Decline::Halting => (true, Some(TaskKey(4)), false),
+                Decline::UnderABudgetStop => (true, None, true),
+            },
+            "the decline halts the run, or a budget stop follows a decline that does not"
+        );
+
+        let pipelines = wide.env.pipelines();
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("a runtime");
+        let (root_reply, root) = oneshot::channel();
+        let (waiter_reply, waiter) = oneshot::channel();
+        let entry = |key, busy, running| Live {
+            identity: attempt_identity(key),
+            cancel: Cancellation::new(),
+            cancelled: false,
+            busy,
+            running,
+            job: None,
+        };
+        let live = BTreeMap::from([
+            (PipelineId(1), entry(0, Busy::Awaiting, None)),
+            (PipelineId(2), entry(2, Busy::Awaiting, None)),
+            (
+                PipelineId(3),
+                entry(
+                    1,
+                    Busy::Invoking(ids.holder.clone()),
+                    Some(ids.holder.clone()),
+                ),
+            ),
+            (PipelineId(4), entry(3, Busy::Running, None)),
+        ]);
+        let replies = BTreeMap::from([
+            (ids.root.clone(), (PipelineId(1), root_reply)),
+            (ids.waiter.clone(), (PipelineId(2), waiter_reply)),
+        ]);
+        let mut log = GrantLog::default();
+        let found = {
+            let mut coordinator = Coordinator {
+                run: &mut wide.run,
+                seams: &seams,
+                hooks: &mut hooks,
+                pipelines: &pipelines,
+                observer: Some(&mut log),
+                leases: Vec::new(),
+                live,
+                replies,
+                gate: SnapshotGate::default(),
+                next: 4,
+                in_verify: None,
+                arrived: None,
+                abandoned: None,
+                interrupt: None,
+                cancelled_work: closure::Cancelled::none(),
+                unresolved: Vec::new(),
+                buffer: Vec::new(),
+                arrivals: 0,
+                handles: Vec::new(),
+                inbox,
+                outbox,
+                injected,
+                injector: Injector(injector),
+                runtime,
+            };
+            assert!(
+                coordinator.live.iter().all(|(pipeline, live)| {
+                    live.identity.open_in(coordinator.run) == (*pipeline != PipelineId(1))
+                }),
+                "the decline closed the root's attempt and none of the three unrelated ones"
+            );
+            body(&mut coordinator, &ids)
+        };
+        BehindADecline {
+            wide,
+            ids,
+            granted: log.0,
+            root,
+            waiter,
+            found,
+        }
+    }
+
+    fn broker_grants(coordinator: &mut Coordinator<'_>) -> u32 {
+        coordinator.run.broker_mut().invocations().slots().granted()
+    }
+
+    #[test]
+    fn a_recorded_halt_withdraws_every_waiting_request_before_reconciliation_frees_a_pair() {
+        let mut behind = with_a_waiter_behind_a_decline(
+            "coordinator-halt-before-reconcile",
+            Decline::Halting,
+            |coordinator, _| {
+                let before = broker_grants(coordinator);
+                coordinator.admit().expect("the pass acts on the halt");
+                let after = broker_grants(coordinator);
+                let vouched: Vec<(String, bool)> = closure::in_flight(coordinator.run.fold())
+                    .iter()
+                    .map(|item| (item.describe(), coordinator.cancelled_work.vouches(item)))
+                    .collect();
+                (
+                    matches!(coordinator.interrupt, Some(Interrupt::Halt)),
+                    coordinator
+                        .live
+                        .iter()
+                        .filter(|(_, live)| !live.cancelled)
+                        .map(|(pipeline, _)| pipeline.0)
+                        .collect::<Vec<_>>(),
+                    (before, after),
+                    vouched,
+                    coordinator.run.warnings().to_vec(),
+                )
+            },
+        );
+        let (halted, uncancelled, grants, vouched, warnings) = behind.found;
+        assert_eq!(
+            (
+                halted,
+                uncancelled,
+                grants,
+                answered(&mut behind.root),
+                answered(&mut behind.waiter),
+                behind.granted.clone()
+            ),
+            (
+                true,
+                Vec::new(),
+                (1, 1),
+                Some(false),
+                Some(false),
+                Vec::new()
+            ),
+            "the halt the fold records is acted on before reconciliation: every live pipeline is \
+             cancelled and both waiting requests are withdrawn while pending and refused, so the \
+             broker grants nothing and nothing is handed out; (halted, uncancelled pipelines, \
+             broker grants before and after the pass, root, waiter, handed out)"
+        );
+        assert!(
+            vouched.len() == 3 && vouched.iter().all(|(_, vouched)| *vouched),
+            "the holder's, the waiter's and the asker's attempts are in flight and vouched for \
+             the closure: {vouched:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("the broker granted")),
+            "no grant was computed to be withdrawn: {warnings:?}"
+        );
+        let ledger = behind.wide.run.broker_mut().invocations();
+        assert!(
+            ledger.settled(&behind.ids.root) && ledger.settled(&behind.ids.waiter),
+            "both waiting requests are settled cancelled: running {:?}, pending {:?}",
+            ledger.running(),
+            ledger.pending()
+        );
+        assert_eq!(
+            (ledger.running(), ledger.pending().is_empty()),
+            (vec![behind.ids.holder.render().as_str()], true),
+            "only the holder's invocation runs, to be released by its own end"
+        );
+        assert!(!ledger.slots().holds(&behind.ids.waiter));
+    }
+
+    #[test]
+    fn a_budget_stop_drains_so_the_pair_reconciliation_frees_reaches_an_open_waiter() {
+        let mut behind = with_a_waiter_behind_a_decline(
+            "coordinator-budget-before-reconcile",
+            Decline::UnderABudgetStop,
+            |coordinator, _| {
+                coordinator.admit().expect("the pass drains");
+                (
+                    coordinator.interrupt.is_some(),
+                    coordinator
+                        .live
+                        .iter()
+                        .filter(|(_, live)| live.cancelled)
+                        .map(|(pipeline, _)| pipeline.0)
+                        .collect::<Vec<_>>(),
+                )
+            },
+        );
+        let (interrupted, cancelled) = behind.found;
+        assert_eq!(
+            (
+                interrupted,
+                cancelled,
+                answered(&mut behind.root),
+                answered(&mut behind.waiter),
+                behind.granted.clone()
+            ),
+            (
+                false,
+                vec![1],
+                Some(false),
+                Some(true),
+                vec![behind.ids.waiter.clone()]
+            ),
+            "a budget stop is not a halt: the pass stops only the root, whose identity the \
+             decline closed, and the pair its withdrawal frees is granted to the open waiter, \
+             which drains to its settlement; (interrupted, cancelled pipelines, root, waiter, \
+             handed out)"
+        );
+        let ledger = behind.wide.run.broker_mut().invocations();
+        assert_eq!(
+            (
+                ledger.settled(&behind.ids.root),
+                ledger.running(),
+                ledger.pending().is_empty()
+            ),
+            (
+                true,
+                vec![
+                    behind.ids.holder.render().as_str(),
+                    behind.ids.waiter.render().as_str()
+                ],
+                true
+            )
+        );
+    }
+
+    fn grant_sites(
+        coordinator: &mut Coordinator<'_>,
+        ids: &Waiting,
+    ) -> (Option<bool>, Option<bool>, Option<bool>, u32) {
+        let (admit_reply, mut admitted) = oneshot::channel();
+        coordinator
+            .handle(
+                Origin::Pipeline,
+                ToCoordinator::Admit {
+                    pipeline: PipelineId(4),
+                    invocation: ids.asker.clone(),
+                    pair: Some(SlotPair {
+                        agent: "c".to_owned(),
+                        pool: None,
+                    }),
+                    reply: admit_reply,
+                },
+            )
+            .expect("an admission is handled");
+        let (snapshot_reply, mut snapshot) = oneshot::channel();
+        coordinator
+            .handle(
+                Origin::Pipeline,
+                ToCoordinator::SnapshotBegin {
+                    pipeline: PipelineId(4),
+                    reply: snapshot_reply,
+                },
+            )
+            .expect("a snapshot request is handled");
+        let (waiting_reply, mut waited) = oneshot::channel();
+        coordinator.gate.mode = GateMode::Closed;
+        coordinator
+            .gate
+            .waiting
+            .push_back((PipelineId(4), waiting_reply));
+        coordinator.open_gate();
+        coordinator
+            .handle(
+                Origin::Pipeline,
+                ToCoordinator::Ended {
+                    pipeline: PipelineId(3),
+                    invocation: ids.holder.clone(),
+                    end: InvocationEnd::Completed,
+                },
+            )
+            .expect("an end is handled");
+        (
+            answered(&mut admitted),
+            answered(&mut snapshot),
+            answered(&mut waited),
+            coordinator.gate.live(),
+        )
+    }
+
+    #[test]
+    fn no_grant_reaches_an_open_pipeline_between_a_recorded_halt_and_the_pass_that_acts_on_it() {
+        let mut behind = with_a_waiter_behind_a_decline(
+            "coordinator-halted-grant-sites",
+            Decline::Halting,
+            grant_sites,
+        );
+        let (admitted, snapshot, waited, snapshots_held) = behind.found;
+        let freed = (answered(&mut behind.root), answered(&mut behind.waiter));
+        assert_eq!(
+            (
+                admitted,
+                snapshot,
+                waited,
+                snapshots_held,
+                freed,
+                behind.granted.clone()
+            ),
+            (
+                Some(false),
+                Some(false),
+                Some(false),
+                0,
+                (Some(false), Some(false)),
+                Vec::new()
+            ),
+            "with the halt recorded and not yet acted on, every grant an open pipeline asked for \
+             or was queued for was refused: the asker's slotted registration, its snapshot \
+             request, its queued snapshot when the gate opened, and the pair the holder's end \
+             freed (to the closed root, then, withdrawn, to the open waiter); (admitted, \
+             snapshot, queued snapshot, snapshots held, (root, waiter), handed out)"
+        );
+        let ledger = behind.wide.run.broker_mut().invocations();
+        assert!(
+            ledger.running().is_empty() && ledger.pending().is_empty(),
+            "running {:?}, pending {:?}",
+            ledger.running(),
+            ledger.pending()
+        );
+        assert!(
+            !ledger.settled(&behind.ids.asker) && ledger.registered() == 3,
+            "the asker's worker was never registered"
+        );
+    }
+
+    #[test]
+    fn under_a_budget_stop_every_grant_site_still_grants_an_open_pipeline() {
+        let mut behind = with_a_waiter_behind_a_decline(
+            "coordinator-budget-grant-sites",
+            Decline::UnderABudgetStop,
+            grant_sites,
+        );
+        let (admitted, snapshot, waited, snapshots_held) = behind.found;
+        let freed = (answered(&mut behind.root), answered(&mut behind.waiter));
+        assert_eq!(
+            (
+                admitted,
+                snapshot,
+                waited,
+                snapshots_held,
+                freed,
+                behind.granted.clone()
+            ),
+            (
+                Some(true),
+                Some(true),
+                Some(true),
+                2,
+                (Some(false), Some(true)),
+                vec![behind.ids.asker.clone(), behind.ids.waiter.clone()]
+            ),
+            "a budget stop drains, so every grant an open pipeline asks for or waits for is \
+             delivered and only the closed root is refused; (admitted, snapshot, queued \
+             snapshot, snapshots held, (root, waiter), handed out)"
+        );
+        let ledger = behind.wide.run.broker_mut().invocations();
+        assert_eq!(
+            ledger.running(),
+            vec![
+                behind.ids.waiter.render().as_str(),
+                behind.ids.asker.render().as_str()
+            ]
         );
     }
 
