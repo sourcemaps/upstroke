@@ -435,6 +435,7 @@ pub(super) enum Ending {
     Completed,
     Failed,
     Cancelled,
+    CancelledBeforeStart,
     Abandoned,
 }
 
@@ -445,14 +446,34 @@ struct Held {
     delivered: Option<Result<ProcessOutput, crate::runner::RunnerError>>,
 }
 
+#[derive(Debug)]
+struct Door {
+    invocation: InvocationId,
+    admitted: bool,
+    waker: Option<Waker>,
+}
+
 #[derive(Debug, Default)]
 struct Control {
     declared: Option<RunnerPolicy>,
     holding: bool,
+    late: bool,
+    barred: Vec<InvocationId>,
+    doors: Vec<Door>,
     failing: Vec<(ProbeTarget, ProbeFailure)>,
     held: Vec<Held>,
     endings: Vec<(InvocationId, Ending)>,
     refused: u32,
+}
+
+impl Control {
+    fn inside(&self, invocation: &InvocationId) -> bool {
+        self.held
+            .iter()
+            .any(|held| held.invocation == *invocation && held.delivered.is_none())
+            || (self.barred.contains(invocation)
+                && self.doors.iter().any(|door| door.invocation == *invocation))
+    }
 }
 
 pub(super) type Responder =
@@ -578,6 +599,47 @@ impl RecordingRunner {
 
     pub(super) fn stop_holding(&self) {
         self.control().holding = false;
+    }
+
+    pub(super) fn enter_late(&self) {
+        self.control().late = true;
+    }
+
+    pub(super) fn bar(&self, invocation: InvocationId) {
+        self.control().barred.push(invocation);
+    }
+
+    pub(super) fn admit(&self, invocation: &InvocationId, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        let mut control = self.control();
+        loop {
+            if control.inside(invocation) {
+                return true;
+            }
+            if let Some(door) = control
+                .doors
+                .iter_mut()
+                .find(|door| door.invocation == *invocation)
+            {
+                door.admitted = true;
+                if let Some(waker) = door.waker.take() {
+                    waker.wake();
+                }
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            control = self
+                .changed
+                .wait_timeout(control, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub(super) fn inside(&self, invocation: &InvocationId) -> bool {
+        self.control().inside(invocation)
     }
 
     pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {
@@ -857,6 +919,57 @@ impl RecordingRunner {
             self.changed.notify_all();
         }
     }
+
+    fn at_the_door(
+        &self,
+        invocation: &InvocationId,
+        cancellation: &Cancellation,
+        waker: &Waker,
+    ) -> bool {
+        let mut control = self.control();
+        let barred = control.barred.contains(invocation);
+        if !control.late && !barred {
+            return false;
+        }
+        let cancelled = cancellation.register(waker);
+        let position = control
+            .doors
+            .iter()
+            .position(|door| door.invocation == *invocation);
+        let admitted = position
+            .and_then(|index| control.doors.get(index))
+            .is_some_and(|door| door.admitted && !barred);
+        if cancelled || admitted {
+            if let Some(index) = position {
+                control.doors.remove(index);
+            }
+            self.changed.notify_all();
+            return false;
+        }
+        match position.and_then(|index| control.doors.get_mut(index)) {
+            Some(door) => door.waker = Some(waker.clone()),
+            None => control.doors.push(Door {
+                invocation: invocation.clone(),
+                admitted: false,
+                waker: Some(waker.clone()),
+            }),
+        }
+        self.changed.notify_all();
+        true
+    }
+
+    fn leave_door(&self, invocation: &InvocationId) {
+        let mut control = self.control();
+        control.doors.retain(|door| door.invocation != *invocation);
+        self.changed.notify_all();
+    }
+
+    fn cancelled_before_start(&self, invocation: &InvocationId) {
+        self.control()
+            .endings
+            .push((invocation.clone(), Ending::CancelledBeforeStart));
+        self.changed.notify_all();
+    }
 }
 
 pub(super) fn exited(code: i32, stdout: String) -> ProcessOutput {
@@ -897,8 +1010,16 @@ impl Future for Invocation<'_> {
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.held {
+            if self.runner.at_the_door(
+                &self.request.invocation,
+                &self.cancellation,
+                context.waker(),
+            ) {
+                return Poll::Pending;
+            }
             if self.cancellation.is_cancelled() {
                 self.ended = true;
+                self.runner.cancelled_before_start(&self.request.invocation);
                 return Poll::Ready(Err(crate::runner::RunnerError::cancelled(
                     &self.request.invocation,
                     crate::error::ProcessFate::NeverStarted,
@@ -928,6 +1049,8 @@ impl Drop for Invocation<'_> {
     fn drop(&mut self) {
         if self.held && !self.ended {
             self.runner.abandon(&self.request.invocation);
+        } else if !self.ended {
+            self.runner.leave_door(&self.request.invocation);
         }
     }
 }

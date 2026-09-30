@@ -710,11 +710,80 @@ mod scaffold_runner {
             runner.waiting().is_empty(),
             "dropping the future released the hold"
         );
+
+        let unstarted = gate(2);
+        let before = Cancellation::new();
+        before.cancel();
+        let error = runner
+            .run_blocking_with(&unstarted, RunnerCall::new(before))
+            .expect_err("a call cancelled before it starts reports an error");
+        assert!(error.is_cancelled(), "{error}");
+        assert_eq!(error.fate, ProcessFate::NeverStarted);
+        assert!(
+            !runner
+                .ran()
+                .iter()
+                .any(|ran| ran.invocation == unstarted.invocation),
+            "no process of it started"
+        );
         assert_eq!(
             runner.endings(),
             vec![
                 (cancelled.invocation.clone(), Ending::Cancelled),
                 (dropped.invocation.clone(), Ending::Abandoned),
+                (unstarted.invocation.clone(), Ending::CancelledBeforeStart),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_late_call_waits_at_the_door_until_admitted_and_a_barred_one_until_cancelled() {
+        let runner = RecordingRunner::new();
+        runner.hold();
+        runner.enter_late();
+        let late = gate(0);
+        let barred = gate(1);
+        runner.bar(barred.invocation.clone());
+        let cancellation = Cancellation::new();
+        let (admitted, cancelled) = std::thread::scope(|scope| {
+            let admitted = scope.spawn(|| runner.run_blocking(&late));
+            let cancelled = scope
+                .spawn(|| runner.run_blocking_with(&barred, RunnerCall::new(cancellation.clone())));
+            assert!(
+                runner.admit(&barred.invocation, Duration::from_secs(30)),
+                "a barred call is inside the runner once it waits at its door"
+            );
+            assert!(
+                !runner.inside(&late.invocation) && runner.ran().is_empty(),
+                "a late call starts only when it is admitted"
+            );
+            assert!(runner.admit(&late.invocation, Duration::from_secs(30)));
+            assert_eq!(
+                runner.waiting(),
+                vec![late.invocation.clone()],
+                "admitting a late call starts it; the barred one still waits at its door"
+            );
+            runner
+                .complete(&late.invocation, Ok(output(0)))
+                .expect("the admitted call is held");
+            cancellation.cancel();
+            (
+                admitted.join().expect("the late call's thread"),
+                cancelled.join().expect("the barred call's thread"),
+            )
+        });
+        assert_eq!(admitted.expect("completed").code, Some(0));
+        let error = cancelled.expect_err("the barred call was cancelled");
+        assert!(error.is_cancelled(), "{error}");
+        assert_eq!(error.fate, ProcessFate::NeverStarted);
+        let started: Vec<InvocationId> =
+            runner.ran().into_iter().map(|ran| ran.invocation).collect();
+        assert_eq!(started, vec![late.invocation.clone()]);
+        assert_eq!(
+            runner.endings(),
+            vec![
+                (late.invocation.clone(), Ending::Completed),
+                (barred.invocation.clone(), Ending::CancelledBeforeStart),
             ]
         );
     }

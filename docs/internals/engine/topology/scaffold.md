@@ -292,25 +292,45 @@ that never started (the CLI is not there). `tests_acceptance.determinism`:
 
 ## `pub(super) enum Ending {`
 
-How an invocation this runner started ended: completed (an output),
+How an invocation this runner was handed ended: completed (an output),
 failed (a Runner error the test delivered, or a probe told to never start),
-cancelled (its call's cancellation fired while it was held), abandoned (its
-future was dropped while held). Recorded once per invocation, in the order the
-endings happened; for a completion the moment is the test's delivery, so the
-order is the test's and not the order the driving threads happened to resume.
+cancelled (its call's cancellation fired while it was held), cancelled before
+start (its call was cancelled before the runner started it: no process, nothing
+in [`RecordingRunner::ran`]), abandoned (its future was dropped while held).
+Recorded once per invocation, in the order the endings happened; for a completion
+the moment is the test's delivery, so the order is the test's and not the order
+the driving threads happened to resume. Cancellations that one interrupt fires
+together are recorded in the order their threads resume, which is unordered.
+
+A call cancelled before it started was once answered and left no trace. An oracle
+reading the endings was then blind to exactly the cancellations that land between
+a grant and the Runner, which is how phase 3's shutdown test came to depend on
+thread timing (the working record's §13, round C1; R-AE).
 
 ## `struct Held {`
 
 One invocation waiting for the test: the waker of the future that last polled
 it, and the result once the test delivers one.
 
+## `struct Door {`
+
+A call waiting at the runner's door, not yet started: whether it has been
+admitted, and the waker of the future that last polled it.
+
 ## `struct Control {`
 
 The runner's control state behind one lock: the declared policy, whether
-invocations are held, the probe failures still owed, the held invocations,
-the endings, and how many completions were refused. `changed` (a `Condvar` on
-the same lock) is notified whenever an invocation starts waiting or ends, so a
-test can wait for "three are in flight" instead of sleeping.
+invocations are held, whether calls enter late and which are barred, the calls
+waiting at the door, the probe failures still owed, the held invocations, the
+endings, and how many completions were refused. `changed` (a `Condvar` on the
+same lock) is notified whenever an invocation reaches or leaves the door, starts
+waiting or ends, so a test can wait for "three are in flight" instead of sleeping.
+
+## `impl Control` › `fn inside(&self, invocation: &InvocationId) -> bool {`
+
+Whether the runner has the call where a test can rely on it staying: held with no
+result delivered, or barred at the door. A call admitted but not yet started, or
+whose result has been delivered, is on its way somewhere and is not inside.
 
 ## `pub(super) struct RecordingRunner` › `codes: Mutex<Vec<i32>>,`
 
@@ -349,7 +369,9 @@ and a torn last line is the append in flight, not a log that fails to parse.
 
 ## `impl RecordingRunner` › `pub(super) fn ran(&self) -> Vec<Ran> {`
 
-Everything it was asked to run, in order.
+Every process it started, in order. A call cancelled before it started, or still
+waiting at the door, is not here; its ending, or [`RecordingRunner::inside`], says
+where it is.
 
 ## `impl RecordingRunner` › `pub(super) fn declaring(self, policy: RunnerPolicy) -> Self {`
 
@@ -371,6 +393,35 @@ held until completed. A test that holds one invocation mid-run and then
 drives another through the same runner uses it, so that the second — if a
 regression let it reach the runner — returns at once and fails its assertion
 instead of hanging the test.
+
+## `impl RecordingRunner` › `pub(super) fn enter_late(&self) {`
+
+From now on every call waits at the door, before its cancellation is checked and
+before anything is started or recorded, until a test admits it
+([`RecordingRunner::admit`]) or its call is cancelled, so a call starts only when a
+test lets it in. The coordinator's test scheduler turns it on, so a coordinator
+that acts before a granted pipeline has reached the Runner meets that pipeline
+still outside, every time.
+
+## `impl RecordingRunner` › `pub(super) fn bar(&self, invocation: InvocationId) {`
+
+This call waits at the door until its call is cancelled, admitted or not: a
+granted invocation whose process never starts, the position a cancellation finds
+when it lands between a grant and the Runner. It then ends
+[`Ending::CancelledBeforeStart`].
+
+## `impl RecordingRunner` › `pub(super) fn admit(&self, invocation: &InvocationId, within: Duration) -> bool {`
+
+A grant's other half: wait until the call reaches the door, let it in, and return
+once it is held — or at once when it is barred and at the door — or `false` when
+`within` passes. A test scheduler calls it for every invocation the coordinator
+grants, so each process starts, and reads the log it records, while the
+coordinator waits. It needs a holding runner: a call answered at once is never
+inside.
+
+## `impl RecordingRunner` › `pub(super) fn inside(&self, invocation: &InvocationId) -> bool {`
+
+[`Control::inside`], for a test that checks without waiting.
 
 ## `impl RecordingRunner` › `pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {`
 
@@ -425,10 +476,28 @@ and record it abandoned — the double's analogue of a Runner terminating an
 invocation whose caller went away. An invocation whose result was already
 delivered has its ending already and records nothing more.
 
+## `impl RecordingRunner` › `fn at_the_door(`
+
+Whether a call not yet started must wait: only when calls enter late or it is
+barred, and then until it is admitted (a barred call never is) or its call is
+cancelled. The waker is registered with the cancellation first, so a cancel
+racing the poll is never lost, and with the door, so an admission wakes it.
+
+## `impl RecordingRunner` › `fn leave_door(&self, invocation: &InvocationId) {`
+
+A future dropped at the door takes its call away with it; nothing started, so
+nothing is recorded.
+
+## `impl RecordingRunner` › `fn cancelled_before_start(&self, invocation: &InvocationId) {`
+
+Record a call whose cancellation fired before the runner started it.
+
 ## `struct Invocation<'a> {`
 
-The future `run` returns: its first poll starts the invocation, later polls
-settle it, and its `Drop` abandons an invocation still held.
+The future `run` returns: its first poll waits at the door when it must, then
+answers a call already cancelled as cancelled before start (fate `NeverStarted`,
+recorded), and otherwise starts the invocation; later polls settle it, and its
+`Drop` abandons an invocation still held or takes a waiting call from the door.
 
 ## `impl Runner for RecordingRunner` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 

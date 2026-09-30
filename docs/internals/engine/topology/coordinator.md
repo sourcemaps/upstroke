@@ -106,8 +106,18 @@ outcome is boxed because a judgement is large and the channel's other messages a
 
 ## `pub trait Quiescence {`
 
-A test's hook into the deterministic intake (R-AD): called when every live pipeline is waiting on
-the coordinator or on a held invocation and nothing is buffered, it chooses what happens next.
+A test's hook into the deterministic intake (R-AD), called at two points. `granted` is handed every
+invocation the coordinator grants, the moment the grant is sent and before the coordinator does
+anything else, and returns once the invocation is inside the Runner: the coordinator cannot see into
+the Runner, and the test's runner is the one party that can, so the observer is where a grant is
+settled. `quiescent` is called when every live pipeline is waiting on the coordinator or on an
+invocation inside the Runner and nothing is buffered, and chooses what happens next.
+
+Without the first, a pipeline between its grant and its Runner call was running on its own while
+the coordinator applied the next message, appended, cancelled or asked the observer — phase 3's CI
+failure at `aea75a79` (the working record's §13, round C1): a shutdown injected at the first
+quiescent point cancelled workers that had not yet reached the Runner, and a seed did not reproduce
+a run.
 
 ## `pub enum Release {`
 
@@ -148,8 +158,9 @@ is appended live — the next resume settles the open attempts interrupted (R-AB
 What a live pipeline is doing as the coordinator knows it, updated at the receipt of each message:
 `Running` on its own, `Awaiting` a reply, `Invoking` a granted invocation, `Done` once its
 completion is received. With an observer, the coordinator applies buffered messages only when no
-pipeline is `Running`, which is what makes the order it applies them in independent of thread
-timing.
+pipeline is `Running`, and a pipeline becomes `Invoking` only once the observer has seen its
+invocation inside the Runner, which together make the order it applies them in, and what each
+process sees when it starts, independent of thread timing.
 
 ## `struct Live {`
 
@@ -259,7 +270,8 @@ it — the pipeline was cancelled, and `integrate()` appends nothing further for
 Without an observer — the production shape — the next message in arrival order. With one, the
 deterministic intake (R-AD): an injected message first; otherwise buffer everything that has
 arrived, wait while any pipeline is `Running`, then apply the buffered message that sorts first by
-pipeline and arrival; when nothing is buffered, every live pipeline is waiting, and the observer
+pipeline and arrival; when nothing is buffered, every live pipeline is waiting — for a reply, or
+inside the Runner, since [`Self::started`] settled each grant with the observer — and the observer
 chooses what happens next.
 
 ## `impl Coordinator<'_>` › `fn observe(&mut self) -> Result<(), UpstrokeError> {`
@@ -274,6 +286,14 @@ an invocation its identity does not own; refused as cancelled when its pipeline 
 the command is ending; otherwise registered with the broker against the invocation's standing —
 granted at once (the reply is sent), or pending until a slot pair frees (the reply waits in
 `replies`). A grant whose pipeline stopped waiting is withdrawn, and whatever that frees is granted.
+
+## `impl Coordinator<'_>` › `fn started(&mut self, origin: Origin, pipeline: PipelineId, invocation: InvocationId) {`
+
+A grant sent: the invocation is the pipeline's running one (withdrawn from the broker if the
+pipeline ends holding it), and the pipeline is `Invoking`. With an observer, the grant is first
+handed to `Quiescence::granted`, and nothing else happens until it returns with the invocation
+inside the Runner; every grant passes through here, those answered at once and those a later
+release frees alike.
 
 ## `impl Coordinator<'_>` › `fn end_invocation(`
 
@@ -355,6 +375,15 @@ widest set of invocations — and of slotted invocations — it saw granted at o
 every invocation (`RecordingRunner::hold`) and answer it with the fixture's responder, so the order
 of completions is the scheduler's and never the threads'.
 
+A scheduler also owns the entry of every call into the runner. It puts its runner in late entry
+(`RecordingRunner::enter_late`), so no granted call starts until the scheduler admits it, and it
+admits each one in `granted` (`RecordingRunner::admit`), so every process starts while the
+coordinator waits there and at no other time. At every quiescent
+point it first checks that each invocation it is handed is inside the runner
+(`RecordingRunner::inside`). A coordinator that acted again before a granted pipeline reached the
+Runner therefore fails every scheduler-driven test at its first quiescent point, on any machine —
+not only when a slow one happens to widen the window, as CI's did at `aea75a79`.
+
 ## `mod tests` › `fn canonical(events: &[TopologyEvent], run_id: &str) -> Vec<serde_json::Value> {`
 
 The packet's `canonical_trace_projection`, for schema-4 events: drop the run's identity and
@@ -374,6 +403,32 @@ R-E and R-V: the coordinator inside `verify`, with
 
 ST-01, ST-02 and ST-06, through the injector; `a_shutdown_cancels_every_live_pipeline_and_ends_the_command_resumably`
 follows them.
+
+## `mod tests` › `fn a_shutdown_cancels_every_live_pipeline_and_ends_the_command_resumably() {`
+
+R-AB's shutdown, injected at the first quiescent point with three workers granted — the
+interleaving phase 3's CI failed on (the working record's §13, round C1). It states the packet's
+`cancellation` sentence — a shutdown "cancels/releases granted and non-slotted invocations after
+termination" — on both sides: in the runner every granted worker's process had started and was
+terminated as a cancellation; in the ledger each was released exactly once, as a cancellation, by
+its pipeline's own report of the end. A release before the termination would make that report a
+counted duplicate.
+
+## `mod tests` › `fn a_shutdown_releases_each_invocation_once_whether_pending_unstarted_running_or_finished() {`
+
+Every place a cancellation can find an invocation, at one shutdown: four workers at width four with
+three agent slots, so one request is pending; one granted worker is barred at the runner's door
+(`RecordingRunner::bar`: granted, its process not started — the interleaving the deterministic
+intake no longer produces by itself, and production can); one is running; and one has just finished,
+its result delivered and its end not yet reported. Each is released exactly once: the pending one
+withdrawn without reaching the runner, the unstarted one cancelled before it started, the running
+one terminated, the finished one completed. The ledger balances with no duplicate (R3, R4; R-AE).
+
+## `mod tests` › `fn one_seed_reproduces_one_run_down_to_what_each_process_saw_when_it_started() {`
+
+R-AD's claim, pinned: three runs of one seed release the same invocations in the same order, start
+the same processes in the same order on the same workspaces with the same log durable at each
+start, and write the same canonical log.
 
 ## `mod tests` › `fn out_of_order_completions_bind_to_their_own_identities_under_seeded_permutations() {`
 

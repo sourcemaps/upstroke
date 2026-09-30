@@ -349,7 +349,16 @@ invocation the runner never held, are refused and both counted, and the first de
 
 A held invocation whose call is cancelled from another thread resolves cancelled with fate `Gone`,
 and a completion after that finds nothing to complete; a held invocation whose future is dropped
-releases its hold and is recorded abandoned. One ending each.
+releases its hold and is recorded abandoned; a call already cancelled when it reaches the runner is
+cancelled with fate `NeverStarted`, starts no process and is recorded cancelled before start. One
+ending each.
+
+## `mod scaffold_runner` › `fn a_late_call_waits_at_the_door_until_admitted_and_a_barred_one_until_cancelled() {`
+
+Under late entry a call starts only once it is admitted, and until then is not inside the runner;
+a barred call is inside once it waits at its door, is never started by an admission, and ends
+cancelled before start when its call is cancelled. What the coordinator's scheduler and
+`a_shutdown_releases_each_invocation_once_whether_pending_unstarted_running_or_finished` lean on.
 
 ## `mod scaffold_runner` › `fn the_scaffold_runner_records_the_policy_and_image_each_invocation_ran_under() {`
 

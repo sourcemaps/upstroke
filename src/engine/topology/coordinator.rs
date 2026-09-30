@@ -162,6 +162,8 @@ impl ToCoordinator {
 }
 
 pub trait Quiescence {
+    fn granted(&mut self, invocation: &InvocationId);
+
     fn quiescent(&mut self, view: &Quiescent<'_>) -> Release;
 }
 
@@ -379,7 +381,10 @@ impl SnapshotGate {
 // made there. Transitions of a pipeline: Running until it asks (`Admit`,
 // `SnapshotBegin`: Awaiting), then granted (Invoking; Running for a snapshot) or
 // refused (Running), an end reported (Running), its completion (Done); only
-// `retire` removes it. Winner and loser: a completion is settled only when its
+// `retire` removes it. Under an observer a grant is handed to it at once and
+// nothing else is done until it returns, which it does when the invocation is
+// inside the Runner, so no Invoking pipeline is still on its way there when the
+// coordinator next acts. Winner and loser: a completion is settled only when its
 // pipeline is live, not cancelled, bound to the identity it names, and that
 // identity is open in the fold; any other message is discarded and counted and
 // releases nothing twice. Cleanup: an interrupt cancels every live token,
@@ -1010,6 +1015,9 @@ impl Coordinator<'_> {
         if let Some(live) = self.live.get_mut(&pipeline) {
             live.running = Some(invocation.clone());
             if origin == Origin::Pipeline && live.busy != Busy::Done {
+                if let Some(observer) = self.observer.as_deref_mut() {
+                    observer.granted(&invocation);
+                }
                 live.busy = Busy::Invoking(invocation);
             }
         }
@@ -1514,6 +1522,7 @@ mod tests {
         }
 
         fn with(runner: &'r RecordingRunner, order: Order<'r>) -> Self {
+            runner.enter_late();
             Self {
                 runner,
                 order,
@@ -1526,7 +1535,20 @@ mod tests {
     }
 
     impl Quiescence for Scheduler<'_> {
+        fn granted(&mut self, invocation: &InvocationId) {
+            assert!(
+                self.runner.admit(invocation, BOUND),
+                "`{invocation}` was granted and did not reach the runner within {BOUND:?}"
+            );
+        }
+
         fn quiescent(&mut self, view: &Quiescent<'_>) -> Release {
+            for invocation in &view.invoking {
+                assert!(
+                    self.runner.inside(invocation),
+                    "`{invocation}` is granted and not inside the runner at a quiescent point"
+                );
+            }
             self.points += 1;
             self.widest = self.widest.max(view.invoking.len());
             self.widest_slotted = self.widest_slotted.max(
@@ -2486,15 +2508,15 @@ mod tests {
             runner,
         );
         let runner = std::sync::Arc::clone(&wide.env.runner);
-        let mut sent = false;
+        let mut granted: Option<Vec<InvocationId>> = None;
         let mut scheduler = Scheduler::scripted(
             &runner,
             Box::new(|view: &Quiescent<'_>| {
-                if sent {
+                if granted.is_some() {
                     return None;
                 }
-                sent = true;
                 assert_eq!(view.live.len(), 3, "three pipelines are in flight");
+                granted = Some(view.invoking.clone());
                 assert!(view.injector.inject(ToCoordinator::Shutdown));
                 Some(Release::Injected)
             }),
@@ -2510,19 +2532,223 @@ mod tests {
             Some(&"attempt_started"),
             "nothing is settled or appended by a shutdown: {kinds:?}"
         );
-        let mut cancelled: Vec<u32> = wide
-            .env
-            .runner
-            .endings()
-            .into_iter()
-            .filter(|(_, ending)| *ending == crate::engine::topology::scaffold::Ending::Cancelled)
-            .filter_map(|(invocation, _)| attempt_key(&invocation))
-            .collect();
-        cancelled.sort_unstable();
-        assert_eq!(cancelled, vec![0, 1, 2], "every live worker was cancelled");
+        let mut granted = granted.expect("the shutdown was injected at a quiescent point");
+        granted.sort();
+        assert_eq!(
+            granted.iter().filter_map(worker).collect::<Vec<_>>(),
+            vec![TaskKey(0), TaskKey(1), TaskKey(2)],
+            "at the shutdown every live pipeline's worker was granted, and nothing else was"
+        );
+        let mut endings = wide.env.runner.endings();
+        endings.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            endings,
+            granted
+                .iter()
+                .map(|invocation| (
+                    invocation.clone(),
+                    crate::engine::topology::scaffold::Ending::Cancelled
+                ))
+                .collect::<Vec<_>>(),
+            "a shutdown \"cancels/releases granted and non-slotted invocations after \
+             termination\": every granted worker's process had started and was terminated as a \
+             cancellation"
+        );
+        let ledger = wide.run.broker_mut().invocations();
+        assert_eq!(
+            (
+                ledger.registered(),
+                ledger.cancelled(),
+                ledger.completed(),
+                ledger.duplicates()
+            ),
+            (3, 3, 0, 0),
+            "and each was released once, as a cancellation, when its pipeline reported the end \
+             of the process: a release before the termination would make that report a counted \
+             duplicate"
+        );
         assert_eq!(wide.run.discarded(), 3, "and every completion discarded");
         assert!(wide.run.invocations_balance(), "{:?}", wide.run.warnings());
         replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_shutdown_releases_each_invocation_once_whether_pending_unstarted_running_or_finished() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+            WideTask::independent("gamma"),
+            WideTask::independent("delta"),
+        ];
+        let worker_of = |key: u32| {
+            AttemptIdentities::new(TaskKey(key), GenerationId(0), AttemptNumber(1)).worker()
+        };
+        let (unstarted, running, finished, pending) =
+            (worker_of(0), worker_of(1), worker_of(2), worker_of(3));
+        let runner = holding(&tasks, &[]);
+        runner.bar(unstarted.clone());
+        let mut wide = Wide::started_with(
+            "coordinator-shutdown-positions",
+            &tasks,
+            4,
+            WidePlans::default(),
+            runner,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut granted: Option<Vec<InvocationId>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if granted.is_some() {
+                    return None;
+                }
+                granted = Some(view.invoking.clone());
+                runner
+                    .release(&finished, BOUND)
+                    .unwrap_or_else(|error| panic!("finishing `{finished}`: {error}"));
+                assert!(view.injector.inject(ToCoordinator::Shutdown));
+                Some(Release::Injected)
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines =
+            wide.env
+                .pipelines_limited(crate::engine::topology::scaffold::SlotLimitsOf::Exactly(
+                    3, 3,
+                ));
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("a shutdown ends the command");
+        drop(scheduler);
+        assert!(error.to_string().contains("shut down"), "{error}");
+        let mut granted = granted.expect("the shutdown was injected at a quiescent point");
+        granted.sort();
+        assert_eq!(
+            granted,
+            vec![unstarted.clone(), running.clone(), finished.clone()],
+            "three agent slots: three workers granted and the fourth pending at the shutdown"
+        );
+
+        let mut endings = wide.env.runner.endings();
+        endings.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            endings,
+            vec![
+                (
+                    unstarted.clone(),
+                    crate::engine::topology::scaffold::Ending::CancelledBeforeStart
+                ),
+                (
+                    running.clone(),
+                    crate::engine::topology::scaffold::Ending::Cancelled
+                ),
+                (
+                    finished.clone(),
+                    crate::engine::topology::scaffold::Ending::Completed
+                ),
+            ],
+            "the granted worker whose process had not started was cancelled before it started, \
+             the running one was terminated, the one that had finished completed, and the pending \
+             one was never handed to the runner"
+        );
+        let started: Vec<InvocationId> = wide
+            .env
+            .runner
+            .ran()
+            .into_iter()
+            .map(|ran| ran.invocation)
+            .collect();
+        assert_eq!(
+            started,
+            vec![running, finished],
+            "no process of the unstarted or the pending worker ever started"
+        );
+        let ledger = wide.run.broker_mut().invocations();
+        assert!(
+            ledger.settled(&pending) && ledger.settled(&unstarted),
+            "the pending request was withdrawn and the unstarted grant released"
+        );
+        assert_eq!(
+            (
+                ledger.registered(),
+                ledger.completed(),
+                ledger.cancelled(),
+                ledger.duplicates()
+            ),
+            (4, 1, 3, 0),
+            "each registration was released exactly once: the finished one as a completion, the \
+             pending, unstarted and running ones as cancellations"
+        );
+        assert!(ledger.balances(), "no registration or slot is left held");
+        assert_eq!(wide.run.discarded(), 4, "every completion discarded");
+        let kinds = kinds_of(&wide.env.durable_events());
+        assert_eq!(
+            kinds.last(),
+            Some(&"attempt_started"),
+            "nothing is settled or appended by a shutdown: {kinds:?}"
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn one_seed_reproduces_one_run_down_to_what_each_process_saw_when_it_started() {
+        type Started = Vec<(String, Vec<String>, String)>;
+        let tasks = three();
+        let mut reference: Option<(Vec<InvocationId>, Started, String)> = None;
+        for run in 0..3 {
+            let runner = holding(&tasks, &[]);
+            let plans = WidePlans {
+                reviewers: 2,
+                verify_reviewers: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(
+                &format!("coordinator-one-seed-{run}"),
+                &tasks,
+                3,
+                plans,
+                runner,
+            );
+            let runner = std::sync::Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::seeded(&runner, 11);
+            let progress = drive(&mut wide, Some(&mut scheduler))
+                .unwrap_or_else(|error| panic!("run {run}: {error}"));
+            let released = scheduler.released.clone();
+            drop(scheduler);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete, "run {run}");
+            let started: Started = wide
+                .env
+                .runner
+                .ran()
+                .into_iter()
+                .map(|ran| {
+                    let workspace = ran
+                        .workspace
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    (ran.invocation.render(), ran.durable_at_spawn, workspace)
+                })
+                .collect();
+            let run_id = wide.run.fold().started().expect("started").run_id.clone();
+            let log = serde_json::to_string(&canonical(&wide.env.durable_events(), &run_id))
+                .expect("serializes");
+            let observed = (released, started, log);
+            match &reference {
+                None => reference = Some(observed),
+                Some(expected) => assert_eq!(
+                    &observed, expected,
+                    "run {run} of seed 11 released, started or logged something run 0 did not"
+                ),
+            }
+        }
     }
 
     #[test]
