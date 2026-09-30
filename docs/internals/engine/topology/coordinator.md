@@ -888,3 +888,121 @@ production intake keeps and an observer's `Release::Append` does not. The closed
 registration, its snapshot request, its queued snapshot when the gate opens, and the pair the holder's
 end frees (granted to the closed root, then, withdrawn, to the closed sibling) are all refused; the
 phase-4 coordinator granted every one of them.
+
+## `mod tests` › `fn every_container_invocation_is_launched_and_released_on_its_own_at_width_three() {`
+
+R19 and R26 under concurrency (phase 5, R-AP). A width-3 run whose pipelines run the production
+`ContainerRunner` over the shared fake, each container's process being the scaffold double's
+invocation (`scaffold::Contained`), so the scheduler holds and releases containers as it holds and
+releases invocations. At every quiescent point the physical inventory — the containers running in
+the runtime, the intents under `<R>/containers`, the views under `<R>/views` — is exactly the names
+of the invocations inside the runner; at the end all three are empty. Every process the double ran
+had one container, created once and removed once, and each mounts its agent's credential volume
+exactly when its role is given one. Three containers ran at once.
+
+## `mod tests` › `fn container_coordinator_child() {`
+
+The second coordinator of the two-process tests (R-AM): this test binary run again, `--exact` and
+`--ignored`, by `scaffold::Served`, with its stdio linked to the parent (`ParentSide`) and its
+container runtime the parent's (`LinkedRuntime`). Its role is named by the environment:
+`fresh` creates a durable width-3 run under a ULID-shaped incarnation, reports its fixture root and
+runs its coordinator until it is killed (`run_held`: every container holds, since nothing in the
+parent completes a child's container); `resume` adopts a root, resumes it through the frozen
+recovery order over the parent's runtime and the production `LockProbe`, with a pre-flight whose
+shell probe is a container, reports what recovery settled and runs until killed; `census` is a
+fresh write command in a second repository — a read-only pre-lock refusal first (an unknown run id),
+then the worktree lock, then `startup_census` — and reports the census, then, when asked, takes its
+own run lock and runs one agent-probe container that mounts the shared credential volume; `owner`
+holds a run lock of its own and two probe containers until it is killed, which is how a dead owner
+comes to exist. `hosted` (Unix) is a coordinator whose pipelines run real host processes
+(`HostHeld`).
+
+## `mod tests` › `fn holds_nothing(run_dir: &std::path::Path, repo: &std::path::Path) -> Result<(), String> {`
+
+R17, observed (R-AQ): nobody holds the run — `rundir::is_running` answers from this process's
+claims, then from the OS — and the repository's worktree lock can be taken, and is let go at once.
+
+## `mod tests` › `fn broker_is_empty(run: &mut TopologyRun) -> Result<(), String> {`
+
+R3, R4 and R13 at a coordinator's start: nothing registered, running or pending, no pair held or
+waited for, no entitlement held, no reservation ever taken or cancelled, no duplicate counted.
+
+## `mod tests` › `fn a_foreign_census_reclaims_a_dead_coordinators_containers_and_leaves_a_live_coordinators_running()`
+
+ST-16 (b) under concurrency, in three processes. A dead owner — a child holding its run lock and two
+containers, killed — leaves its containers running in the shared runtime and its lock free. The live
+coordinator A, this process, runs three pipelines' containers; at its first quiescent point with all
+three inside the runner, a foreign write command in a second repository under the same private root
+(R-AN) runs its census as a child, through the parent's daemon. The census reclaims exactly the dead
+owner's containers (`foreign-run-dead-owner`) and classifies A's as a live owner's
+(`foreign-run-live-owner`), probing A's `run.lock` across the process boundary; A's three run on
+across it, and every removal of them in the journal is A's own. The foreign command's first
+invocation mounts the shared credential volume, and the journal puts it after the census observed
+every dead container terminated and removed it. R17: the owner's lock went with its process, A's is
+held until A ends and then nobody's, and the foreign command holds nothing after it exits; its
+pre-lock refusal left nothing held (it took the worktree lock right after, in the same process).
+
+## `mod tests` › `struct LedgerWatch<'p> {`
+
+A container observer for the census of a resume, recording the pre-flight's ledger — its
+settlements and its running registrations — at every container site the census passes. With
+`CensusWatch` it is the recovery order's hooks.
+
+## `mod tests` › `fn a_resuming_incarnation_reclaims_its_earlier_incarnations_containers_before_its_ledgers_probes_and_admission()`
+
+ST-16 (f) and R-AO. Incarnation 1, a fresh child, is killed with three pipelines' containers
+running; incarnation 2, a resuming child, reclaims those three in its census and is killed while its
+own shell probe's container runs. Incarnation 3, this process, resumes: its census reclaims
+incarnation 2's probe — the same deterministic `InvocationId` as its own shell probe, under another
+container name and intent path — and the journal puts every census operation on it before
+incarnation 3's first container operation. At every reclaim site the census passed, the pre-flight's
+ledger held nothing; the probe ran after it and settled; the broker was empty when it was built.
+The three containers incarnation 3 starts afterwards at width three are a live owner's to a foreign
+census run as a child at its first quiescent point with three inside the runner, which reclaims
+nothing and leaves them running. Each dead incarnation's holds went with its process.
+
+## `mod tests` › `fn crashes_across_three_incarnations_with_pipelines_in_flight_leave_every_orphan_reclaimed_and_no_name_twice()`
+
+ST-16 (g). Incarnation 1 is killed with three pipelines in flight; incarnation 2 resumes as a child,
+reclaims incarnation 1's three containers, settles its three attempts interrupted, passes its
+pre-flight (probes exit) and is killed with three pipelines of its own in flight; incarnation 3, this
+process, reclaims those three, settles their attempts and completes. Across the three incarnations no
+container name and no intent path occurs twice, and wherever two incarnations ran one
+`InvocationId` — the shell probe, in incarnations 2 and 3 — their names differ. Six
+`attempt_interrupted` and two `run_resumed` in the log; nothing left under the private root.
+
+## `mod tests` › `fn a_foreign_census_and_a_resuming_incarnation_converge_on_one_dead_container_as_two_processes()`
+
+ST-16 (h), as two processes. A dead owner's two containers are under the private root; the fake paces
+the first at `Stop` and `Remove` for two parties, so the resuming incarnation (this process's
+recovery order) and a foreign write command (a child in a second repository) have both classified it
+before either kills it, and both observed it terminated before either removes it. Both reclaim it —
+each actor's `Stop` and `Remove` are in the journal — neither refuses, and the root converges clean.
+
+## `mod tests` › `fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released_and_is_never_reset_at_width_three()`
+
+R28 at width three (Unix; R-AQ, R-Z). A width-3 run is shut down with its three workers in flight;
+each pipeline's Runner call carried exactly the run's cleanup lease path (`CarriedLeases` records the
+calls). A simulated surviving reaper — `rundir::tests::cleanup_hold_child`, a real process holding
+the shared lock — then holds R28: the next coordinator's recovery order is refused at its lock
+acquisition, naming the hold, and the hold is exactly where it was; once the reaper lets go, the
+resume proceeds with empty ledgers and completes.
+
+## `mod tests` › `fn a_killed_coordinators_reapers_settle_its_pipelines_processes_under_r28_before_the_next_one_resumes_at_width_three()`
+
+The OS matrix's Unix row at the coordinator, with real processes (R-AQ, R-AR). A coordinator child's
+three pipelines each run a real host process through the production `HostRunner` (`HostHeld`: a
+shell that records its pid and sleeps). While they run, the run's cleanup lease is held — by reapers
+spawned from pipeline threads, which entered no scope and hold it through the paths the coordinator
+carried (R-Z). The coordinator is killed; every one of the three processes is gone once its reaper
+settles, the holds are released after them, nothing of the dead coordinator is held, and the next
+coordinator resumes with empty ledgers and completes.
+
+## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
+
+ST-09's broker rows over the ends phase 4 built: Complete, Parked, Halted, BudgetExceeded, an append
+error and a shutdown, each at width three. At each end nothing is registered and unsettled, pending,
+held or reserved (`balanced_at_end`); at the next start the process holds nothing it did not take,
+and a resumable end's broker starts empty (`broker_is_empty`), while a Complete or Halted run is
+finalized and refused before any broker is built. The killed coordinator's end is the process's
+death, and its next start is asserted empty in the ST-16 (f) and (g) tests and the reaper test.

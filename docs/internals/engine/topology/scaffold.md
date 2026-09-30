@@ -1206,13 +1206,32 @@ A width-N run the frozen recovery order can resume
 
 ## `impl Wide` › `pub(super) fn durable_under(`
 
+[`Wide::durable_with`] under the durable incarnation and the recorded host
+runner, with a spend ceiling.
+
+## `impl Wide` › `pub(super) fn durable_contained(`
+
+A durable run that recorded the **container** runner ([`container_policy`]),
+under the incarnation given, for the tests whose pipelines run containers. The
+incarnation must be a container-name component — `[0-9A-Za-z_]`, which the
+durable incarnation `inc-1` is not — so these runs take a ULID-shaped one.
+
+## `impl Wide` › `fn durable_with(`
+
 What run creation leaves, without its probes: the log at the public
 directory's `events.jsonl` holding `run_started`, the private half's owner and
-commit records agreeing with it, one run id and incarnation throughout (the
-workspace fixture's), and the integration ref at the base; the run and worktree
-locks are taken before any ref is written, as [`Wide::started_with`] takes them.
-The phase-3 fixture is not this one: its log and private directory are laid out
-for driving only, and no recovery could adopt them (the working record's R-AL).
+commit records agreeing with it, one run id and incarnation throughout, and the
+integration ref at the base; the run and worktree locks are taken before any
+ref is written, as [`Wide::started_with`] takes them. The incarnation and the
+recorded runner come from the `DurableIdentity`; an incarnation other than the
+workspace fixture's re-derives the manager under it. The phase-3 fixture is not
+this one: its log and private directory are laid out for driving only, and no
+recovery could adopt them (the working record's R-AL).
+
+## `pub(super) struct DurableIdentity {`
+
+Who a durable run is recorded as: its incarnation, and the runner policy it
+records (the host's when `None`).
 
 ## `impl Wide` › `pub(super) fn resume(`
 
@@ -1226,9 +1245,107 @@ the parent never trusts what the child believed about its own state.
 
 ## `impl WideEnv` › `pub(super) fn resume(`
 
-The next process: disarm the harness, wait for the previous process's release,
-derive a manager under the new incarnation, and run the frozen
-`recover::run_recovery_order` with test seams — a fake container runtime and
-owner liveness, a disposable Git view, [`Certifying`], the manager as the ref
-funnel — then build the run from the handle it returns, with a fresh runner and
-the given ceiling.
+The next process over an empty fake container runtime, a fake owner liveness
+that calls nobody live, and [`Certifying`], through [`WideEnv::resume_over`].
+
+## `impl WideEnv` › `pub(super) fn resume_over(`
+
+[`WideEnv::try_resume_over`], dropping the environment on a refusal.
+
+## `impl WideEnv` › `pub(super) fn try_resume_over(`
+
+The next process: disarm the harness, wait for the previous process's release
+(unless told not to), derive a manager under the new incarnation, and run the
+frozen `recover::run_recovery_order` with the seams given — a container runtime,
+an owner liveness and a pre-flight — and a disposable Git view and the manager as
+the ref funnel; then build the run from the handle it returns, with a fresh
+runner and the given ceiling. A refusal hands the environment back beside the
+error, so a test can observe what the refused process left and try again over
+the same fixture.
+
+## `pub(super) struct ResumingOver<'a> {`
+
+The seams a resume censuses and certifies through: the shared runtime of a
+two-process test and the production `LockProbe`, or the in-process fakes.
+`awaits_release: false` skips the wait for a previous process's cleanup hold,
+for the test that must observe the next coordinator refused over one.
+
+## `pub(super) fn container_policy() -> RunnerPolicy {`
+
+The container runner a contained run records: one image by reference, id and
+digest, and a credential volume per agent — the worker's and the reviewer's.
+
+## `pub(super) fn container_host() -> crate::runner::container::FakeRuntime {`
+
+The shared fake container runtime of a test, holding the recorded image and
+both credential volumes. Every process of the test reaches this one fake: the
+parent through handles (`acting_as`), each child through its daemon.
+
+## `pub(super) fn container_runner(`
+
+The production `ContainerRunner` for a run identity over a runtime, with a
+disposable Git view and the supervision poll given. No runner-level observer is
+installed, since one would take the runner's `hooks` lock across every
+invocation and serialize the pipelines.
+
+## `pub(super) fn exiting() -> crate::runner::container::StartPolicy {`
+
+Every container this handle starts exits at once with code 0: a probe that
+succeeds, a foreign command's one invocation.
+
+## `pub(super) fn exiting_probes() -> crate::runner::container::StartPolicy {`
+
+Probes exit at once and everything else holds: a resuming child passes its
+pre-flight and then runs its pipelines' containers until it is killed.
+
+## `fn played_by(double: Arc<RecordingRunner>, expected: Expected) -> crate::runner::container::StartPolicy {`
+
+A container's process is the scaffold double's invocation of the request that
+created it, found by the invocation its labels name. So the deterministic
+scheduler holds and releases containers exactly as it holds and releases the
+double's invocations, and the container exits with the double's output.
+
+## `pub(super) struct Contained {`
+
+A coordinator's runner of containers: the production `ContainerRunner`, whose
+starts run the double ([`played_by`]); the decorator only records each request
+before the runner plans it.
+
+## `impl WideEnv` › `pub(super) fn identity(&self, incarnation: &str) -> crate::runner::container::exec::RunIdentity {`
+
+The run identity a durable run's containers carry: its private root, run id,
+public run directory, the incarnation given, and its repository key.
+
+## `impl WideEnv` › `pub(super) fn contained(`
+
+A [`Contained`] runner for this environment's double, over a handle of the
+shared runtime named after the incarnation.
+
+## `impl WideEnv` › `pub(super) fn pipelines_over(&self, runner: Arc<dyn Runner>) -> super::coordinator::PipelineSeams {`
+
+[`WideEnv::pipelines`] with another runner.
+
+## `impl WideEnv` › `pub(super) fn seams_over<'a>(&'a self, runner: &'a dyn Runner) -> super::run::RunSeams<'a> {`
+
+[`WideEnv::seams`] with another runner.
+
+## `pub(super) struct Served {`
+
+The parent's side of a second process: the linked child, the daemon thread
+serving its container requests against a handle of the shared runtime, and the
+events it reports. Dropping it kills the child and joins the daemon, however
+the test ends.
+
+## `impl Served` › `pub(super) fn event(&self, what: &str) -> serde_json::Value {`
+
+The child's next report; a child that sends none within the link's bound fails
+the test with its stderr.
+
+## `impl Served` › `pub(super) fn exited(&self, what: &str) -> std::process::ExitStatus {`
+
+Wait for a child that is meant to finish.
+
+## `pub(super) struct ParentSide {`
+
+The child's side: attach once, report events, and reach the parent's container
+runtime ([`crate::runner::container::LinkedRuntime`]).

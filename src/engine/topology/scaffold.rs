@@ -2771,18 +2771,77 @@ impl Wide {
         runner: RecordingRunner,
         ceiling: super::select::Ceiling,
     ) -> Self {
-        let fixture = Fixture::created(tag);
+        Self::durable_with(
+            tag,
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            ceiling,
+            &DurableIdentity {
+                incarnation: DURABLE_INCARNATION.to_owned(),
+                runner: None,
+            },
+        )
+    }
+
+    pub(super) fn durable_contained(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        incarnation: &str,
+    ) -> Self {
+        Self::durable_with(
+            tag,
+            tasks,
+            max_parallel,
+            plans,
+            runner,
+            super::select::Ceiling::unlimited(),
+            &DurableIdentity {
+                incarnation: incarnation.to_owned(),
+                runner: Some(container_policy()),
+            },
+        )
+    }
+
+    fn durable_with(
+        tag: &str,
+        tasks: &[WideTask],
+        max_parallel: u32,
+        plans: WidePlans,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+        identity: &DurableIdentity,
+    ) -> Self {
+        let mut fixture = Fixture::created(tag);
         let run_id = crate::workspace_manager::fixture::RUN_ID;
+        if identity.incarnation != DURABLE_INCARNATION {
+            fixture.manager = WorkspaceManager::derive(
+                &fixture.base,
+                &fixture.private,
+                run_id,
+                &identity.incarnation,
+            )
+            .expect("derive the durable run's manager for its incarnation");
+        }
         let plan = wide_plan(tasks);
         let paths = durable_paths(&fixture);
         paths.create().expect("the durable run's directories");
+        let recorded = run_started_of(&fixture, &plan, max_parallel, plans.reviewers >= 2);
         let started = RunStarted4 {
             run_id: run_id.to_owned(),
-            incarnation: IncarnationId(DURABLE_INCARNATION.to_owned()),
+            incarnation: IncarnationId(identity.incarnation.clone()),
             branch: format!("upstroke/run-{run_id}"),
             integration_ref: GitRef(format!("refs/heads/upstroke/run-{run_id}")),
             private_dir: paths.private.to_string_lossy().into_owned(),
-            ..run_started_of(&fixture, &plan, max_parallel, plans.reviewers >= 2)
+            runner: identity
+                .runner
+                .clone()
+                .unwrap_or_else(|| recorded.runner.clone()),
+            ..recorded
         };
         let inputs = FrozenInputs {
             plan,
@@ -2829,7 +2888,7 @@ impl Wide {
                 run_id: run_id.to_owned(),
                 repo_key: repo_key.as_str().to_owned(),
                 public_dir: public.clone(),
-                incarnation: DURABLE_INCARNATION.to_owned(),
+                incarnation: identity.incarnation.clone(),
                 runner: started.runner.clone(),
             },
             &mut crate::rundir::NoHooks,
@@ -2843,7 +2902,7 @@ impl Wide {
                 run_id: run_id.to_owned(),
                 repo_key: repo_key.as_str().to_owned(),
                 public_dir: public,
-                incarnation: DURABLE_INCARNATION.to_owned(),
+                incarnation: identity.incarnation.clone(),
                 run_started_sha256: digest.clone(),
             },
             &mut crate::rundir::NoHooks,
@@ -2925,43 +2984,85 @@ impl WideEnv {
     }
 
     pub(super) fn resume(
-        mut self,
+        self,
         incarnation: &str,
         runner: RecordingRunner,
         ceiling: super::select::Ceiling,
     ) -> Result<(super::recover::Recovered, Wide), UpstrokeError> {
+        let runtime = crate::runner::container::FakeRuntime::new(
+            crate::runner::container::runtime::ContainerTrace::default(),
+        );
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = self.hooks();
+        self.resume_over(
+            incarnation,
+            runner,
+            ceiling,
+            &ResumingOver {
+                runtime: &runtime,
+                liveness: &liveness,
+                preflight: &Certifying,
+                awaits_release: true,
+            },
+            &mut hooks,
+        )
+    }
+
+    pub(super) fn resume_over(
+        self,
+        incarnation: &str,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+        over: &ResumingOver<'_>,
+        hooks: &mut dyn super::seams::TopologyHooks,
+    ) -> Result<(super::recover::Recovered, Wide), UpstrokeError> {
+        self.try_resume_over(incarnation, runner, ceiling, over, hooks)
+            .map_err(|failed| failed.0)
+    }
+
+    pub(super) fn try_resume_over(
+        mut self,
+        incarnation: &str,
+        runner: RecordingRunner,
+        ceiling: super::select::Ceiling,
+        over: &ResumingOver<'_>,
+        hooks: &mut dyn super::seams::TopologyHooks,
+    ) -> Result<(super::recover::Recovered, Wide), Box<(UpstrokeError, Self)>> {
         let run_id = crate::workspace_manager::fixture::RUN_ID;
         self.harness
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .disarm();
-        await_release_of_the_previous_process(&self.paths.public);
-        let manager = WorkspaceManager::derive(
+        if over.awaits_release {
+            await_release_of_the_previous_process(&self.paths.public);
+        }
+        let manager = match WorkspaceManager::derive(
             &self.fixture.base,
             &self.fixture.private,
             run_id,
             incarnation,
-        )?;
-        let root = super::recover::chain::RootDerived::derive_with(
+        ) {
+            Ok(manager) => manager,
+            Err(error) => return Err(Box::new((error, self))),
+        };
+        let root = match super::recover::chain::RootDerived::derive_with(
             &self.fixture.base,
             run_id,
             None,
             TOPOLOGY_SCHEMA,
-        )?;
+        ) {
+            Ok(root) => root,
+            Err(error) => return Err(Box::new((error, self))),
+        };
         let git_dir = self.fixture.base.join(".git");
         let repo_key = durable_repo_key(&self.fixture);
-        let runtime = crate::runner::container::FakeRuntime::new(
-            crate::runner::container::runtime::ContainerTrace::default(),
-        );
-        let liveness = crate::runner::container::FakeOwnerLiveness::new();
         let view = crate::runner::container::DisposableDirView::new(
             crate::runner::container::runtime::ContainerTrace::default(),
         );
         let today = crate::config::RunnerSelection::host_default();
         let incarnation = IncarnationId(incarnation.to_owned());
-        let mut hooks = self.hooks();
         let mut warnings = Vec::new();
-        let (recovered, handle) = super::recover::run_recovery_order(
+        let recovered = super::recover::run_recovery_order(
             root,
             &super::recover::ResumeSeams {
                 repo_root: &self.fixture.base,
@@ -2970,21 +3071,333 @@ impl WideEnv {
                 incarnation: &incarnation,
                 inputs: self.inputs.clone(),
                 today: &today,
-                runtime: &runtime,
-                liveness: &liveness,
+                runtime: over.runtime,
+                liveness: over.liveness,
                 view: &view,
-                preflight: &Certifying,
+                preflight: over.preflight,
                 refs: &manager,
                 manager: &manager,
                 clock: &super::seams::SystemClock,
             },
-            &mut hooks,
+            hooks,
             &mut warnings,
-        )?;
+        );
+        let (recovered, handle) = match recovered {
+            Ok(recovered) => recovered,
+            Err(error) => return Err(Box::new((error, self))),
+        };
         self.fixture.manager = manager;
         runner.watching(&self.log);
         self.runner = Arc::new(runner);
         let run = super::run::TopologyRun::resumed(handle, self.inputs.clone(), ceiling);
         Ok((recovered, Wide { run, env: self }))
+    }
+}
+
+pub(super) struct DurableIdentity {
+    pub(super) incarnation: String,
+    pub(super) runner: Option<RunnerPolicy>,
+}
+
+pub(super) struct ResumingOver<'a> {
+    pub(super) runtime: &'a dyn crate::runner::container::runtime::ContainerRuntime,
+    pub(super) liveness: &'a dyn crate::runner::container::runtime::OwnerLiveness,
+    pub(super) preflight: &'a dyn crate::runner::container::resolve::RunnerPreflight,
+    pub(super) awaits_release: bool,
+}
+
+pub(super) const CONTAINER_IMAGE_REFERENCE: &str = "ghcr.io/example/upstroke-runner:concurrent";
+
+pub(super) const CONTAINER_IMAGE_ID: &str =
+    "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+
+pub(super) const CONTAINER_IMAGE_DIGEST: &str =
+    "sha256:5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b";
+
+pub(super) const WORKER_VOLUME: &str = "upstroke-credentials-claude-code";
+
+pub(super) const REVIEWER_VOLUME: &str = "upstroke-credentials-copilot";
+
+pub(super) fn container_policy() -> RunnerPolicy {
+    RunnerPolicy {
+        kind: RunnerKind::Container,
+        policy: RunnerContract::ContainerV1,
+        image: Some(crate::topology::events::ImageIdentity {
+            reference: CONTAINER_IMAGE_REFERENCE.to_owned(),
+            id: CONTAINER_IMAGE_ID.to_owned(),
+            digest: Some(CONTAINER_IMAGE_DIGEST.to_owned()),
+        }),
+        credential_volumes: Some(
+            [(AGENT, WORKER_VOLUME), (REVIEW_AGENT, REVIEWER_VOLUME)]
+                .into_iter()
+                .map(|(agent, volume)| (agent.to_owned(), volume.to_owned()))
+                .collect(),
+        ),
+    }
+}
+
+pub(super) fn container_host() -> crate::runner::container::FakeRuntime {
+    let host = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    );
+    host.add_image(CONTAINER_IMAGE_ID, Some(CONTAINER_IMAGE_DIGEST));
+    host.tag(CONTAINER_IMAGE_REFERENCE, CONTAINER_IMAGE_ID);
+    host.add_volume(WORKER_VOLUME);
+    host.add_volume(REVIEWER_VOLUME);
+    host
+}
+
+fn image_environment() -> crate::runner::container::env::ContainerEnvironment {
+    crate::runner::container::env::ContainerEnvironment::from_image(vec![
+        (
+            "PATH".to_owned(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+        ),
+        ("HOME".to_owned(), "/root".to_owned()),
+    ])
+}
+
+pub(super) fn container_runner(
+    identity: crate::runner::container::exec::RunIdentity,
+    repo_root: &Path,
+    runtime: Box<dyn crate::runner::container::runtime::ContainerRuntime>,
+    poll: Duration,
+) -> crate::runner::container::exec::ContainerRunner {
+    crate::runner::container::exec::ContainerRunner::new(
+        container_policy(),
+        identity,
+        repo_root,
+        image_environment(),
+        runtime,
+    )
+    .expect("the recorded container policy builds a runner")
+    .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    )))
+    .with_poll(poll)
+}
+
+fn exit_zero() -> crate::runner::container::runtime::ContainerExecution {
+    crate::runner::container::runtime::ContainerExecution {
+        exit_code: Some(0),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    }
+}
+
+fn launched_invocation(launch: &crate::runner::container::Launch<'_>) -> Option<InvocationId> {
+    launch
+        .labels
+        .get(crate::runner::container::intent::LABEL_INVOCATION)
+        .and_then(|rendered| InvocationId::parse(rendered).ok())
+}
+
+pub(super) fn exiting() -> crate::runner::container::StartPolicy {
+    Arc::new(|_: &crate::runner::container::Launch<'_>| {
+        crate::runner::container::Start::Exit(exit_zero())
+    })
+}
+
+pub(super) fn exiting_probes() -> crate::runner::container::StartPolicy {
+    Arc::new(|launch: &crate::runner::container::Launch<'_>| {
+        if matches!(launched_invocation(launch), Some(InvocationId::Probe { .. })) {
+            crate::runner::container::Start::Exit(exit_zero())
+        } else {
+            crate::runner::container::Start::Hold
+        }
+    })
+}
+
+type Expected = Arc<Mutex<std::collections::BTreeMap<String, RunnerRequest>>>;
+
+fn played_by(double: Arc<RecordingRunner>, expected: Expected) -> crate::runner::container::StartPolicy {
+    Arc::new(move |launch: &crate::runner::container::Launch<'_>| {
+        let request = launch
+            .labels
+            .get(crate::runner::container::intent::LABEL_INVOCATION)
+            .and_then(|rendered| {
+                expected
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(rendered)
+            });
+        let Some(request) = request else {
+            return crate::runner::container::Start::Hold;
+        };
+        let double = Arc::clone(&double);
+        crate::runner::container::Start::Run(Box::new(move |kill: Cancellation| {
+            match double.run_blocking_with(&request, RunnerCall::new(kill)) {
+                Ok(output) => crate::runner::container::runtime::ContainerExecution {
+                    exit_code: output.code,
+                    stdout: output.stdout.into_bytes(),
+                    stderr: output.stderr.into_bytes(),
+                },
+                Err(error) => crate::runner::container::runtime::ContainerExecution {
+                    exit_code: None,
+                    stdout: Vec::new(),
+                    stderr: error.to_string().into_bytes(),
+                },
+            }
+        }))
+    })
+}
+
+pub(super) struct Contained {
+    runner: crate::runner::container::exec::ContainerRunner,
+    expected: Expected,
+}
+
+impl Runner for Contained {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        self.expected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request.invocation.render(), request.clone());
+        self.runner.run(request, call)
+    }
+}
+
+impl WideEnv {
+    pub(super) fn identity(&self, incarnation: &str) -> crate::runner::container::exec::RunIdentity {
+        crate::runner::container::exec::RunIdentity {
+            private_root: self.fixture.private.clone(),
+            run_id: crate::workspace_manager::fixture::RUN_ID.to_owned(),
+            run_dir: self.paths.public.clone(),
+            incarnation: incarnation.to_owned(),
+            repo_key: durable_repo_key(&self.fixture).as_str().to_owned(),
+        }
+    }
+
+    pub(super) fn contained(
+        &self,
+        host: &crate::runner::container::FakeRuntime,
+        incarnation: &str,
+    ) -> Arc<Contained> {
+        let expected: Expected = Arc::default();
+        let runtime = host
+            .acting_as(incarnation)
+            .starting(played_by(Arc::clone(&self.runner), Arc::clone(&expected)));
+        Arc::new(Contained {
+            runner: container_runner(
+                self.identity(incarnation),
+                &self.fixture.base,
+                Box::new(runtime),
+                Duration::from_millis(2),
+            ),
+            expected,
+        })
+    }
+
+    pub(super) fn pipelines_over(&self, runner: Arc<dyn Runner>) -> super::coordinator::PipelineSeams {
+        super::coordinator::PipelineSeams {
+            runner,
+            ..self.pipelines()
+        }
+    }
+
+    pub(super) fn seams_over<'a>(&'a self, runner: &'a dyn Runner) -> super::run::RunSeams<'a> {
+        super::run::RunSeams {
+            runner,
+            ..self.seams()
+        }
+    }
+}
+
+pub(super) struct Served {
+    child: Arc<crate::workspace_manager::fixture::LinkedChild>,
+    events: std::sync::mpsc::Receiver<serde_json::Value>,
+    daemon: Option<std::thread::JoinHandle<Vec<String>>>,
+    stderr: PathBuf,
+}
+
+impl Served {
+    pub(super) fn spawn(
+        test: &str,
+        env: &[(&str, &std::ffi::OsStr)],
+        stderr: &Path,
+        runtime: crate::runner::container::FakeRuntime,
+    ) -> Self {
+        let (child, lines) =
+            crate::workspace_manager::fixture::LinkedChild::spawn(test, env, stderr);
+        let (sent, events) = std::sync::mpsc::channel();
+        let link = Arc::clone(&child);
+        let daemon = std::thread::Builder::new()
+            .name(
+                std::thread::current()
+                    .name()
+                    .unwrap_or("served-child")
+                    .to_owned(),
+            )
+            .spawn(move || runtime.serve(&lines, &link, &sent))
+            .expect("start the daemon serving the child");
+        Self {
+            child,
+            events,
+            daemon: Some(daemon),
+            stderr: stderr.to_path_buf(),
+        }
+    }
+
+    pub(super) fn event(&self, what: &str) -> serde_json::Value {
+        match self
+            .events
+            .recv_timeout(crate::workspace_manager::fixture::LINK_BOUND)
+        {
+            Ok(event) => event,
+            Err(error) => panic!(
+                "{what}: the child sent no event ({error}); its stderr:\n{}",
+                self.stderr()
+            ),
+        }
+    }
+
+    pub(super) fn kill(&self) -> std::process::ExitStatus {
+        self.child.kill()
+    }
+
+    pub(super) fn exited(&self, what: &str) -> std::process::ExitStatus {
+        self.child
+            .wait_within(crate::workspace_manager::fixture::LINK_BOUND)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}: the child did not end within {:?}; its stderr:\n{}",
+                    crate::workspace_manager::fixture::LINK_BOUND,
+                    self.stderr()
+                )
+            })
+    }
+
+    pub(super) fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        if let Some(daemon) = self.daemon.take() {
+            let _ = daemon.join();
+        }
+    }
+}
+
+pub(super) struct ParentSide {
+    link: Arc<crate::workspace_manager::fixture::ParentLink>,
+}
+
+impl ParentSide {
+    pub(super) fn attach() -> Self {
+        Self {
+            link: crate::workspace_manager::fixture::ParentLink::attach(),
+        }
+    }
+
+    pub(super) fn event(&self, event: &serde_json::Value) {
+        self.link
+            .send(&format!("{}{event}", crate::runner::container::CHILD_EVENT));
+    }
+
+    pub(super) fn runtime(&self) -> crate::runner::container::LinkedRuntime {
+        crate::runner::container::LinkedRuntime::over(Arc::clone(&self.link))
     }
 }

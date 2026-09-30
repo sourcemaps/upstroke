@@ -2968,3 +2968,253 @@ pub(crate) fn median(durations: &[std::time::Duration]) -> Option<std::time::Dur
     sorted.sort_unstable();
     sorted.get(sorted.len() / 2).copied()
 }
+
+// -----------------------------------------------------------------------
+// A second process of this test binary, linked to its parent by its stdio
+// -----------------------------------------------------------------------
+
+/// How long either end of a [`LinkedChild`] link waits for the other: a
+/// bound that decides nothing but a failure, never an order.
+pub(crate) const LINK_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A second process of this test binary, run `--exact <test> --ignored`, whose
+/// stdin and stdout are pipes to this process: the parent's end of a link that
+/// carries one line per message in each direction.
+///
+/// **Why a pipe and not a file.** Every message a child sends is a line its
+/// parent reads with a blocking read, and every line a parent sends is one a
+/// child reads the same way, so neither end rests on a clock to learn that the
+/// other has spoken ([`LINK_BOUND`] only turns a silent peer into a failure).
+/// A process's stdio is also the one channel both platforms give a child
+/// without a path or a name another test could guess.
+///
+/// **What else arrives on the child's stdout.** libtest's own lines (`running
+/// 1 test`, the result) share it, so a reader keeps the lines it understands
+/// and ignores the rest. The child's stderr goes to the file `spawn` is given,
+/// so a failing child can be diagnosed after the fact without interleaving its
+/// panic into the protocol.
+///
+/// **Ownership.** The child is killed and reaped, and the reader thread
+/// joined, when the value drops, however the caller's scope ends: a test that
+/// fails midway leaves no process and no thread behind. `kill` is
+/// `Child::kill` -- `SIGKILL` on Unix, `TerminateProcess` on Windows -- so a
+/// killed child is a coordinator that died without running a line of its
+/// own cleanup, which is the death the resume tests are about.
+pub(crate) struct LinkedChild {
+    child: std::sync::Mutex<std::process::Child>,
+    stdin: std::sync::Mutex<Option<std::process::ChildStdin>>,
+    reader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl LinkedChild {
+    /// Spawn `test` from this test binary with `env` set, its stderr written to
+    /// `stderr`, and return the link and the receiver of every line its stdout
+    /// carries, in order, without their terminators.
+    pub(crate) fn spawn(
+        test: &str,
+        env: &[(&str, &OsStr)],
+        stderr: &Path,
+    ) -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let log = fs::File::create(stderr).expect("the linked child's stderr log");
+        let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+        command
+            .args(["--exact", test, "--ignored", "--nocapture", "--test-threads=1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn the linked child");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("the linked child's stdout");
+        let (lines, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut stdout = std::io::BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                        if lines.send(line).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        (
+            std::sync::Arc::new(Self {
+                child: std::sync::Mutex::new(child),
+                stdin: std::sync::Mutex::new(stdin),
+                reader: std::sync::Mutex::new(Some(reader)),
+            }),
+            received,
+        )
+    }
+
+    /// Send one line to the child's stdin; `false` once the child can no
+    /// longer read it (it exited, was killed, or its input was closed).
+    pub(crate) fn send(&self, line: &str) -> bool {
+        let mut stdin = self
+            .stdin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pipe) = stdin.as_mut() else {
+            return false;
+        };
+        let mut framed = String::with_capacity(line.len() + 1);
+        framed.push_str(line);
+        framed.push('\n');
+        pipe.write_all(framed.as_bytes()).is_ok() && pipe.flush().is_ok()
+    }
+
+    /// Kill the child (`Child::kill`) and reap it, returning how it ended.
+    pub(crate) fn kill(&self) -> std::process::ExitStatus {
+        let mut child = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(Some(status)) = child.try_wait() {
+            return status;
+        }
+        let _ = child.kill();
+        child.wait().expect("reap the linked child after its kill")
+    }
+
+    /// The child's exit status once it ends within `bound`; `None` when it has
+    /// not, and then it is still running. Polled with `try_wait` and a 10 ms
+    /// rest, as [`run_kill_child_within`] polls: the rest paces the question and
+    /// orders nothing.
+    pub(crate) fn wait_within(
+        &self,
+        bound: std::time::Duration,
+    ) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            {
+                let mut child = self
+                    .child
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Some(status);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for LinkedChild {
+    fn drop(&mut self) {
+        drop(
+            self.stdin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        let _ = self.kill();
+        if let Some(reader) = self
+            .reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// The child's end of a [`LinkedChild`] link: lines written to this process's
+/// stdout, and lines read from its stdin by a thread that ends when the parent
+/// closes the pipe or dies.
+///
+/// The reader thread is not joined: it blocks in a read of the parent's pipe
+/// until end of file, and the child process -- a test run `--exact` for the one
+/// test that attached it -- ends with the test, which ends the thread with it.
+///
+/// `attach` sends an empty line first. libtest prints `test <name> ... ` with no
+/// newline before it runs the test, so the child's first line would otherwise
+/// arrive glued behind it; a reader that looks for its prefix anywhere in a
+/// line is the other half of the same care.
+pub(crate) struct ParentLink {
+    out: std::sync::Mutex<std::io::Stdout>,
+    lines: std::sync::Mutex<std::sync::mpsc::Receiver<String>>,
+}
+
+impl ParentLink {
+    /// Attach to this process's stdio. Call it once, in the child test.
+    pub(crate) fn attach() -> std::sync::Arc<Self> {
+        let (lines, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let stdin = std::io::stdin();
+            loop {
+                let mut line = String::new();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                        if lines.send(line).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        let link = std::sync::Arc::new(Self {
+            out: std::sync::Mutex::new(std::io::stdout()),
+            lines: std::sync::Mutex::new(received),
+        });
+        link.send("");
+        link
+    }
+
+    /// Send one line to the parent, flushed.
+    pub(crate) fn send(&self, line: &str) {
+        let mut out = self
+            .out
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut framed = String::with_capacity(line.len() + 1);
+        framed.push_str(line);
+        framed.push('\n');
+        out.write_all(framed.as_bytes())
+            .expect("write a line to the parent");
+        out.flush().expect("flush a line to the parent");
+    }
+
+    /// The next line from the parent within `bound`; `None` when none came or
+    /// the parent's end closed.
+    pub(crate) fn recv_within(&self, bound: std::time::Duration) -> Option<String> {
+        self.lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv_timeout(bound)
+            .ok()
+    }
+}
+
+/// Whether the process `pid` still exists (a zombie counts), asked with signal
+/// 0, which delivers nothing. For a test that waits for another process's
+/// reaper to settle a group it cannot `wait` on itself.
+#[cfg(unix)]
+pub(crate) fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 performs no delivery; `kill` reads no memory.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}

@@ -7197,4 +7197,1888 @@ mod tests {
             "the closed sibling's gate was never registered"
         );
     }
+
+    const INC_A: &str = "01KZP5CONTAINERSA000000001";
+
+    type InventoryAt = (Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+
+    fn container_names_of(
+        wide: &Wide,
+        incarnation: &str,
+        invocations: &[InvocationId],
+    ) -> Vec<String> {
+        let identity = wide.env.identity(incarnation);
+        let mut names: Vec<String> = invocations
+            .iter()
+            .map(|invocation| {
+                crate::runner::container::container_name_for(
+                    &identity.repo_key,
+                    &identity.run_id,
+                    &identity.incarnation,
+                    invocation,
+                )
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn intents_under(root: &std::path::Path) -> Vec<String> {
+        crate::runner::container::list_intents(root)
+            .expect("list the container namespace")
+            .into_iter()
+            .map(|found| found.name.as_str().to_owned())
+            .collect()
+    }
+
+    fn views_under(root: &std::path::Path) -> Vec<String> {
+        let mut views: Vec<String> = match std::fs::read_dir(
+            root.join(crate::runner::container::census::VIEWS_DIR),
+        ) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry
+                        .expect("a views entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read the views directory: {error}"),
+        };
+        views.sort();
+        views
+    }
+
+    fn running_in(host: &crate::runner::container::FakeRuntime) -> Vec<String> {
+        host.container_names()
+            .into_iter()
+            .filter(|name| {
+                host.container(name).is_some_and(|container| {
+                    container.state == crate::runner::container::runtime::Liveness::Running
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_container_invocation_is_launched_and_released_on_its_own_at_width_three() {
+        use crate::runner::container::runtime::RuntimeOp;
+        let tasks = three();
+        let mut wide = Wide::durable_contained(
+            "coordinator-contained",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+            INC_A,
+        );
+        let host = crate::engine::topology::scaffold::container_host();
+        let contained = wide.env.contained(&host, INC_A);
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let root = wide.env.fixture.private.clone();
+        let names_env = wide.env.identity(INC_A);
+        let mut points: Vec<InventoryAt> = Vec::new();
+        let mut scheduler = Scheduler::scripted(
+            &double,
+            Box::new(|view: &Quiescent<'_>| {
+                let mut expected: Vec<String> = view
+                    .invoking
+                    .iter()
+                    .map(|invocation| {
+                        crate::runner::container::container_name_for(
+                            &names_env.repo_key,
+                            &names_env.run_id,
+                            &names_env.incarnation,
+                            invocation,
+                        )
+                    })
+                    .collect();
+                expected.sort();
+                points.push((
+                    expected,
+                    running_in(&host),
+                    intents_under(&root),
+                    views_under(&root),
+                ));
+                None
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines = wide.env.pipelines_over(contained.clone());
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*contained),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the contained run completes");
+        let widest = scheduler.widest;
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert_eq!(widest, 3, "three containers ran at once");
+        for (expected, running, intents, views) in &points {
+            assert_eq!(
+                (running, intents, views),
+                (expected, expected, expected),
+                "at every quiescent point the containers running, the intents and the views are \
+                 exactly those of the invocations inside the runner"
+            );
+        }
+        assert!(
+            host.container_names().is_empty()
+                && intents_under(&root).is_empty()
+                && views_under(&root).is_empty(),
+            "every container, intent and view was released: {:?} {:?} {:?}",
+            host.container_names(),
+            intents_under(&root),
+            views_under(&root)
+        );
+        let journal = host.journal();
+        let created: Vec<&str> = journal
+            .iter()
+            .filter(|entry| entry.op == RuntimeOp::Create)
+            .map(|entry| entry.target.as_str())
+            .collect();
+        let removed: Vec<&str> = journal
+            .iter()
+            .filter(|entry| entry.op == RuntimeOp::Remove)
+            .map(|entry| entry.target.as_str())
+            .collect();
+        let ran = double.ran();
+        assert_eq!(created.len(), ran.len(), "one container per process the double ran");
+        let mut created_sorted = created.clone();
+        created_sorted.sort_unstable();
+        created_sorted.dedup();
+        assert_eq!(created_sorted.len(), created.len(), "no name was created twice");
+        let mut removed_sorted = removed.clone();
+        removed_sorted.sort_unstable();
+        assert_eq!(created_sorted, removed_sorted, "each container was removed once");
+        let ran_names = container_names_of(
+            &wide,
+            INC_A,
+            &ran.iter().map(|ran| ran.invocation.clone()).collect::<Vec<_>>(),
+        );
+        assert_eq!(created_sorted, ran_names, "each container is its own invocation's");
+        for ran in &ran {
+            let name = container_names_of(&wide, INC_A, std::slice::from_ref(&ran.invocation))
+                .remove(0);
+            let volumes = journal
+                .iter()
+                .find(|entry| entry.op == RuntimeOp::Create && entry.target == name)
+                .map(|entry| entry.detail.clone())
+                .unwrap_or_default();
+            let expected = if crate::runner::container::env::supplies_credential_location(&ran.role)
+            {
+                match ran.agent.as_ref().map(crate::runner::AgentId::as_str) {
+                    Some(crate::engine::topology::scaffold::AGENT) => {
+                        crate::engine::topology::scaffold::WORKER_VOLUME
+                    }
+                    Some(crate::engine::topology::scaffold::REVIEW_AGENT) => {
+                        crate::engine::topology::scaffold::REVIEWER_VOLUME
+                    }
+                    _ => "",
+                }
+            } else {
+                ""
+            };
+            assert_eq!(
+                volumes, expected,
+                "{}: the credential volume of its agent, exactly when its role is given one",
+                ran.invocation
+            );
+        }
+        assert!(wide.run.invocations_balance());
+        replay_equals_live(&wide);
+    }
+
+    const INC_1: &str = "01KZP5CONTAINERS1000000001";
+    const INC_2: &str = "01KZP5CONTAINERS2000000002";
+    const INC_3: &str = "01KZP5CONTAINERS3000000003";
+    const INC_FOREIGN: &str = "01KZP5CONTAINERSF00000000F";
+    const RUN_DEAD: &str = "01KZP5DEADOWNER00000000001";
+    const RUN_FOREIGN: &str = "01KZP5FOREIGNRUN0000000001";
+    const RUN_NOBODY: &str = "01KZP5NOSUCHRUN00000000001";
+    const CONTAINER_CHILD: &str =
+        "engine::topology::coordinator::tests::container_coordinator_child";
+
+    fn child_env(key: &str) -> String {
+        std::env::var(key).unwrap_or_else(|_| panic!("the parent names `{key}`"))
+    }
+
+    fn probe_request(
+        workspace: &std::path::Path,
+        target: crate::runner::ProbeTarget,
+    ) -> crate::runner::RunnerRequest {
+        let (invocation, agent) = match &target {
+            crate::runner::ProbeTarget::Shell => (
+                crate::engine::topology::identity::PreflightIdentities::shell(0),
+                None,
+            ),
+            crate::runner::ProbeTarget::Agent(agent) => (
+                crate::engine::topology::identity::PreflightIdentities::agent(agent.as_str(), 0),
+                Some(agent.clone()),
+            ),
+        };
+        crate::runner::RunnerRequest {
+            command: crate::runner::CommandSpec::new("sh").arg("-c").arg("exit 0"),
+            workspace: workspace.to_path_buf(),
+            role: crate::runner::ExecutionRole::Probe(target),
+            timeout: Duration::from_secs(600),
+            agent,
+            invocation: invocation.expect("a probe identity"),
+        }
+    }
+
+    fn agent_probe(workspace: &std::path::Path) -> crate::runner::RunnerRequest {
+        probe_request(
+            workspace,
+            crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new(
+                crate::engine::topology::scaffold::AGENT,
+            )),
+        )
+    }
+
+    fn run_held(
+        parent: &crate::engine::topology::scaffold::ParentSide,
+        wide: &mut Wide,
+        incarnation: &str,
+    ) -> ! {
+        let runner: std::sync::Arc<dyn crate::runner::Runner> =
+            std::sync::Arc::new(crate::engine::topology::scaffold::container_runner(
+                wide.env.identity(incarnation),
+                &wide.env.fixture.base,
+                Box::new(parent.runtime()),
+                Duration::from_millis(10),
+            ));
+        let pipelines = wide.env.pipelines_over(std::sync::Arc::clone(&runner));
+        let mut hooks = wide.env.hooks();
+        let ended =
+            wide.run
+                .run_concurrently(&wide.env.seams_over(&*runner), &pipelines, &mut hooks, None);
+        panic!("the parent kills this coordinator while its containers run; it ended {ended:?}");
+    }
+
+    fn fresh_child(parent: &crate::engine::topology::scaffold::ParentSide) {
+        let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
+        let tasks = three();
+        let mut wide = Wide::durable_contained(
+            "coordinator-child",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new(),
+            &incarnation,
+        );
+        parent.event(&serde_json::json!({
+            "root": wide.env.fixture.root.to_string_lossy(),
+        }));
+        run_held(parent, &mut wide, &incarnation);
+    }
+
+    fn resume_child(parent: &crate::engine::topology::scaffold::ParentSide) {
+        let root = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_ROOT"));
+        let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
+        let tasks = three();
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            root,
+            &tasks,
+            3,
+            WidePlans::default(),
+        );
+        let adapters = std::sync::Arc::clone(&env.adapters);
+        let base = env.fixture.base.clone();
+        let probes = crate::engine::topology::scaffold::container_runner(
+            env.identity(&incarnation),
+            &base,
+            Box::new(parent.runtime()),
+            Duration::from_millis(10),
+        );
+        let preflight = crate::engine::topology::preflight::RunPreflight::new(
+            &probes,
+            &*adapters,
+            crate::gates::ShellKind::Sh,
+            &base,
+            Vec::new(),
+        );
+        let runtime = parent.runtime();
+        let mut hooks = env.hooks();
+        let (recovered, mut wide) = env
+            .resume_over(
+                &incarnation,
+                RecordingRunner::new(),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &runtime,
+                    liveness: &crate::runner::container::runtime::LockProbe,
+                    preflight: &preflight,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .unwrap_or_else(|error| panic!("the resuming child's recovery order: {error}"));
+        parent.event(&serde_json::json!({"interrupted": recovered.interrupted}));
+        run_held(parent, &mut wide, &incarnation);
+    }
+
+    fn census_child(parent: &crate::engine::topology::scaffold::ParentSide) {
+        let repo = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_REPO"));
+        let private = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_PRIVATE"));
+        let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
+        let refused = crate::engine::topology::recover::chain::RootDerived::derive_with(
+            &repo,
+            RUN_NOBODY,
+            None,
+            crate::topology::schema::TOPOLOGY_SCHEMA,
+        )
+        .is_err();
+        let git_dir = repo.join(".git");
+        let lock = crate::rundir::WorktreeLock::acquire_in(&repo, &git_dir)
+            .expect("the worktree lock, which the refusal before it left untaken");
+        let repo_key = crate::rundir::RepoKey::v1(
+            &std::fs::canonicalize(&git_dir).expect("the second repository's git dir"),
+        );
+        let runtime = parent.runtime();
+        let view = crate::runner::container::DisposableDirView::new(
+            crate::runner::container::runtime::ContainerTrace::off(),
+        );
+        let mut hooks = crate::engine::topology::seams::NoTopologyHooks::new();
+        let censused = crate::engine::topology::startup::startup_census(
+            crate::engine::topology::startup::WorktreeLocked::from(lock),
+            &mut hooks,
+            &crate::engine::topology::startup::CensusInputs {
+                repo_root: &repo,
+                repo_key: &repo_key,
+                authorized_root: &private,
+                incarnation: &incarnation,
+                runtime: &runtime,
+                liveness: &crate::runner::container::runtime::LockProbe,
+                view: &view,
+            },
+        );
+        let report = match &censused {
+            Ok(done) => {
+                let report = done.census().containers().report();
+                serde_json::json!({
+                    "census": "complete",
+                    "reclaimed": report
+                        .reclaimed
+                        .iter()
+                        .map(|reclaimed| serde_json::json!({
+                            "name": reclaimed.name.as_str(),
+                            "ownership": reclaimed.ownership.name(),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "untouched": report
+                        .untouched
+                        .iter()
+                        .map(|untouched| serde_json::json!({
+                            "name": untouched.name.as_str(),
+                            "ownership": untouched.ownership.name(),
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            }
+            Err(error) => serde_json::json!({"census": "refused", "error": error.to_string()}),
+        };
+        parent.event(&serde_json::json!({"prelock_refused": refused, "report": report}));
+        if std::env::var_os("UPSTROKE_TEST_CHILD_USES_VOLUME").is_some() && censused.is_ok() {
+            let run_dir = crate::rundir::public_dir(&repo, RUN_FOREIGN);
+            crate::workspace_manager::fixture::write_file(&run_dir.join("created"), b"\n");
+            let run_lock = crate::rundir::RunLock::acquire(&run_dir).expect("its own run lock");
+            let identity = crate::runner::container::exec::RunIdentity {
+                private_root: private.clone(),
+                run_id: RUN_FOREIGN.to_owned(),
+                run_dir: run_dir.clone(),
+                incarnation: incarnation.clone(),
+                repo_key: repo_key.as_str().to_owned(),
+            };
+            let runner = crate::engine::topology::scaffold::container_runner(
+                identity,
+                &repo,
+                Box::new(parent.runtime()),
+                Duration::from_millis(10),
+            );
+            let request = agent_probe(&run_dir);
+            let used = crate::runner::container::container_name_for(
+                repo_key.as_str(),
+                RUN_FOREIGN,
+                &incarnation,
+                &request.invocation,
+            );
+            let ran = crate::runner::Runner::run_blocking(&runner, &request);
+            parent.event(&serde_json::json!({
+                "used": used,
+                "ran": ran.as_ref().map(|output| output.code).map_err(ToString::to_string),
+            }));
+            drop(run_lock);
+        }
+        drop(censused);
+    }
+
+    fn owner_child(parent: &crate::engine::topology::scaffold::ParentSide) {
+        let run_dir = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_RUN_DIR"));
+        let identity = crate::runner::container::exec::RunIdentity {
+            private_root: std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_PRIVATE")),
+            run_id: child_env("UPSTROKE_TEST_CHILD_RUN"),
+            run_dir: run_dir.clone(),
+            incarnation: child_env("UPSTROKE_TEST_CHILD_INCARNATION"),
+            repo_key: child_env("UPSTROKE_TEST_CHILD_REPO_KEY"),
+        };
+        let _run_lock = crate::rundir::RunLock::acquire(&run_dir).expect("the owner's run lock");
+        let runner = std::sync::Arc::new(crate::engine::topology::scaffold::container_runner(
+            identity,
+            &run_dir,
+            Box::new(parent.runtime()),
+            Duration::from_millis(10),
+        ));
+        let requests = vec![
+            probe_request(&run_dir, crate::runner::ProbeTarget::Shell),
+            agent_probe(&run_dir),
+        ];
+        let threads: Vec<std::thread::JoinHandle<()>> = requests
+            .into_iter()
+            .map(|request| {
+                let runner = std::sync::Arc::clone(&runner);
+                std::thread::spawn(move || {
+                    let ended = crate::runner::Runner::run_blocking(&*runner, &request);
+                    panic!("the owner's container ended before the kill: {ended:?}");
+                })
+            })
+            .collect();
+        for thread in threads {
+            let _ = thread.join();
+        }
+        panic!("the parent kills this owner while its containers run");
+    }
+
+    #[test]
+    #[ignore = "spawned by the two-process container tests"]
+    fn container_coordinator_child() {
+        let parent = crate::engine::topology::scaffold::ParentSide::attach();
+        match child_env("UPSTROKE_TEST_CHILD_ROLE").as_str() {
+            "fresh" => fresh_child(&parent),
+            "resume" => resume_child(&parent),
+            "census" => census_child(&parent),
+            "owner" => owner_child(&parent),
+            #[cfg(unix)]
+            "hosted" => hosted_child(&parent),
+            other => panic!("no child role `{other}`"),
+        }
+    }
+
+    fn by(
+        journal: &[crate::runner::container::Journaled],
+        actor: &str,
+        op: crate::runner::container::runtime::RuntimeOp,
+    ) -> Vec<String> {
+        journal
+            .iter()
+            .filter(|entry| entry.actor == actor && entry.op == op)
+            .map(|entry| entry.target.clone())
+            .collect()
+    }
+
+    fn await_starts(host: &crate::runner::container::FakeRuntime, actor: &str, count: usize) {
+        assert!(
+            host.await_journal(BOUND, |journal| {
+                journal
+                    .iter()
+                    .filter(|entry| {
+                        entry.actor == actor
+                            && entry.op == crate::runner::container::runtime::RuntimeOp::Start
+                    })
+                    .count()
+                    >= count
+            }),
+            "`{actor}` did not start {count} container(s) within {BOUND:?}: {:?}",
+            host.journal()
+                .iter()
+                .filter(|entry| entry.actor == actor)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn holds_nothing(run_dir: &std::path::Path, repo: &std::path::Path) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        while crate::rundir::observe_cleanup_hold(run_dir, &mut crate::rundir::NoHooks)
+            && started.elapsed() < BOUND
+        {
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(20),
+                BOUND.saturating_sub(started.elapsed()),
+            );
+        }
+        if crate::rundir::is_running(run_dir) {
+            return Err(format!("{} is held", run_dir.display()));
+        }
+        crate::rundir::WorktreeLock::acquire_in(repo, &repo.join(".git"))
+            .map(drop)
+            .map_err(|error| format!("the worktree lock of {}: {error}", repo.display()))
+    }
+
+    fn broker_is_empty(run: &mut TopologyRun) -> Result<(), String> {
+        let (held, cancelled, peak) = (
+            run.entitlements_held(),
+            run.reservations_cancelled(),
+            run.reservations_peak(),
+        );
+        let duplicates = run.broker_duplicates();
+        let ledger = run.broker_mut().invocations();
+        if ledger.registered() != 0
+            || !ledger.running().is_empty()
+            || !ledger.pending().is_empty()
+            || !ledger.slots().holders().is_empty()
+            || !ledger.slots().pending().is_empty()
+            || held != 0
+            || cancelled != 0
+            || peak != 0
+            || duplicates != 0
+        {
+            return Err(format!(
+                "registered {}, running {:?}, pending {:?}, pair holders {:?}, entitlements held \
+                 {held}, reservations cancelled {cancelled}, peak {peak}, duplicates {duplicates}",
+                ledger.registered(),
+                ledger.running(),
+                ledger.pending(),
+                ledger.slots().holders()
+            ));
+        }
+        Ok(())
+    }
+
+    fn second_repository(root: &std::path::Path) -> std::path::PathBuf {
+        let repo = root.join("repo-y");
+        crate::workspace_manager::fixture::write_file(&repo.join("seed.txt"), b"y\n");
+        crate::workspace_manager::fixture::git(&repo, &["init", "-q", "-b", "main"]);
+        repo
+    }
+
+    fn census_names(report: &serde_json::Value, list: &str) -> Vec<(String, String)> {
+        let mut names: Vec<(String, String)> = report["report"][list]
+            .as_array()
+            .unwrap_or_else(|| panic!("the census report lists `{list}`: {report}"))
+            .iter()
+            .map(|entry| {
+                (
+                    entry["name"].as_str().unwrap_or_default().to_owned(),
+                    entry["ownership"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn served(
+        logs: &std::path::Path,
+        name: &str,
+        env: &[(&str, &std::ffi::OsStr)],
+        runtime: crate::runner::container::FakeRuntime,
+    ) -> crate::engine::topology::scaffold::Served {
+        crate::engine::topology::scaffold::Served::spawn(
+            CONTAINER_CHILD,
+            env,
+            &logs.join(format!("{name}.stderr")),
+            runtime,
+        )
+    }
+
+    #[test]
+    fn a_foreign_census_reclaims_a_dead_coordinators_containers_and_leaves_a_live_coordinators_running()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        use std::ffi::OsStr;
+        let tasks = three();
+        let mut wide = Wide::durable_contained(
+            "coordinator-census-b",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+            INC_A,
+        );
+        let host = crate::engine::topology::scaffold::container_host();
+        let root = wide.env.fixture.root.clone();
+        let private = wide.env.fixture.private.clone();
+        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-census-b-logs");
+        let repo_key = wide.env.identity(INC_A).repo_key;
+
+        let dead_dir = crate::rundir::public_dir(&root.join("repo-b"), RUN_DEAD);
+        crate::workspace_manager::fixture::write_file(&dead_dir.join("created"), b"\n");
+        let owner = served(
+            logs.path(),
+            "owner",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("owner")),
+                ("UPSTROKE_TEST_CHILD_RUN_DIR", dead_dir.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_PRIVATE", private.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_RUN", OsStr::new(RUN_DEAD)),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_1)),
+                ("UPSTROKE_TEST_CHILD_REPO_KEY", OsStr::new(&repo_key)),
+            ],
+            host.acting_as("dead-owner"),
+        );
+        await_starts(&host, "dead-owner", 2);
+        assert!(
+            crate::rundir::is_running(&dead_dir),
+            "the owner holds its run lock while its containers run"
+        );
+        let died = owner.kill();
+        drop(owner);
+        assert!(!died.success(), "the owner was killed: {died:?}");
+        let dead: Vec<String> = {
+            let mut dead = by(&host.journal(), "dead-owner", RuntimeOp::Start);
+            dead.sort();
+            dead
+        };
+        assert_eq!(dead.len(), 2);
+        assert!(
+            !crate::rundir::is_running(&dead_dir),
+            "the dead owner's lock hold (R17) went with its process"
+        );
+        assert_eq!(running_in(&host), dead, "the dead owner's containers outlive it");
+
+        let repo_y = second_repository(&root);
+        let contained = wide.env.contained(&host, INC_A);
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let mut census: Option<(serde_json::Value, serde_json::Value, Vec<String>, Vec<String>)> =
+            None;
+        let mut scheduler = Scheduler::scripted(
+            &double,
+            Box::new(|view: &Quiescent<'_>| {
+                if census.is_none() && view.invoking.len() == 3 {
+                    let live = running_in(&host);
+                    let foreign = served(
+                        logs.path(),
+                        "census",
+                        &[
+                            ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("census")),
+                            ("UPSTROKE_TEST_CHILD_REPO", repo_y.as_os_str()),
+                            ("UPSTROKE_TEST_CHILD_PRIVATE", private.as_os_str()),
+                            ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_FOREIGN)),
+                            ("UPSTROKE_TEST_CHILD_USES_VOLUME", OsStr::new("1")),
+                        ],
+                        host.acting_as("foreign")
+                            .starting(crate::engine::topology::scaffold::exiting()),
+                    );
+                    let report = foreign.event("the foreign census");
+                    let used = foreign.event("the foreign write command's first volume use");
+                    let status = foreign.exited("the foreign write command");
+                    assert!(status.success(), "{status:?}: {}", foreign.stderr());
+                    census = Some((report, used, live, running_in(&host)));
+                }
+                None
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines = wide.env.pipelines_over(contained.clone());
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*contained),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the live coordinator completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let (report, used, before, after) = census.expect("the foreign census ran at width three");
+
+        let mut live: Vec<String> = before
+            .iter()
+            .filter(|name| !dead.contains(name))
+            .cloned()
+            .collect();
+        live.sort();
+        assert_eq!(live.len(), 3, "the live coordinator had three containers running");
+        assert_eq!(report["prelock_refused"], true, "{report}");
+        assert_eq!(report["report"]["census"], "complete", "{report}");
+        assert_eq!(
+            census_names(&report, "reclaimed"),
+            dead.iter()
+                .map(|name| (name.clone(), "foreign-run-dead-owner".to_owned()))
+                .collect::<Vec<_>>(),
+            "the census reclaimed the dead owner's containers and nothing else"
+        );
+        assert_eq!(
+            census_names(&report, "untouched"),
+            live.iter()
+                .map(|name| (name.clone(), "foreign-run-live-owner".to_owned()))
+                .collect::<Vec<_>>(),
+            "the live coordinator's containers were classified live and left alone"
+        );
+        assert_eq!(after, live, "the live containers ran on across the census");
+
+        let journal = host.journal();
+        let foreign_effects: Vec<&crate::runner::container::Journaled> = journal
+            .iter()
+            .filter(|entry| entry.actor == "foreign" && entry.op.is_effect())
+            .collect();
+        for entry in &foreign_effects {
+            assert!(
+                !live.contains(&entry.target),
+                "the foreign command touched a live container: {entry:?}"
+            );
+        }
+        let used_name = used["used"].as_str().expect("the name it used").to_owned();
+        assert_eq!(used["ran"], serde_json::json!({"Ok": 0}), "{used}");
+        let position = |wanted: &dyn Fn(&crate::runner::container::Journaled) -> bool| {
+            journal.iter().position(wanted)
+        };
+        let first_use = position(&|entry| {
+            entry.actor == "foreign" && entry.op == RuntimeOp::Create && entry.target == used_name
+        })
+        .expect("the foreign command created its container");
+        assert!(
+            journal[first_use]
+                .detail
+                .contains(crate::engine::topology::scaffold::WORKER_VOLUME),
+            "its first invocation mounts the shared credential volume: {:?}",
+            journal[first_use]
+        );
+        for name in &dead {
+            let removed = position(&|entry| {
+                entry.actor == "foreign" && entry.op == RuntimeOp::Remove && entry.target == *name
+            })
+            .unwrap_or_else(|| panic!("`{name}` was removed by the census"));
+            let terminated = journal
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    entry.actor == "foreign"
+                        && entry.op == RuntimeOp::Observe
+                        && entry.target == *name
+                })
+                .map(|(index, _)| index)
+                .next()
+                .unwrap_or_else(|| panic!("`{name}` was observed by the census"));
+            assert!(
+                terminated < first_use && removed < first_use,
+                "`{name}` was observed terminated ({terminated}) and removed ({removed}) before \
+                 the foreign command's first use of the credential volume ({first_use})"
+            );
+        }
+        for name in &live {
+            let removers: Vec<&str> = journal
+                .iter()
+                .filter(|entry| entry.target == *name && entry.op == RuntimeOp::Remove)
+                .map(|entry| entry.actor.as_str())
+                .collect();
+            assert_eq!(removers, [INC_A], "`{name}` was released by its own coordinator only");
+        }
+        assert!(
+            host.container_names().is_empty()
+                && intents_under(&private).is_empty()
+                && views_under(&private).is_empty(),
+            "nothing is left under the private root: {:?} {:?} {:?}",
+            host.container_names(),
+            intents_under(&private),
+            views_under(&private)
+        );
+        assert!(wide.run.invocations_balance());
+        let public = wide.env.paths.public.clone();
+        let base = wide.env.fixture.base.clone();
+        assert!(
+            crate::rundir::is_running(&public),
+            "the live coordinator's run lock is held until it ends"
+        );
+        let Wide { run, env } = wide;
+        drop(run);
+        holds_nothing(&public, &base).expect("the live coordinator's holds went with it");
+        holds_nothing(&crate::rundir::public_dir(&repo_y, RUN_FOREIGN), &repo_y)
+            .expect("the foreign write command's holds went with it");
+        drop(env);
+    }
+
+    struct LedgerWatch<'p> {
+        harness: crate::runner::container::HarnessHooks,
+        preflight: &'p crate::engine::topology::preflight::RunPreflight<'p>,
+        seen: Vec<(crate::topology::effects::EffectSiteId, (usize, usize), usize)>,
+    }
+
+    impl crate::runner::container::ContainerHooks for LedgerWatch<'_> {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            self.seen.push((
+                site,
+                self.preflight.settlements(),
+                self.preflight.running().len(),
+            ));
+            self.harness.phase(site, phase)
+        }
+
+        fn trace(&self) -> crate::runner::container::runtime::ContainerTrace {
+            self.harness.trace()
+        }
+    }
+
+    struct CensusWatch<'p> {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        watch: LedgerWatch<'p>,
+    }
+
+    impl TopologyHooks for CensusWatch<'_> {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            &mut self.watch
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+        }
+    }
+
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    fn killed_fresh_incarnation(
+        host: &crate::runner::container::FakeRuntime,
+        logs: &std::path::Path,
+    ) -> (std::path::PathBuf, Vec<String>) {
+        use std::ffi::OsStr;
+        let first = served(
+            logs,
+            "first",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("fresh")),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_1)),
+            ],
+            host.acting_as(INC_1),
+        );
+        let root = std::path::PathBuf::from(
+            first.event("the first incarnation's fixture")["root"]
+                .as_str()
+                .expect("a fixture root"),
+        );
+        await_starts(host, INC_1, 3);
+        let died = first.kill();
+        assert!(!died.success(), "the first incarnation was killed: {died:?}");
+        drop(first);
+        let started = sorted(by(
+            &host.journal(),
+            INC_1,
+            crate::runner::container::runtime::RuntimeOp::Start,
+        ));
+        (root, started)
+    }
+
+    fn foreign_census_at_width_three(
+        host: &crate::runner::container::FakeRuntime,
+        logs: &std::path::Path,
+        repo: &std::path::Path,
+        private: &std::path::Path,
+    ) -> serde_json::Value {
+        use std::ffi::OsStr;
+        let foreign = served(
+            logs,
+            "foreign",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("census")),
+                ("UPSTROKE_TEST_CHILD_REPO", repo.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_PRIVATE", private.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_FOREIGN)),
+            ],
+            host.acting_as("foreign"),
+        );
+        let report = foreign.event("the foreign census");
+        let status = foreign.exited("the foreign write command");
+        assert!(status.success(), "{status:?}: {}", foreign.stderr());
+        report
+    }
+
+    #[test]
+    fn a_resuming_incarnation_reclaims_its_earlier_incarnations_containers_before_its_ledgers_probes_and_admission()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        use std::ffi::OsStr;
+        let tasks = three();
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-resume-f-logs");
+        let (root, first) = killed_fresh_incarnation(&host, logs.path());
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            root.clone(),
+            &tasks,
+            3,
+            WidePlans::default(),
+        );
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the first incarnation's holds went with its process");
+        assert_eq!(running_in(&host), first, "its three containers outlive it");
+
+        let second = served(
+            logs.path(),
+            "second",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("resume")),
+                ("UPSTROKE_TEST_CHILD_ROOT", root.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_2)),
+            ],
+            host.acting_as(INC_2),
+        );
+        await_starts(&host, INC_2, 1);
+        let died = second.kill();
+        assert!(!died.success(), "the second incarnation was killed: {died:?}");
+        drop(second);
+        let journal = host.journal();
+        assert_eq!(
+            sorted(by(&journal, INC_2, RuntimeOp::Remove)),
+            first,
+            "the second incarnation's census reclaimed the first incarnation's containers"
+        );
+        let orphan = by(&journal, INC_2, RuntimeOp::Start);
+        assert_eq!(orphan.len(), 1, "it died inside its own shell probe: {orphan:?}");
+        let orphan = orphan[0].clone();
+        assert_eq!(running_in(&host), std::slice::from_ref(&orphan));
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the second incarnation's holds went with its process");
+
+        let base = env.fixture.base.clone();
+        let private = env.fixture.private.clone();
+        let adapters = std::sync::Arc::clone(&env.adapters);
+        let probes = crate::engine::topology::scaffold::container_runner(
+            env.identity(INC_3),
+            &base,
+            Box::new(
+                host.acting_as("third-probes")
+                    .starting(crate::engine::topology::scaffold::exiting()),
+            ),
+            Duration::from_millis(5),
+        );
+        let preflight = crate::engine::topology::preflight::RunPreflight::new(
+            &probes,
+            &*adapters,
+            crate::gates::ShellKind::Sh,
+            &base,
+            Vec::new(),
+        );
+        let census_runtime = host.acting_as("third-census");
+        let mut hooks = CensusWatch {
+            inner: env.hooks(),
+            watch: LedgerWatch {
+                harness: crate::runner::container::HarnessHooks::new(std::sync::Arc::clone(
+                    &env.harness,
+                )),
+                preflight: &preflight,
+                seen: Vec::new(),
+            },
+        };
+        let (recovered, mut wide) = env
+            .resume_over(
+                INC_3,
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &census_runtime,
+                    liveness: &crate::runner::container::runtime::LockProbe,
+                    preflight: &preflight,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .expect("the third incarnation resumes");
+        let seen = std::mem::take(&mut hooks.watch.seen);
+        drop(hooks);
+        assert_eq!(recovered.interrupted, 3, "the first incarnation's three attempts");
+        broker_is_empty(&mut wide.run).expect("the broker starts empty");
+
+        let journal = host.journal();
+        assert_eq!(
+            by(&journal, "third-census", RuntimeOp::Remove),
+            std::slice::from_ref(&orphan),
+            "the third incarnation's census reclaimed the second incarnation's probe"
+        );
+        let own = by(&journal, "third-probes", RuntimeOp::Create);
+        assert_eq!(own.len(), 1, "one shell probe: {own:?}");
+        let own = own[0].clone();
+        let (orphan_parts, own_parts) = (
+            crate::runner::container::container_name_parts(&orphan).expect("the orphan's name"),
+            crate::runner::container::container_name_parts(&own).expect("its own name"),
+        );
+        let shell = crate::runner::container::intent::invocation_hash(
+            &crate::engine::topology::identity::PreflightIdentities::shell(0)
+                .expect("the shell probe's identity"),
+        );
+        assert_eq!(
+            (orphan_parts.1.as_str(), own_parts.1.as_str()),
+            (shell.as_str(), shell.as_str()),
+            "one deterministic InvocationId in both incarnations"
+        );
+        assert_eq!(
+            (orphan_parts.0.as_str(), own_parts.0.as_str()),
+            (INC_2, INC_3)
+        );
+        assert_ne!(
+            crate::runner::container::intent_path_for(&private, &orphan),
+            crate::runner::container::intent_path_for(&private, &own),
+            "the two incarnations' records never share a path"
+        );
+        let first_own = journal
+            .iter()
+            .position(|entry| entry.actor == "third-probes")
+            .expect("its probe ran");
+        let last_reclaim = journal
+            .iter()
+            .rposition(|entry| entry.actor == "third-census" && entry.target == orphan)
+            .expect("the census acted on the orphan");
+        assert!(
+            last_reclaim < first_own,
+            "the census finished with the orphan ({last_reclaim}) before this incarnation's first \
+             container operation ({first_own})"
+        );
+        let reclaims: Vec<&(crate::topology::effects::EffectSiteId, (usize, usize), usize)> = seen
+            .iter()
+            .filter(|(site, _, _)| {
+                matches!(
+                    site,
+                    crate::topology::effects::EffectSiteId::Container(
+                        crate::topology::effects::ContainerSite::Stop
+                            | crate::topology::effects::ContainerSite::Remove
+                            | crate::topology::effects::ContainerSite::UnmountGitView
+                            | crate::topology::effects::ContainerSite::RemoveIntent
+                    )
+                )
+            })
+            .collect();
+        assert!(!reclaims.is_empty(), "the census's reclaim steps were observed: {seen:?}");
+        for (site, settled, running) in &reclaims {
+            assert_eq!(
+                (*settled, *running),
+                ((0, 0), 0),
+                "{site:?}: the pre-flight's ledger held nothing while the census reclaimed"
+            );
+        }
+        assert_eq!(preflight.settlements(), (1, 0), "then its shell probe ran and settled");
+
+        let repo_y = second_repository(&root);
+        let contained = wide.env.contained(&host, INC_3);
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let mut foreign: Option<(serde_json::Value, Vec<String>, Vec<String>)> = None;
+        let mut scheduler = Scheduler::scripted(
+            &double,
+            Box::new(|view: &Quiescent<'_>| {
+                if foreign.is_none() && view.invoking.len() == 3 {
+                    let before = running_in(&host);
+                    let report =
+                        foreign_census_at_width_three(&host, logs.path(), &repo_y, &private);
+                    foreign = Some((report, before, running_in(&host)));
+                }
+                None
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines = wide.env.pipelines_over(contained.clone());
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*contained),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the third incarnation completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let (report, before, after) = foreign.expect("a foreign census ran at width three");
+        assert_eq!(before.len(), 3, "{before:?}");
+        assert_eq!(report["report"]["census"], "complete", "{report}");
+        assert!(census_names(&report, "reclaimed").is_empty(), "{report}");
+        assert_eq!(
+            census_names(&report, "untouched"),
+            before
+                .iter()
+                .map(|name| (name.clone(), "foreign-run-live-owner".to_owned()))
+                .collect::<Vec<_>>(),
+            "the containers it started after its census are a live owner's"
+        );
+        assert_eq!(after, before, "and they ran on");
+        assert!(
+            host.container_names().is_empty()
+                && intents_under(&private).is_empty()
+                && views_under(&private).is_empty(),
+            "{:?} {:?} {:?}",
+            host.container_names(),
+            intents_under(&private),
+            views_under(&private)
+        );
+        let (public, base) = (wide.env.paths.public.clone(), wide.env.fixture.base.clone());
+        let Wide { run, env } = wide;
+        drop(run);
+        holds_nothing(&public, &base).expect("the third incarnation's holds went with it");
+        drop(env);
+    }
+
+    #[test]
+    fn crashes_across_three_incarnations_with_pipelines_in_flight_leave_every_orphan_reclaimed_and_no_name_twice()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        use std::ffi::OsStr;
+        let tasks = three();
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-crashes-g-logs");
+        let (root, first) = killed_fresh_incarnation(&host, logs.path());
+
+        let second = served(
+            logs.path(),
+            "second",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("resume")),
+                ("UPSTROKE_TEST_CHILD_ROOT", root.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_2)),
+            ],
+            host.acting_as(INC_2)
+                .starting(crate::engine::topology::scaffold::exiting_probes()),
+        );
+        assert_eq!(
+            second.event("the second incarnation's recovery")["interrupted"],
+            3,
+            "it settled the first incarnation's three attempts interrupted"
+        );
+        await_starts(&host, INC_2, 4);
+        let died = second.kill();
+        assert!(!died.success(), "the second incarnation was killed: {died:?}");
+        drop(second);
+        let journal = host.journal();
+        let probe_hash = crate::runner::container::intent::invocation_hash(
+            &crate::engine::topology::identity::PreflightIdentities::shell(0)
+                .expect("the shell probe's identity"),
+        );
+        let is_probe = |name: &String| {
+            crate::runner::container::container_name_parts(name)
+                .is_some_and(|(_, invocation_hash)| invocation_hash == probe_hash)
+        };
+        let second_pipelines: Vec<String> = sorted(
+            by(&journal, INC_2, RuntimeOp::Start)
+                .into_iter()
+                .filter(|name| !is_probe(name))
+                .collect(),
+        );
+        assert_eq!(second_pipelines.len(), 3, "{second_pipelines:?}");
+        assert_eq!(
+            sorted(
+                by(&journal, INC_2, RuntimeOp::Remove)
+                    .into_iter()
+                    .filter(|name| !is_probe(name))
+                    .collect()
+            ),
+            first,
+            "the second incarnation reclaimed the first incarnation's orphans"
+        );
+        assert_eq!(running_in(&host), second_pipelines);
+
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            root.clone(),
+            &tasks,
+            3,
+            WidePlans::default(),
+        );
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the second incarnation's holds went with its process");
+        let base = env.fixture.base.clone();
+        let private = env.fixture.private.clone();
+        let adapters = std::sync::Arc::clone(&env.adapters);
+        let probes = crate::engine::topology::scaffold::container_runner(
+            env.identity(INC_3),
+            &base,
+            Box::new(
+                host.acting_as("third-probes")
+                    .starting(crate::engine::topology::scaffold::exiting()),
+            ),
+            Duration::from_millis(5),
+        );
+        let preflight = crate::engine::topology::preflight::RunPreflight::new(
+            &probes,
+            &*adapters,
+            crate::gates::ShellKind::Sh,
+            &base,
+            Vec::new(),
+        );
+        let census_runtime = host.acting_as("third-census");
+        let mut hooks = env.hooks();
+        let (recovered, mut wide) = env
+            .resume_over(
+                INC_3,
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &census_runtime,
+                    liveness: &crate::runner::container::runtime::LockProbe,
+                    preflight: &preflight,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .expect("the third incarnation resumes");
+        assert_eq!(
+            recovered.interrupted, 3,
+            "the second incarnation's three attempts"
+        );
+        broker_is_empty(&mut wide.run).expect("the broker starts empty");
+        assert_eq!(
+            sorted(by(&host.journal(), "third-census", RuntimeOp::Remove)),
+            second_pipelines,
+            "the third incarnation reclaimed the second incarnation's orphans"
+        );
+
+        let contained = wide.env.contained(&host, INC_3);
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::first(&double);
+        let mut hooks = wide.env.hooks();
+        let pipelines = wide.env.pipelines_over(contained.clone());
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*contained),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the third incarnation completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+
+        let journal = host.journal();
+        let created: Vec<String> = journal
+            .iter()
+            .filter(|entry| entry.op == RuntimeOp::Create)
+            .map(|entry| entry.target.clone())
+            .collect();
+        let distinct = sorted(created.clone());
+        let mut deduped = distinct.clone();
+        deduped.dedup();
+        assert_eq!(deduped, distinct, "no container name was created twice");
+        let intents: std::collections::BTreeSet<std::path::PathBuf> = created
+            .iter()
+            .map(|name| {
+                crate::runner::container::intent_path_for(&private, name).expect("a container name")
+            })
+            .collect();
+        assert_eq!(intents.len(), created.len(), "and no intent path twice");
+        let by_hash = |incarnation: &str| -> std::collections::BTreeMap<String, String> {
+            created
+                .iter()
+                .filter_map(|name| {
+                    let (of, invocation_hash) =
+                        crate::runner::container::container_name_parts(name)
+                            .expect("a container name");
+                    (of == incarnation).then(|| (invocation_hash, name.clone()))
+                })
+                .collect()
+        };
+        let (one, two, three) = (by_hash(INC_1), by_hash(INC_2), by_hash(INC_3));
+        let shared: Vec<&String> = two.keys().filter(|hash| three.contains_key(*hash)).collect();
+        assert!(
+            shared.contains(&&probe_hash),
+            "the second and third incarnations ran one deterministic probe identity: {shared:?}"
+        );
+        for hash in one.keys().chain(two.keys()) {
+            let names: Vec<&String> = [&one, &two, &three]
+                .into_iter()
+                .filter_map(|of| of.get(hash))
+                .collect();
+            let mut unique = names.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(unique.len(), names.len(), "{hash}: one name per incarnation");
+        }
+        assert_eq!(
+            count(&wide.env.durable_events(), "attempt_interrupted"),
+            6,
+            "each dead incarnation's in-flight attempts were settled once"
+        );
+        assert_eq!(count(&wide.env.durable_events(), "run_resumed"), 2);
+        assert!(
+            host.container_names().is_empty()
+                && intents_under(&private).is_empty()
+                && views_under(&private).is_empty(),
+            "{:?} {:?} {:?}",
+            host.container_names(),
+            intents_under(&private),
+            views_under(&private)
+        );
+    }
+
+    #[test]
+    fn a_foreign_census_and_a_resuming_incarnation_converge_on_one_dead_container_as_two_processes()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        use std::ffi::OsStr;
+        let tasks = three();
+        let wide = Wide::durable_contained(
+            "coordinator-converge-h",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new(),
+            INC_1,
+        );
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-converge-h-logs");
+        let root = wide.env.fixture.root.clone();
+        let private = wide.env.fixture.private.clone();
+        let repo_key = wide.env.identity(INC_1).repo_key;
+        let dead_dir = crate::rundir::public_dir(&root.join("repo-dead"), RUN_DEAD);
+        crate::workspace_manager::fixture::write_file(&dead_dir.join("created"), b"\n");
+        let owner = served(
+            logs.path(),
+            "owner",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("owner")),
+                ("UPSTROKE_TEST_CHILD_RUN_DIR", dead_dir.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_PRIVATE", private.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_RUN", OsStr::new(RUN_DEAD)),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_FOREIGN)),
+                ("UPSTROKE_TEST_CHILD_REPO_KEY", OsStr::new(&repo_key)),
+            ],
+            host.acting_as("dead-owner"),
+        );
+        await_starts(&host, "dead-owner", 2);
+        let died = owner.kill();
+        assert!(!died.success(), "the owner was killed: {died:?}");
+        drop(owner);
+        let dead = sorted(by(&host.journal(), "dead-owner", RuntimeOp::Start));
+        let contested = dead[0].clone();
+        host.pace(&contested, &[RuntimeOp::Stop, RuntimeOp::Remove], 2);
+
+        let Wide { run, env } = wide;
+        drop(run);
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the first incarnation ended holding nothing");
+        let repo_y = second_repository(&root);
+        let foreign = served(
+            logs.path(),
+            "foreign",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("census")),
+                ("UPSTROKE_TEST_CHILD_REPO", repo_y.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_PRIVATE", private.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_FOREIGN)),
+            ],
+            host.acting_as("foreign"),
+        );
+        let census_runtime = host.acting_as("resuming");
+        let mut hooks = env.hooks();
+        let (recovered, resumed) = env
+            .resume_over(
+                INC_2,
+                RecordingRunner::new(),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &census_runtime,
+                    liveness: &crate::runner::container::runtime::LockProbe,
+                    preflight: &crate::engine::topology::scaffold::Certifying,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .expect("the resuming incarnation converges and resumes");
+        let report = foreign.event("the foreign census");
+        let status = foreign.exited("the foreign write command");
+        assert!(status.success(), "{status:?}: {}", foreign.stderr());
+        drop(foreign);
+        assert_eq!(recovered.interrupted, 0);
+        assert_eq!(report["report"]["census"], "complete", "{report}");
+        assert!(
+            census_names(&report, "reclaimed")
+                .iter()
+                .any(|(name, ownership)| *name == contested
+                    && ownership == "foreign-run-dead-owner"),
+            "the foreign command reclaimed the contested container: {report}"
+        );
+        let journal = host.journal();
+        for op in [RuntimeOp::Stop, RuntimeOp::Remove] {
+            let actors: std::collections::BTreeSet<&str> = journal
+                .iter()
+                .filter(|entry| entry.op == op && entry.target == contested)
+                .map(|entry| entry.actor.as_str())
+                .collect();
+            assert_eq!(
+                actors,
+                ["foreign", "resuming"].into_iter().collect(),
+                "{op}: both reclaimers acted on the contested container"
+            );
+        }
+        assert!(
+            host.container_names().is_empty()
+                && intents_under(&private).is_empty()
+                && views_under(&private).is_empty(),
+            "both reclaimers converged on a clean root: {:?} {:?} {:?}",
+            host.container_names(),
+            intents_under(&private),
+            views_under(&private)
+        );
+        drop(resumed);
+    }
+
+    #[cfg(unix)]
+    struct CarriedLeases {
+        inner: std::sync::Arc<RecordingRunner>,
+        carried: std::sync::Mutex<Vec<(InvocationId, Vec<std::path::PathBuf>)>>,
+    }
+
+    #[cfg(unix)]
+    impl crate::runner::Runner for CarriedLeases {
+        fn run<'a>(
+            &'a self,
+            request: &'a crate::runner::RunnerRequest,
+            call: crate::runner::RunnerCall<'a>,
+        ) -> crate::runner::RunFuture<'a> {
+            let parts = call.into_parts();
+            assert!(parts.spawn.is_none() && parts.container.is_none());
+            self.carried
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((request.invocation.clone(), parts.leases.to_vec()));
+            self.inner.run(
+                request,
+                crate::runner::RunnerCall::new(parts.cancellation)
+                    .holding_cleanup_leases(parts.leases),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released_and_is_never_reset_at_width_three()
+     {
+        let tasks = three();
+        let mut wide = Wide::durable(
+            "coordinator-reaper-hold",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let carrying = std::sync::Arc::new(CarriedLeases {
+            inner: std::sync::Arc::clone(&double),
+            carried: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut scheduler = shutdown_at_first_point(&double);
+        let mut hooks = wide.env.hooks();
+        let pipelines =
+            wide.env
+                .pipelines_over(std::sync::Arc::clone(&carrying) as std::sync::Arc<dyn crate::runner::Runner>);
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*carrying),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("a shutdown ends the command");
+        drop(scheduler);
+        assert!(error.to_string().contains("shut down"), "{error}");
+        let public = wide.env.paths.public.clone();
+        let carried = carrying
+            .carried
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(carried.len(), 3, "three workers were granted: {carried:?}");
+        let lease = std::fs::canonicalize(&public)
+            .expect("the run's public directory")
+            .join("cleanup.lock");
+        for (invocation, leases) in &carried {
+            let leases: Vec<std::path::PathBuf> = leases
+                .iter()
+                .map(|path| std::fs::canonicalize(path).expect("a carried lease path"))
+                .collect();
+            assert_eq!(
+                leases,
+                std::slice::from_ref(&lease),
+                "`{invocation}`, spawned from a pipeline thread, carries the run's cleanup lease \
+                 to its reaper"
+            );
+        }
+
+        let Wide { run, env } = wide;
+        drop(run);
+        let mut reaper = crate::workspace_manager::fixture::spawn_ready_helper(
+            "rundir::tests::cleanup_hold_child",
+            &[("UPSTROKE_TEST_CLEANUP_DIR", public.as_os_str())],
+        );
+        reaper
+            .await_line("held", BOUND)
+            .or_fail("the surviving reaper never took its hold");
+        assert!(
+            crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "a surviving reaper holds R28"
+        );
+        let runtime = crate::runner::container::FakeRuntime::new(
+            crate::runner::container::runtime::ContainerTrace::off(),
+        );
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = env.hooks();
+        let (refused, env) = match env.try_resume_over(
+            INC_2,
+            holding(&tasks, &[]),
+            crate::engine::topology::select::Ceiling::unlimited(),
+            &crate::engine::topology::scaffold::ResumingOver {
+                runtime: &runtime,
+                liveness: &liveness,
+                preflight: &crate::engine::topology::scaffold::Certifying,
+                awaits_release: false,
+            },
+            &mut hooks,
+        ) {
+            Ok(_) => panic!("the next coordinator resumed over a surviving reaper's hold"),
+            Err(refused) => *refused,
+        };
+        assert!(
+            refused
+                .to_string()
+                .contains("still has a process of its own alive"),
+            "the refusal names the hold it observed: {refused}"
+        );
+        assert!(
+            crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "the refused coordinator left the reaper's hold as it found it"
+        );
+        drop(reaper);
+        let (recovered, mut resumed) = env
+            .resume(
+                INC_2,
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("once the hold is released the next coordinator resumes");
+        assert_eq!(recovered.interrupted, 3);
+        broker_is_empty(&mut resumed.run).expect("its ledgers start empty");
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert!(resumed.run.invocations_balance());
+    }
+
+    #[cfg(unix)]
+    struct HostHeld {
+        host: crate::runner::host::HostRunner,
+        pids: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl crate::runner::Runner for HostHeld {
+        fn run<'a>(
+            &'a self,
+            request: &'a crate::runner::RunnerRequest,
+            call: crate::runner::RunnerCall<'a>,
+        ) -> crate::runner::RunFuture<'a> {
+            let pidfile = self.pids.join(format!("{}.pid", request.invocation.render()));
+            let held = crate::runner::RunnerRequest {
+                command: crate::runner::CommandSpec::new("sh").arg("-c").arg(format!(
+                    "echo $$ > '{}'; exec sleep 600",
+                    pidfile.display()
+                )),
+                timeout: Duration::from_secs(900),
+                ..request.clone()
+            };
+            let parts = call.into_parts();
+            Box::pin(async move {
+                let call = crate::runner::RunnerCall::new(parts.cancellation)
+                    .holding_cleanup_leases(parts.leases);
+                self.host.run(&held, call).await
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn hosted_child(parent: &crate::engine::topology::scaffold::ParentSide) {
+        let pids = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_PIDS"));
+        let tasks = three();
+        let mut wide = Wide::durable(
+            "coordinator-child-host",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new(),
+        );
+        parent.event(&serde_json::json!({
+            "root": wide.env.fixture.root.to_string_lossy(),
+        }));
+        let runner: std::sync::Arc<dyn crate::runner::Runner> = std::sync::Arc::new(HostHeld {
+            host: crate::runner::host::HostRunner::new(),
+            pids,
+        });
+        let pipelines = wide.env.pipelines_over(std::sync::Arc::clone(&runner));
+        let mut hooks = wide.env.hooks();
+        let ended =
+            wide.run
+                .run_concurrently(&wide.env.seams_over(&*runner), &pipelines, &mut hooks, None);
+        panic!("the parent kills this coordinator while its processes run; it ended {ended:?}");
+    }
+
+    #[cfg(unix)]
+    fn within(bound: Duration, what: &str, done: impl Fn() -> bool) {
+        let started = std::time::Instant::now();
+        while !done() {
+            assert!(started.elapsed() < bound, "{what} within {bound:?}");
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(20),
+                bound.saturating_sub(started.elapsed()),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_coordinators_reapers_settle_its_pipelines_processes_under_r28_before_the_next_one_resumes_at_width_three()
+     {
+        use std::ffi::OsStr;
+        let tasks = three();
+        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-reapers-logs");
+        let pids = logs.path().join("pids");
+        crate::workspace_manager::fixture::write_file(&pids.join("created"), b"\n");
+        let child = served(
+            logs.path(),
+            "hosted",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("hosted")),
+                ("UPSTROKE_TEST_CHILD_PIDS", pids.as_os_str()),
+            ],
+            crate::engine::topology::scaffold::container_host(),
+        );
+        let root = std::path::PathBuf::from(
+            child.event("the coordinator's fixture")["root"]
+                .as_str()
+                .expect("a fixture root"),
+        );
+        let read_pids = || -> Vec<u32> {
+            std::fs::read_dir(&pids)
+                .expect("the pid directory")
+                .filter_map(|entry| {
+                    let path = entry.expect("a pid entry").path();
+                    (path.extension().and_then(OsStr::to_str) == Some("pid"))
+                        .then(|| std::fs::read_to_string(&path).ok())
+                        .flatten()
+                        .and_then(|text| text.trim().parse().ok())
+                })
+                .collect()
+        };
+        within(BOUND, "three pipeline processes started", || read_pids().len() == 3);
+        let started = read_pids();
+        let public =
+            crate::rundir::public_dir(&root.join("repo"), crate::workspace_manager::fixture::RUN_ID);
+        assert!(
+            crate::rundir::is_running(&public),
+            "the coordinator holds its run lock"
+        );
+        assert!(
+            crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "the reapers of processes spawned from pipeline threads hold the run's cleanup lease"
+        );
+        for pid in &started {
+            assert!(crate::workspace_manager::fixture::process_exists(*pid));
+        }
+        let died = child.kill();
+        assert!(!died.success(), "the coordinator was killed: {died:?}");
+        drop(child);
+        within(BOUND, "every pipeline process settled by its reaper", || {
+            started
+                .iter()
+                .all(|pid| !crate::workspace_manager::fixture::process_exists(*pid))
+        });
+        within(BOUND, "the reapers' holds released once their groups settled", || {
+            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks)
+        });
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            root,
+            &tasks,
+            3,
+            WidePlans::default(),
+        );
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the dead coordinator's lock holds went with it");
+        let (recovered, mut resumed) = env
+            .resume(
+                "inc-2",
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next coordinator resumes");
+        assert_eq!(recovered.interrupted, 3);
+        broker_is_empty(&mut resumed.run).expect("its ledgers start empty");
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+    }
+
+    fn balanced_at_end(run: &mut TopologyRun) -> Result<(), String> {
+        let held = run.entitlements_held();
+        let balances = run.invocations_balance();
+        let ledger = run.broker_mut().invocations();
+        if !balances
+            || held != 0
+            || !ledger.running().is_empty()
+            || !ledger.pending().is_empty()
+            || !ledger.slots().holders().is_empty()
+            || !ledger.slots().pending().is_empty()
+        {
+            return Err(format!(
+                "balances {balances}, entitlements held {held}, running {:?}, pending {:?}, pair \
+                 holders {:?}",
+                ledger.running(),
+                ledger.pending(),
+                ledger.slots().holders()
+            ));
+        }
+        Ok(())
+    }
+
+    fn next_start(wide: Wide, tasks: &[WideTask], shape: &str) -> Option<Wide> {
+        let Wide { run, env } = wide;
+        drop(run);
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .unwrap_or_else(|error| panic!("{shape}: {error}"));
+        let runtime = crate::runner::container::FakeRuntime::new(
+            crate::runner::container::runtime::ContainerTrace::off(),
+        );
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = env.hooks();
+        match env.try_resume_over(
+            "inc-2",
+            RecordingRunner::new().answering(wide_responder(tasks, &[])),
+            crate::engine::topology::select::Ceiling::unlimited(),
+            &crate::engine::topology::scaffold::ResumingOver {
+                runtime: &runtime,
+                liveness: &liveness,
+                preflight: &crate::engine::topology::scaffold::Certifying,
+                awaits_release: true,
+            },
+            &mut hooks,
+        ) {
+            Ok((_, mut resumed)) => {
+                broker_is_empty(&mut resumed.run)
+                    .unwrap_or_else(|error| panic!("{shape}: the next start: {error}"));
+                Some(resumed)
+            }
+            Err(refused) => {
+                let (error, env) = *refused;
+                holds_nothing(&env.paths.public, &env.fixture.base).unwrap_or_else(|held| {
+                    panic!("{shape}: the refused next start ({error}) left a hold: {held}")
+                });
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()
+     {
+        use crate::topology::effects::SubEffectPoint;
+        let tasks = three();
+        let answering = || RecordingRunner::new().answering(wide_responder(&tasks, &[]));
+
+        let mut complete = Wide::durable(
+            "coordinator-ledgers-complete",
+            &tasks,
+            3,
+            WidePlans::default(),
+            answering(),
+        );
+        let progress = drive(&mut complete, None).expect("the run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        balanced_at_end(&mut complete.run).expect("Complete");
+        assert!(
+            next_start(complete, &tasks, "Complete").is_none(),
+            "a complete run is finalized and refused at the next start"
+        );
+
+        let mut parked = Wide::durable(
+            "coordinator-ledgers-parked",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new().answering(
+                crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[0, 1, 2]),
+            ),
+        );
+        let progress = drive(&mut parked, None).expect("the run parks");
+        assert_eq!(outcome_of(&progress), RunOutcome::Parked);
+        balanced_at_end(&mut parked.run).expect("Parked");
+        assert!(next_start(parked, &tasks, "Parked").is_some());
+
+        let mut halted = durable_halting_on_gamma("coordinator-ledgers-halted");
+        let runner = std::sync::Arc::clone(&halted.env.runner);
+        let mut scheduler = gamma_first(&runner);
+        let progress = drive(&mut halted, Some(&mut scheduler)).expect("the run halts");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        balanced_at_end(&mut halted.run).expect("Halted");
+        assert!(next_start(halted, &tasks, "Halted").is_none());
+
+        let wider = four();
+        let mut budget = Wide::durable_under(
+            "coordinator-ledgers-budget",
+            &wider,
+            3,
+            WidePlans::default(),
+            holding(&wider, &[]),
+            TIGHT,
+        );
+        let runner = std::sync::Arc::clone(&budget.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+            }),
+        );
+        let progress = drive(&mut budget, Some(&mut scheduler)).expect("the budget stop ends it");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::BudgetExceeded);
+        balanced_at_end(&mut budget.run).expect("BudgetExceeded");
+        assert!(next_start(budget, &wider, "BudgetExceeded").is_some());
+
+        let mut failed = Wide::durable(
+            "coordinator-ledgers-append-error",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&failed.env.runner);
+        let harness = std::sync::Arc::clone(&failed.env.harness);
+        let mut scheduler = arming_on(&runner, harness, SubEffectPoint::Synced);
+        drive(&mut failed, Some(&mut scheduler)).expect_err("the append error ends the command");
+        drop(scheduler);
+        balanced_at_end(&mut failed.run).expect("an append error");
+        assert!(next_start(failed, &tasks, "an append error").is_some());
+
+        let mut shut = Wide::durable(
+            "coordinator-ledgers-shutdown",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let runner = std::sync::Arc::clone(&shut.env.runner);
+        let mut scheduler = shutdown_at_first_point(&runner);
+        drive(&mut shut, Some(&mut scheduler)).expect_err("a shutdown ends the command");
+        drop(scheduler);
+        balanced_at_end(&mut shut.run).expect("a shutdown");
+        assert!(next_start(shut, &tasks, "a shutdown").is_some());
+    }
 }

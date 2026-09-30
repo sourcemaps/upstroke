@@ -1478,7 +1478,9 @@ mod fake;
 
 #[cfg(test)]
 pub(crate) use fake::{
-    DOCKER_GATED_TESTS, FakeOwnerLiveness, FakeRuntime, RecordingHooks, docker_gate,
+    CHILD_EVENT, DOCKER_GATED_TESTS, FakeOwnerLiveness, FakeRuntime, Journaled, Launch,
+    LinkedRuntime, RecordingHooks, Start, StartPolicy, container_name_for, container_name_parts,
+    docker_gate, intent_path_for,
 };
 
 #[cfg(test)]
