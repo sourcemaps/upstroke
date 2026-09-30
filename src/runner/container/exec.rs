@@ -13,7 +13,10 @@ use crate::error::ProcessFate;
 use crate::error::UpstrokeError;
 use crate::rundir::RunPaths;
 use crate::runner::policy::runner_policy_sha256;
-use crate::runner::{AgentId, ExecutionRole, InvocationId, Runner, RunnerError, RunnerRequest};
+use crate::runner::{
+    AgentId, Cancellation, ExecutionRole, InvocationId, RunFuture, Runner, RunnerCall, RunnerError,
+    RunnerRequest,
+};
 use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
 
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
@@ -236,6 +239,12 @@ impl Reached {
     };
 }
 
+// `hooks` is the one lock this runner owns, and it exists only when a
+// runner-level observer was installed: a caller then holds it for the whole
+// invocation (launch, supervision, release), so callers on one runner wait their
+// turn. A call that carries its own observer, or a runner with none installed,
+// takes no guard, and its invocations run at once. The guard releases on return
+// or unwind; a poisoned lock retains its observer.
 pub struct ContainerRunner {
     policy: RunnerPolicy,
     image_id: String,
@@ -248,7 +257,7 @@ pub struct ContainerRunner {
     runtime: Box<dyn ContainerRuntime>,
     view: Box<dyn GitView>,
     view_is_explicit: bool,
-    hooks: Mutex<Box<dyn ContainerHooks + Send>>,
+    hooks: Option<Mutex<Box<dyn ContainerHooks + Send>>>,
     poll: Duration,
     output_limit: usize,
 }
@@ -291,7 +300,7 @@ impl ContainerRunner {
             runtime,
             view: Box::new(view),
             view_is_explicit: false,
-            hooks: Mutex::new(Box::new(NoHooks)),
+            hooks: None,
             poll: SUPERVISION_POLL,
             output_limit: OUTPUT_LIMIT_BYTES,
         })
@@ -312,7 +321,7 @@ impl ContainerRunner {
 
     #[must_use]
     pub fn with_hooks(mut self, hooks: Box<dyn ContainerHooks + Send>) -> Self {
-        self.hooks = Mutex::new(hooks);
+        self.hooks = Some(Mutex::new(hooks));
         self.rebuild_view();
         self
     }
@@ -372,10 +381,10 @@ impl ContainerRunner {
     }
 
     fn trace(&self) -> ContainerTrace {
-        self.hooks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .trace()
+        match &self.hooks {
+            Some(hooks) => hooks.lock().unwrap_or_else(PoisonError::into_inner).trace(),
+            None => ContainerTrace::off(),
+        }
     }
 
     pub fn plan(&self, request: &RunnerRequest) -> Result<InvocationPlan, UpstrokeError> {
@@ -699,17 +708,25 @@ impl ContainerRunner {
         )
     }
 
-    fn supervise(&self, name: &ContainerName, deadline: Instant) -> Result<bool, UpstrokeError> {
+    fn supervise(
+        &self,
+        name: &ContainerName,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> Result<Watched, UpstrokeError> {
         loop {
             let state = self
                 .runtime
                 .observe(name.as_str())
                 .map_err(refused_by_runtime)?;
             if state.is_terminated() {
-                return Ok(false);
+                return Ok(Watched::Exited);
             }
             if Instant::now() >= deadline {
-                return Ok(true);
+                return Ok(Watched::TimedOut);
+            }
+            if cancellation.is_cancelled() {
+                return Ok(Watched::Cancelled);
             }
             if !self.poll.is_zero() {
                 std::thread::sleep(self.poll);
@@ -772,21 +789,66 @@ pub fn view_dir(private_root: &Path, name: &ContainerName) -> PathBuf {
     super::census::view_path(private_root, name)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Watched {
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
 impl Runner for ContainerRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        Box::pin(async move { self.invoke(request, call) })
+    }
+}
+
+impl ContainerRunner {
+    fn invoke(
+        &self,
+        request: &RunnerRequest,
+        call: RunnerCall<'_>,
+    ) -> Result<ProcessOutput, RunnerError> {
+        let parts = call.into_parts();
+        match (parts.container, &self.hooks) {
+            (Some(observer), _) => self.contain(request, &parts.cancellation, observer),
+            (None, Some(hooks)) => {
+                let mut hooks = hooks.lock().unwrap_or_else(PoisonError::into_inner);
+                self.contain(request, &parts.cancellation, &mut **hooks)
+            }
+            (None, None) => self.contain(request, &parts.cancellation, &mut NoHooks),
+        }
+    }
+
+    fn contain(
+        &self,
+        request: &RunnerRequest,
+        cancellation: &Cancellation,
+        hooks: &mut dyn ContainerHooks,
+    ) -> Result<ProcessOutput, RunnerError> {
+        if cancellation.is_cancelled() {
+            return Err(RunnerError::cancelled(
+                &request.invocation,
+                ProcessFate::NeverStarted,
+            ));
+        }
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
         let started = Instant::now();
         let deadline = started + request.timeout;
-        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
 
-        let launched: Launched = self.launch(&mut **hooks, &plan.launch)?;
+        let launched: Launched = self.launch(hooks, &plan.launch)?;
 
-        let supervised = self.supervise(&launched.name, deadline);
-        let exit_observed = matches!(supervised, Ok(false));
-        let outcome = supervised.and_then(|timed_out| self.collect(&launched, started, timed_out));
+        let supervised = self.supervise(&launched.name, deadline, cancellation);
+        let exit_observed = matches!(supervised, Ok(Watched::Exited));
+        let outcome = match supervised {
+            Ok(Watched::Cancelled) => Ok(None),
+            Ok(watched) => self
+                .collect(&launched, started, watched == Watched::TimedOut)
+                .map(Some),
+            Err(error) => Err(error),
+        };
         let released = self.release(
-            &mut **hooks,
+            hooks,
             &self.identity.private_root,
             &launched,
             if exit_observed {
@@ -801,7 +863,8 @@ impl Runner for ContainerRunner {
             Err(_) => ProcessFate::Unresolved,
         };
         match (outcome, released) {
-            (Ok(output), Ok(())) => Ok(output),
+            (Ok(None), Ok(())) => Err(RunnerError::cancelled(&request.invocation, fate)),
+            (Ok(Some(output)), Ok(())) => Ok(output),
             (Ok(_), Err(failure)) => {
                 Err(RunnerError::new(&request.invocation, fate, failure.error))
             }

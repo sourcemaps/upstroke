@@ -468,7 +468,7 @@ pub(crate) mod fixtures {
             spec = spec.arg(*arg);
         }
         HostRunner::new()
-            .run(&gate_request(
+            .run_blocking(&gate_request(
                 spec,
                 cwd.to_path_buf(),
                 Duration::from_secs(60),

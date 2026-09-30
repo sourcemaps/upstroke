@@ -107,7 +107,7 @@ pub(super) fn run_attempt(
         resume_session,
     }
     .command()?;
-    let output = cx.runner.run(&crate::runner::worker_request(
+    let output = cx.runner.run_blocking(&crate::runner::worker_request(
         command,
         worker_workspace.clone(),
         AgentId::new(cx.adapter.id()),

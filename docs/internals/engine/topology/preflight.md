@@ -229,9 +229,15 @@ unslotted. The alternative was a second copy of register/slot/run/settle
 for the non-slotted case, and this file's own header is that there is
 **one place**.
 
-## `impl Runner for Registering<'_>` › `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {`
+## `impl Runner for Registering<'_>` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
-Register, slot, run, settle — and settle on the failure path too.
+Register, slot, run, settle — and settle on the failure path too. Since PR11
+the inner Runner's `run` is a future, so the wrapper is one too: `admit`
+(register and slot) and `settle` (release and complete or cancel) are
+synchronous and run on either side of the one `.await`, so no ledger or slot
+guard is ever held across it — which is also what keeps the future `Send`. The
+call is forwarded to the inner Runner unchanged, so a cancellation or an
+observer the caller carries reaches the process.
 
 The settlement is not in a `Drop`: a `Drop` that swallowed a refusal
 would make a ledger that did not balance look like one that did, and
@@ -241,21 +247,43 @@ process either never started or did not produce an outcome this run may
 act on, and `R3`'s two lifecycle rows are "released on cancel" and
 "released on complete or cancel" precisely so the two are told apart.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `let Some(slots) = self.slots else {`
+## `impl Registering<'_>` › `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError> {`
+
+Everything before the inner run: register, then, for a slotted invocation,
+take the pair. A refusal after the registration withdraws it before
+returning.
+
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `let withdrawn = |refusal: UpstrokeError| {`
+
+The one withdrawal every refusal after the registration takes: cancel the
+registration and return the refusal. The cancel cannot fail here — it settles
+the entry this call registered a moment ago — but its result is carried as the
+refusal's cleanup (`UpstrokeError::with_cleanup`, which leaves the refusal
+unchanged on `Ok`) rather than discarded, so an impossible failure would still
+be visible. Before PR11 the three refusal paths each discarded it with
+`let _ =`.
+
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `let Some(slots) = self.slots else {`
 
 The non-slotted boundary cannot account a slotted invocation, and
 running it anyway would put an agent probe through a path that
 takes no pair — the process would execute with `permits.
 agent_pool_slots` never consulted.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `agent: match request.agent.as_ref() {`
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `agent: match request.agent.as_ref() {`
 
 The agent whose per-agent slot this is. A slotted invocation
 without an agent binding cannot be accounted, and refusing is
 the assertion rather than inventing a name for it.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `pool: None,`
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `pool: None,`
 
 The pool is the routing layer's and arrives with PR11's
 broker; a per-agent pair with no pool is the sequential
 substrate's assertion, which is what R3 is here.
+
+## `impl Registering<'_>` › `fn settle(`
+
+Everything after the inner run: release the pair, then complete the
+registration on an output or cancel it on an error, exactly once. A release or
+settlement failure carries the inner outcome's fate.

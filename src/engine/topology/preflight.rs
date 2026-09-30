@@ -7,7 +7,7 @@ use crate::agent::{AdapterSource, Caps, ProcessOutput};
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;
-use crate::runner::{Runner, RunnerError, RunnerRequest};
+use crate::runner::{RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest};
 use crate::topology::events::RunnerPolicy;
 
 use super::identity::{InvocationLedger, PreflightIdentities, SlotAssertion, SlotPair, is_slotted};
@@ -171,17 +171,30 @@ pub(super) struct Registering<'a> {
 }
 
 impl Runner for Registering<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        Box::pin(async move {
+            self.admit(request)?;
+            let outcome = self.inner.run(request, call).await;
+            self.settle(request, outcome)
+        })
+    }
+}
+
+impl Registering<'_> {
+    fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError> {
         let refused = |error: UpstrokeError| RunnerError::never_started(&request.invocation, error);
         {
             let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
             ledger.register(&request.invocation).map_err(refused)?;
         }
+        let withdrawn = |refusal: UpstrokeError| {
+            let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+            let cancelled = ledger.cancel(&request.invocation);
+            refused(refusal.with_cleanup(cancelled))
+        };
         if is_slotted(&request.invocation) {
             let Some(slots) = self.slots else {
-                let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                let _ = ledger.cancel(&request.invocation);
-                return Err(refused(UpstrokeError::Refused {
+                return Err(withdrawn(UpstrokeError::Refused {
                     message: format!(
                         "`{}` is a slotted invocation and this boundary holds no slots; INV-23's \
                          non-slotted probe is the recorded shell alone",
@@ -193,9 +206,7 @@ impl Runner for Registering<'_> {
                 agent: match request.agent.as_ref() {
                     Some(agent) => agent.to_string(),
                     None => {
-                        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                        let _ = ledger.cancel(&request.invocation);
-                        return Err(refused(UpstrokeError::Refused {
+                        return Err(withdrawn(UpstrokeError::Refused {
                             message: format!(
                                 "`{}` is a slotted invocation with no agent binding; the pair it \
                                  would take is `{{agent, pool?}}` and there is no agent to name",
@@ -206,17 +217,22 @@ impl Runner for Registering<'_> {
                 },
                 pool: None,
             };
-            let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(error) = slots.acquire(&request.invocation, pair) {
-                drop(slots);
-                let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                let _ = ledger.cancel(&request.invocation);
-                return Err(refused(error));
+            let acquired = slots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .acquire(&request.invocation, pair);
+            if let Err(error) = acquired {
+                return Err(withdrawn(error));
             }
         }
+        Ok(())
+    }
 
-        let outcome = self.inner.run(request);
-
+    fn settle(
+        &self,
+        request: &RunnerRequest,
+        outcome: Result<ProcessOutput, RunnerError>,
+    ) -> Result<ProcessOutput, RunnerError> {
         let settled = |error: UpstrokeError| match &outcome {
             Ok(_) => RunnerError::gone(&request.invocation, error),
             Err(failure) => RunnerError::new(&request.invocation, failure.fate, error),

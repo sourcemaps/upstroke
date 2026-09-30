@@ -407,6 +407,16 @@ The intent is written and nothing else exists.
 
 The `Container` / `container-v1` [`Runner`].
 
+**The observer and its lock.** The one lock this runner owns is `hooks`, and
+the protocol is the comment beside the type (§10's placement). It exists only
+when [`ContainerRunner::with_hooks`] installed a runner-level observer; a caller
+then holds it for the whole invocation, so invocations on one runner take turns
+while one is installed. A call that carries its own `ContainerHooks` observer
+(`RunnerCall::observed_in_container_by`), or a runner with none installed —
+production's — takes no guard, and its invocations run at once. Until PR11 the
+field was always present (`NoHooks` by default) and always locked, so a runner
+supervised one container at a time whatever its callers asked.
+
 Holds the **recorded** `RunnerPolicy` rather than resolving one: resolution
 by read-only inspection is a separate obligation (INV-23, "resolved once by
 read-only inspection before the worktree lock"), and a runner that resolved
@@ -469,7 +479,8 @@ does.
 ## `impl ContainerRunner` › `pub fn with_hooks(mut self, hooks: Box<dyn ContainerHooks + Send>) -> Self {`
 
 Observe (and, for the fault subset, inject at) every container site this
-runner reaches.
+runner reaches for a call that carries no observer of its own. An installed
+observer is shared, so it is taken in turns (the struct's note).
 
 ## `impl ContainerRunner` › `pub fn with_view(mut self, view: Box<dyn GitView>) -> Self {`
 
@@ -797,13 +808,48 @@ never reached `Runner::run`.
 A `ReleaseFailure` whose error is [`UpstrokeError::Refused`] naming every
 step that could not be completed.
 
-## `impl ContainerRunner` › `fn supervise(&self, name: &ContainerName, deadline: Instant) -> Result<bool, UpstrokeError> {`
+## `impl ContainerRunner` › `fn supervise(`
 
-Wait for the container, bounded by the request's own timeout.
+Wait for the container, bounded by the request's own timeout and by the
+call's cancellation, and say which of the three ended the wait
+([`Watched`]).
 
 "timeout or shutdown stops and removes the container"
-(`slice_contract.cancellation`). The stop and the removal are the
-caller's [`super::release`]; this decides *which* disposition.
+(`slice_contract.cancellation`); PR11's cancellation is the same
+disposition: "a granted or non-slotted running invocation is cancelled after
+the Runner terminated its process or container" (`permits.protocol`). The stop
+and the removal are the caller's [`super::release`]; this decides *which*
+disposition. An observed exit wins a tick in which the deadline or the cancel
+also holds, and the deadline wins over the cancel, the order the host funnel
+uses.
+
+## `enum Watched {`
+
+How [`ContainerRunner::supervise`]'s wait ended: the container was observed
+terminated, the request's timeout passed, or the call was cancelled.
+
+## `impl ContainerRunner` › `fn invoke(`
+
+The body of the future `run` returns, executed in its first poll on the
+polling thread (`docs/internals/runner/contract.md`, "Where the work
+happens"). It takes the call apart and picks the observer: the call's own,
+with no lock; otherwise the runner-level one under its guard; otherwise a
+local `NoHooks`.
+
+## `impl ContainerRunner` › `fn contain(`
+
+One invocation under one observer: the pre-launch cancellation check, the
+launch, supervision, collection and the release, in that order. A call
+cancelled before anything is written is refused as
+`RunnerError::cancelled(.., NeverStarted)` with no intent, view or container
+(`a_container_call_cancelled_before_it_starts_writes_no_intent`). A call
+cancelled while its container runs is not collected — nothing it printed is
+anyone's result — and is released through the same reclaim steps as a timed-out
+one (stop, remove, view, intent), then reported `RunnerError::cancelled` with
+the fate the release established; a release that could not finish reports the
+release's own error instead, not a cancellation, because the Runner could not
+establish that it terminated what it started
+(`a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports`).
 
 ## `pub enum ImageIdMismatch {`
 
@@ -908,12 +954,12 @@ instead of a silent regression.
 `effects::tests::the_view_directory_has_one_definition_in_the_tree` guards
 against a second one being written.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOut…` › `let launched: Launched = self.launch(&mut **hooks, &plan.launch)?;`
+## `fn contain(` › `let launched: Launched = self.launch(hooks, &plan.launch)?;`
 
 WriteIntent -> MountGitView -> Create (+ verify the reported image
 id) -> Start, in that order and in one place.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOut…` › `let released = self.release(`
+## `fn contain(` › `let released = self.release(`
 
 Release whatever the invocation reached, whether or not it succeeded:
 R26 is "released on complete (stop/rm, view removed, intent removed),

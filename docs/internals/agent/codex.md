@@ -157,13 +157,13 @@ The six strict-config parser probes: two surfaces x
 
 Every fixed ordinal above, for the uniqueness assertion.
 
-## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let fresh_help = runner.run(&probe_request(`
+## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let fresh_help = runner.run_blocking(&probe_request(`
 
 Fresh and resumed attempts are different CLI surfaces. Both carry
 the reasoning override, so both must prove `--config` before spend;
 only fresh attempts carry the sandbox.
 
-## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let models = runner.run(&probe_request(`
+## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `let models = runner.run_blocking(&probe_request(`
 
 The strict local parser above proves the exact key and the two role
 policy values. The CLI's local catalog is separate zero-spend
@@ -568,17 +568,17 @@ It answers by **argument**, never by program: what the CLI is called at
 the boundary is the boundary's business, and a fixture that keyed on the
 program string would be asserting the adapter's answer against itself.
 
-## `impl Runner for RecordingRunner` › `return Ok(output(`
+## `impl crate::runner::contract::tests::InlineRunner for RecordingRunner` › `return Ok(output(`
 
 The control: the strict parser rejects the unknown key
 *before* the local missing-schema guard.
 
-## `impl Runner for RecordingRunner` › `return Ok(output(`
+## `impl crate::runner::contract::tests::InlineRunner for RecordingRunner` › `return Ok(output(`
 
 The key is accepted, and the run then stops on the schema
 file that deliberately does not exist.
 
-## `impl Runner for RecordingRunner` › `let models: Vec<_> = catalog::known_models(ADAPTER_ID)`
+## `impl crate::runner::contract::tests::InlineRunner for RecordingRunner` › `let models: Vec<_> = catalog::known_models(ADAPTER_ID)`
 
 Every model the catalog knows, each advertising every
 effort. Derived from the catalog rather than written out:

@@ -209,6 +209,34 @@ group is settled whatever the leader's reap then returns, and a
 because its caller settles an outage terminal only on a fate that says no
 process survives.
 
+**`stop`**, since PR11: a predicate the supervision loop reads once per tick,
+beside the timeout and the output bound. When it answers yes while the child is
+still running, the loop ends the tree exactly as it ends a timed-out one —
+`terminate_supervised` on Unix (the reaper settles the group inside
+`Process.Terminate`'s hook phases), `kill_tree` on Windows (the private job) —
+drains with the kill grace, and returns the output with neither `timed_out` nor
+`output_limited` set. The funnel does not know what a stop *means*: the host
+Runner passes its call's cancellation as the predicate, and it is the Runner, not
+the funnel, that reports the invocation cancelled, from its own record that the
+predicate answered yes. It adds no primitive, no site and no new entry name: a
+cancelled tree is terminated by the code a timed-out tree is. `run_with_timeout_at`
+passes a predicate that never stops, so every caller that predates PR11 behaves as
+it did.
+
+## `run_with_timeout_and_limit` › `#[expect(`
+
+Eight parameters where clippy's default is seven: the two sites, the command and
+its input, the three bounds that end a run early (timeout, output limit, stop) and
+the observer are each a caller's choice, and bundling any two of them would make
+the one supervised entry take a struct its two callers build for this call alone.
+The reason string is on the attribute.
+
+## `run_with_timeout_and_limit` › `} else if stop() {`
+
+After the output bound and the timeout, so a run that reaches either in the same
+tick is reported as that; `stopped` then selects the kill grace for the drains, as
+a timeout does.
+
 ## `let mut termination = termination::Supervisor::begin(terminate_site)?;`
 
 Enter before `spawn`: if an interrupt arrives in the narrow interval

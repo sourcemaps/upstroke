@@ -121,6 +121,7 @@ pub fn run_with_timeout_at(
         command,
         stdin_data,
         timeout,
+        &|| false,
         hooks,
     )
     .map_err(|failure| failure.error)
@@ -138,6 +139,7 @@ pub fn run_with_timeout_classified(
     command: Command,
     stdin_data: &[u8],
     timeout: Duration,
+    stop: &dyn Fn() -> bool,
     hooks: &mut dyn SpawnHooks,
 ) -> Result<ProcessOutput, ProcessFailure> {
     validate_process_sites(spawn_site, terminate_site).map_err(|error| ProcessFailure {
@@ -151,6 +153,7 @@ pub fn run_with_timeout_classified(
         stdin_data,
         timeout,
         OUTPUT_LIMIT_BYTES,
+        stop,
         hooks,
     )
 }
@@ -171,6 +174,10 @@ fn validate_process_sites(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the funnel's one supervised entry: two sites, the command and its input, and the three bounds that end a run early (timeout, output limit, stop) are each a caller's choice"
+)]
 fn run_with_timeout_and_limit(
     spawn_site: ProcessSite,
     terminate_site: ProcessSite,
@@ -178,6 +185,7 @@ fn run_with_timeout_and_limit(
     stdin_data: &[u8],
     timeout: Duration,
     output_limit: usize,
+    stop: &dyn Fn() -> bool,
     hooks: &mut dyn SpawnHooks,
 ) -> Result<ProcessOutput, ProcessFailure> {
     let fate = std::cell::Cell::new(ProcessFate::NeverStarted);
@@ -297,6 +305,7 @@ fn run_with_timeout_and_limit(
 
         let mut timed_out = false;
         let mut output_limited = false;
+        let mut stopped = false;
         #[cfg(unix)]
         let code = loop {
             match child_exited_unreaped(&child) {
@@ -323,6 +332,16 @@ fn run_with_timeout_and_limit(
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
+                        terminate_supervised(
+                            hooks,
+                            terminate_site,
+                            &mut termination,
+                            &mut child,
+                            &fate,
+                        )?;
+                        break None;
+                    } else if stop() {
+                        stopped = true;
                         terminate_supervised(
                             hooks,
                             terminate_site,
@@ -366,6 +385,10 @@ fn run_with_timeout_and_limit(
                         timed_out = true;
                         kill_tree(hooks, terminate_site, &mut child, &fate)?;
                         break None;
+                    } else if stop() {
+                        stopped = true;
+                        kill_tree(hooks, terminate_site, &mut child, &fate)?;
+                        break None;
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
@@ -380,7 +403,7 @@ fn run_with_timeout_and_limit(
         };
         let duration = started.elapsed();
 
-        let grace = if timed_out || output_limited {
+        let grace = if timed_out || output_limited || stopped {
             DRAIN_GRACE_KILL
         } else {
             DRAIN_GRACE_EXIT

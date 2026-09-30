@@ -489,3 +489,271 @@ fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {
          half-built must not come back:\n{partly}"
     );
 }
+
+mod scaffold_runner {
+    use std::task::{Context, Waker};
+    use std::time::Duration;
+
+    use super::super::super::scaffold::{Ending, ProbeFailure, RecordingRunner};
+    use crate::agent::ProcessOutput;
+    use crate::error::ProcessFate;
+    use crate::gates::ShellKind;
+    use crate::runner::invocation::AttemptRole;
+    use crate::runner::{
+        AgentId, Cancellation, InvocationId, ProbeTarget, Runner, RunnerCall, RunnerRequest,
+    };
+    use crate::topology::events::{
+        AttemptNumber, GenerationId, ImageIdentity, RunnerContract, RunnerKind, RunnerPolicy,
+    };
+    use crate::topology::registry::TaskKey;
+
+    fn gate(ordinal: u32) -> RunnerRequest {
+        crate::runner::gate_request(
+            ShellKind::native().spec("exit 0"),
+            std::env::temp_dir(),
+            Duration::from_secs(5),
+            InvocationId::attempt(
+                TaskKey(0),
+                GenerationId(0),
+                AttemptNumber(1),
+                AttemptRole::Gate(ordinal),
+                0,
+            ),
+        )
+    }
+
+    fn output(code: i32) -> ProcessOutput {
+        ProcessOutput {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        }
+    }
+
+    #[test]
+    fn the_scaffold_runner_holds_each_invocation_until_the_test_completes_it_in_any_order() {
+        let runner = RecordingRunner::new();
+        runner.hold();
+        let requests: Vec<RunnerRequest> = (0..3).map(gate).collect();
+        let codes = std::thread::scope(|scope| {
+            let drivers: Vec<_> = requests
+                .iter()
+                .map(|request| scope.spawn(|| runner.run_blocking(request)))
+                .collect();
+            let waiting = runner.await_waiting(3, Duration::from_secs(30));
+            assert_eq!(
+                waiting.len(),
+                3,
+                "every invocation started and waits: {waiting:?}"
+            );
+            for (request, code) in requests.iter().zip([10, 11, 12]).rev() {
+                runner
+                    .complete(&request.invocation, Ok(output(code)))
+                    .expect("a held invocation takes its completion");
+            }
+            drivers
+                .into_iter()
+                .map(|driver| {
+                    driver
+                        .join()
+                        .expect("a driving thread")
+                        .expect("completed")
+                        .code
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            codes,
+            vec![Some(10), Some(11), Some(12)],
+            "each invocation got its own completion, whatever the order they were delivered in"
+        );
+        assert_eq!(
+            runner.endings(),
+            requests
+                .iter()
+                .rev()
+                .map(|request| (request.invocation.clone(), Ending::Completed))
+                .collect::<Vec<_>>(),
+            "the endings are recorded in the order the test delivered them"
+        );
+        let ran: Vec<InvocationId> = runner
+            .ran()
+            .into_iter()
+            .map(|ran| ran.request.invocation)
+            .collect();
+        let mut expected: Vec<InvocationId> = requests
+            .iter()
+            .map(|request| request.invocation.clone())
+            .collect();
+        let mut recorded = ran.clone();
+        recorded.sort_by_key(InvocationId::render);
+        expected.sort_by_key(InvocationId::render);
+        assert_eq!(
+            recorded, expected,
+            "every request is recorded with its identity"
+        );
+        assert!(runner.waiting().is_empty());
+    }
+
+    #[test]
+    fn the_scaffold_runner_refuses_and_counts_a_second_completion_and_an_unknown_one() {
+        let runner = RecordingRunner::new();
+        runner.hold();
+        let request = gate(0);
+        let outcome = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| runner.run_blocking(&request));
+            assert_eq!(runner.await_waiting(1, Duration::from_secs(30)).len(), 1);
+            runner
+                .complete(&request.invocation, Ok(output(0)))
+                .expect("the first completion");
+            let second = runner.complete(&request.invocation, Ok(output(1)));
+            let outcome = driver.join().expect("the driving thread");
+            (second, outcome)
+        });
+        let (second, finished) = outcome;
+        assert!(
+            second.is_err(),
+            "a second completion of one invocation is refused"
+        );
+        assert_eq!(
+            finished.expect("completed").code,
+            Some(0),
+            "the first completion stood"
+        );
+        assert!(
+            runner.complete(&gate(7).invocation, Ok(output(0))).is_err(),
+            "a completion for an invocation this runner never held is refused"
+        );
+        assert_eq!(runner.refused_completions(), 2, "both refusals are counted");
+        assert_eq!(runner.endings().len(), 1, "one invocation, one ending");
+    }
+
+    #[test]
+    fn the_scaffold_runner_ends_a_cancelled_or_dropped_invocation_exactly_once() {
+        let runner = RecordingRunner::new();
+        runner.hold();
+        let cancelled = gate(0);
+        let cancellation = Cancellation::new();
+        let outcome = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| {
+                runner.run_blocking_with(&cancelled, RunnerCall::new(cancellation.clone()))
+            });
+            assert_eq!(runner.await_waiting(1, Duration::from_secs(30)).len(), 1);
+            cancellation.cancel();
+            driver.join().expect("the driving thread")
+        });
+        let error = outcome.expect_err("a cancelled invocation reports an error");
+        assert!(error.is_cancelled(), "{error}");
+        assert_eq!(error.fate, ProcessFate::Gone);
+        assert!(
+            runner
+                .complete(&cancelled.invocation, Ok(output(0)))
+                .is_err(),
+            "a completion after the cancellation finds nothing to complete"
+        );
+
+        let dropped = gate(1);
+        {
+            let mut future = runner.run(&dropped, RunnerCall::default());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut context).is_pending(), "held");
+            assert_eq!(runner.waiting(), vec![dropped.invocation.clone()]);
+        }
+        assert!(
+            runner.waiting().is_empty(),
+            "dropping the future released the hold"
+        );
+        assert_eq!(
+            runner.endings(),
+            vec![
+                (cancelled.invocation.clone(), Ending::Cancelled),
+                (dropped.invocation.clone(), Ending::Abandoned),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_scaffold_runner_records_the_policy_and_image_each_invocation_ran_under() {
+        let host = RecordingRunner::new();
+        host.run_blocking(&gate(0)).expect("runs");
+        let recorded = host.ran();
+        assert_eq!(recorded.len(), 1);
+        for ran in &recorded {
+            assert_eq!(ran.policy, crate::runner::policy::host_policy());
+            assert_eq!(ran.image_id, None, "a host boundary has no image");
+        }
+
+        let declared = RunnerPolicy {
+            kind: RunnerKind::Container,
+            policy: RunnerContract::ContainerV1,
+            image: Some(ImageIdentity {
+                reference: "upstroke/agents:2026-09".to_owned(),
+                id: "sha256:0f0e0d0c".to_owned(),
+                digest: None,
+            }),
+            credential_volumes: None,
+        };
+        let container = RecordingRunner::new().declaring(declared.clone());
+        container.run_blocking(&gate(1)).expect("runs");
+        let recorded = container.ran();
+        assert_eq!(recorded.len(), 1);
+        for ran in &recorded {
+            assert_eq!(ran.policy, declared);
+            assert_eq!(ran.image_id.as_deref(), Some("sha256:0f0e0d0c"));
+            assert_eq!(ran.request.invocation, gate(1).invocation);
+        }
+    }
+
+    #[test]
+    fn the_scaffold_runner_fails_a_shell_or_agent_probe_on_demand() {
+        let runner = RecordingRunner::new();
+        runner.fail_probe(
+            ProbeTarget::Shell,
+            ProbeFailure::Exit {
+                code: 127,
+                stderr: "sh: not found".to_owned(),
+            },
+        );
+        let refused = crate::runner::host::run_shell_probe(
+            &runner,
+            ShellKind::native(),
+            std::env::temp_dir(),
+            InvocationId::probe(ProbeTarget::Shell, 0).expect("a probe identity"),
+        )
+        .expect_err("the shell probe fails when told to");
+        assert!(refused.to_string().contains("127"), "{refused}");
+        crate::runner::host::run_shell_probe(
+            &runner,
+            ShellKind::native(),
+            std::env::temp_dir(),
+            InvocationId::probe(ProbeTarget::Shell, 1).expect("a probe identity"),
+        )
+        .expect("a failure is used once; the next shell probe passes");
+
+        let agent = AgentId::new(crate::agent::claude::ADAPTER_ID);
+        runner.fail_probe(
+            ProbeTarget::Agent(agent.clone()),
+            ProbeFailure::NeverStarted,
+        );
+        let probe = crate::agent::probe_request(
+            crate::agent::claude::ADAPTER_ID,
+            ShellKind::native().spec("exit 0"),
+            0,
+            Duration::from_secs(5),
+        )
+        .expect("a probe request");
+        let error = runner
+            .run_blocking(&probe)
+            .expect_err("the agent probe fails when told to");
+        assert_eq!(error.fate, ProcessFate::NeverStarted);
+        assert!(!error.is_cancelled());
+        assert_eq!(
+            runner.ran().len(),
+            3,
+            "failed probes are recorded like any request"
+        );
+    }
+}

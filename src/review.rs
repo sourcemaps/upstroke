@@ -544,7 +544,7 @@ pub fn run_review(
                 invocations.reask.clone()
             },
         );
-        let output = match runner.run(&request) {
+        let output = match runner.run_blocking(&request) {
             Ok(output) => output,
             Err(error) if error.fate.is_unresolved() => return Err(error.into()),
             Err(error) => {
@@ -1144,8 +1144,8 @@ mod tests {
 
     struct FatedRunner(crate::error::ProcessFate);
 
-    impl Runner for FatedRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for FatedRunner {
+        fn run_inline(
             &self,
             request: &RunnerRequest,
         ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
@@ -1574,8 +1574,8 @@ mod tests {
         seen: std::sync::Mutex<Vec<(ExecutionRole, String)>>,
     }
 
-    impl Runner for RecordingRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+        fn run_inline(
             &self,
             request: &RunnerRequest,
         ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
@@ -1583,7 +1583,7 @@ mod tests {
                 .lock()
                 .expect("recorder")
                 .push((request.role.clone(), request.invocation.render()));
-            Runner::run(&self.inner, request)
+            self.inner.run_blocking(request)
         }
     }
 

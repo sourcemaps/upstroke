@@ -325,3 +325,40 @@ is only required to describe a whole branch while its arm reads
 the opposite prose, and this says so at the point where the two claims
 diverge rather than leaving a stale pin to fail with a message about
 Markdown.
+
+## `mod scaffold_runner {`
+
+The substrate's runner double, `scaffold::RecordingRunner`, is what PR11's coordinator tests drive
+(`tests_acceptance.determinism`: "FakeRunner with explicit start/complete control, recorded
+RunnerRequests, InvocationIds (incl. shell and agent probes), and the declared RunnerPolicy and
+image id each invocation executed under … and to fail a shell or agent probe on demand"). These
+tests hold the double to that sentence before anything leans on it.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_holds_each_invocation_until_the_test_completes_it_in_any_order() {`
+
+Three invocations on three threads all start and wait; the test delivers their results in reverse
+order, and each gets its own; the endings are recorded in the order the test delivered them; every
+request is recorded with its identity.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_refuses_and_counts_a_second_completion_and_an_unknown_one() {`
+
+A completion is delivered exactly once: a second delivery for one invocation, and a delivery for an
+invocation the runner never held, are refused and both counted, and the first delivery stands.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_ends_a_cancelled_or_dropped_invocation_exactly_once() {`
+
+A held invocation whose call is cancelled from another thread resolves cancelled with fate `Gone`,
+and a completion after that finds nothing to complete; a held invocation whose future is dropped
+releases its hold and is recorded abandoned. One ending each.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_records_the_policy_and_image_each_invocation_ran_under() {`
+
+By default an invocation records the host policy and no image; under a declared container policy it
+records that policy and its immutable image id, beside the request it carried.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_fails_a_shell_or_agent_probe_on_demand() {`
+
+Through a real consumer: the production shell probe (`host::run_shell_probe`) refuses when the
+double was told to fail the next shell probe with an exit code, and passes on the one after, since a
+failure is used once; an agent probe told to never start is a `NeverStarted` error that is not a
+cancellation. Failed probes are recorded like any request.

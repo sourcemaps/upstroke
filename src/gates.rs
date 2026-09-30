@@ -144,7 +144,7 @@ impl Gate for ShellGate {
         ws: &Workspace,
     ) -> Result<GateResult, UpstrokeError> {
         let (command, timeout) = self.command();
-        let out = runner.run(&crate::runner::gate_request(
+        let out = runner.run_blocking(&crate::runner::gate_request(
             command,
             ws.root().to_path_buf(),
             timeout,
@@ -791,8 +791,8 @@ mod tests {
         }
     }
 
-    impl Runner for ScriptedRunner {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for ScriptedRunner {
+        fn run_inline(
             &self,
             request: &crate::runner::RunnerRequest,
         ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {

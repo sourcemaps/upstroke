@@ -132,6 +132,7 @@ fn excessive_output_is_bounded_and_terminates_the_tree() {
         b"",
         Duration::from_secs(30),
         TEST_LIMIT,
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise noisy child");
@@ -158,6 +159,7 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a modest stderr writer");
@@ -186,6 +188,7 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a noisy stderr child");
@@ -399,6 +402,7 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         command,
         b"",
         Duration::from_secs(3),
+        &|| false,
         &mut hooks,
     )
     .expect_err("the armed fault ends the supervision");
@@ -462,6 +466,7 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         shell("echo next"),
         b"",
         Duration::from_secs(30),
+        &|| false,
         &mut hooks,
     )
     .unwrap_or_else(|failure| panic!("{tag}: the next command runs: {}", failure.error));
@@ -567,6 +572,7 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         command,
         b"",
         Duration::from_secs(30),
+        &|| false,
         &mut hooks,
     )
     .expect_err("the error after the spawn ends the supervision");
@@ -1998,6 +2004,7 @@ fn the_output_limit_path_settles_a_windows_grandchild_too() {
         b"",
         Duration::from_secs(60),
         64 * 1024,
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise the tree");
@@ -4150,6 +4157,7 @@ fn a_spawn_that_fails_before_any_process_exists_is_never_started() {
         Command::new("upstroke-no-such-program-a5f2"),
         b"",
         Duration::from_secs(30),
+        &|| false,
         &mut NoHooks,
     )
     .expect_err("an absent program cannot be spawned");
@@ -4195,6 +4203,7 @@ fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
             shell("sleep 30"),
             b"",
             Duration::from_secs(30),
+            &|| false,
             &mut hooks,
         )
         .expect_err("the funnel was made to fail after the spawn");

@@ -1055,7 +1055,7 @@ fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_pr
 
     let tree = fixture::scratch("st07-process-phases");
     let dir = tree.path().to_path_buf();
-    let ended = crate::runner::Runner::run(&runner, &trivial_request(&dir))
+    let ended = crate::runner::Runner::run_blocking(&runner, &trivial_request(&dir))
         .expect("the trivial command runs");
     assert!(
         !ended.timed_out,
@@ -1093,7 +1093,8 @@ fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_pr
             0,
         ),
     );
-    let terminated = crate::runner::Runner::run(&runner, &request).expect("the timeout terminates");
+    let terminated =
+        crate::runner::Runner::run_blocking(&runner, &request).expect("the timeout terminates");
     assert!(
         terminated.timed_out,
         "the sleeping child outlives its timeout: {terminated:?}"
@@ -1131,7 +1132,7 @@ fn spawn_kill_child() {
         panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
     }
     let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks));
-    let outcome = crate::runner::Runner::run(&runner, &trivial_request(&dir));
+    let outcome = crate::runner::Runner::run_blocking(&runner, &trivial_request(&dir));
     panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
 }
 

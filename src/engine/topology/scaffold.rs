@@ -1,7 +1,10 @@
 //! Extended notes: `docs/internals/engine/topology/scaffold.md`
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use crate::agent::proc::{ProcessOutput, SpawnHooks};
@@ -16,7 +19,10 @@ use crate::ir::{
 use crate::review::{PassBinding, ReviewPlan};
 use crate::rundir::RunDirHooks;
 use crate::runner::container::ContainerHooks;
-use crate::runner::{AgentId, CommandSpec, ExecutionRole, InvocationId, Runner, RunnerRequest};
+use crate::runner::{
+    AgentId, Cancellation, CommandSpec, ExecutionRole, InvocationId, ProbeTarget, RunFuture,
+    Runner, RunnerCall, RunnerRequest,
+};
 use crate::topology::effects::{
     EffectSiteId, EventSite, HookHarness, HookPhase, Injection, InjectionMode, SubEffectPoint,
 };
@@ -390,15 +396,51 @@ pub(super) struct Ran {
     pub(super) command: CommandSpec,
     pub(super) durable_at_spawn: Vec<String>,
     pub(super) head_at_spawn: Option<String>,
+    pub(super) request: RunnerRequest,
+    pub(super) policy: RunnerPolicy,
+    pub(super) image_id: Option<String>,
 }
 
 pub(super) const GATE_DIAGNOSTIC: &str = "scaffold gate rejected the diff";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProbeFailure {
+    Exit { code: i32, stderr: String },
+    NeverStarted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ending {
+    Completed,
+    Failed,
+    Cancelled,
+    Abandoned,
+}
+
+#[derive(Debug)]
+struct Held {
+    invocation: InvocationId,
+    waker: Option<Waker>,
+    delivered: Option<Result<ProcessOutput, crate::runner::RunnerError>>,
+}
+
+#[derive(Debug, Default)]
+struct Control {
+    declared: Option<RunnerPolicy>,
+    holding: bool,
+    failing: Vec<(ProbeTarget, ProbeFailure)>,
+    held: Vec<Held>,
+    endings: Vec<(InvocationId, Ending)>,
+    refused: u32,
+}
 
 #[derive(Debug, Default)]
 pub(super) struct RecordingRunner {
     ran: Mutex<Vec<Ran>>,
     codes: Mutex<Vec<i32>>,
     log: Mutex<Option<PathBuf>>,
+    control: Mutex<Control>,
+    changed: Condvar,
 }
 
 impl RecordingRunner {
@@ -415,9 +457,8 @@ impl RecordingRunner {
 
     pub(super) fn failing_with(codes: Vec<i32>) -> Self {
         Self {
-            ran: Mutex::new(Vec::new()),
             codes: Mutex::new(codes),
-            log: Mutex::new(None),
+            ..Self::default()
         }
     }
 
@@ -426,6 +467,86 @@ impl RecordingRunner {
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(log.to_path_buf());
+    }
+
+    pub(super) fn declaring(self, policy: RunnerPolicy) -> Self {
+        self.control().declared = Some(policy);
+        self
+    }
+
+    pub(super) fn hold(&self) {
+        self.control().holding = true;
+    }
+
+    pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {
+        self.control().failing.push((target, failure));
+    }
+
+    pub(super) fn waiting(&self) -> Vec<InvocationId> {
+        waiting_in(&self.control())
+    }
+
+    pub(super) fn await_waiting(&self, count: usize, within: Duration) -> Vec<InvocationId> {
+        let deadline = std::time::Instant::now() + within;
+        let mut control = self.control();
+        loop {
+            let waiting = waiting_in(&control);
+            let now = std::time::Instant::now();
+            if waiting.len() >= count || now >= deadline {
+                return waiting;
+            }
+            control = self
+                .changed
+                .wait_timeout(control, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub(super) fn complete(
+        &self,
+        invocation: &InvocationId,
+        result: Result<ProcessOutput, crate::runner::RunnerError>,
+    ) -> Result<(), String> {
+        let mut control = self.control();
+        let Some(held) = control
+            .held
+            .iter_mut()
+            .find(|held| held.invocation == *invocation)
+        else {
+            control.refused += 1;
+            return Err(format!("`{invocation}` is not held by this runner"));
+        };
+        if held.delivered.is_some() {
+            control.refused += 1;
+            return Err(format!("`{invocation}` was already completed"));
+        }
+        let ending = if result.is_ok() {
+            Ending::Completed
+        } else {
+            Ending::Failed
+        };
+        held.delivered = Some(result);
+        if let Some(waker) = held.waker.take() {
+            waker.wake();
+        }
+        control.endings.push((invocation.clone(), ending));
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    pub(super) fn endings(&self) -> Vec<(InvocationId, Ending)> {
+        self.control().endings.clone()
+    }
+
+    pub(super) fn refused_completions(&self) -> u32 {
+        self.control().refused
+    }
+
+    fn control(&self) -> std::sync::MutexGuard<'_, Control> {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn durable_now(&self) -> Vec<String> {
@@ -456,10 +577,8 @@ impl RecordingRunner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
-}
 
-impl Runner for RecordingRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> {
+    fn start(&self, request: &RunnerRequest) -> Started {
         let durable_at_spawn = self.durable_now();
         let head_at_spawn = {
             let output = crate::workspace_manager::fixture::git_out(
@@ -471,6 +590,12 @@ impl Runner for RecordingRunner {
                 .success()
                 .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         };
+        let mut control = self.control();
+        let policy = control
+            .declared
+            .clone()
+            .unwrap_or_else(crate::runner::policy::host_policy);
+        let image_id = policy.image.as_ref().map(|image| image.id.clone());
         self.ran
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -482,13 +607,63 @@ impl Runner for RecordingRunner {
                 command: request.command.clone(),
                 durable_at_spawn,
                 head_at_spawn,
+                request: request.clone(),
+                policy,
+                image_id,
             });
+        if let ExecutionRole::Probe(target) = &request.role {
+            if let Some(index) = control
+                .failing
+                .iter()
+                .position(|(failing, _)| failing == target)
+            {
+                let (_, failure) = control.failing.remove(index);
+                let ending = match failure {
+                    ProbeFailure::Exit { .. } => Ending::Completed,
+                    ProbeFailure::NeverStarted => Ending::Failed,
+                };
+                control.endings.push((request.invocation.clone(), ending));
+                self.changed.notify_all();
+                return Started::Ended(match failure {
+                    ProbeFailure::Exit { code, stderr } => Ok(ProcessOutput {
+                        code: Some(code),
+                        stdout: String::new(),
+                        stderr,
+                        duration: Duration::from_millis(1),
+                        timed_out: false,
+                        output_limited: false,
+                    }),
+                    ProbeFailure::NeverStarted => Err(crate::runner::RunnerError::never_started(
+                        &request.invocation,
+                        UpstrokeError::Refused {
+                            message: format!(
+                                "the scaffold runner was told to fail `{}` before it started",
+                                request.invocation
+                            ),
+                        },
+                    )),
+                });
+            }
+        }
+        if control.holding {
+            control.held.push(Held {
+                invocation: request.invocation.clone(),
+                waker: None,
+                delivered: None,
+            });
+            self.changed.notify_all();
+            return Started::Held;
+        }
+        control
+            .endings
+            .push((request.invocation.clone(), Ending::Completed));
+        drop(control);
         let mut codes = self
             .codes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let code = if codes.is_empty() { 0 } else { codes.remove(0) };
-        Ok(ProcessOutput {
+        Started::Ended(Ok(ProcessOutput {
             code: Some(code),
             stdout: if code == 0 {
                 String::new()
@@ -499,6 +674,142 @@ impl Runner for RecordingRunner {
             duration: Duration::from_millis(1),
             timed_out: false,
             output_limited: false,
+        }))
+    }
+
+    fn settle_held(
+        &self,
+        invocation: &InvocationId,
+        cancellation: &Cancellation,
+        waker: &Waker,
+    ) -> Poll<Result<ProcessOutput, crate::runner::RunnerError>> {
+        let mut control = self.control();
+        let Some(index) = control
+            .held
+            .iter()
+            .position(|held| held.invocation == *invocation)
+        else {
+            return Poll::Ready(Err(crate::runner::RunnerError::unresolved(
+                invocation,
+                UpstrokeError::Refused {
+                    message: format!("`{invocation}` vanished from the scaffold runner's hold"),
+                },
+            )));
+        };
+        let delivered = control
+            .held
+            .get_mut(index)
+            .and_then(|held| held.delivered.take());
+        if let Some(result) = delivered {
+            control.held.remove(index);
+            self.changed.notify_all();
+            return Poll::Ready(result);
+        }
+        if cancellation.register(waker) {
+            control.held.remove(index);
+            control
+                .endings
+                .push((invocation.clone(), Ending::Cancelled));
+            self.changed.notify_all();
+            return Poll::Ready(Err(crate::runner::RunnerError::cancelled(
+                invocation,
+                crate::error::ProcessFate::Gone,
+            )));
+        }
+        if let Some(held) = control.held.get_mut(index) {
+            held.waker = Some(waker.clone());
+        }
+        Poll::Pending
+    }
+
+    fn abandon(&self, invocation: &InvocationId) {
+        let mut control = self.control();
+        if let Some(index) = control
+            .held
+            .iter()
+            .position(|held| held.invocation == *invocation)
+        {
+            let held = control.held.remove(index);
+            if held.delivered.is_none() {
+                control
+                    .endings
+                    .push((invocation.clone(), Ending::Abandoned));
+            }
+            self.changed.notify_all();
+        }
+    }
+}
+
+fn waiting_in(control: &Control) -> Vec<InvocationId> {
+    control
+        .held
+        .iter()
+        .filter(|held| held.delivered.is_none())
+        .map(|held| held.invocation.clone())
+        .collect()
+}
+
+enum Started {
+    Ended(Result<ProcessOutput, crate::runner::RunnerError>),
+    Held,
+}
+
+struct Invocation<'a> {
+    runner: &'a RecordingRunner,
+    request: &'a RunnerRequest,
+    cancellation: Cancellation,
+    held: bool,
+    ended: bool,
+}
+
+impl Future for Invocation<'_> {
+    type Output = Result<ProcessOutput, crate::runner::RunnerError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.held {
+            if self.cancellation.is_cancelled() {
+                self.ended = true;
+                return Poll::Ready(Err(crate::runner::RunnerError::cancelled(
+                    &self.request.invocation,
+                    crate::error::ProcessFate::NeverStarted,
+                )));
+            }
+            match self.runner.start(self.request) {
+                Started::Ended(result) => {
+                    self.ended = true;
+                    return Poll::Ready(result);
+                }
+                Started::Held => self.held = true,
+            }
+        }
+        let polled = self.runner.settle_held(
+            &self.request.invocation,
+            &self.cancellation,
+            context.waker(),
+        );
+        if polled.is_ready() {
+            self.ended = true;
+        }
+        polled
+    }
+}
+
+impl Drop for Invocation<'_> {
+    fn drop(&mut self) {
+        if self.held && !self.ended {
+            self.runner.abandon(&self.request.invocation);
+        }
+    }
+}
+
+impl Runner for RecordingRunner {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        Box::pin(Invocation {
+            runner: self,
+            request,
+            cancellation: call.into_parts().cancellation,
+            held: false,
+            ended: false,
         })
     }
 }
@@ -710,7 +1021,7 @@ impl super::attempt::ReviewPasses for ScaffoldReviews {
             cx.timeout,
             invocations.pass.clone(),
         );
-        if let Err(error) = runner.run(&request) {
+        if let Err(error) = runner.run_blocking(&request) {
             if error.fate.is_unresolved() {
                 return Err(error.into());
             }

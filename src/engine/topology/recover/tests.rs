@@ -849,8 +849,8 @@ impl RecordingRunner {
     }
 }
 
-impl Runner for RecordingRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+    fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -913,7 +913,7 @@ impl AgentAdapter for StubAdapter {
             0,
             Duration::from_secs(30),
         )?;
-        let output = runner.run(&request)?;
+        let output = runner.run_blocking(&request)?;
         if output.code != Some(0) {
             return Err(UpstrokeError::Agent {
                 message: format!("`claude --version` exited {:?}", output.code),
@@ -3949,8 +3949,8 @@ struct ProbeContainerRunner<'a> {
     failing: String,
 }
 
-impl Runner for ProbeContainerRunner<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for ProbeContainerRunner<'_> {
+    fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         use crate::runner::container::intent::{ContainerIntent, ContainerName};
         use crate::runner::container::runtime::CreateSpec;
         use crate::runner::container::{
@@ -4471,7 +4471,7 @@ fn kill_during_recovery_repeats_recovery() {
             .expect("a probe identity for the spawned child"),
     };
     let output = crate::runner::host::HostRunner::new()
-        .run(&request)
+        .run_blocking(&request)
         .expect("the child runs");
     assert_ne!(
         output.code,
@@ -8613,7 +8613,7 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
             cx.timeout,
             invocations.pass.clone(),
         );
-        if let Err(error) = runner.run(&request) {
+        if let Err(error) = runner.run_blocking(&request) {
             if error.fate.is_unresolved() {
                 return Err(error.into());
             }
@@ -8689,8 +8689,8 @@ impl DrivenRunner {
     }
 }
 
-impl Runner for DrivenRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for DrivenRunner {
+    fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         let head = {
             let output = crate::workspace_manager::fixture::git_out(
                 &request.workspace,
@@ -16721,7 +16721,7 @@ fn worktree_lease_answer(fixture: &Fixture) -> String {
             fixture.git_dir.to_string_lossy().into_owned(),
         );
     let output = crate::runner::host::HostRunner::new()
-        .run(&crate::runner::gate_request(
+        .run_blocking(&crate::runner::gate_request(
             spec,
             fixture.root.clone(),
             Duration::from_secs(60),
@@ -16972,16 +16972,16 @@ struct SpawningRunner {
     timeout: Option<Duration>,
 }
 
-impl Runner for SpawningRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for SpawningRunner {
+    fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         if request.role == crate::runner::ExecutionRole::Implement {
-            self.host.run(&RunnerRequest {
+            self.host.run_blocking(&RunnerRequest {
                 command: self.program.clone(),
                 timeout: self.timeout.unwrap_or(request.timeout),
                 ..request.clone()
             })?;
         }
-        self.editing.run(request)
+        self.editing.run_blocking(request)
     }
 }
 
@@ -20483,7 +20483,7 @@ fn kill_inside_closure_recovers() {
                 .expect("a probe identity for the spawned child"),
         };
         let output = crate::runner::host::HostRunner::new()
-            .run(&request)
+            .run_blocking(&request)
             .expect("the child runs");
         assert_ne!(output.code, Some(0), "{shape}: the child died: {output:?}");
         assert!(

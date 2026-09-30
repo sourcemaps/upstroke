@@ -7724,7 +7724,7 @@ fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutpu
             0,
         ),
     );
-    let output = runner.run(&request).expect("the gate ran");
+    let output = runner.run_blocking(&request).expect("the gate ran");
     assert_eq!(
         output.code,
         Some(0),

@@ -109,7 +109,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::agent::AdapterSource;
-use crate::agent::ProcessOutput;
 use crate::error::UpstrokeError;
 use crate::events::log::{
     BarrierStep, EventLog, TopologyLine, establish_stable_prefix, first_line_digest,
@@ -123,7 +122,7 @@ use crate::rundir::{
     remove_marker, remove_private_husk, remove_public_husk, stage_commit_record, stage_marker,
     stage_owner_record, write_plan,
 };
-use crate::runner::{InvocationId, Runner, RunnerError, RunnerRequest};
+use crate::runner::{InvocationId, RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest};
 use crate::topology::effects::EventSite;
 use crate::topology::events::{RunStarted4, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{FrozenInputs, TopologyDelta, TopologyFold};
@@ -286,8 +285,8 @@ pub struct ShellProbe<'a> {
 }
 
 impl Runner for ShellProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
-        self.through.run(request)
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        self.through.run(request, call)
     }
 }
 
@@ -302,9 +301,9 @@ pub struct AgentProbe<'a> {
 }
 
 impl Runner for AgentProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         if !super::identity::is_slotted(&request.invocation) {
-            return Err(RunnerError::never_started(
+            return Box::pin(std::future::ready(Err(RunnerError::never_started(
                 &request.invocation,
                 UpstrokeError::Refused {
                     message: format!(
@@ -313,9 +312,9 @@ impl Runner for AgentProbe<'_> {
                         request.invocation
                     ),
                 },
-            ));
+            ))));
         }
-        self.through.run(request)
+        self.through.run(request, call)
     }
 }
 

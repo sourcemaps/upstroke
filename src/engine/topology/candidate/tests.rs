@@ -709,7 +709,7 @@ fn spawn_kill_child(fixture: &Fixture, which: &str) -> ProcessOutput {
         Err(_) => spec,
     };
     HostRunner::new()
-        .run(&gate_request(
+        .run_blocking(&gate_request(
             spec,
             fixture.root.clone(),
             Duration::from_secs(120),

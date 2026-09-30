@@ -56,8 +56,11 @@ impl Recording {
     }
 }
 
-impl Runner for Recording {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> {
+impl crate::runner::contract::tests::InlineRunner for Recording {
+    fn run_inline(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -102,7 +105,7 @@ impl AgentAdapter for Stub {
             0,
             Duration::from_secs(10),
         )?;
-        let output = runner.run(&request)?;
+        let output = runner.run_blocking(&request)?;
         if output.code != Some(0) {
             return Err(UpstrokeError::Agent {
                 message: format!("`{} --version` exited {:?}", self.0, output.code),
@@ -345,7 +348,7 @@ fn a_slotted_invocation_without_an_agent_binding_is_refused() {
         invocation: PreflightIdentities::agent(AGENT, 0).expect("a slotted probe identity"),
     };
     let error = registering
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("a slotted invocation with no agent binding cannot be accounted");
     assert!(error.to_string().contains("no agent binding"), "{error}");
     assert!(
@@ -372,9 +375,9 @@ fn one_identity_cannot_be_registered_twice() {
         agent: None,
         invocation: PreflightIdentities::shell(0).expect("the shell identity"),
     };
-    registering.run(&request).expect("the first runs");
+    registering.run_blocking(&request).expect("the first runs");
     let error = registering
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("the second shares an identity with the first");
     assert!(error.to_string().contains("already registered"), "{error}");
 }
@@ -403,7 +406,7 @@ fn a_gate_invocation_through_the_boundary_takes_no_slot() {
         invocation: gate,
     };
     registering
-        .run(&request)
+        .run_blocking(&request)
         .expect("a gate needs no slot pair");
     assert!(preflight.ledgers_balance());
 }

@@ -516,8 +516,8 @@ mod built_program_tests {
         }
     }
 
-    impl Runner for Boundary {
-        fn run(
+    impl crate::runner::contract::tests::InlineRunner for Boundary {
+        fn run_inline(
             &self,
             request: &RunnerRequest,
         ) -> Result<ProcessOutput, crate::runner::RunnerError> {
@@ -1002,7 +1002,7 @@ mod tests {
                 InvocationId::probe(crate::runner::ProbeTarget::Shell, ordinal)
                     .expect("a shell probe identity"),
             );
-            runner.run(&request).expect("git --version runs")
+            runner.run_blocking(&request).expect("git --version runs")
         };
 
         let named = run_one("git", 0);

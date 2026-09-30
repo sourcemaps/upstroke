@@ -8548,8 +8548,8 @@ impl RecordingRunner {
     }
 }
 
-impl crate::runner::Runner for RecordingRunner {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<ProcessOutput, crate::runner::RunnerError> {
@@ -8562,7 +8562,7 @@ impl crate::runner::Runner for RecordingRunner {
             slotted: request.role.is_slotted(),
             stdin: String::from_utf8_lossy(&request.command.stdin).into_owned(),
         });
-        crate::runner::Runner::run(&self.inner, request)
+        crate::runner::Runner::run_blocking(&self.inner, request)
     }
 }
 

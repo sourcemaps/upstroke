@@ -6,8 +6,12 @@
     clippy::disallowed_macros
 )]
 
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use crate::agent::ProcessOutput;
@@ -17,6 +21,7 @@ use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, ProcessSite, SubEffectPoint,
 };
 
+use super::container::ContainerHooks;
 use super::invocation::InvocationId;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,6 +207,7 @@ pub struct RunnerError {
     pub fate: ProcessFate,
     #[source]
     pub source: Box<UpstrokeError>,
+    cancelled: bool,
 }
 
 impl RunnerError {
@@ -211,7 +217,34 @@ impl RunnerError {
             invocation: invocation.clone(),
             fate,
             source: Box::new(source),
+            cancelled: false,
         }
+    }
+
+    #[must_use]
+    pub fn cancelled(invocation: &InvocationId, fate: ProcessFate) -> Self {
+        let message = match fate {
+            ProcessFate::NeverStarted => {
+                "the invocation was cancelled before any process of it started".to_owned()
+            }
+            ProcessFate::Gone => "the invocation was cancelled, and the Runner terminated and \
+                                  reaped its process tree before reporting it"
+                .to_owned(),
+            ProcessFate::Unresolved => "the invocation was cancelled, and the Runner could not \
+                                        establish that its process tree is gone"
+                .to_owned(),
+        };
+        Self {
+            invocation: invocation.clone(),
+            fate,
+            source: Box::new(UpstrokeError::Refused { message }),
+            cancelled: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        self.cancelled
     }
 
     #[must_use]
@@ -240,8 +273,176 @@ impl From<RunnerError> for UpstrokeError {
     }
 }
 
+pub type RunFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ProcessOutput, RunnerError>> + Send + 'a>>;
+
 pub trait Runner: Send + Sync {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError>;
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a>;
+
+    fn run_blocking(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        block_on(self.run(request, RunnerCall::default()))
+    }
+
+    fn run_blocking_with<'a>(
+        &'a self,
+        request: &'a RunnerRequest,
+        call: RunnerCall<'a>,
+    ) -> Result<ProcessOutput, RunnerError> {
+        block_on(self.run(request, call))
+    }
+}
+
+// Concurrency protocol. A `Cancellation` is shared by whoever may cancel an
+// invocation and by the invocation observing it; the signal is the one owner of
+// both fields. `requested` is the linearization point: it only ever goes from
+// false to true, and `cancel` is idempotent. A pending future registers its
+// waker and then re-reads `requested`, and `cancel` sets `requested` before it
+// drains the wakers, so a registration either sees the flag or is drained. The
+// waker list is the only state behind the lock, held for a push or a drain.
+#[derive(Debug, Clone, Default)]
+pub struct Cancellation {
+    signal: Arc<CancelSignal>,
+}
+
+#[derive(Debug, Default)]
+struct CancelSignal {
+    requested: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl Cancellation {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        if self.signal.requested.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let wakers = std::mem::take(
+            &mut *self
+                .signal
+                .wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.signal.requested.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn register(&self, waker: &Waker) -> bool {
+        {
+            let mut wakers = self
+                .signal
+                .wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !wakers.iter().any(|held| held.will_wake(waker)) {
+                wakers.push(waker.clone());
+            }
+        }
+        self.is_cancelled()
+    }
+}
+
+pub struct RunnerCall<'a> {
+    cancellation: Cancellation,
+    spawn: Option<&'a mut (dyn SpawnHooks + Send)>,
+    container: Option<&'a mut (dyn ContainerHooks + Send)>,
+}
+
+impl Default for RunnerCall<'_> {
+    fn default() -> Self {
+        Self::new(Cancellation::new())
+    }
+}
+
+impl std::fmt::Debug for RunnerCall<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunnerCall")
+            .field("cancellation", &self.cancellation)
+            .field("spawn", &self.spawn.is_some())
+            .field("container", &self.container.is_some())
+            .finish()
+    }
+}
+
+impl<'a> RunnerCall<'a> {
+    #[must_use]
+    pub fn new(cancellation: Cancellation) -> Self {
+        Self {
+            cancellation,
+            spawn: None,
+            container: None,
+        }
+    }
+
+    #[must_use]
+    pub fn observed_by(mut self, spawn: &'a mut (dyn SpawnHooks + Send)) -> Self {
+        self.spawn = Some(spawn);
+        self
+    }
+
+    #[must_use]
+    pub fn observed_in_container_by(
+        mut self,
+        container: &'a mut (dyn ContainerHooks + Send),
+    ) -> Self {
+        self.container = Some(container);
+        self
+    }
+
+    #[must_use]
+    pub const fn cancellation(&self) -> &Cancellation {
+        &self.cancellation
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> CallParts<'a> {
+        CallParts {
+            cancellation: self.cancellation,
+            spawn: self.spawn,
+            container: self.container,
+        }
+    }
+}
+
+pub struct CallParts<'a> {
+    pub cancellation: Cancellation,
+    pub spawn: Option<&'a mut (dyn SpawnHooks + Send)>,
+    pub container: Option<&'a mut (dyn ContainerHooks + Send)>,
+}
+
+struct Unpark(std::thread::Thread);
+
+impl Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::park();
+    }
 }
 
 pub const SPAWN_SITE: EffectSiteId = EffectSiteId::Process(ProcessSite::Spawn);
@@ -294,6 +495,16 @@ pub(crate) mod tests {
     use crate::runner::invocation::{AttemptRole, SequenceRole};
     use crate::topology::events::{AttemptNumber, GenerationId, SequenceId};
     use crate::topology::registry::TaskKey;
+
+    pub(crate) trait InlineRunner: Send + Sync {
+        fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError>;
+    }
+
+    impl<T: InlineRunner> Runner for T {
+        fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+            Box::pin(async move { self.run_inline(request) })
+        }
+    }
 
     #[test]
     fn command_spec_carries_exactly_the_four_frozen_fields() {
@@ -454,6 +665,253 @@ pub(crate) mod tests {
         takes_dyn(&runner);
         let boxed: Box<dyn Runner> = Box::new(host::HostRunner::new());
         takes_dyn(boxed.as_ref());
+    }
+
+    fn exit_request(code: i32, ordinal: u32) -> RunnerRequest {
+        gate_request(
+            crate::gates::ShellKind::native().spec(&format!("exit {code}")),
+            std::env::temp_dir(),
+            Duration::from_secs(60),
+            InvocationId::attempt(
+                TaskKey(0),
+                GenerationId(0),
+                AttemptNumber(1),
+                AttemptRole::Gate(ordinal),
+                0,
+            ),
+        )
+    }
+
+    fn finished(code: i32) -> ProcessOutput {
+        ProcessOutput {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        }
+    }
+
+    struct Gated {
+        release: Cancellation,
+        polled: std::sync::mpsc::SyncSender<InvocationId>,
+    }
+
+    impl Runner for Gated {
+        fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+            let cancellation = call.into_parts().cancellation;
+            let mut announced = false;
+            Box::pin(std::future::poll_fn(move |context| {
+                if !announced {
+                    announced = true;
+                    self.polled
+                        .try_send(request.invocation.clone())
+                        .expect("the test holds the receiving end and has room");
+                }
+                if self.release.register(context.waker()) {
+                    return Poll::Ready(Ok(finished(0)));
+                }
+                if cancellation.register(context.waker()) {
+                    return Poll::Ready(Err(RunnerError::cancelled(
+                        &request.invocation,
+                        ProcessFate::Gone,
+                    )));
+                }
+                Poll::Pending
+            }))
+        }
+    }
+
+    fn gated() -> (Gated, std::sync::mpsc::Receiver<InvocationId>) {
+        let (polled, receiver) = std::sync::mpsc::sync_channel(16);
+        (
+            Gated {
+                release: Cancellation::new(),
+                polled,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn the_runners_future_is_send_and_borrows_one_request_behind_the_same_dyn() {
+        fn is_send<T: Send>(_: &T) {}
+        let runner: Box<dyn Runner> = Box::new(host::HostRunner::new());
+        let request = exit_request(7, 0);
+        let future = runner.run(&request, RunnerCall::default());
+        is_send(&future);
+        let output = block_on(future).expect("the gate runs");
+        assert_eq!(output.code, Some(7));
+        assert_eq!(
+            runner
+                .run_blocking(&request)
+                .expect("the gate runs again")
+                .code,
+            Some(7),
+            "the blocking adapter drives the same future to the same output"
+        );
+    }
+
+    #[test]
+    fn a_cancellation_is_idempotent_and_wakes_each_registration_once() {
+        struct Count(std::sync::atomic::AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let count = Arc::new(Count(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let cancellation = Cancellation::new();
+        let holder = cancellation.clone();
+
+        assert!(!cancellation.register(&waker), "nothing is cancelled yet");
+        assert!(
+            !cancellation.register(&waker),
+            "a second registration of the same waker is the same registration"
+        );
+        assert!(!holder.is_cancelled());
+        holder.cancel();
+        assert!(cancellation.is_cancelled(), "clones share one signal");
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            1,
+            "one registration, one wake"
+        );
+        holder.cancel();
+        cancellation.cancel();
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            1,
+            "a repeated cancel wakes nothing again"
+        );
+        assert!(
+            cancellation.register(&waker),
+            "a registration after the cancel reads it rather than waiting for a wake"
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_blocking_adapter_parks_until_another_thread_completes_the_invocation() {
+        let (runner, polled) = gated();
+        let request = exit_request(0, 1);
+        let output = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| runner.run_blocking(&request));
+            let started = polled
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the blocking adapter polled the invocation");
+            assert_eq!(started, request.invocation);
+            runner.release.cancel();
+            driver.join().expect("the driving thread")
+        });
+        assert_eq!(output.expect("released").code, Some(0));
+    }
+
+    #[test]
+    fn a_pending_invocation_cancelled_from_another_thread_resolves_as_cancelled() {
+        let (runner, polled) = gated();
+        let request = exit_request(0, 2);
+        let cancellation = Cancellation::new();
+        let outcome = std::thread::scope(|scope| {
+            let driver = scope.spawn(|| {
+                runner.run_blocking_with(&request, RunnerCall::new(cancellation.clone()))
+            });
+            polled
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the invocation started");
+            cancellation.cancel();
+            driver.join().expect("the driving thread")
+        });
+        let error = outcome.expect_err("a cancelled invocation reports an error");
+        assert!(error.is_cancelled(), "{error}");
+        assert_eq!(error.fate, ProcessFate::Gone);
+        assert_eq!(error.invocation, request.invocation);
+    }
+
+    #[test]
+    fn a_tokio_pool_awaits_the_runners_future_and_drives_the_host_on_a_blocking_thread() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("a multi-thread runtime");
+
+        let host: Arc<dyn Runner> = Arc::new(host::HostRunner::new());
+        let request = exit_request(9, 3);
+        let blocking = runtime.spawn_blocking(move || host.run_blocking(&request));
+        let supervised = runtime
+            .block_on(blocking)
+            .expect("the blocking thread returned");
+        assert_eq!(supervised.expect("the gate runs").code, Some(9));
+
+        let (runner, polled) = gated();
+        let runner = Arc::new(runner);
+        let awaiting = Arc::clone(&runner);
+        let task = runtime.spawn(async move {
+            let request = exit_request(0, 4);
+            awaiting.run(&request, RunnerCall::default()).await
+        });
+        polled
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a runtime worker polled the invocation");
+        runner.release.cancel();
+        let output = runtime
+            .block_on(task)
+            .expect("the task completed")
+            .expect("released");
+        assert_eq!(output.code, Some(0));
+    }
+
+    #[test]
+    fn no_implementor_overrides_the_blocking_adapter() {
+        fn walk(dir: &std::path::Path, into: &mut Vec<PathBuf>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("read src")
+                .map(|entry| entry.expect("entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, into);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    into.push(path);
+                }
+            }
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        walk(&root.join("src"), &mut files);
+        assert!(
+            files.len() > 100,
+            "the walk found the tree: {}",
+            files.len()
+        );
+        let mut found: Vec<(String, &str)> = Vec::new();
+        for file in &files {
+            let source = std::fs::read_to_string(file).expect("read a source file");
+            let code = crate::effects::blank_comments_and_strings(&source);
+            for needle in ["fn run_blocking(", "fn run_blocking_with<"] {
+                for _ in code.matches(needle) {
+                    let relative = file
+                        .strip_prefix(&root)
+                        .expect("under the root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    found.push((relative, needle));
+                }
+            }
+        }
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("src/runner/contract.rs".to_owned(), "fn run_blocking("),
+                ("src/runner/contract.rs".to_owned(), "fn run_blocking_with<"),
+            ],
+            "the blocking adapter is defined once, as the trait's provided methods; an \
+             implementor that overrides it would bypass the future every caller is promised"
+        );
     }
 
     #[test]
@@ -717,7 +1175,7 @@ pub(crate) mod tests {
                     .spec(&script(fixture.code))
                     .env("UPSTROKE_PARITY_PAYLOAD", fixture.payload);
                 let output = runner
-                    .run(&RunnerRequest {
+                    .run_blocking(&RunnerRequest {
                         command,
                         workspace: workspace.to_path_buf(),
                         role: ExecutionRole::Implement,

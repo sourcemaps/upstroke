@@ -232,6 +232,25 @@ The agent it was bound to, if any.
 
 Its program and arguments.
 
+## `pub(super) struct Ran` › `pub(super) request: RunnerRequest,`
+
+The whole request, as given — `tests_acceptance.determinism` asks for "recorded
+RunnerRequests" beside their `InvocationId`s; the fields above are the ones
+older tests read by name.
+
+## `pub(super) struct Ran` › `pub(super) policy: RunnerPolicy,`
+
+The `RunnerPolicy` this runner declared the invocation executed under:
+`host_policy()` unless [`RecordingRunner::declaring`] named another. ST-20 asks
+that "the FakeRunner/fake container runtime record that every probe and
+invocation of the resumed epoch executed under the recorded boundary and image
+id"; this is the runner's half of that record.
+
+## `pub(super) struct Ran` › `pub(super) image_id: Option<String>,`
+
+The immutable image id of the declared policy, when it names an image — `None`
+for a host boundary.
+
 ## `pub(super) struct Ran` › `pub(super) durable_at_spawn: Vec<String>,`
 
 The event kinds the log **on disk** held at the instant this process was
@@ -257,6 +276,35 @@ only in exact snapshots and "worker worktrees and the staging worktree are
 never used for verification processes".
 What a refused scaffold process prints, so a test can follow it into the
 feedback a retry is given.
+
+## `pub(super) enum ProbeFailure {`
+
+How a probe the test told to fail fails: a process that ran and exited
+non-zero with the given stderr (the CLI is there and broken), or a spawn
+that never started (the CLI is not there). `tests_acceptance.determinism`:
+"the ability … to fail a shell or agent probe on demand".
+
+## `pub(super) enum Ending {`
+
+How an invocation this runner started ended: completed (an output),
+failed (a Runner error the test delivered, or a probe told to never start),
+cancelled (its call's cancellation fired while it was held), abandoned (its
+future was dropped while held). Recorded once per invocation, in the order the
+endings happened; for a completion the moment is the test's delivery, so the
+order is the test's and not the order the driving threads happened to resume.
+
+## `struct Held {`
+
+One invocation waiting for the test: the waker of the future that last polled
+it, and the result once the test delivers one.
+
+## `struct Control {`
+
+The runner's control state behind one lock: the declared policy, whether
+invocations are held, the probe failures still owed, the held invocations,
+the endings, and how many completions were refused. `changed` (a `Condvar` on
+the same lock) is notified whenever an invocation starts waiting or ends, so a
+test can wait for "three are in flight" instead of sleeping.
 
 ## `pub(super) struct RecordingRunner` › `codes: Mutex<Vec<i32>>,`
 
@@ -295,17 +343,81 @@ The kinds the log on disk holds right now.
 
 Everything it was asked to run, in order.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `let durable_at_spawn = self.durable_now();`
+## `impl RecordingRunner` › `pub(super) fn declaring(self, policy: RunnerPolicy) -> Self {`
+
+Declare the policy every invocation of this runner records as the one it ran
+under (a container policy with an image id, say, for a test of a resumed epoch).
+
+## `impl RecordingRunner` › `pub(super) fn hold(&self) {`
+
+From now on every invocation waits, after it is recorded, until the test
+delivers its result with [`RecordingRunner::complete`] or its call is
+cancelled — `tests_acceptance.determinism`'s "explicit start/complete control".
+Without it, the runner answers each request at once from the queued codes, as
+before PR11.
+
+## `impl RecordingRunner` › `pub(super) fn fail_probe(&self, target: ProbeTarget, failure: ProbeFailure) {`
+
+The next probe of `target` fails as `failure` says, once.
+
+## `impl RecordingRunner` › `pub(super) fn await_waiting(&self, count: usize, within: Duration) -> Vec<InvocationId> {`
+
+Block until at least `count` invocations are waiting, or `within` passes, and
+return the ones waiting — the handshake a test takes before it delivers
+completions, so it never delivers to an invocation that has not started.
+
+## `impl RecordingRunner` › `pub(super) fn complete(`
+
+Deliver one held invocation's result. The Runner side of a completion is
+exactly-once: a second delivery for the same invocation, or one for an
+invocation this runner never held (or already ended), is refused and counted
+(`refused_completions`). The stale, duplicate and out-of-order *completions*
+PR11's coordinator must discard (ST-01, ST-02, ST-03) are completions a
+pipeline delivers to the coordinator, and belong to phase 3; what this gives
+phase 3 is the control underneath them — invocations that end in the order the
+test chooses, with the result it chooses, each exactly once.
+
+## `impl RecordingRunner` › `fn start(&self, request: &RunnerRequest) -> Started {`
+
+The first poll of an invocation: record it (with the declared policy and image
+id), answer a probe the test told to fail, hold it when holding, or answer at
+once from the queued codes.
+
+## `fn start(&self, request: &RunnerRequest) -> Started` › `let durable_at_spawn = self.durable_now();`
 
 Read before the request is recorded, so what it captures is the log
 as it stood when the process was asked for.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `stdout: if code == 0 {`
+## `fn start(&self, request: &RunnerRequest) -> Started` › `stdout: if code == 0 {`
 
 A refused process says something, the way a real one does: §11.1
 makes the tail the feedback a retry is given, and a fixture whose
 processes print nothing cannot tell a carried tail from a dropped
 one.
+
+## `impl RecordingRunner` › `fn settle_held(`
+
+A later poll of a held invocation: hand back a delivered result, or end the
+invocation cancelled if its call's cancellation fired (registering the waker
+first, so a cancel racing the poll is never lost), or store the waker and wait.
+
+## `impl RecordingRunner` › `fn abandon(&self, invocation: &InvocationId) {`
+
+The future of a held invocation was dropped before it ended: release the hold
+and record it abandoned — the double's analogue of a Runner terminating an
+invocation whose caller went away. An invocation whose result was already
+delivered has its ending already and records nothing more.
+
+## `struct Invocation<'a> {`
+
+The future `run` returns: its first poll starts the invocation, later polls
+settle it, and its `Drop` abandons an invocation still held.
+
+## `impl Runner for RecordingRunner` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
+
+Every request becomes an [`Invocation`] future carrying the call's
+cancellation. Unheld, it resolves in its first poll, like the host and
+container runners' futures.
 
 ## `pub(super) struct AnsweringAdapter {`
 

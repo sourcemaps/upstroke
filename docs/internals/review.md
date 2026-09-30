@@ -808,7 +808,7 @@ and re-asks". That is a statement about the runner, not about the reviewer, and
 the reviewer's answer — `AgentError` on an unavailable result — cannot carry
 it.
 
-## `let output = match runner.run(&request) {` › `Err(error) => {`
+## `let output = match runner.run_blocking(&request) {` › `Err(error) => {`
 
 What the Runner established about the process is carried out of here, because
 the durable outage attribution differs by it: a reviewer's container refused

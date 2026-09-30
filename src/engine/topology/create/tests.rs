@@ -387,7 +387,7 @@ impl Probes for RecordingProbes {
             });
         }
         through
-            .run(&probe_request_for(invocation, None))
+            .run_blocking(&probe_request_for(invocation, None))
             .map(|_output| ())
             .map_err(UpstrokeError::from)
     }
@@ -406,7 +406,7 @@ impl Probes for RecordingProbes {
             });
         }
         through
-            .run(&probe_request_for(
+            .run_blocking(&probe_request_for(
                 PreflightIdentities::agent(agent, 0)?,
                 Some(agent),
             ))
@@ -2471,7 +2471,7 @@ fn spawn_and_wait(child: &str, root: &Path, site: &str, ordinal: u32) -> Option<
         ),
     );
     let runner = crate::runner::host::HostRunner::new();
-    let output = runner.run(&request).expect("the child spawns");
+    let output = runner.run_blocking(&request).expect("the child spawns");
     assert!(
         !output.timed_out,
         "the child did not die within the timeout"
@@ -2978,7 +2978,7 @@ impl Probes for ContainerProbes {
 
     fn agent(&self, agent: &str, through: &AgentProbe<'_>) -> Result<(), UpstrokeError> {
         through
-            .run(&probe_request_for(
+            .run_blocking(&probe_request_for(
                 PreflightIdentities::agent(agent, 0)?,
                 Some(agent),
             ))
@@ -3252,8 +3252,8 @@ impl RecordingRunner {
     }
 }
 
-impl crate::runner::Runner for RecordingRunner {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RecordingRunner {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3277,8 +3277,8 @@ struct FailsTheSecondRequest {
     seen: Mutex<Vec<String>>,
 }
 
-impl crate::runner::Runner for FailsTheSecondRequest {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for FailsTheSecondRequest {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3322,7 +3322,7 @@ impl crate::agent::AgentAdapter for TwoRequestAdapter {
                 ordinal,
                 std::time::Duration::from_secs(5),
             )?;
-            runner.run(&request)?;
+            runner.run_blocking(&request)?;
         }
         Ok(crate::agent::Caps {
             version: "1.0".to_owned(),
@@ -3430,7 +3430,7 @@ impl crate::agent::AgentAdapter for OneAdapter {
             0,
             std::time::Duration::from_secs(5),
         )?;
-        runner.run(&request)?;
+        runner.run_blocking(&request)?;
         Ok(crate::agent::Caps {
             version: "1.0".to_owned(),
             json_output: true,
@@ -3607,7 +3607,7 @@ impl Probes for RunsThroughWhatItIsHanded {
             probe_request_for(invocation, None)
         };
         let outcome = through
-            .run(&request)
+            .run_blocking(&request)
             .map(|_| ())
             .map_err(UpstrokeError::from)
             .map_err(|e| e.to_string());
@@ -3631,7 +3631,7 @@ impl Probes for RunsThroughWhatItIsHanded {
             )
         };
         let outcome = through
-            .run(&request)
+            .run_blocking(&request)
             .map(|_| ())
             .map_err(UpstrokeError::from)
             .map_err(|e| e.to_string());
@@ -3851,12 +3851,12 @@ impl Probes for IgnoresTheCapability {
         let request = probe_request_for(invocation, None);
         if self.ignore_shell {
             self.elsewhere
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         } else {
             through
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         }
@@ -3869,12 +3869,12 @@ impl Probes for IgnoresTheCapability {
         );
         if self.substitutes(agent) {
             self.elsewhere
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         } else {
             through
-                .run(&request)
+                .run_blocking(&request)
                 .map(|_| ())
                 .map_err(UpstrokeError::from)
         }
@@ -3941,8 +3941,8 @@ struct RefusesEveryRequest {
     seen: Mutex<usize>,
 }
 
-impl crate::runner::Runner for RefusesEveryRequest {
-    fn run(
+impl crate::runner::contract::tests::InlineRunner for RefusesEveryRequest {
+    fn run_inline(
         &self,
         request: &crate::runner::RunnerRequest,
     ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
@@ -3965,7 +3965,7 @@ fn the_grant_counts_a_probe_process_that_started_and_failed() {
 
     let before = pair.accounted();
     pair.agent_probe(&runner)
-        .run(&probe_request_for(
+        .run_blocking(&probe_request_for(
             PreflightIdentities::agent(AGENT, 0).expect("an agent identity"),
             Some(AGENT),
         ))

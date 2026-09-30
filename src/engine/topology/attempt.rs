@@ -983,7 +983,7 @@ impl Judge<'_> {
                 },
             )?;
         }
-        let output = self.runner.run(request);
+        let output = self.runner.run_blocking(request);
         if slotted {
             self.slots.release(&request.invocation)?;
         }
