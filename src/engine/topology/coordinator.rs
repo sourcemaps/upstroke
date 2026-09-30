@@ -3623,7 +3623,7 @@ mod tests {
 
     struct FailingOnce {
         effects: crate::workspace_manager::HarnessEffects,
-        fail_at: Option<crate::topology::effects::EffectSiteId>,
+        fail_at: Option<(crate::topology::effects::EffectSiteId, u32)>,
     }
 
     impl crate::workspace_manager::EffectHooks for FailingOnce {
@@ -3633,11 +3633,20 @@ mod tests {
             phase: crate::topology::effects::HookPhase,
         ) -> crate::topology::effects::Injection {
             let answer = self.effects.phase(site, phase);
-            if phase == crate::topology::effects::HookPhase::Before && self.fail_at == Some(site) {
-                self.fail_at = None;
-                return crate::topology::effects::Injection::Error;
+            if phase != crate::topology::effects::HookPhase::Before {
+                return answer;
             }
-            answer
+            match self.fail_at {
+                Some((at, 0)) if at == site => {
+                    self.fail_at = None;
+                    crate::topology::effects::Injection::Error
+                }
+                Some((at, skip)) if at == site => {
+                    self.fail_at = Some((at, skip - 1));
+                    answer
+                }
+                _ => answer,
+            }
         }
 
         fn durability_ledger(&self) -> crate::util::DurabilityLedger {
@@ -3667,10 +3676,13 @@ mod tests {
             }
         }
 
-        fn fail_the_next_compare_and_swap(&mut self) {
-            self.effects.fail_at = Some(crate::topology::effects::EffectSiteId::Ref(
-                crate::topology::effects::RefSite::CompareAndSwapIntegration,
-            ));
+        fn fail_the_next(&mut self, site: crate::topology::effects::RefSite) {
+            self.fail_after(site, 0);
+        }
+
+        fn fail_after(&mut self, site: crate::topology::effects::RefSite, passing: u32) {
+            self.effects.fail_at =
+                Some((crate::topology::effects::EffectSiteId::Ref(site), passing));
         }
     }
 
@@ -3696,39 +3708,61 @@ mod tests {
         }
     }
 
+    fn steps_to(
+        wide: &mut Wide,
+        hooks: &mut CasFailing,
+        wanted: impl Fn(&Progress) -> bool,
+        what: &str,
+    ) -> Progress {
+        let seams = wide.env.seams();
+        let progress = wide
+            .run
+            .step(&seams, hooks)
+            .unwrap_or_else(|error| panic!("{what}: {error}"));
+        assert!(wanted(&progress), "{what}: {progress:?}");
+        progress
+    }
+
+    fn halted_by_the_last_task(tag: &str, tasks: &[WideTask]) -> Wide {
+        let asking = u32::try_from(tasks.len() - 1).expect("a small plan");
+        let runner = RecordingRunner::new().answering(
+            crate::engine::topology::scaffold::wide_responder_asking(tasks, &[], &[asking]),
+        );
+        let mut wide = Wide::started_with(tag, tasks, 3, WidePlans::default(), runner);
+        halting(&mut wide.env);
+        wide
+    }
+
+    fn after_the_halt(wide: &Wide) -> Vec<&'static str> {
+        let kinds = kinds_of(&wide.env.durable_events());
+        kinds[position(&kinds, "question_answered", 0)..].to_vec()
+    }
+
     #[test]
-    fn prepared_publication_completed_at_run_end() {
+    fn authorized_publication_completed_at_run_end() {
         let tasks = [
             WideTask::independent("alpha"),
             WideTask::independent("beta"),
         ];
-        let runner = RecordingRunner::new().answering(
-            crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[1]),
-        );
-        let mut wide = Wide::started_with(
-            "coordinator-prepared-at-end",
-            &tasks,
-            3,
-            WidePlans::default(),
-            runner,
-        );
-        halting(&mut wide.env);
+        let mut wide = halted_by_the_last_task("coordinator-fast-at-end", &tasks);
         let mut hooks = CasFailing::over(&wide);
-        let seams = wide.env.seams();
-
-        let settled = wide.run.step(&seams, &mut hooks).expect("alpha settles");
-        assert!(
-            matches!(
-                settled,
-                Progress::Settled {
-                    key: TaskKey(0),
-                    accepted: true,
-                    ..
-                }
-            ),
-            "{settled:?}"
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| {
+                matches!(
+                    progress,
+                    Progress::Settled {
+                        key: TaskKey(0),
+                        accepted: true,
+                        ..
+                    }
+                )
+            },
+            "alpha settles",
         );
-        hooks.fail_the_next_compare_and_swap();
+        hooks.fail_the_next(crate::topology::effects::RefSite::CompareAndSwapIntegration);
+        let seams = wide.env.seams();
         let error = wide
             .run
             .step(&seams, &mut hooks)
@@ -3737,65 +3771,422 @@ mod tests {
             error.to_string().contains("CompareAndSwapIntegration"),
             "{error}"
         );
-        let prepared = wide
-            .run
-            .fold()
-            .transaction()
-            .map(|transaction| transaction.class.clone());
         assert!(
             matches!(
-                prepared,
-                Some(crate::topology::fold::TransactionClass::Prepared { .. })
+                wide.run.fold().transaction().map(|open| &open.class),
+                Some(crate::topology::fold::TransactionClass::Prepared {
+                    disposition: crate::topology::events::PreparedDisposition::Fast,
+                    ..
+                })
             ),
-            "`merge_prepared` is durable and `task_merged` is not: the authorized publication is \
-             pending, the state no coordinator schedule reaches at a live end (R-AG): {prepared:?}"
+            "`merge_prepared(fast)` is durable and `task_merged` is not: the state no \
+             coordinator schedule reaches at a live end (R-AG)"
         );
         let before = wide.env.head(&wide.run);
-
-        let parked = wide.run.step(&seams, &mut hooks).expect("beta parks");
-        assert!(
-            matches!(
-                parked,
-                Progress::Settled {
-                    key: TaskKey(1),
-                    accepted: false,
-                    ..
-                }
-            ),
-            "{parked:?}"
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| {
+                matches!(
+                    progress,
+                    Progress::Settled {
+                        key: TaskKey(1),
+                        accepted: false,
+                        ..
+                    }
+                )
+            },
+            "beta parks",
         );
-        let answered = wide
-            .run
-            .step(&seams, &mut hooks)
-            .expect("the decline is ingested");
-        assert!(
-            matches!(answered, Progress::Answered { declined: true, .. }),
-            "{answered:?}"
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Answered { declined: true, .. }),
+            "the decline is ingested",
         );
-        assert!(wide.run.fold().halted_at().is_some());
-        let end = wide
-            .run
-            .step(&seams, &mut hooks)
-            .expect("the closure ends the run");
+        let end = steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Finished { .. }),
+            "the closure ends the run",
+        );
         assert_eq!(outcome_of(&end), RunOutcome::Halted);
-
-        let events = wide.env.durable_events();
-        let kinds = kinds_of(&events);
-        let halted = position(&kinds, "question_answered", 0);
         assert_eq!(
-            &kinds[halted..],
-            &["question_answered", "task_merged", "run_finished"],
-            "the closure completed the authorized publication before it ended the run: {kinds:?}"
+            after_the_halt(&wide),
+            ["question_answered", "task_merged", "run_finished"],
+            "the closure completed the authorized publication before it ended the run"
         );
-        let TopologyEventBody::TaskMerged { data } = &events[halted + 1].body else {
-            panic!("the closure's publication");
-        };
-        assert_eq!(data.sequence, SequenceId(0));
         let after = wide.env.head(&wide.run);
         assert_ne!(after, before, "the CAS moved the integration ref");
-        assert_eq!(after, data.merged_sha.0, "to the authorized proposal");
         assert!(wide.run.fold().transaction().is_none());
         assert!(wide.run.invocations_balance());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn prepared_publication_completed_at_run_end() {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = RecordingRunner::new().answering(
+            crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[], &[2]),
+        );
+        runner.hold();
+        let mut wide = Wide::started_with(
+            "coordinator-prepared-at-end",
+            &tasks,
+            3,
+            WidePlans::default(),
+            runner,
+        );
+        halting(&mut wide.env);
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let mut hooks = CasFailing::over(&wide);
+        hooks.fail_after(
+            crate::topology::effects::RefSite::CompareAndSwapIntegration,
+            1,
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(0)))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(1)))
+            }),
+        );
+        let pipelines = wide.env.pipelines();
+        let error = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect_err("beta's stale integration verifies, prepares, and its CAS fails once");
+        drop(scheduler);
+        assert!(
+            error.to_string().contains("CompareAndSwapIntegration"),
+            "{error}"
+        );
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let pin = crate::engine::topology::integrate::prepared_pin_ref(&run_id, SequenceId(1));
+        let manager = wide.env.fixture.manager.clone();
+        assert!(
+            matches!(
+                wide.run.fold().transaction().map(|open| &open.class),
+                Some(crate::topology::fold::TransactionClass::Prepared {
+                    disposition: crate::topology::events::PreparedDisposition::StaleClean,
+                    ..
+                })
+            ),
+            "a stale-clean `merge_prepared` is durable and its publication is pending: {:?}",
+            wide.run.fold().transaction()
+        );
+        let proposed = manager
+            .direct_ref_target(pin.as_str())
+            .expect("the pin is readable")
+            .expect("the verified proposal is pinned");
+        assert!(
+            manager.intents().expect("intents").contains(
+                &crate::engine::topology::integrate::staging_slot(SequenceId(1))
+            ),
+            "and its staging is still there"
+        );
+
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Answered { declined: true, .. }),
+            "gamma's decline is ingested",
+        );
+        let end = steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Finished { .. }),
+            "the closure ends the run",
+        );
+        assert_eq!(outcome_of(&end), RunOutcome::Halted);
+        assert_eq!(
+            after_the_halt(&wide),
+            ["question_answered", "task_merged", "run_finished"],
+            "the closure published the verified proposal before it ended the run"
+        );
+        assert_eq!(
+            wide.env.head(&wide.run),
+            proposed,
+            "the CAS put the pinned proposal there"
+        );
+        assert_eq!(
+            manager
+                .direct_ref_target(pin.as_str())
+                .expect("the pin is readable"),
+            None,
+            "and the pin was pruned"
+        );
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn promoting_completed_by_the_closure_at_run_end() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = halted_by_the_last_task("coordinator-promoting-at-end", &tasks);
+        let mut hooks = CasFailing::over(&wide);
+        hooks.fail_the_next(crate::topology::effects::RefSite::CreateCandidates);
+        let seams = wide.env.seams();
+        let error = wide
+            .run
+            .step(&seams, &mut hooks)
+            .expect_err("alpha's candidates ref is made to fail once");
+        assert!(error.to_string().contains("CreateCandidates"), "{error}");
+        assert!(
+            matches!(
+                wide.run
+                    .fold()
+                    .task(TaskKey(0))
+                    .and_then(|task| task.generations.first())
+                    .map(|generation| &generation.class),
+                Some(crate::topology::fold::GenerationClass::Promoting)
+            ),
+            "`candidate_prepared` is durable and `task_candidate_created` is not"
+        );
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| {
+                matches!(
+                    progress,
+                    Progress::Settled {
+                        key: TaskKey(1),
+                        accepted: false,
+                        ..
+                    }
+                )
+            },
+            "beta parks",
+        );
+        steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Answered { declined: true, .. }),
+            "the decline is ingested",
+        );
+        let end = steps_to(
+            &mut wide,
+            &mut hooks,
+            |progress| matches!(progress, Progress::Finished { .. }),
+            "the closure ends the run",
+        );
+        assert_eq!(outcome_of(&end), RunOutcome::Halted);
+        assert_eq!(
+            after_the_halt(&wide),
+            [
+                "question_answered",
+                "task_candidate_created",
+                "run_finished"
+            ],
+            "the closure completed the promotion before it ended the run"
+        );
+        let run_id = wide.run.fold().started().expect("started").run_id.clone();
+        let names = crate::engine::topology::candidate::CandidateNames::of(
+            &run_id,
+            TaskKey(0),
+            GenerationId(0),
+        );
+        let manager = wide.env.fixture.manager.clone();
+        assert!(
+            manager
+                .direct_ref_target(names.candidate_ref.as_str())
+                .expect("the candidates ref is readable")
+                .is_some(),
+            "the candidates ref was created, and Halted retains it"
+        );
+        assert_eq!(
+            manager
+                .direct_ref_target(names.prepared_ref.as_str())
+                .expect("the pin is readable"),
+            None,
+            "the candidate-prepared pin was pruned"
+        );
+        replay_equals_live(&wide);
+    }
+
+    struct ArmsOnRetained {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TopologyHooks for ArmsOnRetained {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            let retained = events.last().is_some_and(|event| {
+                matches!(&event.body, TopologyEventBody::AttemptFinished { data }
+                    if matches!(data.settlement,
+                        crate::topology::events::AttemptSettlement::Retained { .. }))
+            });
+            if retained {
+                self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct DecliningOnceArmed(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl crate::interaction::AnswerSource for DecliningOnceArmed {
+        fn id(&self) -> &'static str {
+            "declining-once-armed"
+        }
+
+        fn resolve(
+            &self,
+            question: &crate::ir::Question,
+        ) -> Result<crate::ir::Answer, UpstrokeError> {
+            self.poll(question)
+        }
+
+        fn poll(
+            &self,
+            _question: &crate::ir::Question,
+        ) -> Result<crate::ir::Answer, UpstrokeError> {
+            Ok(if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::ir::Answer::Declined
+            } else {
+                crate::ir::Answer::Unanswered
+            })
+        }
+    }
+
+    fn generation_closed_run_ending(events: &[TopologyEvent]) -> Vec<(u32, RunOutcome)> {
+        events
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::GenerationClosed { data } => match &data.reason {
+                    crate::topology::events::GenerationCloseReason::RunEnding { outcome } => {
+                        Some((data.key.0, outcome.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retained_generation_closed_at_run_end_at_width_three() {
+        let tasks = three();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = RecordingRunner::new().answering(
+            crate::engine::topology::scaffold::wide_responder_asking(&tasks, &[(0, 1)], &[2]),
+        );
+        runner.hold();
+        let mut wide = Wide::started_with(
+            "coordinator-retained-halted",
+            &tasks,
+            3,
+            WidePlans::default(),
+            runner,
+        );
+        halting(&mut wide.env);
+        wide.env.answers = std::sync::Arc::new(DecliningOnceArmed(std::sync::Arc::clone(&armed)));
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+                    .or_else(|| released(view, |invocation| attempt_key(invocation) == Some(0)))
+            }),
+        );
+        let mut hooks = ArmsOnRetained {
+            inner: wide.env.hooks(),
+            armed,
+        };
+        let pipelines = wide.env.pipelines();
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the halt ends the run");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+        assert_eq!(
+            after_the_halt(&wide),
+            [
+                "question_answered",
+                "attempt_interrupted",
+                "generation_closed",
+                "run_finished"
+            ],
+            "beta, in flight, is interrupted and alpha's retained generation closed run-ending"
+        );
+        assert_eq!(
+            generation_closed_run_ending(&wide.env.durable_events()),
+            vec![(0, RunOutcome::Halted)]
+        );
+        replay_equals_live(&wide);
+
+        let mut wide = Wide::started_under(
+            "coordinator-retained-budget",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[(0, 1)]),
+            crate::engine::topology::select::Ceiling {
+                run_usd: Some(0.2),
+                task_usd: None,
+            },
+        );
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+            }),
+        );
+        let progress =
+            drive(&mut wide, Some(&mut scheduler)).expect("the budget stop ends the run");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::BudgetExceeded);
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let stop = position(&kinds, "budget_exceeded", 0);
+        assert!(
+            kinds[..stop].contains(&"attempt_finished")
+                && !kinds[stop..].contains(&"attempt_started"),
+            "the retry the retained generation was ready for is what the ceiling refused: {kinds:?}"
+        );
+        assert_eq!(
+            generation_closed_run_ending(&events),
+            vec![(0, RunOutcome::BudgetExceeded)],
+            "{kinds:?}"
+        );
         replay_equals_live(&wide);
     }
 

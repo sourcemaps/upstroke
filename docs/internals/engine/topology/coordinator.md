@@ -469,9 +469,24 @@ arms the fault at the first append after the halt is folded, which is the closur
 the child (`closure_kill_child_at_width_three`) dies inside it, torn or complete, and the next
 process repeats the closure from the surviving prefix.
 
-## `mod tests` › `fn prepared_publication_completed_at_run_end() {`
+## `mod tests` › `fn authorized_publication_completed_at_run_end() {`
 
-T-PREPARED's closure half, on a state built by making the fast integration's CAS fail once (R-AG).
+Closure step (4) for T-FAST: the fast integration's CAS is made to fail once (`CasFailing`), which
+leaves `merge_prepared(fast)` without `task_merged` — a state no coordinator schedule reaches at a
+live end (R-AG) — and after a decline halts the run the closure publishes it before `run_finished`.
+With `prepared_publication_completed_at_run_end` (T-PREPARED: a stale-clean verified proposal,
+built on the coordinator so that beta is dispatched beside alpha and integrates stale; the answer
+source is armed only once the publication is pending) and
+`promoting_completed_by_the_closure_at_run_end` (T-CAND-REF, closure step (3): the candidates ref
+made to fail once). The frozen width-1 `promoting_completed_at_run_end` (`candidate/tests.rs`) tests
+the completion functions themselves.
+
+## `mod tests` › `fn retained_generation_closed_at_run_end_at_width_three() {`
+
+Closure step (5) for T-RETAINED at both endings: at Halted, beside an interrupted pipeline (the
+decline is armed by the retained settlement's own append, `ArmsOnRetained`, so the halt lands at the
+admission pass that would have admitted the retry); at BudgetExceeded, where the ceiling refuses the
+retry the retained generation was ready for.
 
 ## `mod tests` › `fn over_budget_prefix_without_budget_exceeded_is_not_ending_at_width_three() {`
 
