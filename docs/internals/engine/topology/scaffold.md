@@ -1298,7 +1298,7 @@ succeeds, a foreign command's one invocation.
 Probes exit at once and everything else holds: a resuming child passes its
 pre-flight and then runs its pipelines' containers until it is killed.
 
-## `fn played_by(double: Arc<RecordingRunner>, expected: Expected) -> crate::runner::container::StartPolicy {`
+## `fn played_by(`
 
 A container's process is the scaffold double's invocation of the request that
 created it, found by the invocation its labels name. So the deterministic
@@ -1311,7 +1311,7 @@ A coordinator's runner of containers: the production `ContainerRunner`, whose
 starts run the double ([`played_by`]); the decorator only records each request
 before the runner plans it.
 
-## `impl WideEnv` › `pub(super) fn identity(&self, incarnation: &str) -> crate::runner::container::exec::RunIdentity {`
+## `impl WideEnv` › `pub(super) fn identity(`
 
 The run identity a durable run's containers carry: its private root, run id,
 public run directory, the incarnation given, and its repository key.
@@ -1321,7 +1321,7 @@ public run directory, the incarnation given, and its repository key.
 A [`Contained`] runner for this environment's double, over a handle of the
 shared runtime named after the incarnation.
 
-## `impl WideEnv` › `pub(super) fn pipelines_over(&self, runner: Arc<dyn Runner>) -> super::coordinator::PipelineSeams {`
+## `impl WideEnv` › `pub(super) fn pipelines_over(`
 
 [`WideEnv::pipelines`] with another runner.
 
