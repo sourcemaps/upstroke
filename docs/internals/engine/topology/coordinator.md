@@ -664,6 +664,19 @@ Acceptance item 2, with `disjoint_hints_dispatch_together_overlapping_and_absent
 
 R-E and R-V: the coordinator inside `verify`, with `halt_interrupts_verification`.
 
+## `mod tests` › `fn scheduled_here(every: std::ops::Range<u64>, on_windows: &[u64]) -> Vec<u64> {`
+
+The schedules a seeded test runs on this platform (the record's R-AY): every seed of `every` on Linux
+and macOS; on Windows only `on_windows`, which must be a non-empty subset of them. A seed is one
+schedule of the coordinator's logic, which has no platform branch and is reproduced exactly on every
+machine (R-AD); what Windows adds is its own I/O — process creation, Git for Windows, its paths —
+which every schedule exercises alike, and there a seeded test costs 37 to 44 times what it costs run
+alone on Linux (the CI guest's reconstructed durations; each schedule starts two hundred to three
+hundred Git processes, one per Git effect of the manager's). So Windows runs the fewest schedules a test's assertions compare: one per
+configuration, two where a test asserts equality across seeds, and for a claim made of *some* seed
+the seed that makes it (the Linux runs name it). Tests whose behaviour differs on Windows — the kill
+matrices, the two-process tests, the container runner, the scripted shapes — run in full everywhere.
+
 ## `mod tests` › `fn halt_cancels_in_flight_attempt_at_width_three() {`
 
 T-ATTEMPT at width three: a decline halts the run while alpha is at its gate and beta at its worker;
@@ -1131,7 +1144,9 @@ double, and a seed reproduces a run (R-AD), so each assertion made for a seed is
 schedule on every machine. Seed counts are bounded by cost, not by coverage claims: eight seeds for the
 per-run rows (ST-04, ST-05, ST-13, the chain), sixteen for the independent projection, three to four
 per configuration for the pool tests, and five orders per limit configuration for deadlock-freedom
-(the record's R-AS says why).
+(the record's R-AS says why) — on Linux and macOS. On Windows each runs the fewest its assertions
+compare (`scheduled_here`, the record's R-AY): one seed per per-run row and per pool configuration, two
+for the independent projection, one order per limit configuration.
 
 ## `mod interleaving` › `fn export(kind: &str, value: &serde_json::Value) {`
 
@@ -1206,14 +1221,16 @@ ledger itself is read at every quiescent point and at the end, since the append 
 
 ST-04 over eight seeded runs of a four-task plan with a dependent, a same-generation retry and two
 reviewers per attempt and per verification, with ST-15 (the retry re-gates on a fresh snapshot of its
-own in every seed, and runs beside another task's process in some).
+own in every seed, and runs beside another task's process in some — in all eight, so seed 0 is the
+Windows schedule).
 
 ## `mod interleaving` › `fn injected_duplicates_at_seeded_points_release_nothing_twice_and_change_nothing_durable() {`
 
 ST-05 (with ST-01, ST-02 and ST-06): each seed is run twice, without and with the injector; between
 consecutive points the discard and duplicate counters move by exactly the injections made, and the
 injected run releases, starts and logs byte for byte what the uninjected one did, with the same
-registrations, settlements, slot grants and releases and reservation conversions.
+registrations, settlements, slot grants and releases and reservation conversions. At least five
+injections per seed over the run (forty over Linux's and macOS's eight; each seed makes five to twelve).
 
 ## `mod interleaving` › `fn every_provisional_reservation_converts_at_its_first_append_under_seeded_permutations() {`
 
@@ -1235,7 +1252,9 @@ the final tree equal to the first seed's.
 
 Deadlock-freedom: one slot per agent and per pool; two agents sharing one pool, each in its own, none
 pooled, and one unpooled beside a pooled one; review re-asks taking pairs in two of the four; and each
-under two seeds and three fixed adverse orders. Every run completes within `STEPS`, no point holds a
+under two seeds and three fixed adverse orders — on Windows each configuration under one of them, the
+first seed, newest-granted-first, oldest-granted-first and gates-first in turn (`scheduled_here`), so
+every configuration and every kind of order runs there once. Every run completes within `STEPS`, no point holds a
 pair over a limit, every pair granted is released once, and a verification runs beside attempts. Each
 run executes under the parent module's `bounded` watchdog on its own (`reduced_limit_run`), so a
 regression that hung instead of ending in the stuck error fails the test rather than the suite, and the
@@ -1251,7 +1270,8 @@ coordinator that waited for ever instead fails the test within its bound.
 
 Acceptance item 3 at runtime, with the four `runtime_pool_*` tests after it: the processes held at
 every quiescent point are what runs at once, so a limit that binds shows as a ceiling on them and one
-that does not as two at once.
+that does not as two at once. On Windows one seed per configuration; the gate test's is seed 1, one of
+the two whose schedule runs two gates at once beside a held slot, the claim it makes of some seed.
 
 ## `mod interleaving` › `fn runtime_pool_agent_probes_take_and_release_their_pair_at_preflight_before_admission() {`
 

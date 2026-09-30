@@ -2319,6 +2319,18 @@ mod tests {
         ]
     }
 
+    fn scheduled_here(every: std::ops::Range<u64>, on_windows: &[u64]) -> Vec<u64> {
+        assert!(
+            !on_windows.is_empty() && on_windows.iter().all(|seed| every.contains(seed)),
+            "the Windows schedules {on_windows:?} are a subset of {every:?}"
+        );
+        if cfg!(windows) {
+            on_windows.to_vec()
+        } else {
+            every.collect()
+        }
+    }
+
     const ATTEMPT_LEVEL: [&str; 5] = [
         "task_dispatched",
         "attempt_started",
@@ -5337,7 +5349,7 @@ mod tests {
         type Started = Vec<(String, Vec<String>, String)>;
         let tasks = three();
         let mut reference: Option<(Vec<InvocationId>, Started, String)> = None;
-        for run in 0..3 {
+        for run in scheduled_here(0..3, &[0, 1]) {
             let runner = holding(&tasks, &[]);
             let plans = WidePlans {
                 reviewers: 2,
@@ -5391,7 +5403,7 @@ mod tests {
     fn out_of_order_completions_bind_to_their_own_identities_under_seeded_permutations() {
         let tasks = three();
         let mut reference: Option<BTreeMap<u64, Vec<String>>> = None;
-        for seed in 0..16_u64 {
+        for seed in scheduled_here(0..16, &[0, 1]) {
             let runner = holding(&tasks, &[]);
             let mut wide = Wide::started_with(
                 &format!("coordinator-seed-{seed}"),
@@ -5443,7 +5455,7 @@ mod tests {
     fn independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed() {
         let tasks = three();
         let mut reference: Option<(BTreeMap<u64, Vec<String>>, String)> = None;
-        for seed in 0..8_u64 {
+        for seed in scheduled_here(0..8, &[0, 1]) {
             let runner = holding(&tasks, &[]);
             let mut wide = Wide::started_with(
                 &format!("coordinator-st08-{seed}"),
@@ -5707,7 +5719,7 @@ mod tests {
     #[test]
     fn adversarial_orders_with_one_slot_per_agent_and_pool_always_reach_run_finished() {
         let tasks = three();
-        for seed in 0..12_u64 {
+        for seed in scheduled_here(0..12, &[0]) {
             let runner = holding(&tasks, &[]);
             let plans = WidePlans {
                 reviewers: 2,
@@ -10274,7 +10286,7 @@ mod tests {
             let tasks = mixed();
             let mut seeds = Vec::new();
             let mut retried_beside = 0_usize;
-            for seed in 0..8_u64 {
+            for seed in scheduled_here(0..8, &[0]) {
                 let tag = format!("interleaving-st04-{seed}");
                 let run = seeded_run(
                     Shape::of(tag, &tasks, two_reviewers(), holding(&tasks, &BETA_RETRIES)),
@@ -10519,7 +10531,7 @@ mod tests {
             let tasks = mixed();
             let mut seeds = Vec::new();
             let mut total = 0_usize;
-            for seed in 0..8_u64 {
+            for seed in scheduled_here(0..8, &[0]) {
                 let reference = seeded_run(
                     Shape::of(
                         format!("interleaving-st05-reference-{seed}"),
@@ -10671,7 +10683,11 @@ mod tests {
                     "canonical_log_sha256": digest(&duplicated_log),
                 }));
             }
-            assert!(total >= 40, "{total} injections over eight seeds");
+            assert!(
+                total >= 5 * seeds.len(),
+                "{total} injections over {} seeds",
+                seeds.len()
+            );
             export(
                 "ledgers/invocation",
                 &serde_json::json!({
@@ -11062,7 +11078,7 @@ mod tests {
             let mut seeds = Vec::new();
             let mut provisional_rows = Vec::new();
             let mut entitlement_rows = Vec::new();
-            for seed in 0..8_u64 {
+            for seed in scheduled_here(0..8, &[0]) {
                 let mut wide = Wide::started_with(
                     &format!("interleaving-st13-{seed}"),
                     &tasks,
@@ -11260,7 +11276,7 @@ mod tests {
                 .expect("serializes");
             let one_tree = final_tree(&narrow);
             let mut seeds = Vec::new();
-            for seed in 0..8_u64 {
+            for seed in scheduled_here(0..8, &[0]) {
                 let run = seeded_run(
                     Shape::of(
                         format!("interleaving-chain-{seed}"),
@@ -11314,7 +11330,7 @@ mod tests {
             let tasks = three();
             let mut reference: Option<(BTreeMap<u64, Vec<String>>, String)> = None;
             let mut seeds = Vec::new();
-            for seed in 0..16_u64 {
+            for seed in scheduled_here(0..16, &[0, 1]) {
                 let run = seeded_run(
                     Shape::of(
                         format!("interleaving-st08-{seed}"),
@@ -11478,10 +11494,21 @@ mod tests {
                 (Adverse::Oldest, 0),
                 (Adverse::AgentsLast, 0),
             ];
+            let configurations = reduced();
+            let on_windows: [u64; 4] = [0, 2, 3, 4];
+            assert_eq!(
+                configurations.len(),
+                on_windows.len(),
+                "one order per configuration on Windows"
+            );
             let mut runs = Vec::new();
             let mut beside = 0_usize;
-            for limited in reduced() {
-                for (order, seed) in orders {
+            for (limited, windows) in configurations.into_iter().zip(on_windows) {
+                let positions = scheduled_here(0..5, &[windows]);
+                for (position, (order, seed)) in (0_u64..).zip(orders) {
+                    if !positions.contains(&position) {
+                        continue;
+                    }
                     let index = runs.len();
                     let limits = Limited {
                         name: limited.name,
@@ -11700,7 +11727,7 @@ mod tests {
             for (per_agent, per_pool, binding, widest) in
                 [(1, 2, "agent", 1), (2, 1, "pool", 1), (2, 2, "neither", 2)]
             {
-                for seed in 0..3_u64 {
+                for seed in scheduled_here(0..3, &[0]) {
                     let plans = WidePlans {
                         pool: Some("pool-p".to_owned()),
                         ..WidePlans::default()
@@ -11772,7 +11799,7 @@ mod tests {
                 ..two_reviewers()
             };
             let mut rows = Vec::new();
-            for seed in 0..4_u64 {
+            for seed in scheduled_here(0..4, &[0]) {
                 let run = seeded_run(
                     Shape::of(
                         format!("interleaving-pool-own-{seed}"),
@@ -11828,7 +11855,7 @@ mod tests {
                     ],
                     ..two_reviewers()
                 };
-                for seed in 0..3_u64 {
+                for seed in scheduled_here(0..3, &[0]) {
                     let run = seeded_run(
                         Shape::of(
                             format!(
@@ -11899,7 +11926,7 @@ mod tests {
             let tasks = three();
             let mut several = false;
             let mut rows = Vec::new();
-            for seed in 0..4_u64 {
+            for seed in scheduled_here(0..4, &[1]) {
                 let plans = WidePlans {
                     pool: Some("pool-p".to_owned()),
                     ..WidePlans::default()
@@ -12112,7 +12139,7 @@ mod tests {
         fn seeded_contained_runs_never_reuse_a_container_name_intent_or_view() {
             let tasks = three();
             let mut seeds = Vec::new();
-            for seed in 0..3_u64 {
+            for seed in scheduled_here(0..3, &[0]) {
                 let mut wide = Wide::durable_contained(
                     &format!("interleaving-contained-{seed}"),
                     &tasks,
@@ -12285,7 +12312,7 @@ mod tests {
         fn a_halt_under_every_seed_interrupts_exactly_what_is_in_flight_and_ends_halted() {
             let mut seeds = Vec::new();
             let mut interrupted_total = 0_usize;
-            for seed in 0..8_u64 {
+            for seed in scheduled_here(0..8, &[0]) {
                 let mut wide = durable_halting_on_gamma(&format!("interleaving-st17-halt-{seed}"));
                 let double = std::sync::Arc::clone(&wide.env.runner);
                 let mut interleaver = Interleaver::new(&double, seed, Adverse::Seeded);
@@ -12372,7 +12399,7 @@ mod tests {
             let tasks = four();
             let mut seeds = Vec::new();
             let mut drained_total = 0_usize;
-            for seed in 0..6_u64 {
+            for seed in scheduled_here(0..6, &[0]) {
                 let mut wide = Wide::started_under(
                     &format!("interleaving-st17-budget-{seed}"),
                     &tasks,
