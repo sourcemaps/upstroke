@@ -11471,6 +11471,10 @@ mod tests {
 
         #[test]
         fn reduced_limits_and_adverse_completion_orders_reach_run_finished_within_the_step_bound() {
+            bounded("the reduced-limit runs", reduced_limit_runs);
+        }
+
+        fn reduced_limit_runs() {
             let tasks = mixed();
             let orders = [
                 (Adverse::Seeded, 0xDEAD_0001_u64),
@@ -11605,6 +11609,10 @@ mod tests {
 
         #[test]
         fn a_scheduler_that_stops_releasing_ends_the_run_as_stuck_rather_than_hanging() {
+            bounded("the run whose scheduler stops releasing", stuck_run);
+        }
+
+        fn stuck_run() {
             let tasks = three();
             let mut wide = Wide::started_with(
                 "interleaving-stuck",

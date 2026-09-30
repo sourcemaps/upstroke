@@ -1236,12 +1236,15 @@ the final tree equal to the first seed's.
 Deadlock-freedom: one slot per agent and per pool; two agents sharing one pool, each in its own, none
 pooled, and one unpooled beside a pooled one; review re-asks taking pairs in two of the four; and each
 under two seeds and three fixed adverse orders. Every run completes within `STEPS`, no point holds a
-pair over a limit, every pair granted is released once, and a verification runs beside attempts.
+pair over a limit, every pair granted is released once, and a verification runs beside attempts. The
+runs execute under the parent module's `bounded` watchdog, so a regression that hung instead of ending
+in the stuck error fails the test rather than the suite.
 
 ## `mod interleaving` › `fn a_scheduler_that_stops_releasing_ends_the_run_as_stuck_rather_than_hanging() {`
 
 The bound's other half: a scheduler that stops releasing ends the run with the stuck error, every held
-process cancelled and every registration settled, and nothing appended.
+process cancelled and every registration settled, and nothing appended — under `bounded`, so a
+coordinator that waited for ever instead fails the test within its bound.
 
 ## `mod interleaving` › `fn runtime_pool_same_agent_and_pool_with_opposing_limits_serialize_on_the_binding_limit() {`
 
