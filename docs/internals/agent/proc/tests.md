@@ -1227,6 +1227,27 @@ spend, so the claim is that the wait does not wait it out: a waiter that
 only watched its signal would report "nothing published in five
 minutes", which is the clock talking rather than the death.
 
+## `fn a_producer_whose_reader_cannot_be_started_is_killed_and_reaped() {`
+
+**A reader that cannot be started.** Review round 4's `R4-REG-1` (the PR11
+record, §13), in the constructor that had the same order as the one the
+finding named: `Producer::adopt` started the reader of the child's stdout
+before anything owned the child, so a thread the system refused unwound past
+a bare `Child`, whose drop neither kills nor reaps, and the child outlived
+its adoption.
+
+The refusal is the OS's, not a simulation: `readiness::unstartable_reader`
+asks for a stack no address space can map, so `pthread_create` answers
+`EAGAIN`. The adoption must panic — it cannot hand back a producer with no
+reader for a piped stdout — and must unwind through the producer's drop,
+leaving nothing under the child's pid, not even a zombie
+(`fixture::process_exists` counts one). The builder is asked for with the
+child's pid, which the test checks, so a refusal that came from anywhere
+else is not read as this one. The child is told to run a test no test has
+the name of, so it exits at once of its own accord and leaves nothing
+behind itself; at the start head it was left unreaped. Unix, because a pid
+is what answers for the child; the adoption is the same code on Windows.
+
 ## `fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {`
 
 **Effective deadlines.** The bound is the caller's, it bounds the wait

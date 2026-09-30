@@ -7334,6 +7334,55 @@ fn an_observer_lists_the_worktrees_from_both_hooks_of_a_removal() {
     );
 }
 
+/// Review round 4's `R4-REG-1` (the PR11 record, §13): `LinkedChild::spawn`
+/// started the reader of the child's stdout before anything owned the child, so
+/// a reader thread the system could not create unwound past a bare
+/// `std::process::Child`, whose drop neither kills nor reaps, and the child
+/// outlived its failed constructor. The reader is refused for real here -- its
+/// builder asks for a stack no address space can map, so the thread's creation
+/// fails in the OS (`pthread_create` answers `EAGAIN`) -- and the constructor must
+/// unwind through the owner's drop, leaving nothing under the child's pid, not
+/// even a zombie. The child is given a name no test has, so it runs nothing and
+/// leaves nothing of its own. Unix, because what answers for a pid is
+/// `fixture::process_exists`; the construction is the same code on Windows.
+#[cfg(unix)]
+#[test]
+fn a_linked_child_whose_reader_cannot_be_started_is_killed_and_reaped() {
+    const NO_SUCH_TEST: &str = "workspace_manager::tests::no_test_is_named_this";
+    let scratch = scratch("linked-reader-refused");
+    let stderr = scratch.path().join("stderr.log");
+    let asked = std::cell::Cell::new(None);
+    let refusal = panic_message(|| {
+        drop(super::fixture::LinkedChild::spawn_with(
+            NO_SUCH_TEST,
+            &[],
+            &stderr,
+            |pid| {
+                asked.set(Some(pid));
+                crate::agent::proc::test_support::readiness::unstartable_reader()
+            },
+        ));
+    });
+    let pid = asked
+        .get()
+        .expect("the constructor spawned its child and asked for the child's reader");
+    let refusal = refusal.unwrap_or_else(|| {
+        panic!("the linked child {pid} was constructed although its reader could not be started")
+    });
+    let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .and_then(|(_, rest)| rest.split(' ').next().map(str::to_owned))
+        })
+        .map_or_else(String::new, |state| format!(" (its state: {state})"));
+    assert!(
+        !super::fixture::process_exists(pid),
+        "the linked child {pid} outlived its failed constructor, neither killed nor reaped{state}; \
+         the constructor failed with: {refusal}"
+    );
+}
+
 #[test]
 fn snapshots_create_no_object_for_a_commit_and_never_share_a_checkout() {
     let fixture = Fixture::created("snapshot-clauses");

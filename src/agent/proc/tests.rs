@@ -3738,6 +3738,44 @@ fn a_dead_producer_ends_the_wait_without_spending_the_bound() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_producer_whose_reader_cannot_be_started_is_killed_and_reaped() {
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "agent::proc::tests::no_test_is_named_this",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn the producer");
+    let pid = child.id();
+    let asked = std::cell::Cell::new(None);
+    let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(readiness::Producer::adopt_with(child, |reader_of| {
+            asked.set(Some(reader_of));
+            readiness::unstartable_reader()
+        }));
+    }));
+    assert_eq!(
+        asked.get(),
+        Some(pid),
+        "the adoption asked for the reader of the child it was handed"
+    );
+    assert!(
+        adopted.is_err(),
+        "the producer {pid} was adopted although its reader could not be started"
+    );
+    assert!(
+        !crate::workspace_manager::fixture::process_exists(pid),
+        "the producer {pid} outlived its failed adoption, neither killed nor reaped"
+    );
+}
+
 #[test]
 fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {
     let scratch = Scratch::new("deadline");

@@ -2996,7 +2996,12 @@ pub(crate) const LINK_BOUND: std::time::Duration = std::time::Duration::from_sec
 ///
 /// **Ownership.** The child is killed and reaped, and the reader thread
 /// joined, when the value drops, however the caller's scope ends: a test that
-/// fails midway leaves no process and no thread behind. `kill` is
+/// fails midway leaves no process and no thread behind. The value owns the
+/// child from the moment `spawn` returns it, before anything else is asked of
+/// the system -- the reader thread above all, whose creation can fail -- so a
+/// constructor that fails after the spawn unwinds through the same drop
+/// (`R4-REG-1`: the reader's creation once came first, and a child whose reader
+/// could not be started was left neither killed nor reaped). `kill` is
 /// `Child::kill` -- `SIGKILL` on Unix, `TerminateProcess` on Windows -- so a
 /// killed child is a coordinator that died without running a line of its
 /// own cleanup, which is the death the resume tests are about.
@@ -3015,6 +3020,21 @@ impl LinkedChild {
         env: &[(&str, &OsStr)],
         stderr: &Path,
     ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
+        Self::spawn_with(test, env, stderr, |_| std::thread::Builder::new())
+    }
+
+    /// [`Self::spawn`], its reader thread started from the builder `reader`
+    /// returns when it is handed the child's pid: for the test that makes that
+    /// thread's creation fail
+    /// (`a_linked_child_whose_reader_cannot_be_started_is_killed_and_reaped`,
+    /// with `readiness::unstartable_reader`) and learns which child it has to
+    /// find gone.
+    pub(crate) fn spawn_with(
+        test: &str,
+        env: &[(&str, &OsStr)],
+        stderr: &Path,
+        reader: impl FnOnce(u32) -> std::thread::Builder,
+    ) -> (std::sync::Arc<Self>, std::sync::mpsc::Receiver<String>) {
         let log = fs::File::create(stderr).expect("the linked child's stderr log");
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
         command
@@ -3032,33 +3052,39 @@ impl LinkedChild {
             command.env(key, value);
         }
         let mut child = command.spawn().expect("spawn the linked child");
+        let pid = child.id();
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("the linked child's stdout");
+        let stdout = child.stdout.take();
+        let mut linked = Self {
+            child: std::sync::Mutex::new(child),
+            stdin: std::sync::Mutex::new(stdin),
+            reader: std::sync::Mutex::new(None),
+        };
+        let stdout = stdout.expect("the linked child's stdout");
         let (lines, received) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            use std::io::BufRead as _;
-            let mut stdout = std::io::BufReader::new(stdout);
-            loop {
-                let mut line = String::new();
-                match stdout.read_line(&mut line) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) => {
-                        let line = line.trim_end_matches(['\r', '\n']).to_owned();
-                        if lines.send(line).is_err() {
-                            return;
+        let started = reader(pid)
+            .spawn(move || {
+                use std::io::BufRead as _;
+                let mut stdout = std::io::BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {
+                            let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                            if lines.send(line).is_err() {
+                                return;
+                            }
                         }
                     }
                 }
-            }
-        });
-        (
-            std::sync::Arc::new(Self {
-                child: std::sync::Mutex::new(child),
-                stdin: std::sync::Mutex::new(stdin),
-                reader: std::sync::Mutex::new(Some(reader)),
-            }),
-            received,
-        )
+            })
+            .unwrap_or_else(|error| panic!("start the reader of the linked child {pid}: {error}"));
+        *linked
+            .reader
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(started);
+        (std::sync::Arc::new(linked), received)
     }
 
     /// Send one line to the child's stdin; `false` once the child can no
