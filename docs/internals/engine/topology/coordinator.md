@@ -1340,7 +1340,15 @@ reaper, for the roles that have one (`run_held` is the role that adjusts nothing
 in the ordinary case. A role the parent asks to see past an error (`AFTER_AN_ERROR`, Unix) reports
 the error, whether the run's invocation ledger balances and whether the run's cleanup lease is held;
 then it parks until it is killed (`park`), or drops its seams — the last handle on the reaper — reports
-the lease again, and exits on its own (`exit`).
+the lease again, and exits on its own once the parent says so (`exit`, `exit_on_the_parents_word`).
+
+## `mod tests` › `fn exit_on_the_parents_word() -> ! {`
+
+Exit once the file the parent names (`EXIT_WHEN`) exists, bounded by the module's watchdog. The parent
+looks at the relay while the child is still alive and only then lets it go, so "the reaper acted on
+nothing while its coordinator lived" is an observation rather than a race: a first contention run on
+the child that exited at once saw the reaper's `ps` before the parent looked in 9 of 147 runs (the PR11
+record's round R6).
 
 ## `mod tests` › `fn child_reaper(`
 
@@ -1424,7 +1432,7 @@ dropped with `run_concurrently` had cancelled the reaper and the three survived 
 
 `R6-C1`, exited: who owns the reaper after the error and when it is disarmed. The child drops its last
 handle on the reaper after the unresolved return — the lease is still held, because the drop keeps an
-unsettled reaper armed — and exits normally. The reaper then finds its coordinator gone, kills and
+unsettled reaper armed, and the reaper has made no call — and exits normally when the parent says so. The reaper then finds its coordinator gone, kills and
 removes the three, and releases the lease; the next coordinator's census finds the intents only, its
 ledgers start empty and it completes.
 
@@ -1459,8 +1467,8 @@ called and every container released by its own Runner.
 container is left unresolved (the runtime unreachable for `stop`, `remove` and `observe`), so the
 pre-flight refuses with the probe's registration held and the recovery order returns its error. The
 reaper armed before the probe is still armed; the child drops its pre-flight and its last handle on
-the reaper — still armed, the lease still held — and exits; the reaper then kills and removes the probe
-container and releases the lease. The child keeps its adopted fixture alive to the end
+the reaper — still armed, the lease still held, no call made — and exits when the parent says so; the
+reaper then kills and removes the probe container and releases the lease. The child keeps its adopted fixture alive to the end
 (`try_resume_over`), since dropping an adopted fixture removes the parent's run root.
 
 ## `mod tests` › `fn a_coordinator_refuses_a_reaper_whose_scope_is_not_its_runs_own_before_anything_is_spawned()`

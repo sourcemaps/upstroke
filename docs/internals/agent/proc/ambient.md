@@ -241,12 +241,14 @@ call: a reaper already running keeps the scope it was started with, because
 it is a `fork`-only child that cannot be handed anything afterwards.
 
 A reaper is alive only while one is: a host process's reaper for that
-process's life, and the run's own for the coordinator's whole run once the
-coordinator arms one with `arm_container_reaper` (`proc.rs`). The schema-4
-coordinator registers its run's scope here and arms that reaper at
-`run_concurrently`'s entry whenever its caller names the container runtime's
-CLI, and clears both before it returns (the PR11 record's round R5,
-`FULL-SC-1`).
+process's life, and an incarnation's own once its owner arms one with
+`arm_container_reaper` (`proc.rs`). The schema-4 engine's
+`IncarnationReaper` registers the run's scope here and arms that reaper
+before the incarnation's first container — a resume's pre-flight probe, else
+the coordinator's first pipeline — and clears the scope when it cancels the
+reaper, which it does only once every container it covered is established
+gone; otherwise the reaper stays armed until the process exits (the PR11
+record's rounds R5 and R6, `FULL-SC-1`, `R6-C1`, `R6-C2`).
 
 ### Errors
 
