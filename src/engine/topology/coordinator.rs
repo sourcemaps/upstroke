@@ -10061,6 +10061,9 @@ mod tests {
         let private =
             std::path::PathBuf::from(fixture["private"].as_str().expect("its private root"));
         await_starts(&host, INC_1, 3);
+        within(BOUND, "the coordinator's three containers running", || {
+            running_in(&host).len() == 3
+        });
         let public = crate::rundir::public_dir(
             &root.join("repo"),
             crate::workspace_manager::fixture::RUN_ID,
