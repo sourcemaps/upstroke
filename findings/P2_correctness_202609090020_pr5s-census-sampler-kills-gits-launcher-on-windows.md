@@ -64,3 +64,24 @@ and re-read its Windows kill floors against kills that now reach git, recording 
 kills produce for each of the four commands. If a later pass labels this P1, the disposition
 becomes escalate-to-owner rather than still-deferred, because the census's evidence is PR5's and a
 change to what it shows on Windows is the owner's to accept.
+
+## A second fingerprint, on PR11 (pull request #327, 2026-09-30)
+
+CI run 36767206421 at `4bb04a6568377435cf9d47ebc9883fad9204e7df`, job `test (winguest)` 110064296977,
+failed this sampler alone — `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`,
+in its `Worktree.Add` sample:
+
+    forced removal converges: Io { path: "C:\Users\Administrator\AppData\Local\Temp\upstroke-sample-add-B5WFK90B4N\repo\.git\worktrees\kalpha-g3\locked",
+        source: Os { code: 5, kind: PermissionDenied, message: "Access is denied." } }
+
+That is a new fingerprint of this row, not a new row: the sampler's forced removal could not delete
+the `locked` file of the registration a `git worktree add` creates, which fits a real git still
+running the add after the kill ended its launcher — the reading is consistent with this file's
+failure sequence and not established by the log. The round that pushed `4bb04a65` changed no
+`workspace_manager` path; the same test passed on the same leg at `8eae559a` (run 36757374671) and
+at `4bb04a65` on ubuntu, macOS and the build box's gates; and the re-run at the same head, run
+36769385877, passed every leg, `test (winguest)` included. Attribution and logs: the build box's
+`~/orch-pr11/logs/pr11_repair_r3/ci/red-leg-attribution.txt` and the job logs beside it; the re-run's
+jobs, `~/orch-pr11/logs/pr11_impl_g/findings/run-36769385877-jobs.tsv`. Nothing here changes the
+change that takes this up (above).
+

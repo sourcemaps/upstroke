@@ -1572,10 +1572,10 @@ fn append_error_never_triggers_cleanup_or_report_from_memory() {
         .reservations
         .take(AAY, ReservationKind::Dispatch)
         .expect("the ledger is empty at process start");
-    let worker = AttemptIdentities::new(AAY, GenerationId(0), AttemptNumber(1)).worker();
+    let gate = AttemptIdentities::new(AAY, GenerationId(0), AttemptNumber(1)).gate(0, 0);
     fixture
         .invocations
-        .register(&worker)
+        .register(&gate)
         .expect("a fresh identity registers");
 
     fixture.arm(
@@ -2246,10 +2246,10 @@ fn the_production_emitter_reaches_the_append_error_protocol() {
         .reservations
         .take(AAY, ReservationKind::Dispatch)
         .expect("the ledger is empty at process start");
-    let worker = AttemptIdentities::new(AAY, GenerationId(0), AttemptNumber(1)).worker();
+    let gate = AttemptIdentities::new(AAY, GenerationId(0), AttemptNumber(1)).gate(0, 0);
     fixture
         .invocations
-        .register(&worker)
+        .register(&gate)
         .expect("a fresh identity registers");
 
     fixture.arm(

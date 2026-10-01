@@ -1550,6 +1550,56 @@ fn remove_tree_once_handles_close(path: &Path) -> std::io::Result<()> {
 #[inline]
 fn note_removal_attempt(_attempt: u32) {}
 
+/// One lock per repository's worktree registry (`<common git dir>/worktrees`),
+/// shared by every [`WorkspaceManager`] of that repository in this process.
+///
+/// **Why a lock, and why here.** From PR11 several pipelines of one run add and
+/// remove snapshots while the coordinator adds and removes task and staging
+/// worktrees, all through clones of one manager, and Git 2.43's registry is not
+/// safe against itself: `git worktree add` makes the administrative directory
+/// before it writes `locked`, `gitdir` and `commondir`, a plain `git worktree
+/// prune` removes a directory with no `gitdir`, and every enumeration — `git
+/// worktree list`, the one `add` makes of its siblings, and this module's own
+/// scan in [`WorkspaceManager::remove_worktree_proving`] — reads each entry's
+/// files and dies (or, here, refuses) on one half written. Measured with four
+/// concurrent loops: an add raced by a prune failed 2–3 times in 600
+/// (`~/orch-pr11/logs/pr11_research_c/git-worktree-add-prune-race-*.log`), and a
+/// `git worktree list` raced by adds and prunes failed 7–10 times in about 7,500,
+/// and once in about 2,000 against adds alone
+/// (`~/orch-pr11/logs/pr11_impl_c/git-worktree-list-race.log`); serially, never.
+///
+/// **What it guards.** No data: it orders every registry access this process
+/// makes — the `git worktree add` child, a removal from its registration scan to
+/// its prune, `git worktree list`, and the torn-registration plan's scan — so
+/// none of them sees another half done. **Protocol.** Keyed by the canonical
+/// common git directory, so two managers of one repository share it. Its four
+/// holders take it around one Git child (the add, the list), one scan (a
+/// removal's, the torn plan's), or a removal's mutation inside its funnel, and
+/// each releases it before its funnel's `After` hook. No holder
+/// calls a hook, a registry reader or anything else that could take it again,
+/// so it is never taken twice on one thread, and a holder waits only for its
+/// own Git child and filesystem calls, so it adds no wait cycle. (Phase 3 held
+/// it across a removal's hooks, and an observer that listed the worktrees from
+/// one waited on its own caller for ever: the PR11 record, §13, round R1,
+/// `R1-REG-1`.) A poisoned lock is taken anyway: it protects an ordering, not a
+/// value. **What it cannot guard:** another process — or an agent running Git in
+/// its own worktree — that edits the registry is outside it (the PR11 record,
+/// §11).
+///
+/// The table holds one entry per repository this process has managed and is
+/// never pruned; shared ownership is the lifecycle — each manager of the
+/// repository holds the `Arc` only while it holds the lock.
+static REGISTRY_LOCKS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut table = REGISTRY_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(table.entry(common_git_dir.to_path_buf()).or_default())
+}
+
 impl WorkspaceManager {
     /// Derive the execution root of `run_id` from the managed base and the
     /// authorized private root, and refuse every containment condition
@@ -2651,6 +2701,10 @@ impl WorkspaceManager {
                 Self::WORKTREE_ADD_ARGV.iter().map(OsString::from).collect();
             argv.push(path.as_os_str().to_os_string());
             argv.push(OsString::from(commit));
+            let registry = registry_lock_of(&self.common_git_dir);
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.git_ok(&self.base, &argv)?;
             Ok(path)
         })
@@ -2915,6 +2969,19 @@ impl WorkspaceManager {
     /// finalization's scrub and the live loop's; its error is the funnel's,
     /// never absorbed.
     ///
+    /// The repository's registry lock (`REGISTRY_LOCKS`) is held twice, and
+    /// never across a hook. First around the registration scan, before any
+    /// hook: it binds the registration the removal will act through, so a
+    /// scan refusal comes first and a registration exchanged at the `Before`
+    /// hook is refused by the acted-through check inside the funnel. Then,
+    /// inside the funnel after the `Before` hook has returned, around the
+    /// removal of the checkout, the administrative directory and the prune,
+    /// which act on that binding; it is released before the `After` hook. So
+    /// the scan never reads an add this process has in flight and the prune
+    /// never removes one, and an observer may list the worktrees, or wait on
+    /// another thread's registry access, from either hook (the PR11 record,
+    /// §13, round R1, `R1-REG-1`).
+    ///
     /// # Errors
     ///
     /// The containment refusals, or a Git or I/O error.
@@ -2928,114 +2995,134 @@ impl WorkspaceManager {
         let RemovalBinding {
             admin: registration,
             passed_over,
-        } = self.revalidate_removal_proving(&path, proof)?;
+        } = {
+            let registry = registry_lock_of(&self.common_git_dir);
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.revalidate_removal_proving(&path, proof)?
+        };
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_site(), || {
-            self.revalidate_acted_through(
-                Primitive::RemoveWorktree,
-                Some(slot),
-                registration.as_deref(),
-            )?;
-            let present = match fs::symlink_metadata(&path) {
-                Ok(_) => true,
+            let registry = registry_lock_of(&self.common_git_dir);
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.remove_bound(slot, &path, registration.as_deref(), &ledger)
+        })?;
+        Ok(passed_over)
+    }
+
+    /// [`Self::remove_worktree_proving`]'s second critical section, entered
+    /// holding the registry lock with `registration` bound by its scan: the
+    /// checkout removed and its deletion made durable, then the registration
+    /// cleared and pruned.
+    fn remove_bound(
+        &self,
+        slot: &Slot,
+        path: &Path,
+        registration: Option<&Path>,
+        ledger: &DurabilityLedger,
+    ) -> Result<(), UpstrokeError> {
+        self.revalidate_acted_through(Primitive::RemoveWorktree, Some(slot), registration)?;
+        let present = match fs::symlink_metadata(path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let checkout = if present {
+            let contained = self.contained(path)?;
+            remove_tree_once_handles_close(&contained).map_err(|source| {
+                UpstrokeError::Filesystem {
+                    operation: "remove",
+                    path: contained.clone(),
+                    source,
+                }
+            })?;
+            contained
+        } else {
+            canonical_prefix(path)?
+        };
+        let parent = checkout.parent().ok_or_else(|| UpstrokeError::Git {
+            message: format!("{} has no parent directory", checkout.display()),
+        })?;
+        sync_checkout_removed(&checkout, parent, ledger)?;
+        if let Some(admin) = registration {
+            if !self.registration_still_names(admin, path)? {
+                // Its identity metadata is already absent: forced cleanup
+                // converges without inferring or deleting an admin path.
+                self.git_ok(
+                    &self.base,
+                    &[OsString::from("worktree"), OsString::from("prune")],
+                )?;
+                return Ok(());
+            }
+            let locked = admin.join("locked");
+            match fs::remove_file(&locked) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: locked,
+                        source,
+                    });
+                }
+            }
+            // A killed `git worktree add` can leave an empty `commondir`.
+            // Git then cannot enumerate *any* worktree, so `prune` cannot
+            // remove this one. `revalidate_removal` bound this admin
+            // directory to the exact, contained slot from its byte-safe
+            // `gitdir` before the checkout was deleted. Only that proved
+            // registration may be removed directly.
+            let commondir = admin.join("commondir");
+            let commondir_empty = match fs::metadata(&commondir) {
+                Ok(metadata) => metadata.len() == 0,
+                // No `commondir` at all is Git's to prune; only a read
+                // failure is ours to report.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(source) => {
                     return Err(UpstrokeError::Io {
-                        path: path.clone(),
+                        path: commondir,
                         source,
                     });
                 }
             };
-            let checkout = if present {
-                let contained = self.contained(&path)?;
-                remove_tree_once_handles_close(&contained).map_err(|source| {
-                    UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: contained.clone(),
-                        source,
-                    }
-                })?;
-                contained
-            } else {
-                canonical_prefix(&path)?
-            };
-            let parent = checkout.parent().ok_or_else(|| UpstrokeError::Git {
-                message: format!("{} has no parent directory", checkout.display()),
-            })?;
-            sync_checkout_removed(&checkout, parent, &ledger)?;
-            if let Some(admin) = registration.as_ref() {
-                if !self.registration_still_names(admin, &path)? {
-                    // Its identity metadata is already absent: forced cleanup
-                    // converges without inferring or deleting an admin path.
+            if commondir_empty {
+                if !self.registration_still_names(admin, path)? {
                     self.git_ok(
                         &self.base,
                         &[OsString::from("worktree"), OsString::from("prune")],
                     )?;
                     return Ok(());
                 }
-                let locked = admin.join("locked");
-                match fs::remove_file(&locked) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(source) => {
-                        return Err(UpstrokeError::Filesystem {
-                            operation: "remove",
-                            path: locked,
-                            source,
-                        });
+                remove_tree_once_handles_close(admin).map_err(|source| {
+                    UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: admin.to_path_buf(),
+                        source,
                     }
-                }
-                // A killed `git worktree add` can leave an empty `commondir`.
-                // Git then cannot enumerate *any* worktree, so `prune` cannot
-                // remove this one. `revalidate_removal` bound this admin
-                // directory to the exact, contained slot from its byte-safe
-                // `gitdir` before the checkout was deleted. Only that proved
-                // registration may be removed directly.
-                let commondir = admin.join("commondir");
-                let commondir_empty = match fs::metadata(&commondir) {
-                    Ok(metadata) => metadata.len() == 0,
-                    // No `commondir` at all is Git's to prune; only a read
-                    // failure is ours to report.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(source) => {
-                        return Err(UpstrokeError::Io {
-                            path: commondir,
-                            source,
-                        });
-                    }
-                };
-                if commondir_empty {
-                    if !self.registration_still_names(admin, &path)? {
-                        self.git_ok(
-                            &self.base,
-                            &[OsString::from("worktree"), OsString::from("prune")],
-                        )?;
-                        return Ok(());
-                    }
-                    remove_tree_once_handles_close(admin).map_err(|source| {
-                        UpstrokeError::Filesystem {
-                            operation: "remove",
-                            path: admin.clone(),
-                            source,
-                        }
-                    })?;
-                    // No prune: nothing of this slot's is left for one, and
-                    // what it would remove is other slots' — among it a
-                    // registration whose `gitdir` is gone and, once that
-                    // empties the store, `<common git dir>/worktrees` itself,
-                    // without which the gate above refuses that slot's
-                    // checkout on every attempt. That slot's own removal
-                    // prunes, after its checkout has gone.
-                    return Ok(());
-                }
+                })?;
+                // No prune: nothing of this slot's is left for one, and
+                // what it would remove is other slots' — among it a
+                // registration whose `gitdir` is gone and, once that
+                // empties the store, `<common git dir>/worktrees` itself,
+                // without which the gate above refuses that slot's
+                // checkout on every attempt. That slot's own removal
+                // prunes, after its checkout has gone.
+                return Ok(());
             }
-            self.git_ok(
-                &self.base,
-                &[OsString::from("worktree"), OsString::from("prune")],
-            )?;
-            Ok(())
-        })?;
-        Ok(passed_over)
+        }
+        self.git_ok(
+            &self.base,
+            &[OsString::from("worktree"), OsString::from("prune")],
+        )?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -4962,15 +5049,21 @@ impl WorkspaceManager {
     ///
     /// A Git error.
     pub fn worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
-        let output = self.git_ok(
-            &self.base,
-            &[
-                OsString::from("worktree"),
-                OsString::from("list"),
-                OsString::from("--porcelain"),
-                OsString::from("-z"),
-            ],
-        )?;
+        let registry = registry_lock_of(&self.common_git_dir);
+        let output = {
+            let _serialized = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.git_ok(
+                &self.base,
+                &[
+                    OsString::from("worktree"),
+                    OsString::from("list"),
+                    OsString::from("--porcelain"),
+                    OsString::from("-z"),
+                ],
+            )?
+        };
         parse_worktree_records(&output)
     }
 
@@ -5253,6 +5346,10 @@ impl WorkspaceManager {
         &self,
         excluding: Option<&Slot>,
     ) -> Result<Vec<Slot>, UpstrokeError> {
+        let registry = registry_lock_of(&self.common_git_dir);
+        let _serialized = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut torn = Vec::new();
         for slot in self.intents()? {
             if excluding == Some(&slot) {

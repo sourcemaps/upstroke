@@ -159,7 +159,7 @@ impl UncancelledAppend {
     pub fn cancelling(self, invocations: &mut InvocationLedger) -> AppendError {
         AppendError {
             report: self,
-            cancelled_invocations: invocations.cancel_all_running(),
+            cancelled_invocations: invocations.cancel_after_append_error(),
             _cancelled: Cancelled(()),
         }
     }

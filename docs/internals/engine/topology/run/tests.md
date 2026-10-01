@@ -325,3 +325,60 @@ is only required to describe a whole branch while its arm reads
 the opposite prose, and this says so at the point where the two claims
 diverge rather than leaving a stale pin to fail with a message about
 Markdown.
+
+## `mod scaffold_runner {`
+
+The substrate's runner double, `scaffold::RecordingRunner`, is what PR11's coordinator tests drive
+(`tests_acceptance.determinism`: "FakeRunner with explicit start/complete control, recorded
+RunnerRequests, InvocationIds (incl. shell and agent probes), and the declared RunnerPolicy and
+image id each invocation executed under … and to fail a shell or agent probe on demand"). These
+tests hold the double to that sentence before anything leans on it.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_holds_each_invocation_until_the_test_completes_it_in_any_order() {`
+
+Three invocations on three threads all start and wait; the test delivers their results in reverse
+order, and each gets its own; the endings are recorded in the order the test delivered them; every
+request is recorded with its identity.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_refuses_and_counts_a_second_completion_and_an_unknown_one() {`
+
+A completion is delivered exactly once: a second delivery for one invocation, and a delivery for an
+invocation the runner never held, are refused and both counted, and the first delivery stands.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_ends_a_cancelled_or_dropped_invocation_exactly_once() {`
+
+A held invocation whose call is cancelled from another thread resolves cancelled with fate `Gone`,
+and a completion after that finds nothing to complete; a held invocation whose future is dropped
+releases its hold and is recorded abandoned; a call already cancelled when it reaches the runner is
+cancelled with fate `NeverStarted`, starts no process and is recorded cancelled before start. One
+ending each.
+
+## `mod scaffold_runner` › `fn a_late_call_waits_at_the_door_until_admitted_and_a_barred_one_until_cancelled() {`
+
+Under late entry a call starts only once it is admitted, and until then is not inside the runner;
+a barred call is inside once it waits at its door, is never started by an admission, and ends
+cancelled before start when its call is cancelled. What the coordinator's scheduler and
+`a_shutdown_releases_each_invocation_once_whether_pending_unstarted_running_or_finished` lean on.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_records_the_policy_and_image_each_invocation_ran_under() {`
+
+By default an invocation records the host policy and no image; under a declared container policy it
+records that policy and its immutable image id, beside the request it carried.
+
+## `mod scaffold_runner` › `fn the_scaffold_runner_fails_a_shell_or_agent_probe_on_demand() {`
+
+Through a real consumer: the production shell probe (`host::run_shell_probe`) refuses when the
+double was told to fail the next shell probe with an exit code, and passes on the one after, since a
+failure is used once; an agent probe told to never start is a `NeverStarted` error that is not a
+cancellation. Failed probes are recorded like any request.
+
+## `fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_refuses() {`
+
+Review round 2's `R2-REG-1` (the PR11 record, §13, round R2). The `Self::Closure` section of
+`docs/internals/engine/topology/run.md` still said the concurrent half of closure — in-flight
+cancellation, the budget drain, promotion and publication inside closure — was refused by
+`closure::refuse_unclosable` naming PR11, after phase 4 had built all of it into
+[`TopologyRun::close_run`]. The pin holds what the section says now — the concurrent half done in
+`close_run`, a halt's vouched identities settled, a budget stop drained, only unvouched in-flight work
+refused — and that the retired sentence does not come back. It matches on the prose with its whitespace
+collapsed, as the pins above do.

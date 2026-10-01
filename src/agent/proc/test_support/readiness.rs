@@ -247,18 +247,36 @@ pub(crate) struct Producer {
     framed: Receiver<Framed>,
 }
 
+#[cfg(unix)]
+pub(crate) fn unstartable_reader() -> thread::Builder {
+    thread::Builder::new().stack_size(1 << (usize::BITS - 2))
+}
+
 impl Producer {
-    pub(crate) fn adopt(mut child: Child) -> Self {
+    pub(crate) fn adopt(child: Child) -> Self {
+        Self::adopt_with(child, |_| thread::Builder::new())
+    }
+
+    pub(crate) fn adopt_with(
+        mut child: Child,
+        reader: impl FnOnce(u32) -> thread::Builder,
+    ) -> Self {
+        let pid = child.id();
+        let stdout = child.stdout.take();
         let (sender, framed) = mpsc::channel();
-        let reader = child
-            .stdout
-            .take()
-            .map(|stdout| thread::spawn(move || read_frames(stdout, &sender)));
-        Self {
+        let mut adopted = Self {
             child,
-            reader,
+            reader: None,
             framed,
+        };
+        if let Some(stdout) = stdout {
+            let started = thread::Builder::spawn(reader(pid), move || read_frames(stdout, &sender))
+                .unwrap_or_else(|error| {
+                    panic!("start the reader of the readiness producer {pid}: {error}")
+                });
+            adopted.reader = Some(started);
         }
+        adopted
     }
 
     pub(crate) fn child(&mut self) -> &mut Child {

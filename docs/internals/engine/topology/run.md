@@ -272,9 +272,16 @@ procedure at `max_parallel = 1` (`closure.md`), appends `run_finished`, and
 finalizes (`finalize.md`). What does not cross is `Poisoned` (the absence of
 a branch), `NotStarted` (an unstarted fold admits nothing) and `Finished` (a
 finished run is refused continuation after its finalization). The
-concurrent half of closure — in-flight cancellation, the budget drain,
-promotion and publication completion inside closure — is refused by
-`closure::refuse_unclosable` naming PR11.
+concurrent half of closure is PR11 phase 4's, done in the same `close_run`:
+a halt's coordinator cancels its in-flight pipelines, waits for each to end
+and hands over the identities it vouches for, which step (2) settles
+interrupted with their residue; a budget stop drains its pipelines before
+the closure runs; and a promoting generation or an authorized publication
+is completed wherever the closure finds one (`closure.md`,
+`coordinator.md`). What is still refused, before any append and in the
+sentence `closure::refuse_unclosable` keeps for the frozen recovery tests,
+is in-flight work nothing vouches for: `step` vouches for nothing, and the
+synchronous loop never leaves an attempt or a verification in flight.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
 
@@ -398,9 +405,17 @@ the alternative, and a model could be handed its own work to review
 gates and review passes", and the recorded passes were selected against this
 binding.
 
-## `impl IntegrationCx<'_, '_>` › `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {`
+## `pub fn verification_body(`
 
-The verification proper, every error typed so [`Verification::verify`]
+Since PR11 phase 3 the verification is three pieces, so that the width-1
+[`IntegrationCx::verify`] runs it inline and the coordinator's `verify` runs the
+same body on a pipeline thread (the working record's R-T, R-V): the fold reads
+([`VerificationJob::of`]: the registry entry, the candidate's recorded base, the
+implementer binding), this body, which touches no fold and appends nothing, and
+the mapping ([`verified`]). The order of the effects inside is today's
+`judge_proposal`'s, unchanged.
+
+The verification proper, every error typed so [`verified`]
 can decide what each one means: the review diff, the plan, the input
 classification, the review inputs, and the judge.
 
@@ -460,6 +475,19 @@ Git command the verification issues runs before or between its processes,
 never beside one, so the terminal is safe to settle. R24 at `916852c9`
 excluded these and the `?` propagated them as an interruption
 (`pr8-triage.md` §5, record F3).
+
+A registry another process is half-way through writing is foreign Git
+state here too: a coordinator in a linked checkout of the same repository
+(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), or a host
+agent's own prune (`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`), which the
+process-local registry lock does not exclude. The state is transient and
+the terminal is durable: it spends one of the candidate's deferrals, the
+one that reaches `max_defers` parks the candidate with an unblock
+question, and the other process finishing undoes none of it. An attempt's
+judgement meeting the same state is not mapped here: its Git error is the
+pipeline's, and the command ends resumably. So the race costs a
+verification more than an attempt (the PR11 record's §13, round R8,
+`R8-CONC-1`).
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
@@ -709,11 +737,11 @@ worker's own report and the verdict. A bundle for the same reason — they
 arrive together, are read together, and passing them singly put `settle` at
 eight arguments.
 
-## `struct Produced<'a>` › `capture: &'a Capture,`
+## `struct Produced<'a>` › `capture: &'a super::attempt::Capture,`
 
 The exact tree the attempt captured.
 
-## `struct Produced<'a>` › `assessed: &'a Assessment,`
+## `struct Produced<'a>` › `assessed: &'a super::attempt::Assessment,`
 
 What the ladder's cheap rungs said, and the adapter's parse beside it.
 
@@ -872,22 +900,24 @@ durable either way, which is what makes a closure that fails diagnosable.
 `TopologyRun` — the schema-4 run, driven.
 
 Owns exactly what a run owns: the fold, the append handle, the two locks
-(inside [`RunHandle`]), the two provisional ledgers, and the ceiling it was
+(inside [`RunHandle`]), the permit broker, and the ceiling it was
 configured with. Everything else is a seam.
 
-**It owns the slot assertion (R3)**, and the sentence here said it did not.
-`slots: SlotAssertion` is a field of this struct, `TopologyRun::resumed`
-initialises it with `SlotAssertion::new()`, and `fn attempt` threads
-`slots: &mut self.slots` into the one production `AttemptContext`. Named
-rather than cited by line: the correction that replaced this paragraph made
-it thirteen lines longer, so the `run.rs:615` the first draft carried — correct
-**at `9b6fef1`** — now points **into the correction itself**. `R5-SEAMS`/`PR7-R5-ATT-007`, and
-CLAUDE.md's trap list already names stale line anchors as a repeat cost. The denial was written
-while that was true — "a field nothing reads is a claim the code does not
-back" — and stayed after the branch that uses it arrived.
-`PR7-R3-CONTRACT-006`; confirmed against the tree and corrected 2026-08-26.
-`SlotAssertion::balances()` has to be true at process end, and that is the
-claim the field carries.
+**It owns the broker**, [`PermitBroker`] (`permits.rs`, since PR11): the
+provisional-reservation ledger (R13) and the invocation ledger with its slot
+table (R4, R3), which the width-1 run holds as the one authority for all
+three. `TopologyRun::resumed` builds it empty, as `crash_reconstruction`
+requires, with the slot limits defaulted to the recorded `max_parallel`;
+[`Self::attempt`], [`Self::integrate`], [`Self::with_journal`] and
+[`Self::emit`] split it into its two ledgers with `PermitBroker::halves`,
+because `EmitState` — and the frozen recovery module's `EmitContext` — carry
+the two separately. Its `balances()` has to be true at process end, and that
+is the claim the field carries.
+
+Before PR11 this field was `slots: SlotAssertion` beside `reservations` and
+`invocations`, and an earlier revision of this paragraph denied the slot
+assertion existed at all (`PR7-R3-CONTRACT-006`, corrected 2026-08-26); the
+denial is why the ownership is named here rather than cited by line.
 
 ## `pub struct TopologyRun` › `brief: Brief,`
 
@@ -978,7 +1008,7 @@ only if something can ask the ledger.
 entitlement before the step that can refuse and leak it on the refusing
 path, and all three were green because no test asked this question.
 
-## `pub fn holds_entitlement(&mut self) -> bool` › `self.reservations.cancel_any()`
+## `pub fn holds_entitlement(&mut self) -> bool` › `self.broker.halves().0.cancel_any()`
 
 `cancel_any` reports whether there was one *and* releases it, which
 is exactly right here: the run is being inspected after the step it
@@ -1065,6 +1095,20 @@ real reaper at `ReaperStarted` with the run's hold absent
 dropped with it, on the thread that drives the step, which is what a
 thread-local registration needs.
 
+**The degenerate schedule (PR11 phase 3).** Every branch is a function the
+coordinator (`coordinator.md`) calls too — selection through [`Self::admitted`],
+the budget stop, the backoff, the dispatch and first-attempt start
+([`Self::begin_dispatch`]), the retry start ([`Self::begin_retry`]), the
+settlement ([`Self::settle_judged`]), the integration's steps around the frozen
+`integrate()`, the hard block and the closure — and the attempt between its
+start and its settlement is [`attempt_body`], which `step` runs inline
+([`Self::judge_inline`]) with its own hooks on its own thread, where the
+coordinator spawns it. The same effect functions run in the same order as
+before the split, so every kill point and hook test keeps its meaning, and the
+frozen `recover/tests.rs`, which drives this function, is unchanged; the
+coordinator's `a_chain_plan_projects_identically_at_widths_three_and_one`
+drives it too, as the width-1 side of its comparison.
+
 
 ### Errors
 
@@ -1073,19 +1117,50 @@ each of which ends the command. Otherwise whatever the branch returns,
 or [`LoopBranch::unimplemented`] for a branch this build has not
 written, which performs nothing and appends nothing.
 
-## `impl TopologyRun` › `Admitted::BudgetExceeded(exceeded) => {`
+## `impl TopologyRun` › `pub(super) fn admitted(&self) -> Result<Admitted, UpstrokeError> {`
+
+`select` then `checkpoint`, over the fold, the ceiling and the settled spend:
+the one call of each in this file (`run::tests::the_loop_selects_through_one_function`),
+and the only way the coordinator selects too. A selection is never cached: the
+coordinator asks again after every message it applies, because the fold's
+append checks do not re-check admission (INV-21).
+
+## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 
 `loop`: "a breach appends `budget_exceeded` before any effect".
 The append is the whole of this arm — there is no effect after it
 to be before.
 
-## `impl TopologyRun` › `Admitted::Backoff => {`
+## `impl TopologyRun` › `pub(super) fn back_off(`
 
 "sleep the defer backoff and append `defer_wait_elapsed`" — in
 that order, and `Deferral::wait` owns it. The sleep is first
 because the event records a wait that *elapsed*: appending it
 first would put a claim in the log that a kill during the sleep
-would make false.
+would make false. The coordinator takes this arm only when no pipeline
+is live (R-AB), so a `defer_wait_elapsed` is never placed among in-flight
+settlements.
+
+## `impl TopologyRun` › `pub(super) fn begin_dispatch(`
+
+The ready-dispatch branch up to the attempt's body: the dispatch (or the
+continuation of an open generation), the plan, and `attempt_started`, all on
+the coordinator's thread. Dispatch and `attempt_started` stay together so the
+fold never shows a generation `OpenNoAttempt` while a pipeline creates its
+worktree, where `eligible_continuation` would select it a second time (R-S).
+
+## `impl TopologyRun` › `fn judge_inline(`
+
+The attempt's body run on this thread, `step`'s way: the synchronous
+registrar over the broker's ledger, a [`Carried`] that cancels nothing, and the
+attempt's standing read from the fold once, after `attempt_started` — nothing is
+appended while it runs.
+
+## `impl TopologyRun` › `pub(super) fn settle_judged(`
+
+What an attempt's body produced, settled: [`Self::settle`] and its `Progress`.
+The width-1 loop calls it after the inline body; the coordinator after it has
+checked a pipeline's completion against the pipeline's identity (R-AA).
 
 ## `impl TopologyRun` › `feedback: self.brief.lines(key),`
 
@@ -1122,15 +1197,24 @@ Whatever [`dispatch`] refuses or fails at, with the reservation
 cancelled first. Or [`UpstrokeError::Refused`] when the task is not one
 the registry knows, which is a fold and a registry that disagree.
 
-## `impl TopologyRun` › `self.reservations.take(key, ReservationKind::Dispatch)?;`
+## `impl TopologyRun` › `self.broker.reserve(`
 
-Provisional, before the effect it authorizes.
+Provisional, before the effect it authorizes, and through the broker's
+check: the fold-derived pipeline count plus the outstanding reservations
+must leave room under `max_parallel`, read from the fold at the moment of
+the reservation. The selection that chose this dispatch read the same fold,
+so at width 1 the check is the selection's own count confirmed; at width
+above one it is what keeps several outstanding reservations inside the
+limit.
 
-## `impl TopologyRun` › `let _ = self.reservations.cancel(key, ReservationKind::Dispatch);`
+## `impl TopologyRun` › `let cancelled = reservations.cancel(key, ReservationKind::Dispatch);`
 
 Cancel before returning, and do not let a cancellation
 failure hide the failure that caused it: the first error is
-the one an operator needs.
+the one an operator needs, and the cancellation's own result
+rides along as its cleanup rather than being discarded. After an
+append error the protocol has already cancelled every reservation,
+and this one is then a counted duplicate, not a failure.
 
 ## `impl TopologyRun` › `fn hard_block(`
 
@@ -1209,10 +1293,12 @@ base's tree before it picks, because a second pick onto the merged index
 is not a no-op and applies the hunk again (the record's §12, finding 3,
 measured it). Its observation is what `attempt_started` records.
 
-## `impl TopologyRun` › `fn retry_ready(`
+## `impl TopologyRun` › `pub(super) fn begin_retry(`
 
 The first half of the ready-retry branch: **reserve, verify, and start
-the next attempt in the retained generation.**
+the next attempt in the retained generation** — up to the attempt's body,
+which the caller runs (inline or spawned): [`Retrying::Started`] carries the
+job, [`Retrying::Closed`] a generation whose worktree failed its verify.
 
 `loop`: "if a retained generation exists: {pipeline} reservation, next
 attempt in the retained generation". `settle::retry` owns the order and
@@ -1271,21 +1357,19 @@ The reservation was already cancelled by `retry`.
 
 The attempt number a fresh generation's first attempt carries.
 
-## `impl TopologyRun` › `fn attempt(`
+## `impl TopologyRun` › `fn prepare_attempt(`
 
-The fourth clause of the ready-dispatch branch: **run one attempt
-through the Runner.**
-
-`attempt_started`, the worker, the exact-tree capture, the gate set on
-one shared snapshot, and each reviewer on a fresh one — in that order,
-which is [`AttemptContext`]'s, not a second one. This function's whole
-job is to assemble what that machinery reads and to hand it the seams
-its effects go through, and it is what makes the driver
+The fourth clause of the ready-dispatch branch, first half: **the attempt's
+plan and its announcement.** The binding from the fold, the frozen registry
+entry, `plans.plan`, and `attempt_started` unless the retry already appended it
+— on the coordinator's thread, as an [`AttemptJob`] that owns everything the
+body reads. The worker, the exact-tree capture, the gate set on one shared
+snapshot and each reviewer on a fresh one are [`attempt_body`]'s, in that order,
+which is [`AttemptContext`]'s, not a second one; it is what makes the driver
 `review::run_review`'s **second production caller**.
 
-**The settle write is not here.** What comes back is a [`Judgement`] no
-event records yet; the caller appends it, immediately after this
-returns.
+**The settle write is not here.** What the body returns is a judgement no
+event records yet; [`Self::settle_judged`] appends it.
 
 ### This block was re-targeted, and two of its sentences went false
 
@@ -1316,37 +1400,90 @@ strings; the alternative is the driver copying the five fields
 `inputs` reads, which is assembly logic in the one place that must
 not hold any.
 
-## `impl TopologyRun` › `let run = if run_as.announced {`
+## `impl TopologyRun` › `if !run_as.announced {`
 
 **`attempt_started` is the retry branch's, not this one's.** A retry
 appends it inside `settle::retry`, after the worktree verified, so a
 second append here would be refused by the fold — and rightly: the
 verify is what makes the claim true.
 
-## `impl TopologyRun` › `let assessed = cx.assess(site, &plan, &run, &capture, &diff, entry.spec.kind)?;`
-
-The ladder's cheap rungs, before the expensive ones. `judge` starts
-from this rather than from `None`, so a worker that died or produced
-no diff never reaches a gate or a frontier reviewer.
-
 ## `impl TopologyRun` › `fn close_run(`
 
-Run-end closure, the acting half of `closure.md`: the ending outcome is
-read first (`closure::ending_outcome`), the shapes this build cannot close
-are refused (`closure::refuse_unclosable`, naming PR11), every closable
-generation is closed `RunEnding { outcome }` with its close appended and
-its slot scrubbed after the append, a provisional reservation still held
-is cancelled with a warning, the derivation is confirmed against the
-closed fold, `run_finished` is appended, and terminal finalization runs
+Run-end closure, the acting half of `closure.md`, in `closure_procedure`'s
+order. The ending outcome is read first (`closure::ending_outcome`). Step (2):
+the in-flight work its caller vouches for (`closure::Cancelled`) is settled
+interrupted — each attempt's `attempt_interrupted`, then its own snapshots and
+its task worktree reclaimed; the verification's `merge_verification_interrupted`,
+then its pin deleted expected-old, its staging removed and this sequence's
+snapshots reclaimed ([`Self::reclaim_interrupted`]) — and any other in-flight
+work is refused before any append (`closure::settleable`). Steps (3) and (4):
+a promoting generation is promoted and an authorized publication completed
+([`Self::complete_promotions`], [`Self::complete_publication`]). Then every
+closable generation is closed `RunEnding { outcome }` with its close appended
+and its slot scrubbed after the append, a provisional reservation still held is
+cancelled with a warning, the derivation is confirmed against the closed fold,
+`run_finished` is appended, and terminal finalization runs
 (`finalize::finalize`). The `Progress::Finished` it returns carries what
 finalization did.
 
+`step` and the coordinator's idle arm vouch for nothing, so at width 1 step (2)
+is PR10's refusal unchanged; the coordinator's halt hands over the identities
+whose pipelines it cancelled and saw end (`coordinator.md`, `finish`). Each
+effect of steps (2)–(4) is the one recovery's steps (d) and (f) perform, through
+the same public functions of the frozen modules and the same `WorkspaceManager`
+funnels, on this run's own journal: recovery's own helpers take its typestate,
+and `integrate.rs`'s reclaim helpers are private (the working record's R-AF,
+R-AG).
+
 A kill or an append error inside the sequence leaves a prefix the next
-process's recovery completes: a `generation_closed` without its
-`run_finished` is a closed generation the sweep reclaims and a closure the
-next loop repeats; a torn `run_finished` is truncated by the next open and
+process's recovery completes: an in-flight identity left without its terminal is
+settled by recovery step (d) or (f), a `generation_closed` without its
+`run_finished` is a closed generation the sweep reclaims and a closure the next
+loop repeats, and a torn `run_finished` is truncated by the next open and
 appended again (ST-17, `kill_inside_closure_recovers`,
-`append_error_inside_closure_ends_command_and_resume_completes_closure`).
+`append_error_inside_closure_ends_command_and_resume_completes_closure`, and at
+width three the coordinator's `kill_inside_closure_recovers_at_width_three` and
+`append_error_inside_closure_ends_command_and_resume_completes_closure_at_width_three`).
+
+## `impl TopologyRun` › `fn reclaim_interrupted(`
+
+The residue of what step (2) just settled, after its terminal: an attempt's own
+snapshots (the names `JudgeNames::Attempt` owns, R-Y's scope) and its task
+worktree, the effects `AttemptContext::discard_residue` performs; a
+verification's pin, staging and the snapshots `JudgeNames::Integration` owns for
+its sequence — never another sequence's or an attempt's, which at width > 1 may
+still be another pipeline's (R-W).
+
+## `impl TopologyRun` › `fn complete_promotions(`
+
+Step (3): each promoting generation's candidates ref (created if absent),
+`task_candidate_created`, then its pin pruned and its worktree reclaimed —
+`candidate::recovery_for` supplies the typestate value recovery's step (f)
+starts from.
+
+## `impl TopologyRun` › `fn complete_publication(`
+
+Step (4): an authorized transaction (`integrate::Authorized::from_fold`, which is
+`None` for a verification still started) is published by the frozen
+`integrate::publish` — `assert_publishable`, the CAS when the ref is at the
+expected head, `task_merged`, the pin and staging reclaimed. A halt never
+publishes unverified work: only a prepared transaction is authorized.
+
+## `impl IntegrationJournal for RunJournal<'_, '_> {`
+
+The journal step (4) publishes through: the run's own emitter, discharging an
+append error's in-flight obligation against the run's ledger exactly as the
+candidate journal does.
+
+## `impl TopologyRun` › `pub(super) fn cancel_provisional(&mut self) -> bool {`
+
+Cancel any provisional reservation still held and say whether there was one:
+the coordinator's shutdown, which must cancel provisional reservations and
+normally finds none.
+
+## `fn reclaim_snapshots_of(`
+
+Remove every snapshot intent and worktree whose name `names` owns, and no other.
 
 ## `impl TopologyRun` › `fn settle(`
 
@@ -1748,8 +1885,9 @@ implementation of this protocol.
 
 The driver owns the ledger, so obligation (3) is discharged here
 and the loop keeps one error type. `emitter` borrows the fold, the
-log, the reservations and the warnings; `invocations` is a disjoint
-field, which is the whole reason it is no longer inside `EmitState`.
+log, the reservations and the warnings; `invocations` is the broker's
+other half, split off by `PermitBroker::halves`, which is the whole reason
+it is not inside `EmitState`.
 
 ## `struct IntegrationCx<'a, 'h> {`
 
@@ -1758,13 +1896,13 @@ bundle for the funnels, and the seams and ledgers the verification runs
 through. One object, so `emit`, `verify` and `converted` are all `&mut
 self` methods over disjoint fields rather than three overlapping borrows.
 
-## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `let (diff_parent, diff_tree) = if request.already_present {`
+## `pub fn verification_body(` › `let (diff_parent, diff_tree) = if job.already_present {`
 
 The review diff: the proposal against the head for a stale
 candidate, and the candidate's own patch (base..commit) for an
 already-present one, whose proposal is the head itself.
 
-## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {`
+## `pub fn verification_body(` › `match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {`
 
 What the attempt path decides before it judges (`assess`), less the
 Test-provenance rule: a diff no reviewer can judge — too large, or
@@ -1803,7 +1941,7 @@ sequence), `Pending` for an admission, a failed lineage for a decline
 with its queue position consumed and its lease released, halting per
 `decline_halts_run`.
 
-## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request, &mut charged) {`
+## `impl Verification for IntegrationCx<'_, '_> {` › `verification_body(&mut work, &job, &mut account)`
 
 The reviews are charged as each pass completes, inside `judge` (`SpendAccount`
 below), and **not** from the judgement returned here: a judgement that fails
@@ -1884,3 +2022,97 @@ own `task_dispatched`'s `source_candidate`. Recovery (g) and the
 continuation both read this, so what is re-materialized is what the
 interrupted dispatch materialized. Refused when the generation has no
 dispatch or its dispatch names no source.
+
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) if error.is_cancelled() => Err(error.into()),`
+
+A cancelled Runner error is never an outage (the working record's R-AB, phase
+1's obligation): only a coordinator cancels a pipeline — on a halt, a shutdown
+or an error that ends the command — and what follows is decided by its own
+interrupt state, so an `Unavailable` terminal with an outage cause would record
+something that did not happen. This arm is tested before the fate is read. The
+width-1 loop never cancels, so the arms below it behave as they did.
+
+## `pub fn verified(`
+
+The mapping from what the verification body returned to what `integrate()`
+records, shared by [`IntegrationCx::verify`] and the coordinator's `verify`: the
+arms below are the ones `IntegrationCx::verify` had before PR11 phase 3, behind
+the cancellation arm above.
+
+## `pub struct VerificationJob {`
+
+What a verification's body needs that only the fold can say — the frozen
+registry entry, the candidate's recorded base, the implementer's binding —
+read once, on the coordinator's thread, together with the request's own
+values, owned so the body can run on a pipeline's thread.
+
+## `impl VerificationJob` › `pub fn of(fold: &TopologyFold, request: &VerifyRequest<'_>) -> Result<Self, UpstrokeError> {`
+
+The reads `judge_proposal` made first, in its order, each refusal the error
+`verify` returned for it before.
+
+## `pub struct SpendAccount<'a>` › `pub spend: Option<&'a mut Spend>,`
+
+`None` on a pipeline's thread, which holds no `Spend`: the passes are collected
+in `charged` and the coordinator charges them when the verification's
+completion arrives, before `integrate()` appends the terminal
+(`TopologyRun::charge_reviews`). The total and its position before the terminal
+are the width-1 loop's.
+
+## `pub(super) trait Driver {`
+
+What the coordinator supplies so that [`DrivenJournal`] can implement the
+frozen `IntegrationJournal` and `Verification` over it: the run, the seams and
+the hooks at once (`parts`, one borrow for the three), the run alone, the seams
+alone, and the re-entrant `verify`. The journal is here rather than in the
+coordinator because its `fold()` names the fold's type, and a frozen census
+(`events::log::tests`, `FOLD_MENTIONS`) lists the production modules that may;
+this one is on it and the coordinator is not (R-N).
+
+## `pub(super) struct DrivenJournal<'d, D: ?Sized>(pub &'d mut D);`
+
+The coordinator's integration journal: every append through
+[`TopologyRun::emit`], the fold, the coordinator's hooks, the conversion of the
+integration reservation, and a `verify` that is the coordinator's (R-V).
+
+## `pub enum Retrying {`
+
+What starting a retry produced: the attempt to run (boxed: a job is large and
+the other arm is a key), or the generation its failed verify closed.
+
+## `impl TopologyRun` › `pub(super) fn integration_request(`
+
+The integration's request, read from the fold and the log with nothing taken:
+the coordinator predicts a stale integration from it (`base_sha` against the
+authorized head, `decide`'s fast test on a non-foreign ref) before it reserves
+anything (R-W).
+
+## `impl TopologyRun` › `pub(super) fn reserve_integration(`
+
+The provisional `{pipeline, merge}` reservation, through the broker's check.
+
+## `impl TopologyRun` › `pub(super) fn integration_settled(`
+
+After `integrate()`: the deferral's progress and the `Progress` of a terminal,
+or, on an error, the integration reservation cancelled when it is still held.
+
+## `impl TopologyRun` › `pub(super) fn limit_slots(`
+
+The coordinator's slot limits are the command's `[engine]` configuration
+(R-K): the broker is replaced by one with those limits, which is sound only
+while nothing is outstanding in it — so it refuses otherwise. The new broker
+is built `for_pipelines`: from here on every invocation is run by a pipeline
+that reports its end, and an append error's discharge leaves each running
+registration to that report (round R5 of the PR11 record, `FULL-CONC-1`).
+
+## `impl TopologyRun` › `pub(super) fn record_discard(`
+
+A completion or a pipeline operation the coordinator discarded (R-AA): counted,
+and warned about unless it was a cancelled pipeline's, whose discard is the
+expected end of a cancellation.
+
+## `impl TopologyRun` › `pub const fn reservations_peak(&self) -> usize {`
+
+The most provisional reservations ever outstanding at once in this process —
+one, at every width, because each admission converts at its first append on the
+coordinator's thread before the next selection (memo §5; ST-04).

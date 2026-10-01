@@ -6,6 +6,7 @@ use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
 use crate::events::{AttemptRecord, BudgetKind};
 use crate::ir::QuestionId;
+use crate::runner::InvocationId;
 use crate::topology::events::{
     AttemptNumber, BudgetExceeded4, CandidateRef, DerivedOutcome, Epoch, GenerationId, SequenceId,
     TopologyEvent, TopologyEventBody,
@@ -414,6 +415,175 @@ fn budget_exceeded(epoch: Epoch, breach: Breach, key: Option<TaskKey>) -> Step {
         spent_usd: breach.spent_usd,
         key,
     }))
+}
+
+pub const MERGE_ENTITLEMENTS: usize = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entitlements {
+    pipeline_held: usize,
+    merge_held: usize,
+    max_parallel: u32,
+    poisoned: bool,
+}
+
+impl Entitlements {
+    #[must_use]
+    pub fn of(fold: &TopologyFold) -> Self {
+        Self {
+            pipeline_held: fold.pipeline_held(),
+            merge_held: usize::from(fold.transaction().is_some()),
+            max_parallel: fold
+                .started()
+                .map_or(0, |started| started.limits.max_parallel),
+            poisoned: fold.is_poisoned(),
+        }
+    }
+
+    #[must_use]
+    pub const fn pipeline_held(&self) -> usize {
+        self.pipeline_held
+    }
+
+    #[must_use]
+    pub const fn merge_held(&self) -> usize {
+        self.merge_held
+    }
+
+    #[must_use]
+    pub const fn max_parallel(&self) -> u32 {
+        self.max_parallel
+    }
+
+    #[must_use]
+    pub const fn poisoned(&self) -> bool {
+        self.poisoned
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holds {
+    Preflight,
+    Pipeline,
+    PipelineAndMerge,
+    Nothing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pipeline {
+    Attempt {
+        key: TaskKey,
+        generation: GenerationId,
+        attempt: AttemptNumber,
+    },
+    Sequence(SequenceId),
+    Preflight,
+}
+
+impl Pipeline {
+    fn of(invocation: &InvocationId) -> Self {
+        match invocation {
+            InvocationId::Attempt {
+                key,
+                generation,
+                attempt,
+                ..
+            } => Self::Attempt {
+                key: *key,
+                generation: *generation,
+                attempt: *attempt,
+            },
+            InvocationId::Sequence { sequence, .. } => Self::Sequence(*sequence),
+            InvocationId::Probe { .. } => Self::Preflight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Standing {
+    pipeline: Pipeline,
+    holds: Holds,
+}
+
+impl Standing {
+    #[must_use]
+    pub fn of(fold: &TopologyFold, invocation: &InvocationId) -> Self {
+        let pipeline = Pipeline::of(invocation);
+        let holds = if fold.is_poisoned() {
+            Holds::Nothing
+        } else {
+            match pipeline {
+                Pipeline::Preflight => Holds::Preflight,
+                Pipeline::Attempt {
+                    key,
+                    generation,
+                    attempt,
+                } => {
+                    let in_flight = fold
+                        .task(key)
+                        .and_then(|task| task.generations.iter().find(|held| held.id == generation))
+                        .is_some_and(|held| held.class == GenerationClass::InFlight { attempt });
+                    if in_flight {
+                        Holds::Pipeline
+                    } else {
+                        Holds::Nothing
+                    }
+                }
+                Pipeline::Sequence(sequence) => {
+                    let verifying = fold.transaction().is_some_and(|open| {
+                        open.sequence == sequence
+                            && matches!(
+                                open.class,
+                                crate::topology::fold::TransactionClass::VerificationStarted { .. }
+                            )
+                    });
+                    if verifying {
+                        Holds::PipelineAndMerge
+                    } else {
+                        Holds::Nothing
+                    }
+                }
+            }
+        };
+        Self { pipeline, holds }
+    }
+
+    #[must_use]
+    pub const fn preflight() -> Self {
+        Self {
+            pipeline: Pipeline::Preflight,
+            holds: Holds::Preflight,
+        }
+    }
+
+    #[must_use]
+    pub const fn holds(&self) -> Holds {
+        self.holds
+    }
+
+    pub(super) fn admits(&self, invocation: &InvocationId) -> Result<(), UpstrokeError> {
+        if Pipeline::of(invocation) != self.pipeline {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "`{invocation}` presented the standing of another pipeline: a standing is \
+                     read from the fold for the attempt, the verification or the pre-flight an \
+                     invocation belongs to, and admits that one's invocations only"
+                ),
+            });
+        }
+        match self.holds {
+            Holds::Preflight | Holds::Pipeline | Holds::PipelineAndMerge => Ok(()),
+            Holds::Nothing => Err(UpstrokeError::Refused {
+                message: format!(
+                    "`{invocation}` asked for its slot pair and the fold shows its pipeline \
+                     holding no entitlement: `permits.deadlock_freedom` orders acquisition \
+                     pipeline -> merge -> {{agent, pool}}, so a pair is requested only by an \
+                     attempt the fold has in flight, by the integration verification the fold \
+                     has started, or by a pre-flight probe"
+                ),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -25,15 +25,20 @@ the `host-v1` [`policy`] for the marker, the owner record and
 executes the `RunnerPreflight` shell probe. The container runner is PR6 and
 an explicit non-goal here, as are the async surface and the slot broker.
 
-#### Why `run` is synchronous and still shaped like the async one
+#### Why `run` was synchronous and shaped like the async one
 
 `decisions.sequential_substrate.runner`: "Runner::run(&RunnerRequest) ->
 ProcessOutput synchronous until PR11 (then a boxed Send future)".
-DESIGN.md:250-256 says why the shape has to survive that change: every
+DESIGN.md:250-256 says why the shape had to survive that change: every
 async trait used behind `dyn` returns a boxed `Send` future, so the trait
-must already be object-safe and its request must already be a single
-borrowed value. It is, and [`Runner`] is `Send + Sync` so a `&dyn Runner`
-can be held across the await points PR11 introduces.
+had to be object-safe already and its request a single borrowed value. It
+was, and [`Runner`] is `Send + Sync` so a `&dyn Runner` can be held across
+the await points PR11 introduces. PR11 made the change: `run` returns
+`RunFuture`, a boxed `Send` future, behind the same `dyn`, the request still
+one borrowed value, and what travels with a call (its cancellation and its own
+observers) a second argument; synchronous callers use the trait's
+`run_blocking`. `docs/internals/runner/contract.md` has the contract, and the
+PR11 record (`reviews/2026-09-30-pr11-record.md`, R-A and R-I) the readings.
 
 ## `#![deny(clippy::disallowed_methods, clippy::disallowed_types)]`
 

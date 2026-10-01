@@ -92,11 +92,12 @@ it calls it.
 ## `pub struct RunPreflight<'a>` › `ledger: Mutex<InvocationLedger>,`
 
 Every invocation this pre-flight registered, in one process-local
-ledger. R4 balances at process end.
+ledger, with the slot table the agent probes take their pairs from inside
+it. R3 and R4 balance at process end.
 
-## `pub struct RunPreflight<'a>` › `slots: Mutex<SlotAssertion>,`
-
-R3, asserted rather than brokered: one slotted invocation at a time.
+The `Mutex` is `certify`'s `&self`'s, below: the probes register through a
+boundary that is a `Runner`, and a `Runner` is `Sync`. The probes run one at
+a time, so it is never contended.
 
 ## `pub struct RunPreflight<'a>` › `probed: Mutex<Option<Probed>>,`
 
@@ -121,12 +122,12 @@ What the last successful [`RunnerPreflight::certify`] established.
 ## `impl<'a> RunPreflight<'a>` › `pub fn ledgers_balance(&self) -> bool {`
 
 Whether every invocation this pre-flight registered was settled exactly
-once, and no slot pair is still held.
+once, and no slot pair is still held or waited for.
 
 `resource_accounting` R3/R4 at `NoRunFinished`: "released (process
 death; empty at restart)" — but a *refusal* is not a process death, and
 a pre-flight that refused while still holding a slot would leave the
-resume's own later invocations refused by its own assertion. This is
+resume's own later invocations refused a pair its own leak holds. This is
 what `resume_preflight_probe_containers_reclaimed_after_refusal`
 asserts alongside the containers.
 
@@ -144,10 +145,12 @@ saying the opposite of what happened.
 Every identity still registered as running. Empty once `certify`
 returns, on either path.
 
-## `impl<'a> RunPreflight<'a>` › `fn registering(&self) -> Registering<'_> {`
+## `impl<'a> RunPreflight<'a>` › `fn registering(&self) -> Registering<'_, Mutex<InvocationLedger>> {`
 
 The runner every probe of this pre-flight actually executes through:
-the run's Runner, with the registration wrapped around it.
+the run's Runner, with the registration wrapped around it, on the
+probe boundary ([`Slots::Probe`]) — the shell probe registers without a
+pair, each agent probe with its own.
 
 ## `impl RunnerPreflight for RunPreflight<'_>` › `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {`
 
@@ -171,8 +174,13 @@ named in the refusal, which is what a caller needs it for.
 ### Errors
 
 [`UpstrokeError::Refused`] naming the shell or the agent whose CLI did
-not answer. Every invocation registered before the refusal is cancelled
-and every slot pair released, so the ledgers balance on both paths.
+not answer. Every invocation registered before the refusal is settled —
+completed, or cancelled with its slot pair released — so the ledger
+balances on both paths, with one exception: a probe whose process the
+Runner could not establish as ended (`ProcessFate::Unresolved`) is not
+settled. Its registration stays running and keeps its pair until this
+process exits (`InvocationLedger::end`, round R1 of the PR11 record), so
+after that refusal `running()` names it and the ledger does not balance.
 
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let shell_id = PreflightIdentities::shell(0)?;`
 
@@ -192,19 +200,96 @@ that fails **inside the recorded image**" is a different fact from the same
 CLI failing on the host, and an operator who cannot tell which one has
 nothing to fix.
 
-## `pub(super) struct Registering<'a> {`
+## `pub(super) enum Slots {`
+
+Which pairs a registering boundary gives the requests that cross it.
+
+**Three because the boundaries are three.** INV-23's asymmetry is a real
+one — "one non-slotted shell probe (the recorded shell executing `exit 0`)
+**and** one slotted probe per recorded agent" — so the shell probe's
+boundary ([`super::create::ShellProbe`]) holds no pairs at all, and a
+slotted invocation arriving on it is refused rather than quietly run
+unslotted. The agent probes' boundary gives each request the pair
+`{agent, none}`. And since PR11 the review passes of an attempt or an
+integration verification cross a boundary of their own, whose pair carries
+the reviewer's pool and whose requests present the standing of the pipeline
+they belong to. The alternative was a copy of register/run/settle per case,
+and this file's own header is that there is **one place**.
+
+## `pub(super) enum Slots` › `None,`
+
+The shell probe's boundary: no pairs.
+
+## `pub(super) enum Slots` › `Probe,`
+
+The pre-flight's: each agent probe takes `{agent, none}`. A probe runs before
+admission, so it holds no pipeline entitlement and needs none
+([`crate::engine::topology::select::Standing::preflight`]); the pre-flight
+holds no pool table, and its probes run one at a time.
+
+## `pub(super) enum Slots` › `Pipeline {`
+
+A pipeline's review passes and re-asks: the reviewer's pool, and the
+pipeline's standing read from the fold by the judge that built the boundary.
+
+## `pub trait Registrar: Sync {`
+
+Where an invocation of an attempt, a verification or a pre-flight is admitted
+(`admit`: registered, and granted its `{agent, pool?}` pair when it is slotted)
+and ended (`ended`: with how its Runner call ended, `InvocationEnd` — completed
+or cancelled, which releases the pair, or kept with it when the Runner could not
+establish that the process ended), and where
+an attempt asks for and reports its snapshots (`snapshot_begin`,
+`snapshot_end`; no-ops by default). One trait, so that the one registering
+boundary below and the judge's own calls reach the broker through the same
+path whether they run on the coordinator's thread or a pipeline's (PR11 phase
+3, the working record's R-U). Two implementations: the synchronous one here,
+and the coordinator's channel client (`coordinator.md`), whose `admit` waits
+on its own thread for the grant the coordinator loop sends. `Sync` because a
+registering boundary is a `Runner`, and a `Runner` is `Send + Sync`.
+
+## `impl<L: BorrowMut<InvocationLedger> + Send> Registrar for Mutex<L> {`
+
+The synchronous registrar: the ledger, behind the `Mutex` a `Sync` trait needs,
+admitting through [`InvocationLedger::register_at_once`] — a pair not grantable
+at once is withdrawn inside the ledger and refused, because the caller is the
+coordinator running the invocation on its own thread and may not wait
+(INV-18; R-O). Generic over the ledger's owner: the pre-flight and run creation
+own theirs (`L = InvocationLedger`); the width-1 loop and a judge borrow the
+run's for one attempt or one pass (`L = &mut InvocationLedger`). The lock guards
+the register and settle calls only, never the Runner call between them.
+
+The source keeps this lock's protocol beside the `impl` (standards §10, §6).
+
+## `pub struct Carried {`
+
+What a pipeline carries into every Runner call it makes: its `Cancellation`, so
+the coordinator can end the pipeline's processes from its own thread, and the
+run's cleanup-lease paths, so the Unix reaper of each of them holds R28's lease
+though the pipeline thread never entered the run's scope (R-Z). The default
+carries a cancellation nothing fires and no paths, which is exactly the call
+`run_blocking` makes, so the synchronous substrate is unchanged by it.
+
+## `impl Carried` › `fn rebuild<'a>(&'a self, call: RunnerCall<'a>) -> RunnerCall<'a> {`
+
+A caller's call with this cancellation and these leases in place of its own,
+and its observers kept. A review pass builds its calls itself (`run_review`
+calls `run_blocking`), so the boundary around it is the one place a pipeline's
+context can be put into them.
+
+## `pub(super) struct Registering<'a, R: ?Sized> {`
 
 The run's Runner with R3 and R4 wrapped around every request.
 
 Its own refusals — a registration the ledger refuses, a slotted request
-with no slots or no agent, a pair the assertion refuses — are `RunnerError`s
-with the fate `NeverStarted`, because they precede the inner Runner; a
-release or settlement failure after the inner run carries the inner
+on a boundary with no pairs or with no agent, a pair not grantable at once —
+are `RunnerError`s with the fate `NeverStarted`, because they precede the
+inner Runner; a settlement failure after the inner run carries the inner
 outcome's fate (`Gone` for an output, the inner error's for an error), so
 the boundary never claims more about the process than the Runner it wraps.
 
 One place, so that "each a registered invocation" is true of a process an
-adapter built as much as of one this module built.
+adapter or a review pass built as much as of one this module built.
 
 **`pub(super)` since 2026-08-27, because "one place" was not true.** Fresh
 creation did not use it: `create.rs`'s P4 registered a single
@@ -216,22 +301,31 @@ recorded as ordinal 0 cancelled: the ledger named the process that
 *succeeded* and held no record of the one that failed. The `bf927f3` review
 found it as its third P1; the doc above was already the argument against it.
 
-## `pub(super) struct Registering<'a>` › `pub(super) slots: Option<&'a Mutex<SlotAssertion>>,`
+**Generic over the registrar since PR11 phase 3** (it was generic over the
+ledger's owner in phase 2): the pre-flight and run creation hand it their
+`Mutex`'d ledger, a judge its own registrar — the synchronous one at width 1,
+the coordinator's channel client in a spawned pipeline. A boundary built
+`carrying` a [`Carried`] rebuilds every call with it; one built without forwards
+the caller's call unchanged.
 
-R4's slots, or `None` on a boundary that has none.
+## `pub(super) struct Registering<'a, R: ?Sized>` › `completed: AtomicU32,`
 
-**`Option` because INV-23's asymmetry is a real one**: "one non-slotted
-shell probe (the recorded shell executing `exit 0`) **and** one slotted
-probe per recorded agent". A boundary built for the shell probe holds no
-slots at all — [`super::create::ShellProbe`] is that boundary — so a
-slotted invocation arriving on it is refused rather than quietly run
-unslotted. The alternative was a second copy of register/slot/run/settle
-for the non-slotted case, and this file's own header is that there is
-**one place**.
+How many of this boundary's requests completed. A judge compares it with the
+number of processes a review pass reports, which is how a pass that ran a
+process outside the boundary is caught.
 
-## `impl Runner for Registering<'_>` › `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {`
+## `impl<R: Registrar + ?Sized> Runner for Registering<'_, R>` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
-Register, slot, run, settle — and settle on the failure path too.
+Register (with the pair when slotted), run, settle — and settle on the
+failure path too. Since PR11 the inner Runner's `run` is a future, so the
+wrapper is one too: `admit` (register, and take the pair) and `settle`
+(complete or cancel, which releases the pair) are synchronous and run on
+either side of the one `.await`, so no ledger guard is ever held across it —
+which is also what keeps the future `Send`. A pipeline's `admit` blocks its own
+thread for the coordinator's grant; that is the blocking thread R-I drives every
+Runner future on, never the coordinator. The call is forwarded to the inner
+Runner unchanged, or rebuilt with the carried context when the boundary carries
+one, so the caller's observers always reach the process.
 
 The settlement is not in a `Drop`: a `Drop` that swallowed a refusal
 would make a ledger that did not balance look like one that did, and
@@ -241,21 +335,32 @@ process either never started or did not produce an outcome this run may
 act on, and `R3`'s two lifecycle rows are "released on cancel" and
 "released on complete or cancel" precisely so the two are told apart.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `let Some(slots) = self.slots else {`
+## `impl<R: Registrar + ?Sized> Registering<'_, R>` › `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError> {`
+
+Everything before the inner run: register, with the pair for a slotted
+invocation, through the registrar — the synchronous one withdraws a pair not
+grantable at once and refuses it, because its caller cannot wait (INV-18); a
+pipeline's waits for the coordinator's grant. The refusals that precede the
+registrar — a slotted request on a boundary with no pairs, or naming no agent —
+are made before anything is registered, so every refusal here leaves the ledger
+settled.
+
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `Slots::None => {`
 
 The non-slotted boundary cannot account a slotted invocation, and
 running it anyway would put an agent probe through a path that
 takes no pair — the process would execute with `permits.
 agent_pool_slots` never consulted.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `agent: match request.agent.as_ref() {`
+## `fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError>` › `let Some(agent) = request.agent.as_ref() else {`
 
 The agent whose per-agent slot this is. A slotted invocation
 without an agent binding cannot be accounted, and refusing is
 the assertion rather than inventing a name for it.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {` › `pool: None,`
+## `impl<R: Registrar + ?Sized> Registering<'_, R>` › `fn settle(`
 
-The pool is the routing layer's and arrives with PR11's
-broker; a per-agent pair with no pool is the sequential
-substrate's assertion, which is what R3 is here.
+Everything after the inner run: end the registration exactly once with how the
+inner run ended (`InvocationEnd::of`) — completed on an output, cancelled on an
+error whose fate establishes the process gone, kept with its pair when the fate
+is unresolved. A settlement failure carries the inner outcome's fate.

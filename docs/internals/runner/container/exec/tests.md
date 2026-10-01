@@ -1894,3 +1894,25 @@ reads an answer about another container as this one's settlement, so the fixture
 is armed after the container's name is known rather than from a literal. A
 constant naming `upstroke-c` beside a generated container name is a diagnostic
 the repaired normalizer correctly refuses.
+
+## `struct CancelAfter {`
+
+A per-invocation `ContainerHooks` observer that cancels its own call right after one site's after
+phase and otherwise records like `RecordingHooks` (its trace is the fixture's). Cancelling from the
+hook makes the moment deterministic without a second thread: the container has just been started,
+and the supervisor's first tick sees the cancellation.
+
+## `fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports() {`
+
+A container cancelled while it runs is released through the reclaim steps a timed-out one goes
+through — `Start` before `Stop` before `Remove` before `UnmountGitView` before `RemoveIntent` — and
+leaves no container, intent or view; it is not collected, and only then does the invocation report
+`RunnerError::cancelled` with fate `Gone`. `permits.protocol`: "cancelled after the Runner terminated
+its process or container". The same assertions as
+`a_container_that_outlives_its_timeout_is_stopped_and_removed`, which is the disposition's other
+cause.
+
+## `fn a_container_call_cancelled_before_it_starts_writes_no_intent() {`
+
+A call cancelled before it starts reaches nothing: no intent, no view, no container, an empty trace,
+and the report is `NeverStarted`.

@@ -10,6 +10,7 @@
 pub mod attempt;
 pub mod candidate;
 pub mod closure;
+pub mod coordinator;
 pub mod coverage;
 pub mod create;
 pub mod dispatch;
@@ -18,6 +19,7 @@ pub mod finalize;
 pub mod identity;
 pub mod integrate;
 pub mod ledger;
+pub mod permits;
 pub mod prelock;
 pub mod reachability;
 pub mod repair;

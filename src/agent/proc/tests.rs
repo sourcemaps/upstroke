@@ -132,6 +132,8 @@ fn excessive_output_is_bounded_and_terminates_the_tree() {
         b"",
         Duration::from_secs(30),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise noisy child");
@@ -158,6 +160,8 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a modest stderr writer");
@@ -186,6 +190,8 @@ fn the_output_allowance_bounds_stderr_as_well_as_stdout() {
         b"",
         Duration::from_secs(60),
         TEST_LIMIT,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise a noisy stderr child");
@@ -399,6 +405,8 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         command,
         b"",
         Duration::from_secs(3),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .expect_err("the armed fault ends the supervision");
@@ -462,6 +470,8 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         shell("echo next"),
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .unwrap_or_else(|failure| panic!("{tag}: the next command runs: {}", failure.error));
@@ -567,6 +577,8 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         command,
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut hooks,
     )
     .expect_err("the error after the spawn ends the supervision");
@@ -664,8 +676,8 @@ fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {
 fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {
     use std::os::unix::process::ExitStatusExt;
 
-    let supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "sleep 60"])
@@ -766,8 +778,8 @@ impl Drop for ReapedChild {
 #[cfg(unix)]
 #[test]
 fn an_exited_but_unreaped_child_still_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new(Path::new("/bin/sh"));
     command
         .args(["-c", "read line; exit 0"])
@@ -872,8 +884,8 @@ fn a_child_left_in_this_processs_group_never_answers_for_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_reaped_childs_pid_never_answers_for_its_own_group() {
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = shell("read line; exit 0");
     command
         .stdin(Stdio::piped())
@@ -1477,8 +1489,8 @@ fn unix_reaper_reparent_helper() {
     }
     let ready = std::path::PathBuf::from(std::env::var_os("UPSTROKE_READY").expect("ready path"));
     let agent = std::path::PathBuf::from(std::env::var_os("UPSTROKE_AGENT").expect("agent path"));
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -1998,6 +2010,8 @@ fn the_output_limit_path_settles_a_windows_grandchild_too() {
         b"",
         Duration::from_secs(60),
         64 * 1024,
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect("supervise the tree");
@@ -3250,8 +3264,8 @@ fn unix_reaper_container_helper() {
             .expect("a scope");
     super::set_container_reclaim_scope(Some(&scope)).expect("arm the reaper");
 
-    let mut supervisor =
-        termination::Supervisor::begin(ProcessSite::Terminate).expect("start a private reaper");
+    let mut supervisor = termination::Supervisor::begin(ProcessSite::Terminate, &[])
+        .expect("start a private reaper");
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "sleep 120"])
@@ -3724,6 +3738,44 @@ fn a_dead_producer_ends_the_wait_without_spending_the_bound() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_producer_whose_reader_cannot_be_started_is_killed_and_reaped() {
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "agent::proc::tests::no_test_is_named_this",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn the producer");
+    let pid = child.id();
+    let asked = std::cell::Cell::new(None);
+    let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(readiness::Producer::adopt_with(child, |reader_of| {
+            asked.set(Some(reader_of));
+            readiness::unstartable_reader()
+        }));
+    }));
+    assert_eq!(
+        asked.get(),
+        Some(pid),
+        "the adoption asked for the reader of the child it was handed"
+    );
+    assert!(
+        adopted.is_err(),
+        "the producer {pid} was adopted although its reader could not be started"
+    );
+    assert!(
+        !crate::workspace_manager::fixture::process_exists(pid),
+        "the producer {pid} outlived its failed adoption, neither killed nor reaped"
+    );
+}
+
 #[test]
 fn the_bound_is_the_callers_and_it_does_not_time_a_healthy_producer() {
     let scratch = Scratch::new("deadline");
@@ -4150,6 +4202,8 @@ fn a_spawn_that_fails_before_any_process_exists_is_never_started() {
         Command::new("upstroke-no-such-program-a5f2"),
         b"",
         Duration::from_secs(30),
+        &[],
+        &|| false,
         &mut NoHooks,
     )
     .expect_err("an absent program cannot be spawned");
@@ -4195,6 +4249,8 @@ fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
             shell("sleep 30"),
             b"",
             Duration::from_secs(30),
+            &[],
+            &|| false,
             &mut hooks,
         )
         .expect_err("the funnel was made to fail after the spawn");

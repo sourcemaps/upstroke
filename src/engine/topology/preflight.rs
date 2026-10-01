@@ -1,16 +1,21 @@
 //! Extended notes: `docs/internals/engine/topology/preflight.md`
 
+use std::borrow::BorrowMut;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::agent::{AdapterSource, Caps, ProcessOutput};
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;
-use crate::runner::{Runner, RunnerError, RunnerRequest};
+use crate::runner::{
+    Cancellation, InvocationId, RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest,
+};
 use crate::topology::events::RunnerPolicy;
 
-use super::identity::{InvocationLedger, PreflightIdentities, SlotAssertion, SlotPair, is_slotted};
+use super::identity::{InvocationEnd, InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
+use super::select::Standing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probed {
@@ -32,7 +37,6 @@ pub struct RunPreflight<'a> {
     workspace: PathBuf,
     agents: Vec<String>,
     ledger: Mutex<InvocationLedger>,
-    slots: Mutex<SlotAssertion>,
     probed: Mutex<Option<Probed>>,
 }
 
@@ -63,7 +67,6 @@ impl<'a> RunPreflight<'a> {
             workspace: workspace.to_path_buf(),
             agents,
             ledger: Mutex::new(InvocationLedger::new()),
-            slots: Mutex::new(SlotAssertion::new()),
             probed: Mutex::new(None),
         }
     }
@@ -82,11 +85,6 @@ impl<'a> RunPreflight<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .balances()
-            && self
-                .slots
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .balances()
     }
 
     #[must_use]
@@ -106,12 +104,8 @@ impl<'a> RunPreflight<'a> {
             .collect()
     }
 
-    fn registering(&self) -> Registering<'_> {
-        Registering {
-            inner: self.runner,
-            ledger: &self.ledger,
-            slots: Some(&self.slots),
-        }
+    fn registering(&self) -> Registering<'_, Mutex<InvocationLedger>> {
+        Registering::new(self.runner, &self.ledger, Slots::Probe)
     }
 }
 
@@ -164,71 +158,193 @@ fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {
     }
 }
 
-pub(super) struct Registering<'a> {
-    pub(super) inner: &'a dyn Runner,
-    pub(super) ledger: &'a Mutex<InvocationLedger>,
-    pub(super) slots: Option<&'a Mutex<SlotAssertion>>,
+pub(super) enum Slots {
+    None,
+    Probe,
+    Pipeline {
+        standing: Standing,
+        pool: Option<String>,
+    },
 }
 
-impl Runner for Registering<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
-        let refused = |error: UpstrokeError| RunnerError::never_started(&request.invocation, error);
-        {
-            let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-            ledger.register(&request.invocation).map_err(refused)?;
+pub trait Registrar: Sync {
+    fn admit(
+        &self,
+        invocation: &InvocationId,
+        slots: Option<(SlotPair, Standing)>,
+    ) -> Result<(), UpstrokeError>;
+
+    fn ended(&self, invocation: &InvocationId, end: InvocationEnd) -> Result<(), UpstrokeError>;
+
+    fn snapshot_begin(&self) -> Result<(), UpstrokeError> {
+        Ok(())
+    }
+
+    fn snapshot_end(&self) {}
+}
+
+// The synchronous registrar: the ledger's owner calls it from the one thread
+// that runs every invocation, so a pair it cannot grant at once is refused
+// (R-O). The lock guards the register and settle calls only, never the Runner
+// call between them.
+impl<L: BorrowMut<InvocationLedger> + Send> Registrar for Mutex<L> {
+    fn admit(
+        &self,
+        invocation: &InvocationId,
+        slots: Option<(SlotPair, Standing)>,
+    ) -> Result<(), UpstrokeError> {
+        let mut guard = self.lock().unwrap_or_else(PoisonError::into_inner);
+        let ledger: &mut InvocationLedger = (*guard).borrow_mut();
+        ledger.register_at_once(
+            invocation,
+            slots
+                .as_ref()
+                .map(|(pair, standing)| (pair.clone(), standing)),
+        )
+    }
+
+    fn ended(&self, invocation: &InvocationId, end: InvocationEnd) -> Result<(), UpstrokeError> {
+        let mut guard = self.lock().unwrap_or_else(PoisonError::into_inner);
+        let ledger: &mut InvocationLedger = (*guard).borrow_mut();
+        ledger.end(invocation, &end).map(drop)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Carried {
+    cancellation: Cancellation,
+    leases: Vec<PathBuf>,
+}
+
+impl Carried {
+    #[must_use]
+    pub const fn new(cancellation: Cancellation, leases: Vec<PathBuf>) -> Self {
+        Self {
+            cancellation,
+            leases,
         }
-        if is_slotted(&request.invocation) {
-            let Some(slots) = self.slots else {
-                let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                let _ = ledger.cancel(&request.invocation);
+    }
+
+    #[must_use]
+    pub fn call(&self) -> RunnerCall<'_> {
+        RunnerCall::new(self.cancellation.clone()).holding_cleanup_leases(&self.leases)
+    }
+
+    fn rebuild<'a>(&'a self, call: RunnerCall<'a>) -> RunnerCall<'a> {
+        let parts = call.into_parts();
+        let mut rebuilt = self.call();
+        if let Some(spawn) = parts.spawn {
+            rebuilt = rebuilt.observed_by(spawn);
+        }
+        if let Some(container) = parts.container {
+            rebuilt = rebuilt.observed_in_container_by(container);
+        }
+        rebuilt
+    }
+}
+
+pub(super) struct Registering<'a, R: ?Sized> {
+    inner: &'a dyn Runner,
+    registrar: &'a R,
+    slots: Slots,
+    carried: Option<&'a Carried>,
+    completed: AtomicU32,
+}
+
+impl<'a, R: ?Sized> Registering<'a, R> {
+    pub(super) const fn new(inner: &'a dyn Runner, registrar: &'a R, slots: Slots) -> Self {
+        Self {
+            inner,
+            registrar,
+            slots,
+            carried: None,
+            completed: AtomicU32::new(0),
+        }
+    }
+
+    pub(super) const fn carrying(mut self, carried: &'a Carried) -> Self {
+        self.carried = Some(carried);
+        self
+    }
+
+    pub(super) fn completed(&self) -> u32 {
+        self.completed.load(Ordering::Relaxed)
+    }
+}
+
+impl<R: Registrar + ?Sized> Runner for Registering<'_, R> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        Box::pin(async move {
+            self.admit(request)?;
+            let call = match self.carried {
+                Some(carried) => carried.rebuild(call),
+                None => call,
+            };
+            let outcome = self.inner.run(request, call).await;
+            self.settle(request, outcome)
+        })
+    }
+}
+
+impl<R: Registrar + ?Sized> Registering<'_, R> {
+    fn admit(&self, request: &RunnerRequest) -> Result<(), RunnerError> {
+        let refused = |error: UpstrokeError| RunnerError::never_started(&request.invocation, error);
+        let slots = if is_slotted(&request.invocation) {
+            let standing = match &self.slots {
+                Slots::None => {
+                    return Err(refused(UpstrokeError::Refused {
+                        message: format!(
+                            "`{}` is a slotted invocation and this boundary holds no slots; \
+                             INV-23's non-slotted probe is the recorded shell alone",
+                            request.invocation
+                        ),
+                    }));
+                }
+                Slots::Probe => Standing::preflight(),
+                Slots::Pipeline { standing, .. } => *standing,
+            };
+            let Some(agent) = request.agent.as_ref() else {
                 return Err(refused(UpstrokeError::Refused {
                     message: format!(
-                        "`{}` is a slotted invocation and this boundary holds no slots; INV-23's \
-                         non-slotted probe is the recorded shell alone",
+                        "`{}` is a slotted invocation with no agent binding; the pair it would \
+                         take is `{{agent, pool?}}` and there is no agent to name",
                         request.invocation
                     ),
                 }));
             };
-            let pair = SlotPair {
-                agent: match request.agent.as_ref() {
-                    Some(agent) => agent.to_string(),
-                    None => {
-                        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                        let _ = ledger.cancel(&request.invocation);
-                        return Err(refused(UpstrokeError::Refused {
-                            message: format!(
-                                "`{}` is a slotted invocation with no agent binding; the pair it \
-                                 would take is `{{agent, pool?}}` and there is no agent to name",
-                                request.invocation
-                            ),
-                        }));
-                    }
-                },
-                pool: None,
+            let pool = match &self.slots {
+                Slots::Pipeline { pool, .. } => pool.clone(),
+                Slots::None | Slots::Probe => None,
             };
-            let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(error) = slots.acquire(&request.invocation, pair) {
-                drop(slots);
-                let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-                let _ = ledger.cancel(&request.invocation);
-                return Err(refused(error));
-            }
-        }
+            Some((
+                SlotPair {
+                    agent: agent.to_string(),
+                    pool,
+                },
+                standing,
+            ))
+        } else {
+            None
+        };
+        self.registrar
+            .admit(&request.invocation, slots)
+            .map_err(refused)
+    }
 
-        let outcome = self.inner.run(request);
-
+    fn settle(
+        &self,
+        request: &RunnerRequest,
+        outcome: Result<ProcessOutput, RunnerError>,
+    ) -> Result<ProcessOutput, RunnerError> {
         let settled = |error: UpstrokeError| match &outcome {
             Ok(_) => RunnerError::gone(&request.invocation, error),
             Err(failure) => RunnerError::new(&request.invocation, failure.fate, error),
         };
-        if let (true, Some(slots)) = (is_slotted(&request.invocation), self.slots) {
-            let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
-            slots.release(&request.invocation).map_err(settled)?;
-        }
-        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-        match &outcome {
-            Ok(_) => ledger.complete(&request.invocation).map_err(settled)?,
-            Err(_) => ledger.cancel(&request.invocation).map_err(settled)?,
+        self.registrar
+            .ended(&request.invocation, InvocationEnd::of(&outcome))
+            .map_err(settled)?;
+        if outcome.is_ok() {
+            self.completed.fetch_add(1, Ordering::Relaxed);
         }
         outcome
     }

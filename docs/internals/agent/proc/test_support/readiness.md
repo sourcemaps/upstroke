@@ -379,9 +379,48 @@ write handle closing ends it — so terminating the child, reaping it
 and joining the reader are one ordered operation, and the only place
 that ordering can be guaranteed on a panicking path is a `Drop`.
 
-## `impl Producer` › `pub(crate) fn adopt(mut child: Child) -> Self {`
+## `pub(crate) fn unstartable_reader() -> thread::Builder {`
 
-Adopt `child`, draining its stdout if it was piped.
+A builder whose thread no system can start: it asks for a stack of
+2^(`usize::BITS` − 2) bytes, 2^62 on a 64-bit target, more than any address
+space maps, so `spawn` fails in the OS itself — `pthread_create` answers `EAGAIN` on Linux and macOS, and
+`CreateThread` cannot reserve it on Windows. For the tests that make a
+fixture's reader thread fail to start after its child was spawned
+(`a_producer_whose_reader_cannot_be_started_is_killed_and_reaped`,
+`a_linked_child_whose_reader_cannot_be_started_is_killed_and_reaped`,
+review round 4's `R4-REG-1`). Unix only, because both callers are — each finds its child gone by
+its pid with `fixture::process_exists` — and an ungated definition with only Unix callers is dead
+code on the Windows legs, which `-D warnings` makes a build error there (the Windows-target clippy on
+this box found it).
+
+## `impl Producer` › `pub(crate) fn adopt(child: Child) -> Self {`
+
+Adopt `child`, draining its stdout if it was piped: `adopt_with` and a
+default builder.
+
+## `impl Producer` › `pub(crate) fn adopt_with(`
+
+Adopt `child`, its reader started from the builder `reader` returns when
+it is handed the child's pid.
+
+**The child is owned before the reader is started.** Starting a thread
+can fail — the system can refuse one — and a failure there unwinds out of
+this function. Until review round 4 (`R4-REG-1`, found in the PR11 record's
+`LinkedChild`, whose construction had the same order) the reader was
+started first and the value built after it, so such an unwind dropped a
+bare `Child`, whose drop neither kills nor reaps, and the child outlived
+its adoption. The value is now built first, with no reader, and the reader
+is installed once it has started: a reader that cannot be started unwinds
+through the destructor above, which kills and reaps the child and finds no
+reader to join.
+
+The thread is started as `thread::Builder::spawn(builder, ..)`, in its
+path form, not `builder.spawn(..)`: `runner::container::tests`'
+`the_readiness_allowance_names_the_paths_it_is_written_against` counts the
+denied primitives this file reaches by their call forms, and `.spawn(` is
+one of `std::process::Command::spawn`'s — a thread is not a process, and the
+file still reaches exactly the five primitives its allowlist row is written
+against.
 
 ## `impl Producer` › `pub(crate) fn child(&mut self) -> &mut Child {`
 

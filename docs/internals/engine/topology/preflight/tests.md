@@ -13,7 +13,8 @@ The `RunnerPreflight` implementation, on its own.
 `recover/tests.rs` drives this through the whole recovery order; these are
 the claims about the pre-flight itself — what it probes, in which order,
 which of its processes take a slot pair, and that both ledgers balance on
-the refusal path as well as the successful one.
+the refusal path as well as the successful one (every refusal here is of a
+process the Runner saw end; one it could not is kept, `preflight.md`).
 
 ## `struct Recording {`
 
@@ -133,3 +134,11 @@ ledgers.
 Asserted because the impl is hand-written: a derived one would print the
 `Mutex`es, and a `RunPreflight` in a refusal message would then carry every
 invocation identity the run has issued.
+
+## `fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {`
+
+Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `certify` section of
+`docs/internals/engine/topology/preflight.md` promised that every registration made before a refusal is
+cancelled and every pair released, so the ledger balances on both paths — false since round R1, which
+keeps a probe whose process the Runner could not establish as ended registered, with its pair, until the
+process exits. The pin holds the exception and that the unconditional promise does not come back.

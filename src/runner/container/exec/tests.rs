@@ -616,7 +616,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             runner = runner.with_hooks(Box::new(hooks));
         }
 
-        let error = runner.run(&request).expect_err(case);
+        let error = runner.run_blocking(&request).expect_err(case);
         assert_eq!(error.fate, cell.expected, "{case}: {error}");
         assert!(
             error.to_string().contains(cell.expected.describe()),
@@ -676,7 +676,7 @@ fn a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and
 
     let error = fixture
         .runner()
-        .run(&request)
+        .run_blocking(&request)
         .expect_err("the runtime lost the gate");
     assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
     assert_eq!(
@@ -1225,7 +1225,7 @@ fn every_container_is_created_from_the_recorded_id_even_after_the_reference_move
     );
 
     fixture.trace.clear();
-    runner.run(&request).expect("runs");
+    runner.run_blocking(&request).expect("runs");
     assert_eq!(
         fixture
             .trace
@@ -1300,7 +1300,7 @@ fn a_substituted_reported_image_id_refuses_before_start_in_both_phases() {
             .fake()
             .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
 
-        let refusal = runner.run(&request).expect_err("{phase}: refused");
+        let refusal = runner.run_blocking(&request).expect_err("{phase}: refused");
         let message = refusal.to_string();
         assert!(message.contains(IMAGE_ID), "{phase}: {message}");
         assert!(message.contains(OTHER_IMAGE_ID), "{phase}: {message}");
@@ -1597,7 +1597,9 @@ fn failing_preflight_probe_on_resume_refuses_before_recovery_event_and_reclaims_
                 Duration::from_secs(10),
             )
             .expect("an agent probe request");
-            let output = runner.run(&request).expect("the spawn itself succeeds");
+            let output = runner
+                .run_blocking(&request)
+                .expect("the spawn itself succeeds");
             assert_eq!(output.code, exit, "the CLI failed inside the image");
             assert!(output.stderr.contains("command not found"));
         }
@@ -1907,7 +1909,7 @@ fn a_completed_invocation_releases_in_the_contracts_order_and_reports_the_result
         ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
 
     let output = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect("a non-zero exit is not an error");
     assert_eq!(output.code, Some(3), "a non-zero exit is a ProcessOutput");
     assert_eq!(output.stdout, "the work is done\n");
@@ -1993,7 +1995,7 @@ fn a_container_that_outlives_its_timeout_is_stopped_and_removed() {
         ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
 
     let output = runner
-        .run(&request)
+        .run_blocking(&request)
         .expect("a timeout is an output, not an error");
     assert!(output.timed_out);
     assert_eq!(
@@ -2066,7 +2068,7 @@ fn output_beyond_the_bound_is_truncated_and_reported_as_limited() {
             Duration::from_secs(10),
             gate_id(0),
         );
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert_eq!(output.output_limited, limited, "{tag}");
         assert_eq!(output.stdout.len(), bytes.min(16), "{tag}");
         assert_eq!(output.code, Some(0), "{tag}: the exit status is held fixed");
@@ -2102,7 +2104,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 Duration::from_secs(10),
                 worker_id(0),
             );
-            fixture.runner().run(&request).expect("completes");
+            fixture.runner().run_blocking(&request).expect("completes");
         }),
         ("cancelled by timeout", |fixture| {
             let mut request = worker_request(
@@ -2113,7 +2115,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 worker_id(1),
             );
             request.timeout = Duration::ZERO;
-            fixture.runner().run(&request).expect("times out");
+            fixture.runner().run_blocking(&request).expect("times out");
         }),
         ("refused for a substituted image id", |fixture| {
             let request = worker_request(
@@ -2129,7 +2131,10 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 .runtime
                 .fake()
                 .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
-            fixture.runner().run(&request).expect_err("refuses");
+            fixture
+                .runner()
+                .run_blocking(&request)
+                .expect_err("refuses");
         }),
         ("refused at a funnel phase", |fixture| {
             let mut hooks = RecordingHooks::new(fixture.trace.clone());
@@ -2157,7 +2162,7 @@ fn a_credential_volume_is_never_created_or_pruned_by_any_disposition() {
                 worker_id(3),
             );
             runner
-                .run(&request)
+                .run_blocking(&request)
                 .expect_err("the funnel was made to fail");
         }),
         ("reclaimed as an orphan", |fixture| {
@@ -2277,7 +2282,7 @@ fn a_launch_that_fails_after_a_committed_effect_still_releases_everything() {
                 .expect("a name");
 
             let refusal = runner
-                .run(&request)
+                .run_blocking(&request)
                 .expect_err("the funnel was made to fail");
             assert!(
                 refusal.to_string().contains(site.name()),
@@ -2452,13 +2457,13 @@ fn every_at_run_end_outcome_is_driven_through_its_mechanism_and_the_ledgers_bala
 
         match mechanism {
             Mechanism::Complete => {
-                fixture.runner().run(&request).expect("completes");
+                fixture.runner().run_blocking(&request).expect("completes");
             }
             Mechanism::Cancel => {
                 let fixture = Fixture::new(&format!("outcome-{outcome}-live"), false);
                 let mut request = request.clone();
                 request.timeout = Duration::ZERO;
-                let output = fixture.runner().run(&request).expect("times out");
+                let output = fixture.runner().run_blocking(&request).expect("times out");
                 assert!(
                     output.timed_out,
                     "[{outcome}] the cancellation cell did not cancel anything"
@@ -2486,7 +2491,10 @@ fn every_at_run_end_outcome_is_driven_through_its_mechanism_and_the_ledgers_bala
                     .runtime
                     .fake()
                     .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
-                fixture.runner().run(&request).expect_err("refuses");
+                fixture
+                    .runner()
+                    .run_blocking(&request)
+                    .expect_err("refuses");
             }
             Mechanism::Census => {
                 let mut hooks = RecordingHooks::new(fixture.trace.clone());
@@ -3005,7 +3013,7 @@ fn every_role_writes_and_syncs_its_own_six_field_intent_before_its_container_is_
         let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
             .expect("a name");
         expected.push((name.as_str().to_owned(), request.invocation.render()));
-        runner.run(request).expect("runs");
+        runner.run_blocking(request).expect("runs");
     }
 
     let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -3227,7 +3235,7 @@ fn a_launch_that_fails_at_any_step_releases_everything_it_reached() {
                 fixture.runtime.fake().set_failing(RuntimeOp::Stop);
             }
 
-            let refusal = runner.run(&request).expect_err("the launch fails");
+            let refusal = runner.run_blocking(&request).expect_err("the launch fails");
             let message = refusal.to_string();
             assert!(
                 message.contains(marker),
@@ -3683,7 +3691,7 @@ fn real_docker_runs_from_the_recorded_image_id_and_composes_over_the_image_envir
     );
     assert_eq!(plan.launch.spec.image_id, image_id);
 
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -3796,7 +3804,7 @@ fn real_docker_refuses_a_reviewer_write_to_its_read_only_mount() {
             Some(role_is_review),
             "{tag}: the mount disposition"
         );
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         let wrote = workspace.join("probe.txt").exists();
         outcomes.push((
             tag,
@@ -3904,7 +3912,7 @@ fn real_docker_confines_a_gate_to_its_mount() {
         Duration::from_secs(60),
         gate_id(0),
     );
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
 
     assert!(
         output.stdout.contains("MY-OWN-WORKTREE-a5f2"),
@@ -4012,7 +4020,7 @@ fn real_docker_a_gate_write_outside_every_declared_mount_fails() {
     }
     assert!(plan.launch.spec.read_only_root);
 
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     let said = |path: &str| -> String {
         output
             .stdout
@@ -4268,7 +4276,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
     .expect("a container policy")
     .with_poll(Duration::from_millis(10));
     let refusal = hostile
-        .run(&gate_request(
+        .run_blocking(&gate_request(
             ShellKind::Sh.spec("claude"),
             mine.clone(),
             Duration::from_secs(60),
@@ -4316,7 +4324,7 @@ fn real_docker_a_worktree_binary_cannot_shadow_the_certified_cli() {
 
     let mut answers: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
     for (tag, request) in [("the attempt", gate), ("the probe", probe)] {
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert_eq!(output.code, Some(0), "{tag}: stderr {}", output.stderr);
         let mut read = BTreeMap::new();
         for line in output.stdout.lines() {
@@ -4417,7 +4425,7 @@ fn real_docker_a_git_dependent_gate_sees_only_the_role_view() {
         Duration::from_secs(60),
         gate_id(0),
     );
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -4588,7 +4596,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
          printf 'CONTROL=[%s]\\n' \"${{{control_key}}}\""
     ));
     let request = gate_request(spec, workspace, Duration::from_secs(60), gate_id(0));
-    let output = runner.run(&request).expect("runs");
+    let output = runner.run_blocking(&request).expect("runs");
     assert_eq!(output.code, Some(0), "stderr: {}", output.stderr);
     let line = |key: &str| -> String {
         output
@@ -4707,7 +4715,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
             }
             (leader, descendant)
         });
-        let output = runner.run(&request).expect("runs");
+        let output = runner.run_blocking(&request).expect("runs");
         assert!(output.timed_out, "the fixture did not reach its timeout");
         sampler.join().expect("the sampler panicked")
     });
@@ -4773,4 +4781,129 @@ fn every_gated_test_of_this_lane_is_counted() {
             "`{name}` is counted and is not a test here"
         );
     }
+}
+
+struct CancelAfter {
+    inner: RecordingHooks,
+    cancellation: crate::runner::Cancellation,
+    at: crate::topology::effects::EffectSiteId,
+}
+
+impl ContainerHooks for CancelAfter {
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        if site == self.at && phase == crate::topology::effects::HookPhase::After {
+            self.cancellation.cancel();
+        }
+        self.inner.phase(site, phase)
+    }
+
+    fn trace(&self) -> ContainerTrace {
+        self.inner.trace()
+    }
+}
+
+#[test]
+fn a_cancelled_container_invocation_is_released_through_the_reclaim_steps_before_it_reports() {
+    let fixture = Fixture::new("cancel-running", false);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh.spec("sleep 600"),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(600),
+        worker_id(0),
+    );
+    let name =
+        ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation).expect("a name");
+    let cancellation = crate::runner::Cancellation::new();
+    let mut observer = CancelAfter {
+        inner: RecordingHooks::new(fixture.trace.clone()),
+        cancellation: cancellation.clone(),
+        at: crate::topology::effects::EffectSiteId::Container(ContainerSite::Start),
+    };
+
+    let error = runner
+        .run_blocking_with(
+            &request,
+            RunnerCall::new(cancellation).observed_in_container_by(&mut observer),
+        )
+        .expect_err("a cancelled invocation reports an error, not an output");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+
+    let rendered = fixture.trace.rendered();
+    let at = |needle: &str| {
+        fixture
+            .trace
+            .position_starting(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in {rendered:#?}"))
+    };
+    assert!(
+        at("site:Start:before") < at("site:Stop:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:Stop:before") < at("site:Remove:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:Remove:before") < at("site:UnmountGitView:before"),
+        "{rendered:#?}"
+    );
+    assert!(
+        at("site:UnmountGitView:before") < at("site:RemoveIntent:before"),
+        "{rendered:#?}"
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
+    assert!(
+        !fixture
+            .private_root
+            .join("views")
+            .join(name.as_str())
+            .exists()
+    );
+    assert!(
+        !fixture.trace.ops().contains(&RuntimeOp::Collect),
+        "a cancelled invocation's output is not collected: {rendered:#?}"
+    );
+}
+
+#[test]
+fn a_container_call_cancelled_before_it_starts_writes_no_intent() {
+    let fixture = Fixture::new("cancel-before", true);
+    let runner = fixture.runner();
+    let request = worker_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        AgentId::new("claude-code"),
+        Duration::from_secs(60),
+        worker_id(1),
+    );
+    let cancellation = crate::runner::Cancellation::new();
+    cancellation.cancel();
+    let error = runner
+        .run_blocking_with(&request, RunnerCall::new(cancellation))
+        .expect_err("a cancelled call reports an error");
+    assert!(error.is_cancelled(), "{error}");
+    assert_eq!(error.fate, ProcessFate::NeverStarted, "{error}");
+    assert!(
+        fixture.trace.rendered().is_empty(),
+        "nothing was reached: {:#?}",
+        fixture.trace.rendered()
+    );
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("scan")
+            .is_empty()
+    );
 }

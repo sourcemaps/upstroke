@@ -555,7 +555,9 @@ fn a_failed_reclamation_during_an_unwind_does_not_abort_the_process() {
         invocation: InvocationId::probe(ProbeTarget::Shell, 11)
             .expect("a probe identity for the spawned child"),
     };
-    let output = HostRunner::new().run(&request).expect("the child runs");
+    let output = HostRunner::new()
+        .run_blocking(&request)
+        .expect("the child runs");
 
     assert!(
         !output.timed_out,

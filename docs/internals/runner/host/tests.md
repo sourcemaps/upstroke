@@ -1878,7 +1878,7 @@ The point's kill coordinate is *inside* this call, after the real
 ambient join. Reaching the line after it means the kill never
 fired, and the parent reads a clean exit as exactly that.
 
-## `fn spawn_funnel_kill_helper()` › `let _ = runner.run(&crate::runner::gate_request(`
+## `fn spawn_funnel_kill_helper()` › `let _ = runner.run_blocking(&crate::runner::gate_request(`
 
 Every point this platform declares is reached by an ordinary spawn,
 which is what `every_role_reaches_the_containment_points_of_this_
@@ -2194,7 +2194,7 @@ The kill hook: after `CreateProcess` and before private-job
 assignment. `apply_io` aborts, so no destructor runs and the
 ambient handle is closed only by the kernel.
 
-## `fn windows_ambient_coordinator_helper()` › `let _ = runner.run(&request);`
+## `fn windows_ambient_coordinator_helper()` › `let _ = runner.run_blocking(&request);`
 
 Aborts inside `run`, at `CreatedSuspended`.
 
@@ -2710,7 +2710,7 @@ still there.
 The oracle. A boundary that had not decided yet reaches `second`, so
 "resolve per spawn" really does change the answer here.
 
-## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let outcome = runner.run(&attempt);`
+## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let outcome = runner.run_blocking(&attempt);`
 
 The claim. The runner that certified `first` does not silently run
 `second`.
@@ -3123,3 +3123,86 @@ so that no spelling is counted from prose.
 
 And the two are the run and the resume facade, each of which then
 borrows that one runner for pre-flight and every attempt.
+
+## `struct Witness {`
+
+A per-invocation `SpawnHooks` observer for PR11's tests: the pids `child_created` reported, the
+containment points in the order they fired, and the thread each child was created from. It is the
+observer a test hands one call through `RunnerCall::observed_by`, so what it records is that
+invocation's and no other's.
+
+## `fn scratch_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
+
+The new tests take their scratch directory from `rundir::scratch_tree::acquire`, which refuses an
+occupied root and reclaims the tree when the guard drops, rather than from this file's older
+`scratch`, which leaves its directory behind.
+
+## `fn wait_for_file(path: &Path, within: Duration) -> bool {`
+
+The handshake the cancellation tests wait on: the child publishes a marker once it is running, and
+the test acts only after seeing it, bounded so a child that never starts fails the test instead of
+hanging it. A condition with a deadline, not a sleep standing in for one.
+
+## `fn the_blocking_adapter_supervises_the_process_on_the_calling_thread() {`
+
+Parity for the blocking adapter (the PR11 record, R-A): the child is created from the thread that
+called `run_blocking_with`, so the thread-scoped state on the spawn path — the reaper's cleanup-lease
+paths and the observation export's attribution — is the caller's, as it was when `run` was
+synchronous. The call's own observer also saw the spawn's containment points.
+
+## `fn a_call_cancelled_before_it_starts_spawns_nothing() {`
+
+A call cancelled before the runner looks at it is refused as `NeverStarted` with nothing spawned and
+nothing observed, and before the program name is even resolved — the resolution counter does not
+move.
+
+## `fn cancelling_a_running_invocation_terminates_it_and_reports_it_cancelled() {`
+
+The protocol's order on a real child, on every platform: the child announces itself, the test
+cancels from another thread, and the invocation reports `RunnerError::cancelled` with fate `Gone` —
+the Runner terminated the process before it reported. The bound on the time from the cancel to the
+report is against a child that would otherwise have run 300 seconds.
+
+## `fn cancelling_an_invocation_ends_every_process_of_its_tree() {`
+
+Unix. The tree, not just the child: the child opens a fifo for writing, starts a background
+grandchild that inherits the descriptor, and announces itself; the fifo's reading end reports
+`WouldBlock` (writers exist) before the cancel, so the end of file after it is not vacuous. After the
+Runner reports the invocation cancelled, every writer is gone and the fifo reads end of file — the
+same oracle `agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` uses for a
+timeout, with the same bounded read loop for the kernel's closing of a killed process's
+descriptors.
+
+## `fn rendezvous_helper() {`
+
+Subprocess helper (`--ignored`): publish this child's marker, wait — bounded — for the peer's, and
+print this process's pid. Two children that each wait for the other both succeed only if they ran at
+the same time.
+
+## `fn two_invocations_on_one_host_runner_run_at_once_each_carrying_its_own_observation() {`
+
+`HostRunner::hooks`' PR11 debt, discharged. Two invocations on one runner, each carrying its own
+observer, run at once — both rendezvous children exit 0 — and each observer saw exactly its own
+child's pid and exactly one spawn's containment points, the sequence a lone invocation records.
+Before PR11 the runner held its one observer's lock for a whole supervised run, and the pair could not
+overlap.
+
+## `fn a_runner_level_observer_still_takes_invocations_one_at_a_time() {`
+
+The control, and the contract kept for every test that installs an observer: under `with_hooks` the
+same pair takes turns, so exactly one child outlives its (shortened) wait for the other. It also
+shows the rendezvous oracle can fail.
+
+## `fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {`
+
+PR11's carried cleanup leases (the working record's R-Z). A pipeline thread
+has not entered the run's cleanup scope — the scope is thread-local and its
+owner is the coordinator's thread — so the Unix reaper of a process it spawns
+holds the run's R28 lease only if the call carries the lease paths. The
+control carries none, and nothing holds the lease while its child runs.
+After each call the hold must have ended with the reaper, read as a
+bounded wait under the test's own 60-second bound, the one its readiness
+handshake waits: a sibling test thread's fork can hold a copy of the lease
+for a moment after the reaper exits (the mechanism of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
+that outlives the bound fails the test.

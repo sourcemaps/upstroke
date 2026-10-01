@@ -511,8 +511,10 @@ even if a caller reached past the selector.
 
 ### Errors
 
-A reservation the ledger refuses, a Git or containment error from the
-verify, or [`UpstrokeError::Refused`] when the fold holds no retained
+A reservation the broker's check refuses — the fold-derived count plus the
+outstanding reservations leaves no room under `max_parallel`, the task
+already holds one, or the fold is poisoned — a Git or containment error from
+the verify, or [`UpstrokeError::Refused`] when the fold holds no retained
 generation for `key`. Every error path cancels the reservation it took.
 
 ## `reservations.cancel(request.key, ReservationKind::Retry)?;`

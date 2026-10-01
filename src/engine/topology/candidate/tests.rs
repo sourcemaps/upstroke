@@ -709,7 +709,7 @@ fn spawn_kill_child(fixture: &Fixture, which: &str) -> ProcessOutput {
         Err(_) => spec,
     };
     HostRunner::new()
-        .run(&gate_request(
+        .run_blocking(&gate_request(
             spec,
             fixture.root.clone(),
             Duration::from_secs(120),
@@ -1381,11 +1381,11 @@ fn snapshot_residue_reclaimed() {
 
     let gates = fixture
         .manager
-        .add_snapshot(hooks.effects(), &SnapshotName::gates(0, 1), &input)
+        .add_snapshot(hooks.effects(), &SnapshotName::gates(0, 0, 1), &input)
         .expect("the gate snapshot");
     let review = fixture
         .manager
-        .add_snapshot(hooks.effects(), &SnapshotName::review(0, 1, 0), &input)
+        .add_snapshot(hooks.effects(), &SnapshotName::review(0, 0, 1, 0), &input)
         .expect("the reviewer's snapshot");
     let ephemeral = gates.ephemeral().expect("a tree input commits");
     assert_eq!(
