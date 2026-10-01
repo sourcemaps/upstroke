@@ -3200,3 +3200,9 @@ has not entered the run's cleanup scope — the scope is thread-local and its
 owner is the coordinator's thread — so the Unix reaper of a process it spawns
 holds the run's R28 lease only if the call carries the lease paths. The
 control carries none, and nothing holds the lease while its child runs.
+After each call the hold must have ended with the reaper, read as a
+bounded wait under the test's own 60-second bound, the one its readiness
+handshake waits: a sibling test thread's fork can hold a copy of the lease
+for a moment after the reaper exits (the mechanism of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
+that outlives the bound fails the test.

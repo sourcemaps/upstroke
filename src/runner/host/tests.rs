@@ -6967,6 +6967,7 @@ fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them
         "this thread has left the run's scope, like a pipeline thread that never entered it"
     );
 
+    let bound = Duration::from_secs(60);
     for carried in [false, true] {
         let ready = dir.join(format!("ready-{carried}"));
         let mut command = native().spec(": > \"$UPSTROKE_READY\"; sleep 300");
@@ -6992,7 +6993,7 @@ fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them
                 };
                 runner.run_blocking_with(&request, call)
             });
-            let started = wait_for_file(&ready, Duration::from_secs(60));
+            let started = wait_for_file(&ready, bound);
             let held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
             cancellation.cancel();
             let outcome = driver.join().expect("the driving thread");
@@ -7009,9 +7010,18 @@ fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them
             "carried {carried}: the reaper holds the run's cleanup lease exactly when the call \
              carries it"
         );
+        let waiting = std::time::Instant::now();
+        let mut held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+        while held && waiting.elapsed() < bound {
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(20),
+                bound.saturating_sub(waiting.elapsed()),
+            );
+            held = crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+        }
         assert!(
-            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
-            "carried {carried}: the hold ended with the reaper"
+            !held,
+            "carried {carried}: the hold ended with the reaper within {bound:?}"
         );
     }
     drop(lock);

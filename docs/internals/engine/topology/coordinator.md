@@ -1157,7 +1157,12 @@ across it, and every removal of them in the journal is A's own. The foreign comm
 invocation mounts the shared credential volume, and the journal puts it after the census observed
 every dead container terminated and removed it. R17: the owner's lock went with its process, A's is
 held until A ends and then nobody's, and the foreign command holds nothing after it exits; its
-pre-lock refusal left nothing held (it took the worktree lock right after, in the same process).
+pre-lock refusal left nothing held (it took the worktree lock right after, in the same process). The
+owner's release is read as a bounded wait (`within`, under `BOUND`), as `holds_nothing` reads the
+others: `rundir::is_running` reads the run's cleanup lease once the run lock is free, and a sibling test
+thread's fork can hold a copy of that lease for a moment after its last holder ends (the mechanism of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`). A hold that outlives the bound fails the
+test.
 
 ## `mod tests` › `struct LedgerWatch<'p> {`
 

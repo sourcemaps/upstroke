@@ -8812,9 +8812,10 @@ mod tests {
             dead
         };
         assert_eq!(dead.len(), 2);
-        assert!(
-            !crate::rundir::is_running(&dead_dir),
-            "the dead owner's lock hold (R17) went with its process"
+        within(
+            BOUND,
+            "the dead owner's lock hold (R17) went with its process",
+            || !crate::rundir::is_running(&dead_dir),
         );
         assert_eq!(
             running_in(&host),
@@ -9864,7 +9865,6 @@ mod tests {
         panic!("the parent kills this coordinator while its processes run; it ended {ended:?}");
     }
 
-    #[cfg(unix)]
     fn within(bound: Duration, what: &str, done: impl Fn() -> bool) {
         let started = std::time::Instant::now();
         while !done() {
