@@ -169,13 +169,20 @@ an input:
 - **Well-formed before the fork.** `ReaperContainerScope::new` refuses an empty or filter-breaking
   root label or incarnation (`census.rs:777`), and `render_container_argv` refuses a program it cannot
   resolve to a path (`proc.rs:4749`, `:4771`) — both on the parent side, before anything is forked.
-- **Checked against each container before its intent.** Every cover — the arming one and each later
-  one — compares the armed scope's two filter values (`label=upstroke.private_root=…`,
+- **Checked against each container before anything forks, and before its intent** (amended,
+  `FUA-D1-DES-2`). Every cover takes the scope it would hold — the armed scope, or, on the arming
+  cover, the scope it is about to arm, built from the runtime's reaper program and the runner's
+  identity — and compares that scope's two filter values (`label=upstroke.private_root=…`,
   `label=upstroke.incarnation=…`; `census.rs:826`, `:828`) with this container's two label values in
-  `plan.launch.spec.labels`, and refuses the launch, before `write_intent`, on any difference. Both
-  sides derive from one value, so the check fires only if a later change makes them diverge — a
-  canonicalised root on one side, say — and then it fires at the first launch, in every test that
-  launches a container.
+  `plan.launch.spec.labels` **first**. A difference refuses the launch before any fork, any intent
+  and any effect; only a scope that selects the container is armed. The design as reviewed at
+  `793c3784` said "arm if unarmed; refuse if … the armed scope's filters differ", which compares
+  after the fork: under its own stale-incarnation mutation (`fua-m3`) a reaper over the wrong scope
+  could acknowledge READY before the comparison refused, and a death in that interval had it reclaim
+  a scope that is not this incarnation's (the design lens, finding 2). Both sides derive from one
+  value, so the check fires only if a later change makes them diverge — a canonicalised root on one
+  side, say — and then it fires at the first launch, in every test that launches a container, with
+  nothing armed.
 - **The first probe is covered like every container.** The cover runs before the first probe's
   intent, whatever entry the probe came from (rows 1–4); there is no "before the first probe" window
   for a check to be late in.
@@ -214,10 +221,24 @@ gets a second reaper over the same scope, and each covers its own launches.
   reaper through `spawn_reaper`'s fork with **no cleanup lease** and the rendered scope, and waits for
   its READY within `HELPER_READY_BUDGET`. No process group, no launch claim, no `REGISTER`: the
   reaper's `pgid` stays 0, so it never settles a group and never forks an anchor.
-- `pub struct ContainerReaper` with a `Drop` that cancels (`Reaper::cancel`, `proc.rs:2355`:
-  `REAPER_CANCEL`, acknowledged within two seconds, then the unbounded `AcknowledgedExit` wait). A
-  cancelled reaper exits without listing anything (`REAPER_CANCEL if requested == 0`,
-  `proc.rs:2760`, with `pgid` 0): **cancellation kills nothing**.
+- `pub struct ContainerReaper` with a `Drop` that cancels: `REAPER_CANCEL`, acknowledged within two
+  seconds as `Reaper::cancel` (`proc.rs:2355`) does, and fail-closed as it does when the
+  acknowledgement does not come. A cancelled reaper exits without listing anything
+  (`REAPER_CANCEL if requested == 0`, `proc.rs:2760`, with `pgid` 0): **cancellation kills
+  nothing**.
+- **The exit after the acknowledgement is waited for with a deadline** (amended, `FUA-D1-CONC-1`).
+  The design as reviewed kept `Reaper::cancel`'s unbounded `AcknowledgedExit` wait (`proc.rs:2427`),
+  so a reaper stopped between writing `REAPER_OK` (`proc.rs:2764`) and its `_exit` held its
+  coordinator's drop — and with it a normal shutdown — for as long as it stayed stopped (the
+  concurrency lens). That wait is unbounded for a host reaper because its exit releases the cleanup
+  lease its caller is about to act on (`ReaperEnding::AcknowledgedExit`); a container reaper holds no
+  lease (below), so nothing downstream depends on its exit. Its drop therefore waits
+  `HELPER_END_BUDGET` for the exit; a reaper still there is sent `SIGKILL` — it acknowledged
+  `CANCEL`, so the only thing left for it to do is exit, and killing it loses nothing — and waited
+  for once more within the same budget; one still not collectable then is left for the process's
+  exit. Every wait in the container reaper's life has a deadline: READY (`HELPER_READY_BUDGET`), the
+  acknowledgement (two seconds), the exit (two `HELPER_END_BUDGET`s). Host reapers keep
+  `Reaper::cancel` and its unbounded wait unchanged.
 - `spawn_reaper` (`proc.rs:2498`) takes the container scope as an argument rather than reading the
   process-global one (`proc.rs:2546`); `Supervisor::begin` passes `container_scope_for_a_new_reaper()`
   as today, so host reapers are unchanged.
@@ -225,8 +246,9 @@ gets a second reaper over the same scope, and each covers its own launches.
 **The rule, in `exec.rs`'s `Reaping`:**
 
 - `cover` (under the mutex, held across the fork on the first cover so a concurrent first launch
-  waits for it): arm if unarmed; refuse if arming fails, or if the armed scope's filters differ from
-  the container's labels; then count the invocation in flight and return `Covered`.
+  waits for it): take the armed scope, or build the one to arm; refuse if its filters differ from the
+  container's labels, **before arming** (`FUA-D1-DES-2`); arm if unarmed, refusing if arming fails;
+  then count the invocation in flight and return `Covered`.
 - `Covered::settle(fate)`: if `fate` is `Unresolved` set `unsettled`; decrement in flight.
   `Covered`'s `Drop` without a settle — an unwinding panic inside `contain` — sets `unsettled` and
   decrements.
@@ -260,7 +282,8 @@ containers; it does not depend on any coordinator ledger, so no caller can get i
 | killed after `create` or `start`, while running, or mid-release | the container exists or may | lists by scope (`docker ps --all`), kills and removes each (`reclaim_labeled_containers`, `proc.rs:4812`), lists again; the next census removes the intents and views |
 | killed during the disarm (`CANCEL` written) | none of this runner's left (disarm needs every fate established) | exits on `CANCEL`, or sees the death first and lists nothing |
 | killed after an unsettled drop | the unresolved containers | kills and removes them |
-| `R6-D1`: the cancellation fails (the reaper stopped, killed, or not answering) | — | `Reaper::cancel` arms fail-closed termination, and the monitor arming installed ends the process with `SIGTERM` — the module's rule for a helper whose state it cannot establish, which `R6-D1` requires here too. A reaper that was only slow then finds its coordinator gone and reclaims what the incarnation still runs, or reads its `CANCEL` first and exits without listing (§1.8 weighs keeping this arm) |
+| `R6-D1`: the cancellation fails (the reaper stopped, killed, or not answering) | — | the drop arms fail-closed termination, as `Reaper::cancel` does, and the monitor arming installed ends the process with `SIGTERM` — the module's rule for a helper whose state it cannot establish, which `R6-D1` requires here too. A reaper that was only slow then finds its coordinator gone and reclaims what the incarnation still runs, or reads its `CANCEL` first and exits without listing (§1.8 weighs keeping this arm) |
+| the reaper stopped after acknowledging `CANCEL` (`FUA-D1-CONC-1`) | none of this runner's left (a disarm needs every fate established) | the drop waits `HELPER_END_BUDGET` for its exit, sends it `SIGKILL`, and waits once more within the same budget: the caller goes on within two budgets, and the reaper, killed after its last decision, lists nothing |
 | Windows | — | no reaper (ST-16 (e)): `cover` counts and returns its value, `Reaping`'s drop does nothing, and the next write command's census reclaims, as `OrphanWindow::UntilNextWriteCommandStart` documents |
 
 **R28: the container reaper holds no cleanup lease.** Round R5's reaper held the run's cleanup lease
@@ -311,22 +334,51 @@ in `src/runner/container/exec/tests.rs`, `#[cfg(unix)]` (§1.6). **What it enume
 `src/**/*.rs` production region (`effects::production_code`, skipping
 `effects::census_domain::whole_file_test_modules`, as the fold census does):
 
-1. **The start and create calls.** Every occurrence of `create_container(` and `start_container(`
-   that is not their definition. Expected, exactly: `src/runner/container.rs` once each (inside the
-   free `launch`) and `src/runner/container/exec.rs` once each (inside `ContainerRunner::launch`).
-2. **The free `launch`.** Every `launch(` token that is neither a method call (`.launch(`) nor a
-   definition (`fn launch(`), in every region, `container.rs`'s included: expected none. A production
-   caller of the free `launch` is a second path that no cover dominates.
-3. **The runtime's methods.** `runtime.create(` and `runtime.start(` occur once each in
-   `container.rs` (inside the two funnels) and nowhere else — the textual half of the guard whose
-   type-level half is `clippy.toml:231`–`:232`.
-4. **The covered launch.** In `exec.rs`: `fn launch(`'s signature names `Covered`; its body holds the
-   one `create_container(` and one `start_container(`; `self.launch(` occurs once, in `fn contain(`,
-   after `self.reaping.cover(`; `Covered {` is constructed once, inside `fn cover(`.
+**It reads namings, not calls** (amended, `FUA-D1-DES-1`). The census as reviewed counted call tokens,
+so `use super::launch as start_uncovered;` and a call of `start_uncovered(` reached the free
+launcher with no cover while all five checks passed (the design lens, finding 1). An **unarmed
+launcher** is anything that starts a container without a cover: the free `launch`, the funnels
+`create_container` and `start_container`, and the runtime's primitives `ContainerRuntime::create`
+and `::start`. A **naming** of one is any occurrence of its identifier in code (comments and strings
+blanked) as a path segment or a bare expression — a call, a `use` or `pub use` of it, an `as` alias, a
+function value — other than its definition (`fn launch(`), a method call or field (`.launch`), or a
+field initializer (`launch:`). Every naming of an alias, a function value or a re-export names the
+original identifier somewhere, so a census of namings sees all three; only a glob import followed by
+a call by the same bare name escapes the `use` clause, and that call is itself a naming.
+
+1. **The funnels.** The production namings of `create_container` and `start_container` are exactly:
+   in `src/runner/container/exec.rs`, its one `use super::{…}` import (one naming of each, with no
+   `as`) and one call of each inside `ContainerRunner::launch`'s body; in `src/runner/container.rs`,
+   one call of each inside the free `launch`'s body. Nothing else in any production region.
+2. **The free `launch`.** No production naming at all, `container.rs`'s included. A production
+   caller of the free `launch` — by name, alias, function value or re-export — is a second path that
+   no cover dominates.
+3. **The primitives.** `clippy`'s `disallowed_methods` (`clippy.toml:231`–`:232`) denies every path
+   reference to `ContainerRuntime::create` and `::start`, calls and function values alike, in every
+   production module that does not allow the lint; two production modules allow it module-wide,
+   `container.rs` (the funnel) and `view.rs` (the Git view's), and this check pins them: their
+   namings of `create` and `start` are exactly `runtime.create(` and `runtime.start(` once each,
+   inside the two funnels, and the standard library's `File::create(` once in each file. No `as`
+   alias and no `pub use` of either primitive anywhere.
+4. **The covered launch.** In `exec.rs`: `fn launch(`'s signature names `Covered`; `self.launch(`
+   occurs once, in `fn contain(`, after `self.reaping.cover(`; `Covered {` is constructed once,
+   inside `fn cover(`.
 5. **The control.** The sorted list of production regions naming `start_container` is exactly
    `["src/runner/container.rs", "src/runner/container/exec.rs"]`, and the walk scanned more than 40
    files and more than 750,000 non-whitespace bytes — the fold census's density checks — so a census
-   that scanned nothing cannot pass.
+   that scanned nothing cannot pass. A second test runs the naming reader over written snippets — an
+   alias, a function value, a re-export, a glob import and a call, beside a method, a field and a
+   definition — and requires it to name the first five and none of the rest.
+
+**Why the census and not visibility.** The review's preferred remedy is an unarmed launcher nothing
+outside the funnel can name. Privacy cannot give it here: an item private to `runner::container` is
+visible to every child module of it — the reason `clippy.toml`'s comment above `:231` gives for
+denying the primitives instead — and `create_container` and `start_container` must stay nameable from
+`exec.rs`. The free `launch` could be made test-only, but it is a `funnel` row of
+`src/runner/container.rs` in `effects/wrappers.toml`, and `effects::tests::checks::reachable_fns_are_classified`
+refuses a row whose fn is no longer reachable — an edit of another module's rows, which this
+follow-up's brief reserves for the orchestrator — and the frozen `recover/tests.rs:3957` imports it.
+So the census is the guard, not a backstop, and it is written to refuse every naming.
 
 **How a mutation proves it can fail.** Four mutations, each a scratch copy built from itself (the
 `Compiling` line naming the copy) and each turning the census red with its own message while the
@@ -338,6 +390,9 @@ unmutated copy passes:
 | `fua-c2` | a new production fn in `exec.rs` calls `start_container(` | 1 and 5 |
 | `fua-c3` | a topology module calls `crate::runner::container::launch(` in production | 2 |
 | `fua-c4` | `Covered {` constructed outside `cover` | 4 |
+| `fua-c5` (`FUA-D1-DES-1`) | `exec.rs` gains `use super::launch as start_uncovered;` and a production fn calling `start_uncovered(` | 2 |
+| `fua-c6` (`FUA-D1-DES-1`) | a production fn in `exec.rs` takes `super::start_container` as a function value and calls it | 1 |
+| `fua-c7` (`FUA-D1-DES-1`) | `census.rs` re-exports `pub use super::create_container as create_uncovered;` | 1 |
 
 ### 1.5 The regression tests
 
@@ -361,6 +416,9 @@ this table, so each row's red is measured against the whole set.
 | the CI flake: every "R28/R17 not held" read is a bounded wait | `no_reaper_test_reads_a_hold_as_released_once` (source census over the new tests): a negated `observe_cleanup_hold(`/`is_running(` occurs only inside the module's bounded helper | a one-shot `assert!(!observe_cleanup_hold(..))` after a refusal (round R6's): a sibling thread's fork holds an inherited lease descriptor for a moment (`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`) | `fua-m12` one such one-shot read added to a reaper test |
 | the design property | `every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope` (in-process): with a test-only observation of armed scopes at each container start, through a fresh run's P4 (shell and agent probes), a resume's pre-flight, `step` (worker, gates, reviews, verification) and `run_concurrently` at width three, every start is covered by a live reaper whose scope is the container's labels, and the count of observed starts equals the count of containers the fake created; with the R6-C1 pair and the R6-D2 control for its other clauses | a launch path the cover does not dominate | `fua-m13` the cover moved after `launch`; `fua-m2`; `fua-m3` |
 | the census (§1.4) | `every_container_start_in_production_is_reached_only_through_a_covered_launch` | a second production path to a container start | `fua-c1`–`fua-c4` |
+| `FUA-D1-DES-1`: the census refuses an alias, a function value and a re-export | the census above, and `the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher` (unit, over written snippets) | a census of call tokens (the reviewed design's): an alias reaches the free launcher and every check passes | `fua-c5`, `fua-c6`, `fua-c7` |
+| `FUA-D1-DES-2`: nothing arms until the scope is validated | `a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed` (unit, `exec/tests.rs`): an unarmed runner's cover is handed labels its scope does not select; refused, and no reaper armed — the runner's own state and the process's armed-scope observation both empty | arming before comparing (the reviewed design's rule): a reaper over the wrong scope exists, and acknowledged READY, before the refusal | `fua-m14` the comparison moved after the arming |
+| `FUA-D1-CONC-1`: a stop after the `CANCEL` acknowledgement does not wedge the caller | `a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` (isolated child, bounded): a `ContainerReaper` over a stopped stand-in that has acknowledged `CANCEL` is dropped; the drop returns within two `HELPER_END_BUDGET`s and the stand-in is killed and collected | the unbounded `AcknowledgedExit` wait (the reviewed design's): the drop never returns, and the isolated child is killed at its deadline | `fua-m15` the container reaper's exit wait made `AcknowledgedExit` |
 
 **The harness rules, each a lesson of rounds R5–R7:**
 
@@ -488,8 +546,19 @@ body.
 - **Existing tests that kill a coordinator** and say "its three containers outlive it" keep passing,
   because the fake's default program kills nothing; their messages should say that it is the fake's
   no-op reaper, not the absence of one.
-- **The docker CLI wedged at the coordinator's death** bounds each reaper call at 30 seconds
-  (`REAPER_DOCKER_TICKS`) and leaves what it could not kill to the census, as PR6's reaper always has.
+- **A `docker` CLI wedged at the coordinator's death holds the reaper with no deadline** (corrected,
+  `FUA-D1-REG-1`; the sentence as reviewed said each call was bounded at 30 seconds, which the
+  regression lens showed false). The reaper's `docker` calls are PR6's fork-side machinery,
+  inherited unchanged: a listing is read for up to 30 seconds (`read_bounded`, `proc.rs:4889`,
+  `:4934`; `REAPER_DOCKER_TICKS`), its process is then waited for for up to 30 seconds more
+  (`reap_bounded`, `proc.rs:4891`, `:4975`), sent `SIGKILL` (`:4987`), and then waited for by a
+  `waitpid(pid, 0)` with **no deadline** (`:4990`). A CLI that `SIGKILL` cannot make collectable — one
+  in uninterruptible sleep — holds the reaper there indefinitely; the dead coordinator's containers
+  then run on until the next write command's census, the orphan window this follow-up closes,
+  reopened for that case. It is not bounded here: the loop is shared by every reaper's container
+  half, and bounding it, and witnessing a process `SIGKILL` cannot end, is work of its own. It is
+  filed as `PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL` (P3, `pre_existing`, first bad
+  `919a728e`, PR6 lane c), with this sequence as its evidence.
 - **The macOS and Windows legs** are CI's to speak for (§1.6); this box runs Linux only.
 
 ### 1.9 What the implementation changes, by file
@@ -511,3 +580,18 @@ body.
   follow-up B's lock text), this record, and the deletion of the finding's file.
 - Not changed: `src/engine/topology/**` production code, `recover.rs`, `recover/tests.rs`, every
   frozen file, `src/rundir.rs`, `src/workspace_manager*`.
+
+### 1.10 The design review's four corrections (round 1, at `793c3784`)
+
+Three `gpt-6-astra` lenses at `max` reviewed this section at `793c3784`
+(`~/orch-pr11/reviews/review-328-d1-{design,concurrency,regression}-793c3784.review.md`, hashes in
+`SHA256SUMS-328-d1`; the orchestrator's triage `review-328-d1-triage.md`). The core — the reaper armed
+inside the launch funnel — held in all three; each returned one or two P2s, all corrections of this
+section, made above before any code and marked with their ids:
+
+| id | lens | the correction | where |
+|---|---|---|---|
+| `FUA-D1-DES-1` | design | the census reads namings — aliases, function values, re-exports — of every unarmed launcher, not call tokens; why visibility cannot do it here | §1.4; witnesses in §1.5 |
+| `FUA-D1-DES-2` | design | the cover compares the scope it would hold with the container's labels before it forks; nothing arms until the scope is validated | §1.2, §1.3; witness in §1.5 |
+| `FUA-D1-CONC-1` | concurrency | the container reaper's exit after its `CANCEL` acknowledgement is waited for with a deadline, then killed; no wait of its life is unbounded | §1.3; witness in §1.5 |
+| `FUA-D1-REG-1` | regression | the risk account states the inherited limit — a deadline-less `waitpid` after `SIGKILL` — and files it rather than claiming a 30-second bound | §1.8 |
