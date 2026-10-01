@@ -276,6 +276,10 @@ pub trait ContainerRuntime: Send + Sync {
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError>;
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError>;
+
+    fn reaper_program(&self) -> PathBuf {
+        PathBuf::from(super::DOCKER_PROGRAM)
+    }
 }
 
 pub trait OwnerLiveness: Send + Sync {

@@ -1479,8 +1479,8 @@ mod fake;
 #[cfg(test)]
 pub(crate) use fake::{
     CHILD_EVENT, DOCKER_GATED_TESTS, FakeOwnerLiveness, FakeRuntime, Journaled, Launch,
-    LinkedRuntime, RecordingHooks, Start, StartPolicy, container_name_for, container_name_parts,
-    docker_gate, intent_path_for,
+    LinkedRuntime, NO_OP_REAPER_PROGRAM, RecordingHooks, Start, StartPolicy, container_name_for,
+    container_name_parts, docker_gate, intent_path_for,
 };
 
 #[cfg(test)]
@@ -1497,6 +1497,38 @@ impl DockerCli {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) fn write_program_in_its_own_process(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut writer = Command::new("/bin/sh");
+    writer
+        .args(["-c", "printf '%s' \"$2\" > \"$1\"", "write-program"])
+        .arg(path)
+        .arg(script);
+    let written =
+        crate::agent::proc::test_support::run_with_timeout(writer, "", Duration::from_secs(60))
+            .expect("run the program's writer in a process of its own");
+    assert_eq!(
+        written.code,
+        Some(0),
+        "write {}: {written:?}",
+        path.display()
+    );
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("make the written program executable");
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) fn run_program_in_its_own_process(program: &Path, args: &[&str]) -> Option<i32> {
+    let mut command = Command::new(program);
+    command.args(args);
+    crate::agent::proc::test_support::run_with_timeout(command, "", Duration::from_secs(60))
+        .expect("run the program in a process of its own")
+        .code
+}
 
 #[cfg(test)]
 #[inline]

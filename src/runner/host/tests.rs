@@ -4725,7 +4725,49 @@ mod inherited_writer {
         assert_eq!(output.code, Some(0), "{output:?}");
 
         let fifo_name = "shim fifo ' $name";
-        let fifo = root.0.join(fifo_name);
+        writes_leave_no_writer_in_another_threads_fork(&root.0.join(fifo_name), |fifo, marker| {
+            assert_eq!(marker_shim(&root.0, fifo_name, marker), fifo);
+        });
+    }
+
+    #[test]
+    fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {
+        let mut helper = Command::new(std::env::current_exe().expect("the test executable"));
+        helper.args([
+            "runner::host::tests::inherited_writer::reaper_relay_writer_helper",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        let output = proc::test_support::run_with_timeout(helper, "", Duration::from_secs(180))
+            .expect("supervise the isolated inherited-writer witness");
+        assert_eq!(output.code, Some(0), "{output:?}");
+        assert!(
+            output.stdout.contains("1 passed"),
+            "the helper must run one test: {output:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper; holds forked descriptors away from other tests"]
+    fn reaper_relay_writer_helper() {
+        let root = Scratch(scratch("reaper-relay-writer"));
+        writes_leave_no_writer_in_another_threads_fork(
+            &root.0.join("relay fifo ' $name"),
+            |fifo, marker| {
+                crate::runner::container::write_program_in_its_own_process(
+                    fifo,
+                    &shim_script(marker),
+                );
+            },
+        );
+    }
+
+    fn writes_leave_no_writer_in_another_threads_fork(
+        fifo: &Path,
+        write: impl FnOnce(&Path, &str) + Send,
+    ) {
         let name =
             std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a NUL-free FIFO path");
         // SAFETY: name is a live NUL-terminated path in our private scratch
@@ -4738,7 +4780,7 @@ mod inherited_writer {
         let mut reader = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(&fifo)
+            .open(fifo)
             .expect("open the FIFO reader before the shim writer");
         // SAFETY: reader owns a live FIFO descriptor. F_SETPIPE_SZ takes an
 
@@ -4753,11 +4795,11 @@ mod inherited_writer {
         let expected = shim_script(&marker).into_bytes();
         let mut actual = vec![0; expected.len()];
         std::thread::scope(|scope| {
-            let writer = scope.spawn(|| marker_shim(&root.0, fifo_name, &marker));
+            let writer = scope.spawn(|| write(fifo, &marker));
             read_fifo(&mut reader, &mut actual[..1]);
             let held = hold_inherited_descriptors();
             read_fifo(&mut reader, &mut actual[1..]);
-            assert_eq!(writer.join().expect("join the shim writer"), fifo);
+            writer.join().expect("join the shim writer");
             held.assert_alive();
             let eof = reader.read(&mut [0_u8]);
             held.assert_alive();

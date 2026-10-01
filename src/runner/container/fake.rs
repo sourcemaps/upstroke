@@ -100,6 +100,8 @@ struct State {
     journal: Vec<Journaled>,
     processes: BTreeMap<String, Process>,
     pace: Option<Pace>,
+    reaper_program: Option<PathBuf>,
+    covers: Option<Vec<(String, bool)>>,
 }
 
 impl Drop for State {
@@ -374,7 +376,19 @@ impl FakeRuntime {
     pub(crate) fn calls(&self) -> Vec<RuntimeOp> {
         self.trace.ops()
     }
+
+    #[cfg(unix)]
+    pub(crate) fn observing_covers(&self) {
+        self.state().covers = Some(Vec::new());
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {
+        self.state().covers.clone().unwrap_or_default()
+    }
 }
+
+pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";
 
 impl ContainerRuntime for FakeRuntime {
     fn probe(&self) -> Result<(), RuntimeError> {
@@ -474,6 +488,13 @@ impl ContainerRuntime for FakeRuntime {
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.daemon_remove(name)
     }
+
+    fn reaper_program(&self) -> PathBuf {
+        self.state()
+            .reaper_program
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(NO_OP_REAPER_PROGRAM))
+    }
 }
 
 impl FakeRuntime {
@@ -548,6 +569,7 @@ impl FakeRuntime {
             container.state = Liveness::Running;
             container.labels.clone()
         };
+        self.observe_cover(name, &labels);
         let Some(policy) = self.starting.0.clone() else {
             return Ok(());
         };
@@ -608,6 +630,27 @@ impl FakeRuntime {
         Ok(settled)
     }
 
+    fn observe_cover(&self, name: &str, labels: &BTreeMap<String, String>) {
+        let mut state = self.state();
+        let Some(covers) = state.covers.as_mut() else {
+            return;
+        };
+        #[cfg(unix)]
+        let covered = {
+            let label = |key: &str| labels.get(key).cloned().unwrap_or_default();
+            crate::agent::proc::armed_container_reaper_selects(
+                &label(super::intent::LABEL_PRIVATE_ROOT),
+                &label(super::intent::LABEL_INCARNATION),
+            )
+        };
+        #[cfg(not(unix))]
+        let covered = {
+            let _ = labels;
+            false
+        };
+        covers.push((name.to_owned(), covered));
+    }
+
     fn settle_process(&self, name: &str) {
         let finished = {
             let mut state = self.state();
@@ -646,7 +689,115 @@ impl FakeRuntime {
     }
 }
 
+#[cfg(unix)]
+fn reaper_stub() -> String {
+    use super::intent::{LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
+    format!(
+        r#"#!/bin/sh
+relay=${{0%/*}}
+tab=$(printf '\t')
+printf '%s\t' "$@" >> "$relay/calls"
+printf '\n' >> "$relay/calls"
+case "$1" in
+ps)
+    root=
+    incarnation=
+    for argument in "$@"; do
+        case "$argument" in
+        label={LABEL_PRIVATE_ROOT}=*) root=${{argument#label={LABEL_PRIVATE_ROOT}=}} ;;
+        label={LABEL_INCARNATION}=*) incarnation=${{argument#label={LABEL_INCARNATION}=}} ;;
+        esac
+    done
+    while IFS="$tab" read -r name labeled_root labeled_incarnation; do
+        if [ "$labeled_root" = "$root" ] && [ "$labeled_incarnation" = "$incarnation" ]; then
+            printf '%s\n' "$name"
+        fi
+    done < "$relay/listing"
+    ;;
+rm)
+    while IFS="$tab" read -r name labeled_root labeled_incarnation; do
+        if [ "$name" != "$4" ]; then
+            printf '%s\t%s\t%s\n' "$name" "$labeled_root" "$labeled_incarnation"
+        fi
+    done < "$relay/listing" > "$relay/listing.next"
+    mv "$relay/listing.next" "$relay/listing"
+    ;;
+esac
+exit 0
+"#
+    )
+}
+
+#[cfg(unix)]
+impl FakeRuntime {
+    pub(crate) fn install_reaper_relay(&self, relay: &Path) -> PathBuf {
+        crate::workspace_manager::fixture::create_dir(relay);
+        crate::workspace_manager::fixture::write_file(&relay.join("listing"), b"");
+        let program = relay.join("docker");
+        super::write_program_in_its_own_process(&program, &reaper_stub());
+        self.state().reaper_program = Some(program.clone());
+        program
+    }
+
+    pub(crate) fn publish_for_reaper(&self, relay: &Path) -> Vec<(String, String, String)> {
+        let label = |labels: &BTreeMap<String, String>, key: &str| {
+            labels.get(key).cloned().unwrap_or_else(|| "-".to_owned())
+        };
+        let published: Vec<(String, String, String)> = self
+            .state()
+            .containers
+            .iter()
+            .map(|(name, container)| {
+                (
+                    name.clone(),
+                    label(&container.labels, super::intent::LABEL_PRIVATE_ROOT),
+                    label(&container.labels, super::intent::LABEL_INCARNATION),
+                )
+            })
+            .collect();
+        let listing: String = published
+            .iter()
+            .map(|(name, root, incarnation)| format!("{name}\t{root}\t{incarnation}\n"))
+            .collect();
+        crate::workspace_manager::fixture::write_file(&relay.join("listing"), listing.as_bytes());
+        published
+    }
+
+    pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(relay.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                line.split('\t')
+                    .filter(|field| !field.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn deliver_reaper_calls(&self, relay: &Path) -> Vec<String> {
+        let daemon = self.acting_as("reaper");
+        let mut delivered = Vec::new();
+        for call in Self::reaper_calls(relay) {
+            let (verb, settled) = match (call.first().map(String::as_str), call.last()) {
+                (Some("kill"), Some(id)) => ("kill", daemon.daemon_stop(id, StopMode::Kill)),
+                (Some("rm"), Some(id)) => ("rm", daemon.daemon_remove(id)),
+                _ => continue,
+            };
+            let id = call.last().map_or("", String::as_str);
+            delivered.push(match settled {
+                Ok(settled) => format!("{verb} {id}: {}", settled_name(settled)),
+                Err(error) => format!("{verb} {id}: {error}"),
+            });
+        }
+        delivered
+    }
+}
+
 pub(crate) const RUNTIME_REQUEST: &str = "UPSTROKE-RUNTIME-REQUEST ";
+
+const REAPER_PROGRAM_QUERY: &str = "reaper-program";
 
 pub(crate) const RUNTIME_REPLY: &str = "UPSTROKE-RUNTIME-REPLY ";
 
@@ -686,6 +837,9 @@ impl FakeRuntime {
     }
 
     fn answer(&self, request: &Value) -> Value {
+        if request.get("op").and_then(Value::as_str) == Some(REAPER_PROGRAM_QUERY) {
+            return json!({"ok": self.reaper_program().to_string_lossy()});
+        }
         let Some(op) = request.get("op").and_then(Value::as_str).and_then(op_named) else {
             return json!({"err": {
                 "kind": "failed",
@@ -766,6 +920,10 @@ impl LinkedRuntime {
         if let (Some(request), Value::Object(arguments)) = (request.as_object_mut(), arguments) {
             request.extend(arguments);
         }
+        self.exchange(op, &request)
+    }
+
+    fn exchange(&self, op: RuntimeOp, request: &Value) -> Result<Value, RuntimeError> {
         let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
         self.link.send(&format!("{RUNTIME_REQUEST}{request}"));
         let Some(line) = self.link.recv_within(LINK_BOUND) else {
@@ -871,6 +1029,13 @@ impl ContainerRuntime for LinkedRuntime {
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         let settled = self.call(RuntimeOp::Remove, json!({"name": name}))?;
         settled_of(&settled, RuntimeOp::Remove)
+    }
+
+    fn reaper_program(&self) -> PathBuf {
+        self.exchange(RuntimeOp::Probe, &json!({"op": REAPER_PROGRAM_QUERY}))
+            .ok()
+            .and_then(|program| program.as_str().map(PathBuf::from))
+            .unwrap_or_default()
     }
 }
 

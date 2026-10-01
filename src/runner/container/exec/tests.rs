@@ -213,6 +213,9 @@ impl ContainerRuntime for Runtime {
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.0.fake.remove(name)
     }
+    fn reaper_program(&self) -> PathBuf {
+        self.0.fake.reaper_program()
+    }
 }
 
 struct Fixture {
@@ -4905,5 +4908,840 @@ fn a_container_call_cancelled_before_it_starts_writes_no_intent() {
         list_intents(&fixture.private_root)
             .expect("scan")
             .is_empty()
+    );
+}
+
+#[cfg(unix)]
+const UNARMED_LAUNCHERS: &[&str] = &["launch", "create_container", "start_container"];
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Naming {
+    Call,
+    Value,
+    Import,
+    Alias,
+    Reexport,
+}
+
+#[cfg(unix)]
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+#[cfg(unix)]
+fn identifier_occurrences(code: &str, name: &str) -> Vec<usize> {
+    let bytes = code.as_bytes();
+    code.match_indices(name)
+        .map(|(at, _)| at)
+        .filter(|at| {
+            let before = at.checked_sub(1).and_then(|index| bytes.get(index));
+            let after = bytes.get(at + name.len());
+            !before.is_some_and(|byte| is_identifier_byte(*byte))
+                && !after.is_some_and(|byte| is_identifier_byte(*byte))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn ends_with_word(text: &str, word: &str) -> bool {
+    text.strip_suffix(word).is_some_and(|before| {
+        !before
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| is_identifier_byte(*byte))
+    })
+}
+
+#[cfg(unix)]
+fn declaration_starts_at(code: &str, at: usize) -> bool {
+    let head = code[..at].trim_end();
+    head.is_empty()
+        || head.ends_with([';', '{', '}', ']'])
+        || ends_with_word(head, "pub")
+        || head.ends_with(')')
+}
+
+#[cfg(unix)]
+fn use_declaration_of(code: &str, at: usize) -> Option<usize> {
+    identifier_occurrences(&code[..at], "use")
+        .into_iter()
+        .rev()
+        .find(|start| !code[*start..at].contains(';') && declaration_starts_at(code, *start))
+}
+
+#[cfg(unix)]
+fn is_public(code: &str, use_at: usize) -> bool {
+    let head = code[..use_at].trim_end();
+    if ends_with_word(head, "pub") {
+        return true;
+    }
+    head.strip_suffix(')')
+        .and_then(|inside| inside.rfind('(').map(|open| &inside[..open]))
+        .is_some_and(|before| ends_with_word(before.trim_end(), "pub"))
+}
+
+#[cfg(unix)]
+fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
+    let mut found = Vec::new();
+    for at in identifier_occurrences(code, name) {
+        let before = code[..at].trim_end();
+        let after = code[at + name.len()..].trim_start();
+        if ends_with_word(before, "fn") || before.ends_with('.') {
+            continue;
+        }
+        if after.starts_with(':') && !after.starts_with("::") {
+            continue;
+        }
+        let kind = match use_declaration_of(code, at) {
+            Some(use_at) if is_public(code, use_at) => Naming::Reexport,
+            Some(_) if ends_with_word(after.split_whitespace().next().unwrap_or(""), "as") => {
+                Naming::Alias
+            }
+            Some(_) => Naming::Import,
+            None if after.starts_with('(') => Naming::Call,
+            None => Naming::Value,
+        };
+        found.push((kind, at));
+    }
+    found
+}
+
+#[cfg(unix)]
+fn enclosing_fn(code: &str, at: usize) -> Option<String> {
+    let bytes = code.as_bytes();
+    identifier_occurrences(code, "fn")
+        .into_iter()
+        .filter(|start| *start < at)
+        .rev()
+        .find_map(|start| {
+            let name = code[start + 2..].trim_start();
+            let end = name
+                .find(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .unwrap_or(name.len());
+            if end == 0 {
+                return None;
+            }
+            let open = start + code[start..].find('{')?;
+            let mut depth = 0_usize;
+            let mut close = None;
+            for (offset, byte) in bytes.iter().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth = depth.checked_sub(1)?;
+                        if depth == 0 {
+                            close = Some(offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (open < at && close.is_some_and(|close| at < close)).then(|| name[..end].to_owned())
+        })
+}
+
+#[cfg(unix)]
+#[test]
+fn the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher() {
+    let snippet = "\
+use super::launch as start_uncovered;
+pub use super::create_container as create_uncovered;
+pub(crate) use super::start_container;
+use super::{mount_git_view, start_container, write_intent};
+use super::*;
+fn bypass(hooks: &mut dyn ContainerHooks) {
+    let uncovered = super::start_container;
+    uncovered(hooks);
+    launch(hooks, runtime, view, plan);
+    crate::runner::container::create_container(hooks);
+}
+fn launch(&self, plan: &InvocationPlan) {
+    self.launch(hooks);
+    let spec = &plan.launch.spec;
+    let built = InvocationPlan { launch: spec.clone() };
+}
+";
+    let mut read: Vec<(&str, Naming, usize)> = Vec::new();
+    for name in UNARMED_LAUNCHERS {
+        for (kind, at) in namings(snippet, name) {
+            read.push((name, kind, snippet[..at].lines().count()));
+        }
+    }
+    read.sort();
+    let mut expected = vec![
+        ("launch", Naming::Alias, 1),
+        ("create_container", Naming::Reexport, 2),
+        ("start_container", Naming::Reexport, 3),
+        ("start_container", Naming::Import, 4),
+        ("start_container", Naming::Value, 7),
+        ("launch", Naming::Call, 9),
+        ("create_container", Naming::Call, 10),
+    ];
+    expected.sort();
+    assert_eq!(
+        read, expected,
+        "the reader names every alias, re-export, import, function value and call of an unarmed \
+         launcher, and no definition, method call, field or field initializer"
+    );
+    assert_eq!(
+        enclosing_fn(
+            snippet,
+            snippet.find("launch(hooks, runtime").expect("the call")
+        ),
+        Some("bypass".to_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let test_modules = crate::effects::census_domain::whole_file_test_modules(&src, &files, 13);
+    assert!(
+        test_modules.contains(
+            &src.join("runner")
+                .join("container")
+                .join("exec")
+                .join("tests.rs")
+        ),
+        "this file is declared `#[cfg(test)] mod tests;` and the scan has to know it"
+    );
+    let relative = |path: &Path| {
+        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    let mut scanned = 0_usize;
+    let mut scanned_bytes = 0_usize;
+    let mut found: Vec<(String, &str, Naming, Option<String>)> = Vec::new();
+    let mut naming_start_container: BTreeSet<String> = BTreeSet::new();
+    let mut primitives: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut operations: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut covered_launch = None;
+    for path in &files {
+        if test_modules.contains(path) {
+            continue;
+        }
+        let source = std::fs::read_to_string(path).expect("a source file");
+        let production = crate::effects::production_code(&source);
+        let dense = production
+            .as_bytes()
+            .iter()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .count();
+        assert!(dense > 0, "{}'s region is empty", path.display());
+        scanned += 1;
+        scanned_bytes += dense;
+        let file = relative(path);
+        for name in UNARMED_LAUNCHERS {
+            for (kind, at) in namings(&production, name) {
+                if *name == "start_container" {
+                    naming_start_container.insert(file.clone());
+                }
+                found.push((file.clone(), name, kind, enclosing_fn(&production, at)));
+            }
+        }
+        if file == "src/runner/container.rs" || file == "src/runner/container/view.rs" {
+            for primitive in ["create", "start"] {
+                for at in identifier_occurrences(&production, primitive) {
+                    let before = production[..at].trim_end();
+                    if ends_with_word(before, "fn") {
+                        continue;
+                    }
+                    let separator = if before.ends_with("::") {
+                        "::"
+                    } else if before.ends_with('.') {
+                        "."
+                    } else {
+                        ""
+                    };
+                    let path = &before[..before.len() - separator.len()];
+                    let receiver = if separator.is_empty() {
+                        ""
+                    } else {
+                        let start = path
+                            .rfind(|character: char| {
+                                !(character.is_alphanumeric() || character == '_')
+                            })
+                            .map_or(0, |end| end + 1);
+                        &path[start..]
+                    };
+                    let after = production[at + primitive.len()..].chars().next();
+                    primitives.push((
+                        file.clone(),
+                        format!(
+                            "{receiver}{separator}{primitive}{}",
+                            after.map(String::from).unwrap_or_default()
+                        ),
+                        enclosing_fn(&production, at),
+                    ));
+                }
+            }
+            for operation in ["RuntimeOp::Create", "RuntimeOp::Start"] {
+                for (at, _) in production.match_indices(operation) {
+                    operations.push((
+                        file.clone(),
+                        operation.to_owned(),
+                        enclosing_fn(&production, at),
+                    ));
+                }
+            }
+        }
+        if file == "src/runner/container/exec.rs" {
+            covered_launch = Some(production);
+        }
+    }
+    assert!(scanned > 40, "the walk found only {scanned} source files");
+    assert!(
+        scanned_bytes > 750_000,
+        "the {scanned} regions hold {scanned_bytes} non-whitespace bytes between them"
+    );
+
+    found.sort();
+    let mut expected = vec![
+        (
+            "src/runner/container.rs".to_owned(),
+            "create_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+        (
+            "src/runner/container.rs".to_owned(),
+            "start_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "create_container",
+            Naming::Import,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "start_container",
+            Naming::Import,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "create_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "start_container",
+            Naming::Call,
+            Some("launch".to_owned()),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "a production region names an unarmed launcher — the free `launch`, `create_container` or \
+         `start_container` — outside the two funnels that may: by a call, an import, an alias, a \
+         function value or a re-export. Every container must be started through \
+         `ContainerRunner::launch`, which only `contain` calls with the cover its reaper armed"
+    );
+    assert_eq!(
+        naming_start_container,
+        ["src/runner/container.rs", "src/runner/container/exec.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
+
+    primitives.sort();
+    let mut expected_primitives = vec![
+        (
+            "src/runner/container.rs".to_owned(),
+            "runtime.create(".to_owned(),
+            Some("create_container".to_owned()),
+        ),
+        (
+            "src/runner/container.rs".to_owned(),
+            "runtime.start(".to_owned(),
+            Some("start_container".to_owned()),
+        ),
+    ];
+    expected_primitives.sort();
+    let primitives: Vec<(String, String, Option<String>)> = primitives
+        .into_iter()
+        .filter(|(_, spelled, _)| spelled != "File::create(")
+        .collect();
+    assert_eq!(
+        primitives, expected_primitives,
+        "the two production modules whose `clippy::disallowed_methods` allowance is module-wide \
+         name the runtime's `create` or `start` outside the funnels `create_container` and \
+         `start_container`"
+    );
+    operations.sort();
+    assert_eq!(
+        operations,
+        vec![
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Create".to_owned(),
+                Some("create".to_owned())
+            ),
+            (
+                "src/runner/container.rs".to_owned(),
+                "RuntimeOp::Start".to_owned(),
+                Some("start".to_owned())
+            ),
+        ],
+        "the real runtime's `docker create` and `docker start` are reached only from its \
+         `ContainerRuntime::create` and `::start`"
+    );
+
+    let exec = covered_launch.expect("exec.rs is scanned");
+    let definitions: Vec<usize> = exec.match_indices("fn launch(").map(|(at, _)| at).collect();
+    assert_eq!(definitions.len(), 1, "one `fn launch(` in exec.rs");
+    let signature_end = definitions[0] + exec[definitions[0]..].find('{').expect("a body");
+    assert!(
+        exec[definitions[0]..signature_end].contains("Covered"),
+        "`ContainerRunner::launch` takes the cover its reaper armed"
+    );
+    let launches: Vec<usize> = exec
+        .match_indices("self.launch(")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(launches.len(), 1, "one call of the covered launch");
+    assert_eq!(
+        enclosing_fn(&exec, launches[0]).as_deref(),
+        Some("contain"),
+        "the covered launch is called from `contain`"
+    );
+    let covers: Vec<usize> = exec
+        .match_indices(".cover(")
+        .map(|(at, _)| at)
+        .filter(|at| enclosing_fn(&exec, *at).as_deref() == Some("contain"))
+        .collect();
+    assert!(
+        covers.len() == 1 && covers[0] < launches[0],
+        "`contain` covers its invocation before it calls the launch"
+    );
+    let constructions: Vec<usize> = exec.match_indices("Covered {").map(|(at, _)| at).collect();
+    assert!(
+        constructions.len() == 1
+            && enclosing_fn(&exec, constructions[0]).as_deref() == Some("cover"),
+        "a `Covered` is made only by the cover that armed the reaper"
+    );
+}
+
+#[cfg(unix)]
+fn reaper_labels(private_root: &Path, incarnation: &str) -> BTreeMap<String, String> {
+    [
+        (
+            LABEL_PRIVATE_ROOT.to_owned(),
+            crate::runner::container::intent::private_root_label(private_root),
+        ),
+        (LABEL_INCARNATION.to_owned(), incarnation.to_owned()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+#[cfg(unix)]
+fn armed_for(private_root: &Path, incarnation: &str) -> bool {
+    crate::agent::proc::armed_container_reaper_selects(
+        &crate::runner::container::intent::private_root_label(private_root),
+        incarnation,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {
+    let fixture = Fixture::new("reaper-scope-refused", true);
+    let reaping = Reaping::default();
+    let foreign = reaper_labels(&fixture.private_root, INCARNATION_2);
+
+    let refused = reaping
+        .cover(&fixture.runtime, &fixture.identity, &foreign)
+        .err()
+        .expect("a container its runner's scope does not select is refused");
+    assert!(
+        refused.to_string().contains("would not find it"),
+        "the refusal says why: {refused}"
+    );
+    {
+        let state = reaping.state.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            state.armed.is_none() && state.in_flight == 0 && !state.unsettled,
+            "the refused cover armed nothing and counted nothing"
+        );
+    }
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1)
+            && !armed_for(&fixture.private_root, INCARNATION_2),
+        "no reaper was forked for either scope: nothing arms until the scope is validated"
+    );
+
+    let own = reaper_labels(&fixture.private_root, INCARNATION_1);
+    let covered = reaping
+        .cover(&fixture.runtime, &fixture.identity, &own)
+        .expect("the runner's own container is covered");
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "the control: a container the scope selects arms the runner's reaper"
+    );
+    covered.settle(ProcessFate::NeverStarted);
+    drop(reaping);
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "every cover settled with an established end, so dropping the runner disarmed it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent() {
+    let fixture = Fixture::new("reaper-scope-armed-foreign", true);
+    let runner = fixture.runner();
+    let foreign = RunIdentity {
+        incarnation: INCARNATION_2.to_owned(),
+        ..fixture.identity.clone()
+    };
+    runner
+        .reaping
+        .cover(
+            &fixture.runtime,
+            &foreign,
+            &reaper_labels(&fixture.private_root, INCARNATION_2),
+        )
+        .expect("a reaper armed for another incarnation, as a caller-built one would have been")
+        .settle(ProcessFate::NeverStarted);
+    assert!(armed_for(&fixture.private_root, INCARNATION_2));
+
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let refused = runner
+        .run_blocking(&request)
+        .expect_err("the runner's container is not selected by the armed scope");
+    assert_eq!(refused.fate, ProcessFate::NeverStarted, "{refused}");
+    assert!(
+        refused.to_string().contains("would not find it"),
+        "the refusal says why: {refused}"
+    );
+    assert!(
+        list_intents(&fixture.private_root)
+            .expect("the container namespace is readable")
+            .is_empty(),
+        "no intent was written for a container its reaper would not find"
+    );
+    assert!(
+        !fixture
+            .runtime
+            .fake()
+            .journal()
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Create),
+        "nothing was created: {:?}",
+        fixture.runtime.fake().journal()
+    );
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "and no second reaper was armed for the runner's own scope"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop() {
+    let fixture = Fixture::new("reaper-unresolved-kept", false);
+    for op in [RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove] {
+        fixture.runtime.fake().set_unreachable(op);
+    }
+    let runner = fixture.runner();
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let error = runner
+        .run_blocking(&request)
+        .expect_err("the runtime cannot observe, stop or remove the container");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    assert!(armed_for(&fixture.private_root, INCARNATION_1));
+    drop(runner);
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "a runner whose container may still run leaves its reaper armed past its last handle, \
+         until the process exits"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop() {
+    let fixture = Fixture::new("reaper-ended-disarmed", true);
+    let runner = fixture.runner();
+    let completed = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    runner
+        .run_blocking(&completed)
+        .expect("the container ran and was released");
+    fixture.runtime.fake().set_unreachable(RuntimeOp::Observe);
+    let released = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(1),
+    );
+    let error = runner
+        .run_blocking(&released)
+        .expect_err("the observation is lost and the release completes");
+    assert_eq!(error.fate, ProcessFate::Gone, "{error}");
+    assert!(armed_for(&fixture.private_root, INCARNATION_1));
+    drop(runner);
+    assert!(
+        !armed_for(&fixture.private_root, INCARNATION_1),
+        "every container the runner started is established gone, so its drop disarmed the reaper"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_panic_inside_contain_leaves_the_reaper_armed() {
+    use crate::topology::effects::{EffectSiteId, HookPhase, Injection};
+
+    struct PanicsAfterStart;
+
+    impl ContainerHooks for PanicsAfterStart {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            assert!(
+                !(site == EffectSiteId::Container(ContainerSite::Start)
+                    && phase == HookPhase::After),
+                "a panic inside `contain`, after the container started"
+            );
+            Injection::Proceed
+        }
+    }
+
+    let fixture = Fixture::new("reaper-panic-kept", false);
+    let runner = fixture.runner().with_hooks(Box::new(PanicsAfterStart));
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner.run_blocking(&request)
+    }));
+    assert!(unwound.is_err(), "the hook panicked inside the invocation");
+    drop(runner);
+    assert!(
+        armed_for(&fixture.private_root, INCARNATION_1),
+        "a container whose invocation unwound has no established end, so the reaper stays armed"
+    );
+}
+
+#[cfg(unix)]
+const REAPER_TESTS: &[(&str, &[&str])] = &[
+    (
+        "src/agent/proc.rs",
+        &[
+            "run_isolated",
+            "a_container_reaper_is_armed_only_at_the_terminate_site",
+            "container_reaper_whose_cancellation_fails_child",
+            "a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor",
+            "container_reaper_stopped_before_its_cancellation_child",
+            "a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it",
+            "container_reaper_lease_child",
+            "an_armed_container_reaper_holds_no_cleanup_lease",
+            "container_reaper_stopped_after_its_acknowledgement_child",
+            "a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller",
+        ],
+    ),
+    (
+        "src/engine/topology/coordinator.rs",
+        &[
+            "reaper_finished",
+            "reclaimed_by_its_reaper",
+            "a_resume_killed_inside_its_pre_flight_probe",
+            "a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it",
+            "the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe",
+            "stranded_child",
+            "a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits",
+            "a_contained_run_with_its_reaper_relayed",
+            "released_by_their_own_runner_and_never_reaped",
+            "a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three",
+            "a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called",
+            "every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope",
+        ],
+    ),
+    (
+        "src/engine/topology/create/tests.rs",
+        &[
+            "fresh_p4_probe_child",
+            "a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started",
+            "every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope",
+        ],
+    ),
+    (
+        "src/runner/container/exec/tests.rs",
+        &[
+            "a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed",
+            "a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent",
+            "a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop",
+            "a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop",
+            "a_panic_inside_contain_leaves_the_reaper_armed",
+        ],
+    ),
+];
+
+#[cfg(unix)]
+fn block_end(code: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (offset, byte) in code.as_bytes().iter().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn negated_hold_reads_outside_a_bounded_wait(body: &str) -> Vec<String> {
+    let mut unbounded = Vec::new();
+    for read in ["observe_cleanup_hold", "is_running"] {
+        for at in identifier_occurrences(body, read) {
+            if !body[at + read.len()..].trim_start().starts_with('(') {
+                continue;
+            }
+            let path = body[..at].trim_end_matches(|character: char| {
+                character.is_alphanumeric() || character == '_' || character == ':'
+            });
+            if !path.trim_end().ends_with('!') {
+                continue;
+            }
+            let bounded = ["loop", "while"].iter().any(|keyword| {
+                identifier_occurrences(&body[..at], keyword)
+                    .into_iter()
+                    .filter_map(|start| {
+                        let open = start + body[start..].find('{')?;
+                        let end = block_end(body, open)?;
+                        (open < at && at < end).then_some(&body[start..end])
+                    })
+                    .any(|block| block.contains("deadline") || block.contains("elapsed()"))
+            });
+            if !bounded {
+                let line = body[..at].lines().count();
+                unbounded.push(format!("`!{read}(` at line {line} of the body"));
+            }
+        }
+    }
+    unbounded
+}
+
+#[cfg(unix)]
+#[test]
+fn no_reaper_test_reads_a_hold_as_released_once() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut scanned = 0_usize;
+    let mut negated_reads = 0_usize;
+    let mut violations = Vec::new();
+    for (file, functions) in REAPER_TESTS {
+        let source = crate::effects::blank_comments(
+            &std::fs::read_to_string(root.join(file)).expect("a source"),
+        );
+        for function in *functions {
+            let definitions: Vec<usize> = source
+                .match_indices(&format!("fn {function}("))
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(
+                definitions.len(),
+                1,
+                "`{function}` is defined once in {file}, so this census reads it"
+            );
+            let open = definitions[0] + source[definitions[0]..].find('{').expect("a body");
+            let end = block_end(&source, open).expect("a closed body");
+            let body = &source[definitions[0]..=end];
+            scanned += 1;
+            negated_reads += ["observe_cleanup_hold", "is_running"]
+                .iter()
+                .map(|read| identifier_occurrences(body, read).len())
+                .sum::<usize>();
+            for unbounded in negated_hold_reads_outside_a_bounded_wait(body) {
+                violations.push(format!("{file}: `{function}`: {unbounded}"));
+            }
+        }
+    }
+    assert!(scanned >= 25, "the census read {scanned} functions");
+    assert!(
+        negated_reads >= 1,
+        "the census found no hold read at all, so it is reading nothing"
+    );
+    assert!(
+        violations.is_empty(),
+        "a reaper test reads a cleanup hold as released with one read: a sibling thread's fork \
+         holds an inherited lease descriptor for a moment \
+         (`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), so every `not held` read \
+         polls within a bound: {violations:#?}"
+    );
+    assert_eq!(
+        negated_hold_reads_outside_a_bounded_wait(
+            "fn once() { assert!(!crate::rundir::observe_cleanup_hold(&public, &mut NoHooks)); }"
+        )
+        .len(),
+        1,
+        "the reader names a one-shot read"
+    );
+    assert!(
+        negated_hold_reads_outside_a_bounded_wait(
+            "fn polled() { loop { if !observe_cleanup_hold(&public, &mut NoHooks) { return; } \
+             if Instant::now() >= deadline { return; } } }"
+        )
+        .is_empty(),
+        "and accepts a read polled within a deadline"
     );
 }
