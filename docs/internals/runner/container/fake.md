@@ -805,7 +805,7 @@ it this fake's reaper program.
 
 Writes the listing from every container the fake holds, with their recorded labels (`-` for
 one a seeded container lacks). A witness publishes before it kills the coordinator: the reaper
-lists within ten milliseconds of the death.
+notices the death within one of its 10-millisecond polls and lists at once.
 
 ## `impl FakeRuntime` › `pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {`
 

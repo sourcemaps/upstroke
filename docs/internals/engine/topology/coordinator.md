@@ -1426,9 +1426,9 @@ the run it adopts, so the run is dropped first and the guard then reclaims what 
 
 ## `mod tests` › `const REAPER_BOUND: Duration = Duration::from_secs(60);`
 
-How long a witness waits for a dead coordinator's reaper to finish its calls. The reaper starts
-within ten milliseconds of the death; the bound exists so a mutation that arms nothing fails the
-test instead of hanging it.
+How long a witness waits for a dead coordinator's reaper to finish its calls. The reaper notices
+the death within one of its 10-millisecond polls; the bound exists so a mutation that arms nothing
+fails the test instead of hanging it.
 
 ## `mod tests` › `fn reaper_finished(`
 

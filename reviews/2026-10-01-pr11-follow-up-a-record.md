@@ -247,7 +247,8 @@ gets a second reaper over the same scope, and each covers its own launches.
   `Reaper::cancel` and its unbounded wait unchanged.
 - `spawn_reaper` (`proc.rs:2498`) takes the container scope as an argument rather than reading the
   process-global one (`proc.rs:2546`); `Supervisor::begin` passes `container_scope_for_a_new_reaper()`
-  as today, so host reapers are unchanged.
+  as today, so host reapers are unchanged. (As built, `spawn_reaper` keeps its signature and the
+  fork it shares is `fork_reaper(leases, containers)`: §2.1.)
 
 **The rule, in `exec.rs`'s `Reaping`:**
 
@@ -417,7 +418,8 @@ Every test below is `#[cfg(unix)]`. "Two-process" means the phase-5 fixture: a c
 `ParentSide::attach`, as the round-7 witnesses use them, `~/orch-pr11/reviews/r7-witnesses/delta/witnesses.patch`).
 The reaper's `docker` is the relay stub (the harness rules below): it records its calls in its own
 directory, answers `ps` from a listing the parent writes, and the parent delivers the recorded `kill`
-and `rm` to the fake. Each mutation is a scratch copy built from itself and run against every test of
+and `rm` to the fake. (As built, the listing carries every container's labels and the stub filters it
+by the `ps` arguments, as the daemon would: §2.1.) Each mutation is a scratch copy built from itself and run against every test of
 this table, so each row's red is measured against the whole set.
 
 | requirement | test (kind, file) | the first-bad shape it fails on | mutation |
@@ -445,7 +447,8 @@ this table, so each row's red is measured against the whole set.
 - **`R6-D3`, an isolated writer.** The stub is written by `/bin/sh -c 'printf %s "$2" > "$1"'` in a
   process of its own, bounded through `agent::proc::test_support::run_with_timeout`, its mode set by
   path afterwards — in `src/runner/container/fake.rs`, not in `src/workspace_manager/fixture.rs`
-  (follow-up B's path, where round R6 put it).
+  (follow-up B's path, where round R6 put it). (As built, the writer is in `container.rs`'s
+  `cfg(test)` tail, since `fake.rs` forbids `std::process::Command`: §2.1.)
 - **Bounded "not held" waits.** Every read that a hold is released polls within the module's bound,
   as `holds_nothing` does (`coordinator.rs`, from `:8679`); the census row above keeps it so.
 - **Isolated children are bounded.** Every child process — the two-process coordinators and the
@@ -611,3 +614,325 @@ section, made above before any code and marked with their ids:
 | `FUA-D1-DES-2` | design | the cover compares the scope it would hold with the container's labels before it forks; nothing arms until the scope is validated | §1.2, §1.3; witness in §1.5 |
 | `FUA-D1-CONC-1` | concurrency | the container reaper's exit after its `CANCEL` acknowledgement is waited for with a deadline, then killed; no wait of its life is unbounded | §1.3; witness in §1.5 |
 | `FUA-D1-REG-1` | regression | the risk account states the inherited limit — a deadline-less `waitpid` after `SIGKILL` — and files it rather than claiming a 30-second bound | §1.8 |
+
+## 2. Implementation
+
+Phase 2, by `pr11_fua_impl` (`claude-opus-5-5`, `max`). Every figure below is in a saved file under
+`~/orch-pr11/logs/pr11_fua_impl/` that the sentence names. Code lines are cited at the code commit
+`4bc56d21` unless another is named; the later commits of this phase change no production source
+file, and only `cdd72177` changes a test (the census, in `exec/tests.rs`).
+
+### 2.0 The order of the work
+
+1. **§1 amended before any code** (`6d565f42`): the four corrections, marked with their ids
+   (§1.10).
+2. **The implementation and its tests** (`4bc56d21`), and the two `effects/wrappers.toml` rows.
+3. **Notes, `design/15`, the findings** (`a8ef3fb0`).
+4. **The census's primitives check corrected** (`cdd72177`; §2.2), §1.4 with it.
+5. **This section**, after the mutation campaign ran at `cdd72177`.
+
+### 2.1 What changed, by file
+
+**`src/agent/proc.rs`** (the Process funnel's `termination` module):
+
+- `fork_reaper(leases, containers)` (`:2559`) is the fork every reaper is made by, split out of
+  `spawn_reaper` unchanged; `spawn_reaper` (`:2548`) keeps its signature and its order —
+  `verify_group_scanner`, the thread's lease scope merged with the carried paths, the process-wide
+  container scope — and hands them to it, so a host reaper is forked as before.
+- `pub struct ContainerReaper` and `pub fn arm_container_reaper(terminate_site, scope)`
+  (`:4868`, `:4872`), re-exported from `agent::proc` under `cfg(unix)` (`:837`): refuses any site
+  but `Process.Terminate`; renders the scope before anything else; `shared_state()?` installs the
+  signal monitor (`R6-D1`); forks one reaper through `fork_reaper` with **no** lease and the
+  rendered scope, without the scanner check, a launch claim or a `REGISTER` — the reaper's `pgid`
+  stays 0.
+- `impl Drop for ContainerReaper` (`:4895`) calls `Reaper::cancel_unleased` (`:2377`): the same
+  CANCEL frame and two-second acknowledgement as `cancel`, fail-closed when it does not come, and
+  then `ReaperEnding::UnleasedExit` (`:2545`): the exit waited for within `HELPER_END_BUDGET`, then
+  `SIGKILL`, then once more within the same budget (`:2438`, `:2478`) — `FUA-D1-CONC-1`. Host
+  reapers keep `cancel` and its unbounded `AcknowledgedExit` wait.
+- Test-only: `ARMED_CONTAINER_REAPERS` (`:4906`) records each armed reaper's listing argv until it
+  is cancelled; `armed_container_reaper_selects` answers whether one lists a private root label and
+  incarnation (the coverage observation, §2.3). The module's tests gain the four isolated-child
+  witnesses and their children (§2.3).
+
+**`src/runner/container/exec.rs`** (the launch funnel):
+
+- `ContainerRunner` gains `reaping: Reaping` (`:268`): a mutex over the armed reaper and its scope,
+  the covers in flight, and a sticky `unsettled`.
+- `Reaping::cover(runtime, identity, labels)` (`:290`): takes the armed scope, or builds the one it
+  would arm from `runtime.reaper_program()` and the runner's `RunIdentity`; refuses, through
+  `refuse_unless_selected` (`:324`), a container whose two labels that scope does not select —
+  **before** arming (`FUA-D1-DES-2`); arms on the first cover (`arm_container_reaper`, Unix only);
+  counts the invocation; returns `Covered`, constructed nowhere else (`:285`).
+- `contain` covers after the plan and before the launch (`:961`); `launch` takes `&Covered`
+  (`:670`); every return path after the cover settles it with the fate the runner established
+  (the launch's error fate, or the release's, `:1004`).
+- `Covered`'s drop (`:350`) counts down and marks the runner unsettled unless the fate was
+  established `Gone` or `NeverStarted` (an unwinding invocation has none). `Reaping`'s drop
+  (`:374`) cancels the reaper only when nothing is in flight and nothing is unsettled, and
+  otherwise keeps it armed until the process exits (`Armed::kept_until_the_process_exits`,
+  `mem::forget` of the reaper on Unix) — `R6-C1`.
+- On Windows the cover validates the labels the same way and arms nothing (no reaper, ST-16 (e)).
+
+**`src/runner/container/runtime.rs`**: `ContainerRuntime::reaper_program` (`:280`), defaulting to
+`DOCKER_PROGRAM`, which `DockerCli` inherits. **`src/runner/container/census.rs`**:
+`ReaperContainerScope::selects(labels)` (`:818`).
+
+**Test support** — `src/runner/container/fake.rs`: the fake's `reaper_program` is its relay stub once
+one is installed and `/usr/bin/true` otherwise (`NO_OP_REAPER_PROGRAM`); the relay stub finds its
+relay from `$0` and answers `ps` by the labels in its listing, as the daemon would; the linked
+runtime asks the parent's fake for its reaper program over the link (`REAPER_PROGRAM_QUERY`), so a
+two-process witness installs its relay once, on the fake it serves; `observing_covers` records, at
+each container start, whether an armed reaper selects it. `src/runner/container.rs`'s
+`cfg(test)` tail: `write_program_in_its_own_process` (the isolated writer, `R6-D3`; here and not in
+`fake.rs` because the fake forbids `std::process::Command`), `run_program_in_its_own_process`
+(the relay's self-check), and the `NO_OP_REAPER_PROGRAM` re-export. The two doubles outside the fake
+that back a `ContainerRunner` override `reaper_program`: `exec/tests.rs`'s `Runtime` (`:216`) and
+`create/tests.rs`'s `Inventory` (`:2894`).
+
+**Tests** in `src/runner/container/exec/tests.rs`, `src/agent/proc.rs`,
+`src/engine/topology/coordinator.rs`, `src/engine/topology/create/tests.rs` and
+`src/runner/host/tests.rs` (the FIFO oracle shared with the relay writer); two existing coordinator
+assertions that a killed coordinator's containers "outlive it" now say why — the fake's no-op reaper
+program.
+
+**Not changed:** every frozen file (§2.6), `src/engine/topology/**` production code, `recover.rs`,
+`recover/tests.rs`, `src/rundir.rs`, `src/workspace_manager*`, `clippy.toml`, `src/effects/**`,
+`Cargo.toml`. `design/15`'s crash-containment paragraph gains one sentence; the notes of all ten
+noted modules this phase changed carry the prose (§13).
+
+**Where the implementation departs from §1's text, and why:**
+
+- `spawn_reaper` keeps its signature (§1.3 said it would take the scope and lease set as
+  arguments); the shared fork is `fork_reaper`, which takes them. Same effect, smaller diff for the
+  host path.
+- The container reaper skips `verify_group_scanner`: it registers no group, so the scanner is never
+  consulted, and the check could only add a way to refuse.
+- The relay writer is in `container.rs`'s test tail, not `fake.rs` (§1.5's harness rules), because
+  the fake forbids `std::process::Command`; the stub filters `ps` by labels rather than answering a
+  listing the parent pre-filters, so a scope that does not select a container does not find it.
+- The child coordinator gets the relay through the link (the parent's fake answers its reaper
+  program), not through an environment variable: the relay's binding (`R6-D2`) is then structural in
+  both kinds of witness.
+- The panic witness (`a_panic_inside_contain_leaves_the_reaper_armed`) runs in-process and reads the
+  armed-scope observation after the runner's drop, rather than in an isolated child: a reaper kept
+  armed in the test binary is the state it asserts, and it holds no lease and runs the fake's no-op
+  program. `R6-C1`'s unit witnesses do the same; its end-to-end witness is two-process.
+- The design property is witnessed for creation's P4 probes in `create/tests.rs` as well as for a
+  resume's pre-flight, `run_concurrently` and `step` in `coordinator.rs`.
+- Some witnesses are named differently from §1.5's table; §2.3 maps each requirement to the test as
+  built.
+
+### 2.2 The domination census
+
+`every_container_start_in_production_is_reached_only_through_a_covered_launch`
+(`src/runner/container/exec/tests.rs`, census commit `cdd72177`) reads every production region of
+`src/` (`effects::production_code`, the whole-file test modules skipped) and runs §1.4's five
+checks, as amended (`FUA-D1-DES-1`):
+
+1. the namings — calls, imports, aliases, function values, re-exports — of `create_container` and
+   `start_container`: exactly `exec.rs`'s one import of each and one call of each inside
+   `ContainerRunner::launch`, and `container.rs`'s one call of each inside the free `launch`;
+2. the free `launch`: no production naming at all;
+3. the runtime's primitives: in every production module whose effective `clippy::disallowed_methods`
+   level is `allow` — stated, or inherited from a parent that states it; twenty-seven modules
+   today — each call or path naming `create` or `start` is one of seventeen pinned namings, two of
+   them `runtime.create(` and `runtime.start(` inside the funnels and none of the rest a container
+   runtime's; `RuntimeOp::Create`/`::Start` only inside `DockerCli`'s own `create` and `start`;
+4. the covered launch's shape in `exec.rs`: `launch` takes `Covered`, `self.launch(` once, in
+   `contain`, after its one `.cover(`, and `Covered {` built once, in `cover`;
+5. the control: the regions naming `start_container` are exactly the two funnels' files; more than
+   40 files and 750,000 non-whitespace bytes read; the lint-level walk found more than 100 modules
+   guarded and places `container.rs` and `view.rs` among the rest.
+
+Its two readers are tested on written input:
+`the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher` and
+`the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid`.
+
+**Check 3 was corrected during this phase.** As first written (at `4bc56d21`) it read only
+`container.rs` and `view.rs` and relied on clippy everywhere else, and the record's amended §1.4
+said every other production module forbids the lint. That was false: twenty-seven production modules
+allow `clippy::disallowed_methods` module-wide, so a `runtime.start(…)` planted in, say,
+`src/engine/resume.rs` compiles and passes `cargo clippy --lib -- -D warnings` (`fua-p2` below).
+Found by this phase's own scan of module headers before any review; repaired in `cdd72177`, with
+§1.4 corrected, and the same planted call now fails the census (`fua-c8`). Where the lint is denied
+or forbidden, clippy refuses a function value of the primitive as well as a call (`fua-p1`).
+
+### 2.3 The witnesses and their mutations
+
+Twenty-three new tests, every one `cfg(unix)` (the FIFO oracle's Linux), and six ignored children
+they spawn: twenty-two and the six at `a8ef3fb0`, by the residue runs' logs against the merge base's
+(`measure/new-tests-a8ef3fb0.txt`, `tools/new-tests.py`; no test removed), and the lint-level walk's
+reader test, `cdd72177`'s. Each mutation is a scratch copy of the tracked tree at the census commit
+`cdd72177` (`tools/campaign.py` through `tools/mutate.py`; each `base.txt` records the head, and
+`tools/verify-copies.sh` shows each copy's `src/`, `effects/`, `examples/` and manifests equal to
+`cdd72177`'s but for the mutated file, `mutation/copies-vs-cdd72177.txt`), built from itself — every
+log's `Compiling upstroke v0.1.0 (…/mut/src/<name>)` line (`Checking` for the two clippy probes)
+names its own copy — and run against the twenty-two tests of `tools/reaper-tests.txt` (every new
+test but the lint-level walk's reader test), so each row's red is measured against the whole set;
+`mutation/<name>/{mutation.diff,test.log,summary.txt}`, tabulated by `tools/mutation-table.py` in
+`mutation/TABLE.md` (the table below) and `mutation/SUMMARY.txt`. The unmutated control passes all
+twenty-two.
+
+| id | the mutation | witness for | red | green |
+|---|---|---|---|---|
+| `control` | none | the set at the census commit | none | 22 |
+| `fua-m1` | `arm_container_reaper` returns a handle with no reaper | `R6-C2`, `R7-D1`, the design property, `R6-C1`, `R6-D1` | 13: `a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor`, `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`, `a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it`, `a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`, `every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe`, `a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started`, `every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent`, `a_panic_inside_contain_leaves_the_reaper_armed`, `a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop`, `a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop`, `a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed` | 9 |
+| `fua-m2` | an unarmed runner's cover skips probe invocations | `R6-C2`, `R7-D1`, `R7-D2`, the design property | 6: `a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it`, `every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe`, `a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started`, `every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 16 |
+| `fua-m3` | the cover builds its scope from a stale incarnation | `R7-D2` and every container witness | 13: `a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three`, `a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it`, `a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called`, `a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`, `every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe`, `a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started`, `every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent`, `a_panic_inside_contain_leaves_the_reaper_armed`, `a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop`, `a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop`, `a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed` | 9 |
+| `fua-m4` | `refuse_unless_selected` accepts any labels | `R7-D2`, `FUA-D1-DES-2` | 2: `a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent`, `a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed` | 20 |
+| `fua-m5` | `Reaping`'s drop cancels whatever `unsettled` says | `R6-C1` | 3: `a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`, `a_panic_inside_contain_leaves_the_reaper_armed`, `a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop` | 19 |
+| `fua-m6` | `Covered`'s drop reads `Unresolved` as established | `R6-C1` | 2: `a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`, `a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop` | 20 |
+| `fua-m7` | `Covered`'s drop without a settle is not unsettled | `R6-C1` (an unwinding invocation) | 1: `a_panic_inside_contain_leaves_the_reaper_armed` | 21 |
+| `fua-m8` | arming skips `shared_state()` | `R6-D1` | 2: `a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor`, `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it` | 20 |
+| `fua-m9` | the container fork is handed the thread's cleanup leases | the property's last clause (no R28 held) | 1: `an_armed_container_reaper_holds_no_cleanup_lease` | 21 |
+| `fua-m10` | the drop closes the pipes instead of sending CANCEL | `R6-D2`, `R6-D1` | 4: `a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor`, `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`, `a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three`, `a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called` | 18 |
+| `fua-m11` | the relay program written through this process's descriptor | `R6-D3` | 1: `the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork` | 21 |
+| `fua-m12` | one one-shot "not held" read added to the lease witness's child | requirement 8 (the bounded reads) | 1: `no_reaper_test_reads_a_hold_as_released_once` | 21 |
+| `fua-m13-c1` | `contain` launches with a `Covered` built by hand, then covers | the design property; the census's check 4 (`fua-c1`) | 8: `a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it`, `every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe`, `a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started`, `every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope`, `a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent`, `a_panic_inside_contain_leaves_the_reaper_armed`, `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 14 |
+| `fua-m14` | the scope compared with the labels after the arming | `FUA-D1-DES-2` | 1: `a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed` | 21 |
+| `fua-m15` | the exit wait after the acknowledgement made `AcknowledgedExit` | `FUA-D1-CONC-1` | 1: `a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` | 21 |
+| `fua-c2` | a production fn in `exec.rs` calls `start_container(` | the census, check 1 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c3` | `preflight.rs` calls `crate::runner::container::launch(` | the census, check 2 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c4` | `Covered {` built outside `cover` | the census, check 4 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c5` | `use super::launch as start_uncovered;` and a call of it | `FUA-D1-DES-1`: an alias | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c6` | `let start = super::start_container;` and a call of it | `FUA-D1-DES-1`: a function value | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c7` | `pub use super::create_container as create_uncovered;` in `census.rs` | `FUA-D1-DES-1`: a re-export | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-c8` | `runtime.start("probe")` in `engine/resume.rs`, which allows `disallowed_methods` | the census, check 3 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 21 |
+| `fua-r0` | none (the two effects tests as committed) | the rows' control | none | 2 |
+| `fua-r1` | `"arm_container_reaper"` removed from the funnel row | the funnel row | 1: `every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified` | 1 |
+| `fua-r2` | `drop = 6` back to `drop = 5` | the `drop` count | 1: `every_name_more_than_one_callable_bears_is_pinned_by_its_count` | 1 |
+| `fua-p1` | `let start = R::start;` in `census.rs`, clippy on the lib | census check 3's reliance on clippy where the lint is denied | clippy rc 101: use of a disallowed method `upstroke::runner::container::runtime::ContainerRuntime::start` at `src/runner/container/census.rs:21:17` | — |
+| `fua-p2` | `fua-c8`'s planted call, clippy on the lib | why check 3 reads the modules that allow the lint | clippy rc 0: no disallowed-method error | — |
+
+**Every mutation turned red the witness its row names**, and each copy differed from `cdd72177` in
+exactly its mutated file (`control` and `fua-r0` in none; `mutation/copies-vs-cdd72177.txt`). The
+red column counts the set's tests that failed and names them; the green column counts those that
+passed. `fua-r0`–`fua-r2` ran the two effects tests that read `effects/wrappers.toml` (§2.8) rather
+than the set. `fua-p1` and `fua-p2` ran `cargo clippy --lib --all-features -- -D warnings` on their
+copies, not tests: clippy refuses a function value of the runtime's `start` where the lint is denied,
+and passes `fua-c8`'s planted call where it is allowed — why check 3 reads those modules itself.
+The census mutants `fua-c2`–`fua-c8` and `fua-m13-c1` each turned the
+census red, its message naming the planted naming (`fua-c2`, `-c3`, `-c5`–`-c8`) or the broken shape
+(`fua-c4`, `fua-m13-c1`) (`mutation/<name>/test.log`).
+
+**The two-process witnesses** run a child coordinator over the parent's fake (`scaffold::Served`,
+`ParentSide`), install the relay on the fake the child is served by — the child's runner asks the
+parent's fake for its reaper program over the link, so nothing passes it in the environment — and,
+before killing the child, publish the fake's containers with their labels to the relay's listing;
+the stub answers `ps` by those labels as the daemon would. A dead coordinator's reaper notices the
+death within one of its 10-millisecond polls (`reaper_loop`); each witness waits for its calls
+within `REAPER_BOUND` (60 s) and delivers them to the fake as the actor `reaper`, so a container is
+gone only by the reaper's own `kill` and `rm`, and no census listing occurred after the death. A
+child's events and exit are awaited within `workspace_manager::fixture::LINK_BOUND` (120 s); a child
+that must be seen alive past its last handle waits for a file the parent writes (round R6's lesson);
+every isolated child of `agent::proc` runs under `run_isolated`'s deadline and is killed with its
+process group at it, so a mutation fails rather than wedges (`fua-m15`'s red is exactly that kill:
+its child was still in the unbounded wait at the deadline, `status None`).
+
+**Repeats.** The twenty-two tests, thirty consecutive runs at `a8ef3fb0` while the first campaign
+loaded the box: thirty of thirty green, about 2.1 s each (`proof/repeat-under-campaign/summary.txt`).
+
+### 2.4 Class searches
+
+Saved in `measure/class-searches.txt` (at `4bc56d21`; `cdd72177` changed only the census's reading):
+
+- **Every runtime that backs a `ContainerRunner` names its reaper program.** Of the twelve
+  `ContainerRuntime` implementations, five back a runner: the real `DockerCli` (the trait's `docker`
+  default, correctly), `FakeRuntime` and `LinkedRuntime` (`fake.rs`), `exec/tests.rs`'s `Runtime` and
+  `create/tests.rs`'s `Inventory`; the four test doubles override `reaper_program`. The other seven
+  (`prelock/tests.rs`'s `Inventory`, `startup/tests.rs`'s two, `census/tests.rs`'s `WedgedRuntime`,
+  `resolve/tests.rs`'s `LoggingRuntime`, `container/tests.rs`'s two) never back a runner, so their
+  default is never asked for. Every `ContainerRunner::new` site and every `scaffold::container_runner`
+  caller is listed with the runtime it is handed (24 and 8 sites): each is one of the five.
+- **Every wait of the container reaper's life has a deadline**: READY (`await_ready`,
+  `HELPER_READY_BUDGET`), the CANCEL acknowledgement (two seconds), the exit after it
+  (`UnleasedExit`'s two bounded waits); the fail-closed arm waits for nothing. The one deadline-less
+  wait left is inside the reaper, in PR6's inherited `docker` machinery — filed (§1.8,
+  `PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL`).
+- **Write-then-exec fixtures this change adds**: one, the relay stub, through the isolated writer.
+- **"Not held" reads in the new tests**: every one is a bounded poll; the census
+  `no_reaper_test_reads_a_hold_as_released_once` keeps it so.
+- **Unarmed paths to a container start**: none outside the funnels — the census (§2.2), whose
+  primitives check covers every module where clippy cannot refuse them.
+- **Modules where a lint the census relies on is lowered**: the module-header scan that found the
+  twenty-seven `clippy::disallowed_methods` allowances (§2.2) is the census's own walk; it is the
+  class search for the defect check 3 had.
+
+### 2.5 Residue
+
+The whole suite in a fresh, short `TMPDIR`, at the merge base `92c4ca81` and at `a8ef3fb0` (the code
+of this phase before the census commit, which reads source only), each from a `git archive` copy
+(`tools/residue-run.sh`, `residue/{base,head}/`, compared by class with ULIDs, ten-character random
+suffixes and digits normalized by `tools/residue-compare.py`, `residue/compare-base-head.txt`):
+44 top-level entries and 154 in all at both, **no class differs**. Each run's 60-second listing
+shows the suite allocating there. The head run passed 3,022 tests, the base 3,000.
+
+### 2.6 Frozen files, schema 4 and the legacy path
+
+- **The module diff proof passes** at `4bc56d21` against the merge base `92c4ca81`
+  (`proof/module-diff-proof-4bc56d21.txt`): the 26 frozen production files byte-identical, and all
+  eight frozen test children identical, `recover/tests.rs` among them. G6's "fold, queue, merge,
+  repair, and recovery modules byte-identical to the G5 range" names none of the files this change
+  touches.
+- **Schema 4 stays unreachable in production**: no production code constructs a `ContainerRunner`
+  (§1.1), and nothing in `engine::topology`'s production code changed.
+- **The legacy path and host runs are unchanged**: the legacy engine's runner is the host's; a host
+  launch's reaper is forked by `spawn_reaper` exactly as before — the same scanner check, leases
+  and process-wide scope, handed to the split-out `fork_reaper` — and `Reaper::cancel` keeps its
+  unbounded acknowledged-exit wait (`the_acknowledged_exit_wait_after_cleanup_or_cancel_is_still_unbounded`
+  passes in the full suite).
+
+### 2.7 Platforms
+
+- **Linux** (this box): every gate, the full suite, the campaign and the repeats.
+- **macOS**: the same code. `clippy --target aarch64-apple-darwin --all-targets` is clean
+  (`dev/clippy-aarch64-apple-darwin-2.log`); the tests are CI's. The reaper ignores `SIGHUP` and
+  registers no group, so it cannot trip `PR326-MACOS-A-DAEMONIZING-DESCENDANT-HANGS-UP-THE-ROLE`;
+  the one stopped reaper is `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`'s,
+  continued by the kernel once its caller is gone or, if it is still stopped five seconds later,
+  by the test. `/usr/bin/true` — the fake's no-op reaper program — exists on macOS. The relay stub
+  uses `/bin/sh`, `printf` and `mv`. The FIFO oracle is Linux-only (`F_SETPIPE_SZ`), as before.
+- **Windows**: no reaper (ST-16 (e)); the cover validates labels and arms nothing. Every new test is
+  `cfg(unix)`, so the guest harness gains no test. `clippy --target x86_64-pc-windows-msvc
+  --all-targets` and `cargo +1.85.0 check --target x86_64-pc-windows-msvc --locked --all-targets`
+  are clean (`dev/clippy-x86_64-pc-windows-msvc-2.log`, `dev/msrv-windows-1.log`) — type-checked
+  and linted, not run; the first Windows clippy run found two `cfg(windows)`-only defects
+  (`dev/clippy-x86_64-pc-windows-msvc-1.log`), fixed before the commit. The guest's time is CI's
+  (§2.9).
+- **Docker**: real Docker is G7's; the fake and the relay carry every test here.
+
+### 2.8 Instruments
+
+`effects/wrappers.toml`, the `src/agent/proc.rs` module only:
+
+| row | change | why |
+|---|---|---|
+| `funnel` | `"arm_container_reaper"` | It takes `ProcessSite::Terminate` by value, refuses any other site, and forks one cleanup reaper through the Terminate site's own fork, with no lease and no process group, for a container runner's incarnation. |
+| `shared` | `drop = 5` → `drop = 6` (and the `"drop"` comment's "five" → "six") | `ContainerReaper`'s `Drop` is a sixth callable named `drop` in the file; it cancels the reaper as `Supervisor`'s does, with a bounded wait for its exit. |
+
+Both are required, measured on scratch copies of `cdd72177` (§2.3's method), each run against the two
+effects tests that read them: without the funnel row,
+`every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified` fails with
+`src/agent/proc.rs` `unclassified: ["arm_container_reaper"]` (`fua-r1`); with `drop = 5`,
+`every_name_more_than_one_callable_bears_is_pinned_by_its_count` fails: six callables bear `drop` in
+`src/agent/proc.rs` and the record pins five (`fua-r2`); as committed, both pass (`fua-r0`)
+(`mutation/fua-r{0,1,2}-*/test.log`). Nothing else in any instrument changes: no new effect
+site or primitive, no `clippy.toml`, `src/effects/**`, `Cargo.toml [lints]` or allowlist. The
+census of §2.2 is, by `MAINTAINING.md` step 7's reading, a subject: it asserts a fact about the
+product — every container start is covered — and governs nothing outside the launch funnel's own
+rule.
+
+### 2.9 Gates and CI
+
+The ten gates run at the pushed head, in the foreground, cargo through `upstroke-build` on this
+session's base; their logs, and CI's legs read by the newest run per workflow after the push, are in
+the pull request body and `~/orch-pr11/handovers/pr11_fua_impl.md`, which name each file. This
+section is committed before they run, so it names no figure of theirs.
+
+### 2.10 What is not verified here
+
+- macOS and Windows behaviour: CI's (§2.9).
+- Real Docker: G7's.
+- The 30-second bounds of the inherited `docker` calls and the deadline-less wait after them were
+  not exercised: filed, not changed.
