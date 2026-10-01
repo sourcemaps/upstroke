@@ -414,6 +414,14 @@ is installed once it has started: a reader that cannot be started unwinds
 through the destructor above, which kills and reaps the child and finds no
 reader to join.
 
+The thread is started as `thread::Builder::spawn(builder, ..)`, in its
+path form, not `builder.spawn(..)`: `runner::container::tests`'
+`the_readiness_allowance_names_the_paths_it_is_written_against` counts the
+denied primitives this file reaches by their call forms, and `.spawn(` is
+one of `std::process::Command::spawn`'s — a thread is not a process, and the
+file still reaches exactly the five primitives its allowlist row is written
+against.
+
 ## `impl Producer` › `pub(crate) fn child(&mut self) -> &mut Child {`
 
 The adopted child, for a test that drives the process directly.

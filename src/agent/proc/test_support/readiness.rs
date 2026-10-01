@@ -270,8 +270,7 @@ impl Producer {
             framed,
         };
         if let Some(stdout) = stdout {
-            let started = reader(pid)
-                .spawn(move || read_frames(stdout, &sender))
+            let started = thread::Builder::spawn(reader(pid), move || read_frames(stdout, &sender))
                 .unwrap_or_else(|error| {
                     panic!("start the reader of the readiness producer {pid}: {error}")
                 });
