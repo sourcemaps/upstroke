@@ -2214,6 +2214,11 @@ pub(super) fn kill_dir(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {
     }
 }
 
+pub(super) fn child_temporary_of(dir: &Path) -> [(&'static str, &std::ffi::OsStr); 3] {
+    let dir = dir.as_os_str();
+    [("TMPDIR", dir), ("TMP", dir), ("TEMP", dir)]
+}
+
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {
     launch_the_kill_child_and_adopt(test, dir, site, &[])
 }

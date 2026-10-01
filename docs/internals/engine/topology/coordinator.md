@@ -704,7 +704,9 @@ T-FINISH at width three, with
 `append_error_inside_closure_ends_command_and_resume_completes_closure_at_width_three`: `HaltArming`
 arms the fault at the first append after the halt is folded, which is the closure's first terminal;
 the child (`closure_kill_child_at_width_three`) dies inside it, torn or complete, and the next
-process repeats the closure from the surviving prefix.
+process repeats the closure from the surviving prefix. Each child's temporary directory is a `kill_dir`
+guard this test holds (`scaffold::child_temporary_of`), so the fixture the child builds and the neutral Git
+configuration it writes are reclaimed with the guard rather than left in the suite's temporary directory.
 
 ## `mod tests` › `fn authorized_publication_completed_at_run_end() {`
 
@@ -1050,6 +1052,17 @@ claims, then from the OS — and the repository's worktree lock can be taken, an
 R3, R4 and R13 at a coordinator's start: nothing registered, running or pending, no pair held or
 waited for, no entitlement held, no reservation ever taken or cancelled, no duplicate counted.
 
+## `mod tests` › `fn served(`
+
+A child coordinator (`container_coordinator_child`) served the parent's fake runtime
+(`scaffold::Served`), its standard error kept as `<name>.stderr` in the test's `logs` directory — which is
+also its temporary directory (`scaffold::child_temporary_of`). So a fresh child's fixture, which the
+parent adopts once the child is dead, and the neutral Git configuration the child writes lie inside the
+`logs` guard, which each test binds before its children and the runs it adopts from them, so they are
+dropped first and the guard then reclaims the rest; the tests keep that directory's tag
+short (`census-b`, `resume-f`, `crashes-g`, `converge-h`, `reapers`), since a fresh child's paths nest
+inside it on Windows too (the record's phase-7 path arithmetic).
+
 ## `mod tests` › `fn a_foreign_census_reclaims_a_dead_coordinators_containers_and_leaves_a_live_coordinators_running()`
 
 ST-16 (b) under concurrency, in three processes. A dead owner — a child holding its run lock and two
@@ -1308,4 +1321,6 @@ kill at that cell, and this process adopts its directory and resumes it twice th
 recovery order. The first resume finalizes to the state the uninterrupted
 finalization left (report outcome, retained candidates, refs under the run namespace, worktrees, the
 execution root); the second finds the report current, removes nothing and refuses the same run; neither
-appends, and planted answer files stay byte-identical.
+appends, and planted answer files stay byte-identical. Every child's temporary directory is a guard the
+cell holds (`scaffold::child_temporary_of`, tag `tmp`, short for the Windows path budget), declared before
+the run it adopts, so the run is dropped first and the guard then reclaims what the child left.

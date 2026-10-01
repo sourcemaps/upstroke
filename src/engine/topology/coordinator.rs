@@ -3758,12 +3758,17 @@ mod tests {
             let handoff = crate::engine::topology::scaffold::kill_dir(&format!(
                 "coordinator-closure-kill-{shape}"
             ));
+            let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+            let mut environment = vec![
+                ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
+                ("UPSTROKE_TEST_KILL_SHAPE", std::ffi::OsStr::new(shape)),
+            ];
+            environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+                temporary.path(),
+            ));
             let status = crate::workspace_manager::fixture::run_kill_child_within(
                 "engine::topology::coordinator::tests::closure_kill_child_at_width_three",
-                &[
-                    ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
-                    ("UPSTROKE_TEST_KILL_SHAPE", std::ffi::OsStr::new(shape)),
-                ],
+                &environment,
                 crate::engine::topology::scaffold::KILL_CHILD_BOUND,
             )
             .unwrap_or_else(|| panic!("{shape}: the kill child did not end in time"));
@@ -8299,9 +8304,11 @@ mod tests {
         env: &[(&str, &std::ffi::OsStr)],
         runtime: crate::runner::container::FakeRuntime,
     ) -> crate::engine::topology::scaffold::Served {
+        let mut environment = env.to_vec();
+        environment.extend(crate::engine::topology::scaffold::child_temporary_of(logs));
         crate::engine::topology::scaffold::Served::spawn(
             CONTAINER_CHILD,
-            env,
+            &environment,
             &logs.join(format!("{name}.stderr")),
             runtime,
         )
@@ -8324,7 +8331,7 @@ mod tests {
         let host = crate::engine::topology::scaffold::container_host();
         let root = wide.env.fixture.root.clone();
         let private = wide.env.fixture.private.clone();
-        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-census-b-logs");
+        let logs = crate::engine::topology::scaffold::kill_dir("census-b");
         let repo_key = wide.env.identity(INC_A).repo_key;
 
         let dead_dir = crate::rundir::public_dir(&root.join("repo-b"), RUN_DEAD);
@@ -8661,7 +8668,7 @@ mod tests {
         use std::ffi::OsStr;
         let tasks = three();
         let host = crate::engine::topology::scaffold::container_host();
-        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-resume-f-logs");
+        let logs = crate::engine::topology::scaffold::kill_dir("resume-f");
         let (root, first) = killed_fresh_incarnation(&host, logs.path());
         let env = crate::engine::topology::scaffold::WideEnv::adopted(
             root.clone(),
@@ -8903,7 +8910,7 @@ mod tests {
         use std::ffi::OsStr;
         let tasks = three();
         let host = crate::engine::topology::scaffold::container_host();
-        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-crashes-g-logs");
+        let logs = crate::engine::topology::scaffold::kill_dir("crashes-g");
         let (root, first) = killed_fresh_incarnation(&host, logs.path());
 
         let second = served(
@@ -9111,7 +9118,7 @@ mod tests {
             INC_1,
         );
         let host = crate::engine::topology::scaffold::container_host();
-        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-converge-h-logs");
+        let logs = crate::engine::topology::scaffold::kill_dir("converge-h");
         let root = wide.env.fixture.root.clone();
         let private = wide.env.fixture.private.clone();
         let repo_key = wide.env.identity(INC_1).repo_key;
@@ -9424,7 +9431,7 @@ mod tests {
      {
         use std::ffi::OsStr;
         let tasks = three();
-        let logs = crate::engine::topology::scaffold::kill_dir("coordinator-reapers-logs");
+        let logs = crate::engine::topology::scaffold::kill_dir("reapers");
         let pids = logs.path().join("pids");
         crate::workspace_manager::fixture::write_file(&pids.join("created"), b"\n");
         let child = served(
@@ -12735,13 +12742,18 @@ mod tests {
                     "interleaving-finalize-{label}-{cell}"
                 ));
                 let index = cell.to_string();
+                let temporary = crate::engine::topology::scaffold::kill_dir("tmp");
+                let mut environment = vec![
+                    ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
+                    ("UPSTROKE_TEST_KILL_OUTCOME", std::ffi::OsStr::new(label)),
+                    ("UPSTROKE_TEST_KILL_CELL", std::ffi::OsStr::new(&index)),
+                ];
+                environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+                    temporary.path(),
+                ));
                 let status = crate::workspace_manager::fixture::run_kill_child_within(
                     FINALIZE_CHILD,
-                    &[
-                        ("UPSTROKE_TEST_KILL_DIR", handoff.path().as_os_str()),
-                        ("UPSTROKE_TEST_KILL_OUTCOME", std::ffi::OsStr::new(label)),
-                        ("UPSTROKE_TEST_KILL_CELL", std::ffi::OsStr::new(&index)),
-                    ],
+                    &environment,
                     crate::engine::topology::scaffold::KILL_CHILD_BOUND,
                 )
                 .unwrap_or_else(|| panic!("{tag}: the kill child did not end in time"));

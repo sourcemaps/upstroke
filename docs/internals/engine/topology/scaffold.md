@@ -908,6 +908,20 @@ as the guard, so it is reclaimed when the parent's test ends. It was
 `temp_dir()/upstroke-topo-<tag>-<pid>-<ordinal>`, unique to a call within one process and removed
 by nobody (`PR7-SCRATCH-FIXTURE-LEAK`).
 
+## `pub(super) fn child_temporary_of(dir: &Path) -> [(&'static str, &std::ffi::OsStr); 3] {`
+
+The environment that makes `dir` a child test process's temporary directory: `TMPDIR`, and the `TMP` and
+`TEMP` Windows reads. For PR11's children (the coordinator's kill children and its two-process
+containers' children), which `kill_child_and_adopt_in_a_scratch_tree` does not launch: a parent holds a
+`kill_dir` guard, hands its path to the child through this, and drops the guard after the child has
+ended and the run it left has been adopted and dropped, so what the child made under `temp_dir()` — its
+fixture, and the neutral Git configuration every process that runs the fixture's Git writes once
+(`fixture::neutral_git_config`) — is reclaimed with it. Until phase 7 those children wrote into the
+suite's own temporary directory and nothing removed their configurations: 23 directories per suite run
+(the PR11 record, §8, phase 7's residue). The nesting lengthens every path under such a child's fixture
+by the guard's name, so the parents keep that name short: the record's phase-7 arithmetic bounds the
+longest checkout `.git` path at 207 characters on the CI guest, 13 under Git for Windows' 220.
+
 ## `pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {`
 
 Run `test` as a child that must die, and adopt the run it left behind.
