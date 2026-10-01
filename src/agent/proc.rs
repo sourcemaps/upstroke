@@ -5071,10 +5071,27 @@ mod termination {
             if let Some(run_dir) = run_dir {
                 command.env(CONTAINER_REAPER_RUN_DIR, run_dir);
             }
-            command
+            let mut caller = command
                 .stdin(Stdio::null())
-                .output()
-                .expect("run the isolated container-only caller")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start the isolated container-only caller");
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while caller
+                .try_wait()
+                .expect("poll the isolated container-only caller")
+                .is_none()
+            {
+                if Instant::now() >= deadline {
+                    let _ = caller.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            caller
+                .wait_with_output()
+                .expect("collect the isolated container-only caller")
         }
 
         fn arm_a_container_only_reaper() -> ContainerReaper {

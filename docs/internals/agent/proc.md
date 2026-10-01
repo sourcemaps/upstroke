@@ -2379,10 +2379,11 @@ Install the process's signal monitor before the fork, as every
 (`Reaper::cancel`) fails closed by setting `PENDING_TERMINATION`, and the
 monitor is the only thing that acts on it: it kills the registered groups
 and raises the signal, so this process ends and the reaper, seeing its
-coordinator gone, settles and releases R28. A container-only coordinator
-starts no host process, so nothing else had installed the monitor; the
-failed cancellation set the flag, nothing read it, and the caller went on
-with the cleanup lease still held by its stopped or wedged reaper —
+coordinator gone, settles and releases R28. `Supervisor::begin` is
+reached only through the process funnel, so in a process whose every
+invocation runs in a container nothing else had installed the monitor;
+the failed cancellation set the flag, nothing read it, and the caller went
+on with the cleanup lease still held by its stopped or wedged reaper —
 `monitor initialized=false, pending termination=15, R28 still held=true`.
 
 ## `mod termination` › `impl Drop for ContainerReaper {`
@@ -2586,7 +2587,10 @@ which takes the run's cleanup lease — and stops it, then cancels: the stopped 
 the cancellation fails while the stopped reaper holds R28, and the caller ends by `SIGTERM` rather
 than going on as if the lease were free. The parent resumes the orphaned reaper (the kernel may
 already have, for an orphaned stopped process group), which finds its coordinator gone, settles and
-releases the lease; then the run directory is removed.
+releases the lease; then the run directory is removed. Each isolated caller
+is bounded at sixty seconds and killed after it, so a caller that neither
+ends nor returns fails the test rather than wedging the suite — what a
+cancellation that waits without a bound for a stopped reaper would do.
 
 ## `mod tests` › `fn the_reapers_cleanup_hold_is_shared_between_overlapping_invocations() {`
 

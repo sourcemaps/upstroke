@@ -11126,13 +11126,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_coordinator_refuses_a_reaper_whose_scope_is_not_its_runs_own_before_anything_is_spawned() {
+        let _alone = registering_a_container_scope();
         let tasks = three();
         let mut wide = Wide::durable_contained(
             "reaper-foreign-scope",
             &tasks,
             3,
             WidePlans::default(),
-            holding(&tasks, &[]),
+            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
             INC_A,
         );
         let host = crate::engine::topology::scaffold::container_host();
