@@ -8,7 +8,7 @@ reviewed_sha: 1fe988cd140dab27731206db4812ab2a927618b7
 location: src/agent/proc.rs:4735
 provenance: pre_existing
 first_bad: PR7's TopologyRun, which the census notes name as the registrar (docs/internals/runner/container/census.md, "What a later slice must connect")
-guard: the change that wires the coordinator's container reaper, before G6 certifies ST-16 — ST-16 is gated "G2, G6, G7" and the packet says "PR12 may not merge until G6 passes", so PR12 cannot take it unless the owner has G6 record ST-16 (d)'s coordinator half open, with PR12 taking it
+guard: the follow-up change that wires the coordinator's container reaper, after PR11 and before G6 certifies ST-16 — ST-16 is gated "G2, G6, G7" and the packet says "PR12 may not merge until G6 passes"
 ---
 
 ## Failure sequence
@@ -50,9 +50,10 @@ at the full review's grade (the PR11 record's §13, "Review round 7 (round R7): 
 withdrawn implementation stays in the branch's history, the last of it at `92593723`.
 
 **Latent.** No production run selects a container runner for a schema-4 run in this build (the PR11
-record, `R-G`); the census notes say PR12 is where a run first does. P1 is the reviewers' label; the
-owner classifies whether it is serious (`MAINTAINING.md`, "Serious P1"). G6's pass rule ends "no open
-critical/high finding", so while this stays open at P1 it is G6's to answer whatever the guard says.
+record, `R-G`); the census notes say PR12 is where a run first does. It stays P1, `deferred`: on
+2026-10-01 the owner kept PR11's narrowed scope and split this finding out into a follow-up change due
+after PR11 and before G6, without reclassifying it and without waiving G6 (the PR11 record's §12). G6's
+pass rule ends "no open critical/high finding", so the follow-up lands before G6 certifies ST-16.
 
 ## What the change that takes this up should do
 
