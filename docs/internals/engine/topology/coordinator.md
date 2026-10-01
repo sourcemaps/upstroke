@@ -1282,7 +1282,7 @@ generation dispatched once; each attempt started once and settled once (`candida
 taken once; each sequence claimed by one candidate, in log order; integration in
 `task_candidate_created` order and each sequence merged once.
 
-## `mod interleaving` › `fn duplicating() -> Inject<'static> {`
+## `mod interleaving` › `fn duplicating(crossed: std::rc::Rc<std::cell::Cell<usize>>) -> Inject<'static> {`
 
 ST-05's injector, which also carries ST-01, ST-02 and ST-06 under interleaving: at a seeded point it
 offers one of a duplicate end of an invocation already settled (the ledger counts it as a duplicate
@@ -1290,7 +1290,10 @@ when its pipeline is live, the coordinator discards it otherwise), an end of a r
 outside its pipeline, a snapshot end nobody holds, a stale completion (a retired pipeline's own
 identity, remembered from earlier points, or a pipeline that never existed), a registration offered
 through the injector, or a completion naming another live pipeline's identity (or a mismatched attempt
-or sequence). Every one of them is refused or counted, once, and none reaches the log.
+or sequence). Every one of them is refused or counted, once, and none reaches the log. `crossed`
+counts the last kind, so the test can require each to be refused by the binding to its pipeline's
+identity rather than by the injector's own refusal, which would refuse it anyway (round R5,
+`FULL-SC-2`).
 
 ## `mod interleaving` › `struct Tracing {`
 
