@@ -10991,7 +10991,7 @@ mod tests {
             let mut seeds = Vec::new();
             let mut total = 0_usize;
             let mut total_crossed = 0_usize;
-            for seed in scheduled_here(0..8, &[0]) {
+            for seed in scheduled_here(0..8, &[1]) {
                 let reference = seeded_run(
                     Shape::of(
                         format!("interleaving-st05-reference-{seed}"),

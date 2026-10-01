@@ -1332,7 +1332,9 @@ injections per seed over the run (forty over Linux's and macOS's eight; each see
 Since round R5 (`FULL-SC-2`), every completion injected for a live pipeline under another identity
 must be refused by the binding to that pipeline's identity — counted by `duplicating`'s `crossed`
 and matched against the binding's warnings — and at least one is injected over the seeds run; before
-it, the injector's own refusal would have discarded them with the binding removed.
+it, the injector's own refusal would have discarded them with the binding removed. That last is a claim
+made of some seed, so on Windows (R-AY) the test runs seed 1, the lowest whose injections include one
+(seed 0's nine include none).
 
 ## `mod interleaving` › `fn every_provisional_reservation_converts_at_its_first_append_under_seeded_permutations() {`
 
