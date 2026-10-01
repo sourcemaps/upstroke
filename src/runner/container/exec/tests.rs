@@ -5008,6 +5008,153 @@ fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
 }
 
 #[cfg(unix)]
+fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for at in identifier_occurrences(code, name) {
+        let before = code[..at].trim_end();
+        let after = code[at + name.len()..].trim_start();
+        if ends_with_word(before, "fn") {
+            continue;
+        }
+        if after.starts_with("::") && !after.starts_with("::<") {
+            continue;
+        }
+        let called = after.starts_with('(');
+        let pathed = before.ends_with("::");
+        if !(called || pathed || use_declaration_of(code, at).is_some()) {
+            continue;
+        }
+        let argument = after
+            .strip_prefix('(')
+            .and_then(|arguments| arguments.split(')').next())
+            .map(str::trim);
+        if called && matches!(argument, Some("true" | "false")) {
+            continue;
+        }
+        let separator = if before.ends_with("::") {
+            "::"
+        } else if before.ends_with('.') {
+            "."
+        } else {
+            ""
+        };
+        let path = &before[..before.len() - separator.len()];
+        let receiver = if separator.is_empty() {
+            ""
+        } else {
+            let start = path
+                .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .map_or(0, |end| end + 1);
+            &path[start..]
+        };
+        let next = after.chars().next().map(String::from).unwrap_or_default();
+        found.push((format!("{receiver}{separator}{name}{next}"), at));
+    }
+    found
+}
+
+#[cfg(unix)]
+fn stated_disallowed_methods(source: &str) -> Option<bool> {
+    let blanked = crate::effects::blank_comments(source);
+    let mut rest = blanked.trim_start();
+    let mut allowed = false;
+    let mut guarded = false;
+    while let Some(after) = rest.strip_prefix("#![") {
+        let mut depth = 1_usize;
+        let mut end = None;
+        for (offset, character) in after.char_indices() {
+            match character {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        let attribute: String = after[..end].split_whitespace().collect();
+        rest = after[end + 1..].trim_start();
+        if !attribute.contains("clippy::disallowed_methods") {
+            continue;
+        }
+        let (applies, level) = match attribute.strip_prefix("cfg_attr(") {
+            Some(conditional) if conditional.starts_with("test,") => continue,
+            Some(conditional) => match conditional.strip_prefix("not(test),") {
+                Some(level) => (true, level.to_owned()),
+                None => (false, conditional.to_owned()),
+            },
+            None => (true, attribute.clone()),
+        };
+        if level.starts_with("allow(") {
+            allowed = true;
+        } else if applies {
+            guarded = true;
+        }
+    }
+    if allowed {
+        Some(false)
+    } else if guarded {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn parent_module(src: &Path, module: &Path) -> Option<PathBuf> {
+    let relative = module.strip_prefix(src).ok()?;
+    let mut segments: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if segments.last().is_some_and(|last| last == "mod.rs") {
+        segments.pop();
+    } else if let Some(last) = segments.last_mut() {
+        *last = last.trim_end_matches(".rs").to_owned();
+    }
+    if segments == ["lib"] || segments == ["main"] {
+        return None;
+    }
+    segments.pop();
+    if segments.is_empty() {
+        return Some(src.join("lib.rs"));
+    }
+    let parent = segments.join("/");
+    let found = [
+        src.join(format!("{parent}.rs")),
+        src.join(&parent).join("mod.rs"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file());
+    assert!(
+        found.is_some(),
+        "the parent module of {} is neither {parent}.rs nor {parent}/mod.rs, so its lint level \
+         cannot be read",
+        module.display()
+    );
+    found
+}
+
+#[cfg(unix)]
+fn clippy_refuses_the_primitives_in(src: &Path, file: &Path) -> bool {
+    let mut module = Some(file.to_path_buf());
+    while let Some(current) = module {
+        let source = std::fs::read_to_string(&current).expect("a module source");
+        if let Some(guarded) = stated_disallowed_methods(&source) {
+            return guarded;
+        }
+        module = parent_module(src, &current);
+    }
+    true
+}
+
+#[cfg(unix)]
 fn enclosing_fn(code: &str, at: usize) -> Option<String> {
     let bytes = code.as_bytes();
     identifier_occurrences(code, "fn")
@@ -5096,6 +5243,45 @@ fn launch(&self, plan: &InvocationPlan) {
 
 #[cfg(unix)]
 #[test]
+fn the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid() {
+    let tree = repo::scratch("lint-level-walk");
+    let src = tree.path().join("src");
+    let write = |relative: &str, text: &str| {
+        let path = src.join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+        std::fs::write(&path, text).expect("a module");
+        path
+    };
+    write("lib.rs", "pub mod allowing;\npub mod silent;\n");
+    write(
+        "allowing.rs",
+        "//! notes\n\n// a reason\n#![allow(clippy::disallowed_methods)]\n\npub mod inherits;\npub mod forbids;\n",
+    );
+    let inherits = write("allowing/inherits.rs", "pub fn f() {}\n");
+    let forbids = write(
+        "allowing/forbids.rs",
+        "#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]\npub fn f() {}\n",
+    );
+    let test_only = write(
+        "silent.rs",
+        "#![cfg_attr(test, allow(clippy::disallowed_methods))]\npub fn f() {}\n",
+    );
+    let allowing = src.join("allowing.rs");
+    assert_eq!(
+        [
+            clippy_refuses_the_primitives_in(&src, &allowing),
+            clippy_refuses_the_primitives_in(&src, &inherits),
+            clippy_refuses_the_primitives_in(&src, &forbids),
+            clippy_refuses_the_primitives_in(&src, &test_only),
+        ],
+        [false, false, true, true],
+        "a stated allowance, one a silent child inherits, a production forbid beneath it, and an \
+         allowance that holds in tests alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
@@ -5136,6 +5322,8 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
     let mut naming_start_container: BTreeSet<String> = BTreeSet::new();
     let mut primitives: Vec<(String, String, Option<String>)> = Vec::new();
     let mut operations: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut guarded = 0_usize;
+    let mut unguarded: BTreeSet<String> = BTreeSet::new();
     let mut covered_launch = None;
     for path in &files {
         if test_modules.contains(path) {
@@ -5160,50 +5348,23 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
                 found.push((file.clone(), name, kind, enclosing_fn(&production, at)));
             }
         }
-        if file == "src/runner/container.rs" || file == "src/runner/container/view.rs" {
+        if clippy_refuses_the_primitives_in(&src, path) {
+            guarded += 1;
+        } else {
+            unguarded.insert(file.clone());
             for primitive in ["create", "start"] {
-                for at in identifier_occurrences(&production, primitive) {
-                    let before = production[..at].trim_end();
-                    if ends_with_word(before, "fn") {
-                        continue;
-                    }
-                    let separator = if before.ends_with("::") {
-                        "::"
-                    } else if before.ends_with('.') {
-                        "."
-                    } else {
-                        ""
-                    };
-                    let path = &before[..before.len() - separator.len()];
-                    let receiver = if separator.is_empty() {
-                        ""
-                    } else {
-                        let start = path
-                            .rfind(|character: char| {
-                                !(character.is_alphanumeric() || character == '_')
-                            })
-                            .map_or(0, |end| end + 1);
-                        &path[start..]
-                    };
-                    let after = production[at + primitive.len()..].chars().next();
-                    primitives.push((
-                        file.clone(),
-                        format!(
-                            "{receiver}{separator}{primitive}{}",
-                            after.map(String::from).unwrap_or_default()
-                        ),
-                        enclosing_fn(&production, at),
-                    ));
+                for (spelled, at) in primitive_namings(&production, primitive) {
+                    primitives.push((file.clone(), spelled, enclosing_fn(&production, at)));
                 }
             }
-            for operation in ["RuntimeOp::Create", "RuntimeOp::Start"] {
-                for (at, _) in production.match_indices(operation) {
-                    operations.push((
-                        file.clone(),
-                        operation.to_owned(),
-                        enclosing_fn(&production, at),
-                    ));
-                }
+        }
+        for operation in ["RuntimeOp::Create", "RuntimeOp::Start"] {
+            for (at, _) in production.match_indices(operation) {
+                operations.push((
+                    file.clone(),
+                    operation.to_owned(),
+                    enclosing_fn(&production, at),
+                ));
             }
         }
         if file == "src/runner/container/exec.rs" {
@@ -5272,28 +5433,101 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
     );
 
     primitives.sort();
-    let mut expected_primitives = vec![
+    let mut expected_primitives: Vec<(String, String, Option<String>)> = [
         (
-            "src/runner/container.rs".to_owned(),
-            "runtime.create(".to_owned(),
-            Some("create_container".to_owned()),
+            "src/agent/codex.rs",
+            "MissingOutputSchema::create(",
+            "validate_effort_config_key",
         ),
         (
-            "src/runner/container.rs".to_owned(),
-            "runtime.start(".to_owned(),
-            Some("start_container".to_owned()),
+            "src/agent/proc.rs",
+            "Drain::start(",
+            "run_with_timeout_and_limit",
         ),
-    ];
+        (
+            "src/agent/proc.rs",
+            "Drain::start(",
+            "run_with_timeout_and_limit",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Feeder::start(",
+            "run_with_timeout_and_limit",
+        ),
+        (
+            "src/agent/proc.rs",
+            "Job::create(",
+            "spawn_suspended_in_job_with",
+        ),
+        ("src/agent/proc.rs", "Job::create,", "create_ambient"),
+        ("src/agent/proc.rs", "create(", "create_with"),
+        (
+            "src/engine/resume.rs",
+            "paths.create(",
+            "resume_harness_inner_on",
+        ),
+        ("src/runner/container.rs", "File::create(", "write_synced"),
+        (
+            "src/runner/container.rs",
+            "runtime.create(",
+            "create_container",
+        ),
+        (
+            "src/runner/container.rs",
+            "runtime.start(",
+            "start_container",
+        ),
+        (
+            "src/runner/container/view.rs",
+            "File::create(",
+            "write_file",
+        ),
+        ("src/workspace.rs", ".create(", "create_private_dir"),
+        (
+            "src/workspace.rs",
+            "PendingGateWorkspace::create(",
+            "gate_snapshot_for_candidate_in_with_mode",
+        ),
+        (
+            "src/workspace.rs",
+            "PrivateHooksDir::create(",
+            "git_output_with_input",
+        ),
+        (
+            "src/workspace.rs",
+            "PrivateHooksDir::create(",
+            "run_git_with_private_hooks",
+        ),
+        ("src/workspace.rs", "builder.create(", "create_private_dir"),
+    ]
+    .into_iter()
+    .map(|(file, spelled, function)| {
+        (
+            file.to_owned(),
+            spelled.to_owned(),
+            Some(function.to_owned()),
+        )
+    })
+    .collect();
     expected_primitives.sort();
-    let primitives: Vec<(String, String, Option<String>)> = primitives
-        .into_iter()
-        .filter(|(_, spelled, _)| spelled != "File::create(")
-        .collect();
+    assert!(
+        guarded > 100
+            && unguarded.contains("src/runner/container.rs")
+            && unguarded.contains("src/runner/container/view.rs")
+            && !unguarded.contains("src/runner/container/exec.rs")
+            && !unguarded.contains("src/runner/container/census.rs")
+            && !unguarded.contains("src/engine/topology/attempt.rs"),
+        "the lint-level walk read {guarded} modules where clippy refuses the runtime's primitives \
+         and these where it cannot: {unguarded:?}; the funnel and the Git view allow the lint, \
+         `exec.rs` and `census.rs` forbid it, and `engine/topology/attempt.rs` inherits \
+         `engine/topology.rs`'s forbid"
+    );
     assert_eq!(
         primitives, expected_primitives,
-        "the two production modules whose `clippy::disallowed_methods` allowance is module-wide \
-         name the runtime's `create` or `start` outside the funnels `create_container` and \
-         `start_container`"
+        "a production module where clippy cannot refuse `ContainerRuntime::create` or `::start` — \
+         its effective `clippy::disallowed_methods` level is `allow`, stated or inherited — names a \
+         `create` or `start` call or path this list does not hold. If it is not a container \
+         runtime's, add it here; if it is, it starts a container no cover dominates"
     );
     operations.sort();
     assert_eq!(

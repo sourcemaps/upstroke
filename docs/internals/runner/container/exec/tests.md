@@ -1960,19 +1960,23 @@ does), five checks:
    its two calls inside `ContainerRunner::launch`, and `container.rs`'s two calls inside the
    free `launch`;
 2. the free `launch` has no production naming at all;
-3. in `container.rs` and `view.rs` — the two production modules whose `disallowed_methods`
-   allowance is module-wide, so clippy cannot guard them — the runtime's `create` and `start`
-   are named only by `runtime.create(` and `runtime.start(` inside the two funnels (the
-   standard library's `File::create(` aside), and `RuntimeOp::Create`/`RuntimeOp::Start` only
-   inside the real runtime's own `create` and `start`;
+3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
+   stated in its header or inherited from a parent that states it, twenty-seven modules today —
+   where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call or path
+   naming `create` or `start` is one of seventeen pinned namings: `runtime.create(` and
+   `runtime.start(` inside the two funnels, and fourteen others none of which is a container
+   runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(` and the like); and
+   `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own `create` and
+   `start`;
 4. in `exec.rs`, `fn launch(`'s signature names `Covered`, `self.launch(` occurs once, in
    `contain`, after `contain`'s one `.cover(`, and `Covered {` is constructed once, in `cover`;
 5. the control: the regions naming `start_container` are exactly those two files, and the walk
    read more than 40 files and 750,000 non-whitespace bytes.
 
-Every other production module forbids `disallowed_methods` outside tests, so a path to the
-primitives there — a call or a function value — is a clippy error, measured
-(`fua-p1-clippy-refuses-a-function-value-of-the-start-primitive`).
+In every other production module the lint is denied or forbidden outside tests, so a path to the
+primitives there — a call or a function value — is a clippy error, measured in a forbidding module
+(`fua-p1-clippy-refuses-a-function-value-of-the-start-primitive`); and a call planted in a module
+that allows the lint, where clippy says nothing, fails check 3 (`fua-c8`).
 
 ## `fn reaper_labels(private_root: &Path, incarnation: &str) -> BTreeMap<String, String> {`
 
@@ -2028,4 +2032,37 @@ test thread's fork holds an inherited cleanup-lease descriptor for a moment
 within a bound. A positive read is safe and is not refused: a fork can make a released lease
 look held, never a held one look released. `fua-m12` adds one one-shot read to the lease test's
 child and turns this census red.
+
+## `fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {`
+
+The namings of a primitive's name that could reach it: a call by any receiver, a path, or a
+naming inside a `use`; not a definition, a module path segment (`create::`), a field, or a local
+variable used as a value — a trait method is reachable only by a call or a path. A call whose only
+argument is a `bool` literal is skipped: neither `ContainerRuntime::create(&CreateSpec)` nor
+`::start(&str)` takes one, and `OpenOptions::create(true)` is the common case. Each is spelled with
+its receiver or path segment and the character after it, so the pinned list is readable.
+
+## `fn stated_disallowed_methods(source: &str) -> Option<bool> {`
+
+A module's own statement of `clippy::disallowed_methods` in production: its leading inner
+attributes, comments blanked, read in order. An `allow` that holds outside tests — unconditional,
+under `cfg_attr(not(test), …)`, or under any other `cfg_attr` predicate, conservatively — makes the
+module unguarded; a `deny`, `forbid` or `warn` that holds in production guards it; `cfg_attr(test,
+…)` is ignored; nothing stated is `None`.
+
+## `fn parent_module(src: &Path, module: &Path) -> Option<PathBuf> {`
+
+The file of a module's parent, by the path: `a/b/c.rs` and `a/b/c/mod.rs` are children of `a/b.rs`
+or `a/b/mod.rs`, a top-level module is a child of `lib.rs`, and the crate roots have none. A parent
+that is neither file fails the census rather than being guessed.
+
+## `fn clippy_refuses_the_primitives_in(src: &Path, file: &Path) -> bool {`
+
+The nearest stated level up the parents; with none stated anywhere, the lint's default `warn`,
+which the gates' `-D warnings` makes an error.
+
+## `fn the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid() {`
+
+The walk over a written tree: a stated allowance, a silent child that inherits it, a production
+forbid beneath it, and an allowance that holds in tests alone.
 

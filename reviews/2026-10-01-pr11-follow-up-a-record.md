@@ -28,10 +28,16 @@ run-layout and lock text, and nothing below changes any of them.
 
 ## 0. Status
 
-- **Phase 1 (design): this section's §1.** The design and the draft pull request that will carry its
-  implementation. No production code at this head.
-- **Next:** the astra review of §1, then implementation by a fresh session, then the reviews and
-  rounds `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
+- **Phase 1 (design): §1**, by `pr11_fua_design`, pushed at `793c3784`. Reviewed by three
+  `gpt-6-astra` lenses at `max` (round 1): the core held in all three; four P2 corrections.
+- **Phase 2 (implementation): §2**, by `pr11_fua_impl` (`claude-opus-5-5`, `max`). §1 was first
+  amended with the four corrections, each marked with its id (§1.10), and then implemented with a
+  regression test per requirement, a witness per correction, the domination census, and a mutation
+  for each. `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED` is fixed and its file deleted; the inherited
+  limit the regression lens found is filed as its own finding.
+- **Next:** the orchestrator's implementation review (delta and fix-check over the four corrections
+  and the eight requirements, then regression, then concurrency), and the rounds `MAINTAINING.md`
+  prescribes. G6's input range must include this follow-up's merge.
 
 ## 1. Design
 
@@ -353,22 +359,32 @@ a call by the same bare name escapes the `use` clause, and that call is itself a
 2. **The free `launch`.** No production naming at all, `container.rs`'s included. A production
    caller of the free `launch` — by name, alias, function value or re-export — is a second path that
    no cover dominates.
-3. **The primitives.** `clippy`'s `disallowed_methods` (`clippy.toml:231`–`:232`) denies every path
-   reference to `ContainerRuntime::create` and `::start`, calls and function values alike, in every
-   production module that does not allow the lint; two production modules allow it module-wide,
-   `container.rs` (the funnel) and `view.rs` (the Git view's), and this check pins them: their
-   namings of `create` and `start` are exactly `runtime.create(` and `runtime.start(` once each,
-   inside the two funnels, and the standard library's `File::create(` once in each file. No `as`
-   alias and no `pub use` of either primitive anywhere.
+3. **The primitives.** `clippy`'s `disallowed_methods` (`clippy.toml:231`–`:232`) refuses every path
+   reference to `ContainerRuntime::create` and `::start` — calls and function values alike — in
+   every production module whose effective level for the lint is not `allow`. Twenty-seven
+   production modules allow it module-wide (each recorded in `effects/allowlist.toml`), and a module
+   that states nothing inherits its parent's level, so this check walks each production module's
+   stated level up its parents and, in every module where clippy cannot refuse the primitives, pins
+   each naming of `create` or `start` — a call by any receiver, a path, or a `use` — to an expected
+   list of seventeen: in `container.rs`, `runtime.create(` and `runtime.start(` inside the two
+   funnels and the standard library's `File::create(`, and in the other modules the fourteen such
+   namings that exist, none of them a container runtime's. A call whose only argument is a
+   `bool` literal is not counted — `OpenOptions::create(true)` — since neither primitive takes one.
+   A new naming in such a module fails the census until it is added to the list or shown to be a
+   container start; `RuntimeOp::Create`/`::Start` are pinned to `DockerCli`'s own `create` and
+   `start` in the same walk.
 4. **The covered launch.** In `exec.rs`: `fn launch(`'s signature names `Covered`; `self.launch(`
    occurs once, in `fn contain(`, after `self.reaping.cover(`; `Covered {` is constructed once,
    inside `fn cover(`.
 5. **The control.** The sorted list of production regions naming `start_container` is exactly
    `["src/runner/container.rs", "src/runner/container/exec.rs"]`, and the walk scanned more than 40
    files and more than 750,000 non-whitespace bytes — the fold census's density checks — so a census
-   that scanned nothing cannot pass. A second test runs the naming reader over written snippets — an
-   alias, a function value, a re-export, a glob import and a call, beside a method, a field and a
-   definition — and requires it to name the first five and none of the rest.
+   that scanned nothing cannot pass; the lint-level walk read more than 100 modules as guarded and
+   names `container.rs` and `view.rs` among those it is not. A second test runs the naming reader
+   over written snippets — an alias, a function value, a re-export, a glob import and a call, beside
+   a method, a field and a definition — and requires it to name the first five and none of the
+   rest; a third runs the lint-level walk over a written tree — a stated allowance, one a silent
+   child inherits, a production forbid beneath it, an allowance that holds in tests alone.
 
 **Why the census and not visibility.** The review's preferred remedy is an unarmed launcher nothing
 outside the funnel can name. Privacy cannot give it here: an item private to `runner::container` is
