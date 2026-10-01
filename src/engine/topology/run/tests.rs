@@ -532,6 +532,81 @@ fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_r
 }
 
 #[test]
+fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_deferral_or_parks() {
+    use crate::engine::topology::attempt::JudgeError;
+    use crate::engine::topology::integrate::Verified;
+    use crate::topology::events::SequenceId;
+
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+    const HEADING: &str = "`impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {`";
+
+    let arm = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with(HEADING))
+        .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
+    for (proposition, pin) in [
+        (
+            "a registry another process is half-way through writing reaches this arm",
+            "A registry another process is half-way through writing is foreign Git state here too",
+        ),
+        (
+            "a coordinator in a linked checkout of the same repository is one such process",
+            "`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`",
+        ),
+        (
+            "a host agent's own prune is another",
+            "`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`",
+        ),
+        (
+            "the terminal spends one of the candidate's deferrals",
+            "spends one of the candidate's deferrals",
+        ),
+        (
+            "the one that reaches `max_defers` parks the candidate with a question",
+            "parks the candidate with an unblock question",
+        ),
+        (
+            "the other process finishing undoes none of it",
+            "the other process finishing undoes none of it",
+        ),
+        (
+            "an attempt's Git error is the pipeline's and ends the command resumably instead",
+            "its Git error is the pipeline's, and the command ends resumably",
+        ),
+    ] {
+        assert!(
+            arm.contains(pin),
+            "the verification's Git arm must state that {proposition}; looked for {pin:?} \
+             in:\n{arm}"
+        );
+    }
+
+    let torn = super::verified(
+        Err(JudgeError::Other(crate::error::UpstrokeError::Git {
+            message: "git worktree list --porcelain -z failed: fatal: failed to read \
+                      .git/worktrees/half-written/commondir: Success"
+                .to_owned(),
+        })),
+        Vec::new(),
+        SequenceId(1),
+    );
+    match torn {
+        Ok(Verified::Unavailable { detail, .. }) => assert!(
+            detail.contains("half-written/commondir"),
+            "the outage carries what Git said: {detail}"
+        ),
+        Ok(Verified::Judged(_)) => {
+            panic!("the mapping the notes state: a Git error in a verification is not judged")
+        }
+        Err(error) => panic!(
+            "the mapping the notes state: a Git error in a verification's judgement is an outage \
+             of its sequence, not an error that ends the command: {error}"
+        ),
+    }
+}
+
+#[test]
 fn a_cancelled_verification_is_never_classified_as_an_outage() {
     use crate::engine::topology::attempt::JudgeError;
     use crate::engine::topology::integrate::Verified;

@@ -476,6 +476,19 @@ never beside one, so the terminal is safe to settle. R24 at `916852c9`
 excluded these and the `?` propagated them as an interruption
 (`pr8-triage.md` §5, record F3).
 
+A registry another process is half-way through writing is foreign Git
+state here too: a coordinator in a linked checkout of the same repository
+(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), or a host
+agent's own prune (`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`), which the
+process-local registry lock does not exclude. The state is transient and
+the terminal is durable: it spends one of the candidate's deferrals, the
+one that reaches `max_defers` parks the candidate with an unblock
+question, and the other process finishing undoes none of it. An attempt's
+judgement meeting the same state is not mapped here: its Git error is the
+pipeline's, and the command ends resumably. So the race costs a
+verification more than an attempt (the PR11 record's §13, round R8,
+`R8-CONC-1`).
+
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
 The refusal a branch returns for one clause it does not implement.
