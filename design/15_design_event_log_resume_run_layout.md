@@ -65,8 +65,8 @@ Current host-process crash containment is deliberately platform-specific. On Uni
 
 **One engine process at a time writes a repository's worktree registry.** *PROPOSED — pending the owner's
 decisions on erratum E-FUB-1 (with Class C for the vocabulary) and the one-change unfreeze of
-`src/workspace.rs`; the design is `reviews/2026-10-01-pr11-follow-up-b-record.md` §1, and nothing in
-this paragraph is in force until both decisions are made.*
+`src/workspace.rs`; the design is `reviews/2026-10-01-pr11-follow-up-b-record.md` §1, revised in its
+second design round, and nothing in this paragraph is in force until both decisions are made.*
 
 **The defect.** Every checkout of a repository registers its linked worktrees in one shared store,
 `<common git dir>/worktrees/`. Git writes a registration one file at a time:
@@ -87,21 +87,38 @@ each registry access, and around nothing else. The accesses are:
 - the v0.1 path's gate-snapshot add, its removal and list, and its resume's branch switch. This is the
   second amendment of `src/workspace.rs`'s freeze, for this one change.
 
-**The primitive.**
-- **Unix:** an `flock` on a descriptor the registry Git child inherits. A coordinator killed mid-write
-  therefore leaves the lock held by the child still writing, until that child exits.
-- **Windows:** `LockFileEx`. The coordinator's ambient kill-on-close job ends the child with it.
+**The hold, and who may still be writing.** The lock is held only by the engine process that takes it:
+an `flock` on a close-on-exec descriptor on Unix, `LockFileEx` on a non-inheritable handle on Windows.
+It is never handed to a child, so no Git child, filter, or helper a child starts ever holds it.
+- **The record.** While an access holds the lock, the file records that process and each Git child the
+  access starts, by process id and start time. A child is recorded before it can run: on Unix it
+  records itself between `fork` and `exec`, and on Windows it is created suspended until it is
+  recorded.
+- **The check.** Every acquirer waits, before it reads or writes the registry, until every process
+  the previous holder recorded has terminated, and then clears the record.
 
-**The wait.** It is bounded at 600 seconds. A wait that runs out is a refusal that ends the command
-resumably. It is never foreign Git state that a verification could defer or park a candidate on.
+So a coordinator that dies mid-write leaves nothing a later engine process can read half written,
+whichever order the operating system releases its lock and ends its child in.
 
-**The file.** It is created on first use, after the command's read-only refusals. It spans runs and is
-never removed: removing it while another process waits on it would split the lock.
+**The wait.** One deadline of 600 seconds bounds each acquisition, the lock and the record together. A
+wait that runs out is a refusal that ends the command resumably and names what it waited on. It is
+never foreign Git state that a verification could defer or park a candidate on.
+
+**The file.**
+- **Created before any agent spends.** A v0.1 write command creates it among its execution
+  prerequisites. A schema-4 command creates it at its first registry access, which precedes every
+  worktree an agent runs in. A repository in which the file cannot be created, or opened for
+  writing, refuses the write command before any work.
+- **Never removed, by a run or by an operator.** Removing it while an engine process holds it, or
+  while a Git child it records is still writing, would split the lock and lose the record.
+- **No registry read at construction.** Constructing the schema-4 manager reads no registry, so a
+  command that refuses before its locks creates and takes nothing.
 
 **What it cannot exclude stays foreign Git state.** That is:
 - an agent's own Git on the host runner;
 - the user's Git in any checkout;
-- the torn registration a writer killed mid-write leaves, until its own run's resume repairs it.
+- the torn registration a writer killed mid-write leaves, until its own run's resume repairs it. A
+  later engine process reads it only once that writer has terminated.
 
 **When a Unix helper does not start.** The cleanup reaper and the job-control guard are forked before any agent exists, and each acknowledges its own startup within a fixed budget. A launch that does not see that acknowledgement fails, ends the helper with one `SIGKILL` and a **bounded** wait — by number, or through the identity the next paragraph describes — and reports what those two calls answered, alongside how long it waited, that budget, the descriptor ceiling the helper was closing against, and how the wait ended: on the helper's own report of the setup step that refused and the error it left, on the acknowledgement pipe closing with no report, or on the budget elapsing with nothing on the pipe. A helper that cannot finish its setup writes that report on the acknowledgement pipe it already owns before it ends, and the wait ends the moment the helper ends on every supported platform. On macOS the wait is a `select`, because `poll` on the FIFO the channel is built from never reports the writer's close. The point of reporting these is one distinction: a helper that had **already ended itself** before the signal, whose report or exit status names which of its own setup steps refused, against one that was **still running** and had to be killed, which says it was still working when the budget ran out. Nothing else is claimed. **The wait after the signal is bounded, and a helper still there when it runs out is left behind.** The wait asks the kernel for what it can answer without blocking and asks again until the helper is collected or a second budget of its own elapses; a helper that has not become collectable by then is one the kernel is not ready to hand back — in uninterruptible I/O with the signal pending, say — so the launch reports that it was left for this process's exit to collect and returns, rather than waiting on it. It must return: these launches hold the barrier under which the signal monitor refuses to kill or stop any registered group, so a launch that never returns is every running agent outliving a `SIGTERM` for as long as the kernel takes. Of the waits that end a helper, one is **not** bounded, and deliberately: the end of a run's cleanup reaper that has **acknowledged** CLEANUP or CANCEL, whose exit is what releases the run's cleanup lease the caller is about to act on, so releasing that caller early would let it proceed against a lease still held. A reaper that did not acknowledge CLEANUP — its pipe ended with no answer, it refused, or the request could not be written — is ended with the bounded wait instead, because its caller acts on nothing: the supervisor answers that failure by arming fail-closed termination of this process and returning an error, and a reaper the wait leaves behind holds the lease until it exits, as a reaper does after any coordinator death. The parent asks the kernel nothing about the helper beyond those two calls and the pipe it was already reading, and in particular a pid is never treated as evidence of which process it names — a wait that answers *not collectable yet* is reported as that and never as the helper: while an embedding host may reap this process's children with a wildcard wait, no observation the parent can make establishes that, and the message says only what the pipe carried and what `kill` and `waitpid` returned.
 
