@@ -8633,7 +8633,7 @@ mod tests {
             if after == "exit" {
                 drop(pipelines);
                 parent.event(&serde_json::json!({"dropped": true, "held": held()}));
-                std::process::exit(0);
+                exit_on_the_parents_word();
             }
             loop {
                 std::thread::park();
@@ -8644,6 +8644,22 @@ mod tests {
 
     #[cfg(unix)]
     const AFTER_AN_ERROR: &str = "UPSTROKE_TEST_CHILD_AFTER_AN_ERROR";
+
+    #[cfg(unix)]
+    const EXIT_WHEN: &str = "UPSTROKE_TEST_CHILD_EXIT_WHEN";
+
+    #[cfg(unix)]
+    fn exit_on_the_parents_word() -> ! {
+        let word = std::path::PathBuf::from(child_env(EXIT_WHEN));
+        let started = std::time::Instant::now();
+        while !word.exists() && started.elapsed() < BOUND {
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(10),
+                BOUND.saturating_sub(started.elapsed()),
+            );
+        }
+        std::process::exit(0);
+    }
 
     #[cfg(unix)]
     fn child_reaper(
@@ -8759,7 +8775,7 @@ mod tests {
                 drop(preflight);
                 drop(reaper);
                 parent.event(&serde_json::json!({"dropped": true, "held": held()}));
-                std::process::exit(0);
+                exit_on_the_parents_word();
             }
             (resumed, _) => resumed,
         };
@@ -10540,6 +10556,7 @@ mod tests {
         listed: Vec<String>,
         child: crate::engine::topology::scaffold::Served,
         returned: serde_json::Value,
+        word: std::path::PathBuf,
     }
 
     #[cfg(unix)]
@@ -10554,6 +10571,7 @@ mod tests {
         let logs = crate::engine::topology::scaffold::kill_dir(tag);
         let relay = logs.path().join("relay");
         let program = FakeRuntime::install_reaper_relay(&relay);
+        let word = logs.path().join("exit-now");
         let child = served(
             logs.path(),
             tag,
@@ -10562,6 +10580,7 @@ mod tests {
                 ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_1)),
                 ("UPSTROKE_TEST_CHILD_CONTAINER_CLI", program.as_os_str()),
                 (AFTER_AN_ERROR, OsStr::new(after)),
+                (EXIT_WHEN, word.as_os_str()),
             ],
             host.acting_as(INC_1),
         );
@@ -10601,6 +10620,7 @@ mod tests {
             listed,
             child,
             returned,
+            word,
         }
     }
 
@@ -10677,6 +10697,7 @@ mod tests {
     #[test]
     fn a_coordinator_that_returns_with_its_containers_unresolved_leaves_its_reaper_armed_past_its_last_handle_until_the_process_exits_at_width_three()
      {
+        use crate::runner::container::FakeRuntime;
         use crate::runner::container::runtime::RuntimeOp;
         let stranded = three_containers_then_an_error(
             "unresolved-exited",
@@ -10693,6 +10714,7 @@ mod tests {
             public,
             listed,
             child,
+            word,
             ..
         } = stranded;
         let dropped = child.event("the caller dropped its last handle on the incarnation's reaper");
@@ -10702,6 +10724,11 @@ mod tests {
             "the last handle on the reaper was dropped with the containers unresolved, and the \
              reaper was not cancelled: it still holds the run's cleanup lease: {dropped}"
         );
+        assert!(
+            FakeRuntime::reaper_calls(&relay).is_empty(),
+            "the reaper acts on nothing while its coordinator lives, after the drop as before it"
+        );
+        crate::workspace_manager::fixture::write_file(&word, b"");
         let censused_before_the_death = censused(&host);
         let exited = child.exited("the coordinator's process exits on its own");
         assert!(exited.success(), "{exited:?}");
@@ -11048,6 +11075,7 @@ mod tests {
         let logs = crate::engine::topology::scaffold::kill_dir("probe-unresolved");
         let relay = logs.path().join("relay");
         let program = FakeRuntime::install_reaper_relay(&relay);
+        let word = logs.path().join("exit-now");
         let child = served(
             logs.path(),
             "probe",
@@ -11057,6 +11085,7 @@ mod tests {
                 ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_2)),
                 ("UPSTROKE_TEST_CHILD_CONTAINER_CLI", program.as_os_str()),
                 (AFTER_AN_ERROR, OsStr::new("exit")),
+                (EXIT_WHEN, word.as_os_str()),
             ],
             host.acting_as(INC_2),
         );
@@ -11103,6 +11132,7 @@ mod tests {
             FakeRuntime::reaper_calls(&relay).is_empty(),
             "the reaper acts on nothing while its coordinator lives"
         );
+        crate::workspace_manager::fixture::write_file(&word, b"");
         let censused_before_the_death = censused(&host);
         let exited = child.exited("the resuming incarnation's process exits on its own");
         assert!(exited.success(), "{exited:?}");
