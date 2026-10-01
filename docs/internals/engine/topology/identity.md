@@ -575,7 +575,12 @@ registration settles. Settling is the only transition that releases, and a
 registration settles once, so "nothing released twice" (ST-02, ST-05) is a
 property of the type. "Released only after the Runner reports it terminated"
 is the caller's obligation, and every caller here settles after its Runner
-call returned.
+call returned. The one settlement no Runner call precedes is the append-error
+protocol's ([`Self::cancel_after_append_error`]), and it settles a running
+registration only in a ledger whose owner runs every invocation itself; a
+ledger the coordinator's pipelines report into ([`Self::for_pipelines`])
+leaves each one to its end (round R5 of the PR11 record, the full review's
+`FULL-CONC-1`).
 
 A duplicate settlement is a counter, not an error — INV-20 asks for "discard
 with a non-durable warning", not a refusal.
@@ -587,7 +592,22 @@ requires.
 
 ## `impl InvocationLedger` › `pub fn with_limits(limits: SlotLimits) -> Self {`
 
-An empty ledger at `limits`.
+An empty ledger at `limits`, for an owner that runs every invocation itself.
+
+## `impl InvocationLedger` › `pub fn for_pipelines(limits: SlotLimits) -> Self {`
+
+An empty ledger at `limits` whose invocations run on the coordinator's pipelines, each of which
+reports its invocation's end after the Runner call returned (the PR11 record's R-U). Only that report
+establishes whether the process is gone, so nothing settles a running registration here but its own
+end ([`Self::cancel_after_append_error`]).
+
+## `enum Ends {`
+
+How this ledger learns that a running invocation's process ended. `Inline`: its owner runs every
+invocation on its own thread and settles it after the Runner returned — the synchronous substrate,
+the pre-flight, recovery — so when the owner appends, nothing it holds is running a process.
+`Reported`: the coordinator's pipelines run the invocations and report each end; until that report,
+a running registration's process may still run.
 
 ## `impl InvocationLedger` › `pub fn register(&mut self, invocation: &InvocationId) -> Result<(), UpstrokeError> {`
 
@@ -684,14 +704,34 @@ Cancel every registration still in flight, returning how many.
 
 Waiting requests are withdrawn first and all together, so no pending one is
 granted on the way out; then every running one is cancelled and its pair
-released. The append-error protocol's "in-flight invocations are cancelled
-through the Runner" — this is the ledger half of that; the Runner half is
-the caller's. It is the one release of a granted invocation before its
-termination is established (the working record's R-AI, and round R1's class
-search): nothing can be granted after it, because the pending requests went
-first and the fold is poisoned, and each pipeline's own end report after its
-process ends is a counted duplicate — an unresolved one included, which the
-coordinator still records.
+released. Sound only where no process of a running registration can still
+run: an owner that runs every invocation itself, between its Runner calls —
+the append-error discharge of an `Inline` ledger, and
+`AttemptContext::cancel_in_flight`.
+
+**Corrected in round R5** (the full review's `FULL-CONC-1`). This was the
+append-error discharge of every ledger, the coordinator's included, and this
+section called it "the one release of a granted invocation before its
+termination is established", sound because nothing could be granted after it
+and each pipeline's later end was a counted duplicate. The ledger then
+reported running none, holders none and a balance while a cancelled process
+it could not establish gone was still held — the concurrency lens's witness,
+an unresolved end counted as a duplicate. A pipelines' ledger now never
+reaches this function at an append error.
+
+## `impl InvocationLedger` › `pub fn cancel_after_append_error(&mut self) -> usize {`
+
+The ledger half of the append-error protocol's obligation (3), "in-flight
+invocations are cancelled through the Runner"; the Runner half is the
+caller's. Returns how many registrations it settled. An `Inline` ledger
+settles every waiting and running registration ([`Self::cancel_all_running`]).
+A pipelines' ledger withdraws the waiting ones — no process of them ran — and
+settles no running one: the coordinator cancels their pipelines, and each
+running registration is then settled by its own end report, completed or
+cancelled when the Runner established its process gone and **kept**, with its
+pair, when it did not ([`Self::end`]). Nothing is granted in between: the
+waiting requests are gone, the fold is poisoned, and the interrupt refuses
+every request.
 
 ## `impl InvocationLedger` › `pub fn withdraw_pending(&mut self) -> usize {`
 
@@ -904,6 +944,15 @@ Settling something never registered is refused, and is not a duplicate.
 
 ## `mod tests` › `fn cancel_all_running_settles_every_in_flight_invocation() {`
 
-The append-error protocol's half: every running registration is cancelled,
+The `Inline` ledger's discharge: every running registration is cancelled,
 the waiting one is withdrawn without being granted, and the ledger then
 balances.
+
+## `mod tests` › `fn a_pipelines_ledger_leaves_each_running_invocation_to_the_end_that_establishes_its_process_gone()`
+
+Round R5's `FULL-CONC-1` at the ledger: the same holdings in both kinds. The
+`Inline` ledger's discharge settles all four; the pipelines' ledger withdraws
+only the waiting request, keeps the three running ones and their pairs, and
+does not balance. Then their ends: a completion and a cancellation that
+established its process gone each settle once, and an unresolved end keeps
+its registration and its pair.

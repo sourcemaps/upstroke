@@ -712,11 +712,19 @@ struct Entry {
     state: Registration,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Ends {
+    #[default]
+    Inline,
+    Reported,
+}
+
 #[derive(Debug, Default)]
 pub struct InvocationLedger {
     entries: BTreeMap<String, Entry>,
     duplicates: u32,
     slots: SlotTable,
+    ends: Ends,
 }
 
 impl InvocationLedger {
@@ -731,6 +739,15 @@ impl InvocationLedger {
             entries: BTreeMap::new(),
             duplicates: 0,
             slots: SlotTable::with_limits(limits),
+            ends: Ends::Inline,
+        }
+    }
+
+    #[must_use]
+    pub fn for_pipelines(limits: SlotLimits) -> Self {
+        Self {
+            ends: Ends::Reported,
+            ..Self::with_limits(limits)
         }
     }
 
@@ -943,6 +960,13 @@ impl InvocationLedger {
             drop(self.slots.release(invocation));
         }
         withdrawn.saturating_add(running.len())
+    }
+
+    pub fn cancel_after_append_error(&mut self) -> usize {
+        match self.ends {
+            Ends::Inline => self.cancel_all_running(),
+            Ends::Reported => self.withdraw_pending(),
+        }
     }
 
     pub fn withdraw_pending(&mut self) -> usize {
@@ -1700,5 +1724,95 @@ mod tests {
             0,
             "cancelling a running invocation is not a duplicate settlement"
         );
+    }
+
+    #[test]
+    fn a_pipelines_ledger_leaves_each_running_invocation_to_the_end_that_establishes_its_process_gone()
+     {
+        let gate = ids(1).gate(0, 0);
+        let unresolved = probe("claude", 0);
+        let gone = probe("codex", 0);
+        let waiting = probe("claude", 1);
+        let mut inline = InvocationLedger::with_limits(limits(1, 1));
+        let mut piped = InvocationLedger::for_pipelines(limits(1, 1));
+        for ledger in [&mut inline, &mut piped] {
+            ledger.register(&gate).expect("registered");
+            slotted(ledger, &unresolved, pair("claude"));
+            slotted(ledger, &gone, pair("codex"));
+            assert_eq!(
+                slotted(ledger, &waiting, pair("claude")),
+                Admission::Pending
+            );
+        }
+
+        assert_eq!(
+            inline.cancel_after_append_error(),
+            4,
+            "where the ledger's owner ran every invocation itself, nothing it holds is running a \
+             process when it appends: the three running and the one waiting are settled at once"
+        );
+        assert!(inline.balances());
+
+        assert_eq!(
+            piped.cancel_after_append_error(),
+            1,
+            "where pipelines run the invocations, only the waiting request is withdrawn: no process \
+             of it ran"
+        );
+        let names = |ids: &[&InvocationId]| -> Vec<String> {
+            let mut names: Vec<String> = ids.iter().map(|id| id.render()).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            piped.running(),
+            names(&[&gate, &unresolved, &gone]),
+            "the running ones stay registered until their ends are reported"
+        );
+        assert!(
+            piped.slots().holds(&unresolved)
+                && piped.slots().holds(&gone)
+                && piped.slots().pending().is_empty()
+                && !piped.balances(),
+            "and keep their pairs: the ledger reports no release and no balance it has not observed"
+        );
+
+        for (id, end) in [
+            (&gate, InvocationEnd::Completed),
+            (
+                &gone,
+                InvocationEnd::Failed {
+                    fate: ProcessFate::Gone,
+                    detail: "cancelled; the process is gone".to_owned(),
+                },
+            ),
+            (
+                &unresolved,
+                InvocationEnd::Failed {
+                    fate: ProcessFate::Unresolved,
+                    detail: "cancelled; termination not established".to_owned(),
+                },
+            ),
+        ] {
+            assert!(
+                piped
+                    .end(id, &end)
+                    .unwrap_or_else(|error| panic!("`{id}` ends: {error}"))
+                    .is_empty(),
+                "nothing is waiting, so no end grants anything"
+            );
+        }
+        assert_eq!(
+            piped.running(),
+            names(&[&unresolved]),
+            "the end that did not establish its process gone keeps its registration"
+        );
+        assert!(piped.slots().holds(&unresolved) && !piped.slots().holds(&gone));
+        assert_eq!(
+            (piped.completed(), piped.cancelled(), piped.duplicates()),
+            (1, 2, 0),
+            "each was settled once, by its own end or its withdrawal"
+        );
+        assert!(!piped.balances());
     }
 }

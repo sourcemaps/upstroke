@@ -2087,7 +2087,10 @@ or, on an error, the integration reservation cancelled when it is still held.
 
 The coordinator's slot limits are the command's `[engine]` configuration
 (R-K): the broker is replaced by one with those limits, which is sound only
-while nothing is outstanding in it — so it refuses otherwise.
+while nothing is outstanding in it — so it refuses otherwise. The new broker
+is built `for_pipelines`: from here on every invocation is run by a pipeline
+that reports its end, and an append error's discharge leaves each running
+registration to that report (round R5 of the PR11 record, `FULL-CONC-1`).
 
 ## `impl TopologyRun` › `pub(super) fn record_discard(`
 

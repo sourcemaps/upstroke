@@ -53,12 +53,18 @@ creates its worktree, where `eligible_continuation` would select it a second tim
 
 `select` checks the ceiling against the **settled** spend only, and a pipeline's spend is known
 when its completion is settled — a verification's review spend when its completion is accepted,
-before the next selection (R-AH). So a run can overrun its ceiling by the unknown spend of at most
-`max_parallel` live pipelines, each running one invocation at a time: the breach is seen at the
-next selection after a settlement crosses the ceiling, and the pipelines live at that moment are
-not stopped — a budget stop drains them. This bound is stated here only: the report carries no
-width and admits no field this slice would add, and it is never a durable field
-("durable_events: none new").
+before the next selection (R-AH). The breach is seen at the next selection after a settlement
+crosses the ceiling, and the pipelines live at that moment are not stopped: a budget stop drains
+them, and each runs the rest of its body — the worker it may still be running, then its gates,
+its review passes and their re-asks (a verification: its review passes and re-asks). So a run can
+overrun its ceiling by the **remaining spend** of every pipeline admitted before the stop, at most
+`max_parallel` of them, whatever that remaining work costs: not a count of invocations, since a
+pipeline runs one invocation at a time and goes on starting them after the stop (round R5's
+`FULL-SC-4`; the witness is `a_budget_stop_drains_live_pipelines_to_their_settlements_and_ends_budget_exceeded`,
+whose two drained pipelines start their review passes after `budget_exceeded`). This exposure is
+stated here only: the report carries no width and admits no field this slice would add, and it is
+never a durable field ("durable_events: none new"); `PR11-OVERSHOOT-BOUND-IN-NO-OUTPUT` carries it
+to an output.
 
 ### The run's end (phase 4)
 
@@ -70,7 +76,12 @@ would have, and the closure runs once none is live; a halting settlement drained
 live makes the next admission pass cancel them, so the closure runs as Halted. A cancelled
 pipeline whose Runner could not establish that its process ended keeps the closure out: the
 command ends resumably and names it. A shutdown cancels and drains the same way and appends
-nothing. An append error runs the protocol in `emit.rs` and ends the command with its report.
+nothing. An append error runs the protocol in `emit.rs` and ends the command with its report; the
+protocol withdraws the waiting requests, and each running invocation is released by its own
+pipeline's report of its end once the Runner has established that its process is gone — one whose
+process is unresolved keeps its registration and its pair, as at any other end (the working
+record's R-AI, as corrected in round R5: the coordinator's broker is built `for_pipelines`, and its
+ledger settles no running registration at the protocol).
 
 ### What an end establishes, and what closes an identity (round R1)
 
@@ -696,7 +707,18 @@ G6's shutdown row, resumed through the frozen recovery order itself (`Wide::dura
 
 The slice contract's named test, at each T-APPEND error-return shape — a partial write, a flush
 error after the full line, a sync error — injected at the settlement of one pipeline while two
-others are in flight, and the resume following the surviving prefix (R-AI).
+others are in flight, and the resume following the surviving prefix (R-AI). Since round R5 the
+ledger it asserts has no duplicate settlement: each of the two running registrations is settled once,
+by its own pipeline's end report after its process terminated, and not by the protocol before.
+
+## `mod tests` › `fn an_append_error_releases_a_running_invocation_only_when_its_end_establishes_its_process_gone()`
+
+The full review's `FULL-CONC-1` (its concurrency lens's witness): the same append error with beta's
+cancelled process reported unresolved (`RecordingRunner::unresolved_when_cancelled`). Beta keeps its
+registration and its pair, gamma is released by its end, nothing is settled twice, and the ledger
+does not balance — it reports no release and no balance it has not observed. At `a9e88039` the
+protocol had settled both before either pipeline ended: running none, holders none, balanced, two
+duplicates.
 
 ## `mod tests` › `fn kill_inside_closure_recovers_at_width_three() {`
 
@@ -731,12 +753,36 @@ retry the retained generation was ready for.
 
 With `a_budget_stop_drains_live_pipelines_to_their_settlements_and_ends_budget_exceeded`, G6's budget
 row: `budget_exceeded` before any budget-driven end, the drain, the end. `Recording` keeps the fold
-after every append, and `ending_as` asks it what the fold would say to a `run_finished`.
+after every append, and `ending_as` asks it what the fold would say to a `run_finished`. The drain
+test also holds the overshoot's shape (round R5, `FULL-SC-4`): each pipeline live at the stop starts
+its review pass after `budget_exceeded`, which `Ran::durable_at_spawn` shows, so the exposure is
+every admitted pipeline's remaining work, not one invocation each.
+
+## `mod tests` › `fn the_overshoot_notes_bound_the_remaining_spend_of_every_pipeline_live_at_the_stop() {`
+
+Pins the `Budget overshoot` section above, as `run/tests.rs` pins its notes: it must state the
+remaining spend, the review passes and re-asks, and that no count of invocations bounds it, and the
+retired reading — one invocation per live pipeline — must not come back. Red against the notes at
+`a9e88039`.
 
 ## `mod tests` › `fn run_finished_budget_exceeded_refused_after_halting_drain_settlement_at_width_three() {`
 
 In this build a halting settlement is a declined answer, which the fold refuses while a budget stop
-is current, so a halting drain settlement is planted on a width-three prefix (R-AH).
+is current, so a halting drain settlement is planted on a width-three prefix (R-AH). It proves
+**outcome precedence only**: the prefix is planted after a shutdown, with nothing live, so the halt
+the planted settlement records has nothing to cancel; the fold derives Halted, refuses
+`run_finished(BudgetExceeded)`, and the next coordinator's closure ends the run Halted. The
+conversion of a live drain is the next test's (round R5, the full review's `FULL-SC-3`).
+
+## `mod tests` › `fn a_halting_settlement_drained_after_a_budget_stop_cancels_the_live_worker_and_ends_halted_at_width_three()`
+
+Closure step (2)'s conversion, live: alpha crosses the ceiling and `budget_exceeded` is recorded with
+beta's and gamma's workers inside the Runner; the scheduler then drains a halting settlement of beta's
+(`Release::Append`, as R-AH says it must be planted in this build) while gamma's worker is still
+live. The next admission pass acts on the halt: gamma's worker is cancelled through the Runner, the
+closure runs as Halted from step (2) and settles gamma's attempt `attempt_interrupted`, nothing is
+published, and the run finishes Halted at beta. With the halt branch disabled during a budget drain,
+gamma's worker runs on and the command fails on gamma's next snapshot request instead.
 
 ## `mod tests` › `fn a_halt_whose_cancelled_process_is_unresolved_ends_the_command_without_closing() {`
 
@@ -760,7 +806,42 @@ selection it opens meets a ceiling only the verification's review spend has cros
 ## `mod tests` › `fn stale_duplicate_and_mismatched_completions_are_discarded_with_a_warning_and_counted() {`
 
 ST-01, ST-02 and ST-06, through the injector; `a_shutdown_cancels_every_live_pipeline_and_ends_the_command_resumably`
-follows them.
+follows them. An injected completion meets every check a pipeline's does before the injector refuses
+it as injected, so a count of discards cannot tell which check held; since round R5 (the full
+review's `FULL-SC-2`) the test asserts which one refused each: the binding to the pipeline's identity
+refuses alpha's two completions for another generation and another attempt, and the injector only
+beta's own, which nothing earlier refuses. The binding and the fold's check are proved on the channel
+a pipeline sends on by the three tests below.
+
+## `mod tests` › `fn completion_on_the_pipeline_channel(`
+
+Round R5's assembled coordinator for `FULL-SC-2`: alpha's and beta's attempts started at width
+three, their pipelines live with their jobs, the fold optionally given a settlement of beta's attempt
+first; the one message — a completion — is sent by the named pipeline's own `Client` into the
+coordinator's inbox and taken by `receive_one` with no observer, the production intake, so it
+arrives as `Origin::Pipeline` and meets `accepts` as a real pipeline's completion does. What the
+coordinator did with it is returned whole (`Received`): whether it interrupted, which pipelines are
+still live and cancelled, the discards counted and the events appended.
+
+## `mod tests` › `fn a_pipelines_completion_naming_another_attempt_of_its_task_is_discarded_and_its_pipeline_kept()`
+
+The binding, for a completion naming attempt 2 of the pipeline's own task: discarded and counted, by
+the binding's warning, and the pipeline left live to send its own. With the binding removed the fold's
+check refuses it instead and retires the live pipeline — whose own completion would then be stale.
+
+## `mod tests` › `fn a_pipelines_completion_carrying_another_live_pipelines_identity_is_discarded_and_settles_nothing()`
+
+The binding, for alpha's pipeline carrying beta's identity, which the fold holds open (the
+concurrency lens's case): discarded and counted, nothing appended, both pipelines live. With the
+binding removed nothing else refuses it: alpha's pipeline is retired and its job settled with a
+completion that was not its own.
+
+## `mod tests` › `fn a_pipelines_completion_for_an_identity_the_fold_closed_is_discarded_and_settles_nothing() {`
+
+The fold's check: beta's attempt is settled first (a planted `attempt_finished`), and beta's pipeline
+then reports its own completion before any pass has stopped it. Discarded, counted and retired,
+nothing appended. With the check removed the completion is settled against an attempt the fold has
+already settled, which the fold refuses and the command ends on.
 
 ## `mod tests` › `fn a_shutdown_cancels_every_live_pipeline_and_ends_the_command_resumably() {`
 
@@ -1128,7 +1209,11 @@ resume proceeds with empty ledgers and completes.
 
 The OS matrix's Unix row at the coordinator, with real processes (R-AQ, R-AR). A coordinator child's
 three pipelines each run a real host process through the production `HostRunner` (`HostHeld`: a
-shell that records its pid and sleeps). While they run, the run's cleanup lease is held — by reapers
+shell that records its pid and sleeps). The shell is handed the pid file's path as its argument, never
+inside its program text (standards §9), and the pid directory's own name carries an apostrophe and a
+space, so a path a shell would have to quote is exercised on every run: at `a9e88039`, which spliced
+the path into the program in single quotes, no pid was recorded and the test failed at its bound
+(round R5, the full review's `FULL-REG-1`). While they run, the run's cleanup lease is held — by reapers
 spawned from pipeline threads, which entered no scope and hold it through the paths the coordinator
 carried (R-Z). The coordinator is killed; every one of the three processes is gone once its reaper
 settles, the holds are released after them, nothing of the dead coordinator is held, and the next
@@ -1244,6 +1329,10 @@ consecutive points the discard and duplicate counters move by exactly the inject
 injected run releases, starts and logs byte for byte what the uninjected one did, with the same
 registrations, settlements, slot grants and releases and reservation conversions. At least five
 injections per seed over the run (forty over Linux's and macOS's eight; each seed makes five to twelve).
+Since round R5 (`FULL-SC-2`), every completion injected for a live pipeline under another identity
+must be refused by the binding to that pipeline's identity — counted by `duplicating`'s `crossed`
+and matched against the binding's warnings — and at least one is injected over the seeds run; before
+it, the injector's own refusal would have discarded them with the binding removed.
 
 ## `mod interleaving` › `fn every_provisional_reservation_converts_at_its_first_append_under_seeded_permutations() {`
 

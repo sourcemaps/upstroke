@@ -249,7 +249,11 @@ What obligations (1), (2), (4) and (5) established.
 
 ## `pub struct AppendError` › `pub cancelled_invocations: usize,`
 
-How many still-running invocations the ledger cancelled.
+How many registrations the ledger settled at the discharge: every waiting and
+running one in a ledger whose owner runs each invocation itself, and only the
+waiting ones in a ledger the coordinator's pipelines report into, whose running
+registrations are settled by their own ends afterwards
+([`InvocationLedger::cancel_after_append_error`]; round R5 of the PR11 record).
 
 ## `pub struct AppendError` › `_cancelled: Cancelled,`
 
@@ -287,7 +291,10 @@ constructor of [`AppendError`].
 **Two production call sites, not one.** This sentence read "`cancel_all_running`
 has one call site, and this is it"; the other is
 `AttemptContext::cancel_in_flight` (`attempt.rs`), the `T-ATTEMPT`
-halt-cancellation path, and it is in this slice.
+halt-cancellation path, and it is in this slice. Since round R5 of the PR11
+record this one reaches `cancel_all_running` through
+`cancel_after_append_error`, and only for a ledger whose owner runs every
+invocation itself.
 
 **No raw hit count here, deliberately.** The first draft quoted one, and a
 count over the tree changes whenever anything — including a doc comment
@@ -352,7 +359,12 @@ Discharge obligation (3) and mint the report.
 
 "In-flight invocations are cancelled through the Runner"; this is the
 ledger half. The Runner half — cancelling the pipelines and discarding
-the completions — is the caller's too, and always was.
+the completions — is the caller's too, and always was. The ledger half is
+[`InvocationLedger::cancel_after_append_error`], which settles a running
+registration only where no process of it can still run: at the
+coordinator, each running one is left to the end its pipeline reports once
+the Runner has terminated it (round R5 of the PR11 record, the full review's
+`FULL-CONC-1`).
 
 ## `pub enum EmitError {`
 

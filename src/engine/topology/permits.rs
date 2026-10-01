@@ -35,6 +35,14 @@ impl PermitBroker {
         Self::new(SlotLimits::defaulted(derived.max_parallel()))
     }
 
+    #[must_use]
+    pub fn for_pipelines(slots: SlotLimits) -> Self {
+        Self {
+            reservations: Reservations::new(),
+            invocations: InvocationLedger::for_pipelines(slots),
+        }
+    }
+
     pub fn reserve(
         &mut self,
         derived: &Entitlements,

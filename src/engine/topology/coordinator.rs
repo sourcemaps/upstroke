@@ -3017,6 +3017,22 @@ mod tests {
             "{:?}",
             wide.run.warnings()
         );
+        let refused_by = |rule: &str| {
+            wide.run
+                .warnings()
+                .iter()
+                .filter(|warning| warning.starts_with("a completion for") && warning.contains(rule))
+                .count()
+        };
+        assert_eq!(
+            (refused_by(BINDING), refused_by("was injected for pipeline")),
+            (2, 1),
+            "alpha's two completions for another generation and another attempt were refused by \
+             the binding to its pipeline's identity, and only beta's own, which nothing else \
+             refuses, by the injector: an injected completion meets every check a pipeline's does \
+             before it is refused as injected: {:?}",
+            wide.run.warnings()
+        );
         let events = wide.env.durable_events();
         assert_eq!(
             count(&events, "candidate_prepared"),
@@ -3026,6 +3042,231 @@ mod tests {
         assert_eq!(count(&events, "task_merged"), 3);
         assert!(wide.run.invocations_balance());
         replay_equals_live(&wide);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Received {
+        interrupted: Option<String>,
+        live: Vec<(PipelineId, bool)>,
+        discarded: u32,
+        appended: usize,
+    }
+
+    fn completion_on_the_pipeline_channel(
+        tag: &str,
+        closing: Option<TopologyEventBody>,
+        from: PipelineId,
+        identity: Identity,
+    ) -> (Wide, Received, Vec<String>) {
+        let tasks = three();
+        let mut wide =
+            Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]));
+        let mut hooks = wide.env.hooks();
+        let seams = wide.env.seams();
+        let mut live = BTreeMap::new();
+        for (pipeline, key) in [(PipelineId(1), 0), (PipelineId(2), 1)] {
+            let job = wide
+                .run
+                .begin_dispatch(TaskKey(key), GenerationId(0), false, &seams, &mut hooks)
+                .expect("alpha's and beta's attempts start");
+            live.insert(
+                pipeline,
+                Live {
+                    identity: attempt_identity(key),
+                    cancel: Cancellation::new(),
+                    cancelled: false,
+                    busy: Busy::Running,
+                    running: None,
+                    job: Some(job),
+                },
+            );
+        }
+        let closes = closing.is_some();
+        if let Some(event) = closing {
+            wide.run
+                .emit(event, &seams, &mut hooks)
+                .expect("a fold-valid settlement of beta's attempt");
+        }
+        let pipelines = wide.env.pipelines();
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("a runtime");
+        let warned = wide.run.warnings().len();
+        let received = {
+            let mut coordinator = Coordinator {
+                run: &mut wide.run,
+                seams: &seams,
+                hooks: &mut hooks,
+                pipelines: &pipelines,
+                observer: None,
+                leases: Vec::new(),
+                live,
+                replies: BTreeMap::new(),
+                gate: SnapshotGate::default(),
+                next: 2,
+                in_verify: None,
+                arrived: None,
+                abandoned: None,
+                interrupt: None,
+                cancelled_work: closure::Cancelled::none(),
+                unresolved: Vec::new(),
+                buffer: Vec::new(),
+                arrivals: 0,
+                handles: Vec::new(),
+                inbox,
+                outbox,
+                injected,
+                injector: Injector(injector),
+                runtime,
+            };
+            assert!(
+                attempt_identity(0).open_in(coordinator.run)
+                    && attempt_identity(1).open_in(coordinator.run) != closes,
+                "alpha's attempt is open, and beta's is open unless the test settled it"
+            );
+            let appended = coordinator.run.events().len();
+            let discarded = coordinator.run.discarded();
+            assert!(
+                coordinator.client(from, true).send(ToCoordinator::Judged {
+                    pipeline: from,
+                    identity,
+                    outcome: Ok(forged()),
+                }),
+                "the coordinator's inbox is open"
+            );
+            coordinator.receive_one();
+            Received {
+                interrupted: coordinator
+                    .interrupt
+                    .as_ref()
+                    .map(|interrupt| match interrupt {
+                        Interrupt::Failed(error) => error.to_string(),
+                        other => other.describe().to_owned(),
+                    }),
+                live: coordinator
+                    .live
+                    .iter()
+                    .map(|(pipeline, live)| (*pipeline, live.cancelled))
+                    .collect(),
+                discarded: coordinator.run.discarded() - discarded,
+                appended: coordinator.run.events().len() - appended,
+            }
+        };
+        let warnings = wide.run.warnings()[warned..].to_vec();
+        (wide, received, warnings)
+    }
+
+    const BINDING: &str = "whose identity is";
+
+    #[test]
+    fn a_pipelines_completion_naming_another_attempt_of_its_task_is_discarded_and_its_pipeline_kept()
+     {
+        let (_wide, received, warnings) = completion_on_the_pipeline_channel(
+            "coordinator-channel-wrong-attempt",
+            None,
+            PipelineId(1),
+            Identity::Attempt {
+                key: TaskKey(0),
+                generation: GenerationId(0),
+                attempt: AttemptNumber(2),
+            },
+        );
+        assert_eq!(
+            received,
+            Received {
+                interrupted: None,
+                live: vec![(PipelineId(1), false), (PipelineId(2), false)],
+                discarded: 1,
+                appended: 0,
+            },
+            "alpha's pipeline sent a completion for attempt 2 of its own task on the channel every \
+             pipeline sends on: it is discarded and counted, nothing is settled, and the pipeline \
+             stays live to send its own; warnings {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("came from pipeline 1, ")
+                    && warning.contains(BINDING)),
+            "the binding of a completion to its pipeline's identity refused it: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_pipelines_completion_carrying_another_live_pipelines_identity_is_discarded_and_settles_nothing()
+     {
+        let (wide, received, warnings) = completion_on_the_pipeline_channel(
+            "coordinator-channel-crossed",
+            None,
+            PipelineId(1),
+            attempt_identity(1),
+        );
+        assert_eq!(
+            received,
+            Received {
+                interrupted: None,
+                live: vec![(PipelineId(1), false), (PipelineId(2), false)],
+                discarded: 1,
+                appended: 0,
+            },
+            "alpha's pipeline sent a completion carrying beta's identity, which the fold holds \
+             open: it is discarded and counted, neither attempt is settled, and both pipelines stay \
+             live; warnings {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("came from pipeline 1, ")
+                    && warning.contains(BINDING)),
+            "the binding refused it: {warnings:?}"
+        );
+        assert!(
+            !kinds_of_log(&wide).contains(&"candidate_prepared"),
+            "nothing was settled from the crossed completion"
+        );
+    }
+
+    #[test]
+    fn a_pipelines_completion_for_an_identity_the_fold_closed_is_discarded_and_settles_nothing() {
+        let (wide, received, warnings) = completion_on_the_pipeline_channel(
+            "coordinator-channel-closed",
+            Some(planted_settlement(
+                TaskKey(1),
+                crate::topology::events::SettlementTransition::Retry,
+            )),
+            PipelineId(2),
+            attempt_identity(1),
+        );
+        assert!(!attempt_identity(1).open_in(&wide.run));
+        assert_eq!(
+            received,
+            Received {
+                interrupted: None,
+                live: vec![(PipelineId(1), false)],
+                discarded: 1,
+                appended: 0,
+            },
+            "beta's pipeline sent its own completion after the fold had settled beta's attempt and \
+             before any pass stopped the pipeline: the completion is discarded and counted, the \
+             pipeline retired, and nothing is settled twice; warnings {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("names an identity the fold does not hold open")),
+            "the fold's own check refused it: {warnings:?}"
+        );
+        assert_eq!(
+            kinds_of_log(&wide)
+                .iter()
+                .filter(|kind| **kind == "attempt_finished")
+                .count(),
+            1,
+            "beta's attempt was settled once, by the fold's own settlement"
+        );
     }
 
     #[test]
@@ -3480,10 +3721,10 @@ mod tests {
             assert!(ledger.balances(), "{shape}");
             assert_eq!(
                 ledger.duplicates(),
-                2,
-                "{shape}: the protocol settled both running registrations at the error, and each \
-                 pipeline's own end report after its process terminated was a counted duplicate \
-                 that released nothing (R-AI)"
+                0,
+                "{shape}: the protocol withdrew only what was waiting, and each running \
+                 registration was settled once, by its own pipeline's end report after its process \
+                 terminated (R-AI, as corrected in round R5)"
             );
             assert!(
                 !wide.env.paths.public.join("report.json").exists(),
@@ -3524,6 +3765,71 @@ mod tests {
             );
             replay_equals_live(&resumed);
         }
+    }
+
+    #[test]
+    fn an_append_error_releases_a_running_invocation_only_when_its_end_establishes_its_process_gone()
+     {
+        use crate::engine::topology::scaffold::Ending;
+        let tasks = three();
+        let mut wide = Wide::durable(
+            "coordinator-append-error-unresolved",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let beta = AttemptIdentities::new(TaskKey(1), GenerationId(0), AttemptNumber(1)).worker();
+        let gamma = AttemptIdentities::new(TaskKey(2), GenerationId(0), AttemptNumber(1)).worker();
+        wide.env.runner.unresolved_when_cancelled(beta.clone());
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let harness = std::sync::Arc::clone(&wide.env.harness);
+        let mut scheduler = arming_on(
+            &runner,
+            harness,
+            crate::topology::effects::SubEffectPoint::WrittenFull,
+        );
+        let error =
+            drive(&mut wide, Some(&mut scheduler)).expect_err("the append error ends the command");
+        drop(scheduler);
+        assert!(wide.run.fold().is_poisoned(), "{error}");
+        let endings = wide.env.runner.endings();
+        assert!(
+            endings.contains(&(beta.clone(), Ending::CancelledUnresolved))
+                && endings.contains(&(gamma.clone(), Ending::Cancelled)),
+            "the Runner did not establish that beta's process ended, and did establish gamma's: \
+             {endings:?}"
+        );
+        let named = beta.render();
+        assert!(
+            wide.run
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains(&named) && warning.contains("did not establish")),
+            "the command's end names the invocation it still holds: {:?}",
+            wide.run.warnings()
+        );
+        let ledger = wide.run.broker_mut().invocations();
+        let holders: Vec<String> = ledger
+            .slots()
+            .holders()
+            .iter()
+            .map(|holder| holder.render())
+            .collect();
+        assert_eq!(
+            (
+                ledger.running(),
+                holders,
+                ledger.balances(),
+                ledger.settled(&gamma),
+                ledger.duplicates()
+            ),
+            (vec![named.as_str()], vec![named.clone()], false, true, 0),
+            "beta's end did not establish that its process is gone, so beta keeps its registration \
+             and its pair, and the ledger does not balance; gamma's end did, and released it once. \
+             Neither was settled by the append-error protocol before its pipeline reported its end: \
+             (running, pair holders, balances, gamma settled, duplicate settlements)"
+        );
     }
 
     struct HaltArming {
@@ -4605,9 +4911,66 @@ mod tests {
                 .all(|(_, ending)| *ending == crate::engine::topology::scaffold::Ending::Completed),
             "no process was cancelled"
         );
+        let mut paid_after_the_stop: Vec<u32> = wide
+            .env
+            .runner
+            .ran()
+            .iter()
+            .filter(|ran| {
+                ran.durable_at_spawn
+                    .iter()
+                    .any(|kind| kind == "budget_exceeded")
+            })
+            .filter(|ran| matches!(role_of(&ran.invocation), Some(AttemptRole::ReviewPass(_))))
+            .filter_map(|ran| attempt_key(&ran.invocation))
+            .collect();
+        paid_after_the_stop.sort_unstable();
+        assert_eq!(
+            paid_after_the_stop,
+            vec![1, 2],
+            "beta and gamma, each running its worker when the stop was recorded, went on to start \
+             their review passes after it: the overshoot is the remaining spend of every pipeline \
+             admitted before the stop, its later review passes and re-asks included, not one \
+             invocation each (`PR11-OVERSHOOT-BOUND-IN-NO-OUTPUT`)"
+        );
         let ledger = wide.run.broker_mut().invocations();
         assert!(ledger.balances() && ledger.duplicates() == 0);
         replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn the_overshoot_notes_bound_the_remaining_spend_of_every_pipeline_live_at_the_stop() {
+        const NOTES: &str = include_str!("../../../docs/internals/engine/topology/coordinator.md");
+        let section = NOTES
+            .split("\n### ")
+            .find(|section| section.starts_with("Budget overshoot"))
+            .expect("the notes carry the `Budget overshoot` section")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (proposition, pin) in [
+            (
+                "the exposure is what each live pipeline has still to spend",
+                "remaining spend",
+            ),
+            ("its later review passes included", "review passes"),
+            ("and their re-asks", "re-asks"),
+            (
+                "and no count of invocations bounds it",
+                "not a count of invocations",
+            ),
+        ] {
+            assert!(
+                section.contains(pin),
+                "the `Budget overshoot` notes must state that {proposition}; looked for {pin:?} \
+                 in:\n{section}"
+            );
+        }
+        assert!(
+            !section.contains("each running one invocation at a time:"),
+            "the retired reading, which bounds the overshoot by one invocation per live pipeline, \
+             must not come back:\n{section}"
+        );
     }
 
     fn deferring_alpha(tasks: &[WideTask], asking: &[u32]) -> RecordingRunner {
@@ -4861,6 +5224,92 @@ mod tests {
             })
             .collect();
         assert_eq!(ends, vec![(RunOutcome::Halted, Some(TaskKey(0)))]);
+    }
+
+    #[test]
+    fn a_halting_settlement_drained_after_a_budget_stop_cancels_the_live_worker_and_ends_halted_at_width_three()
+     {
+        use crate::engine::topology::scaffold::Ending;
+        use crate::topology::events::SettlementTransition;
+        let tasks = four();
+        let mut wide = Wide::started_under(
+            "coordinator-halting-drain-live",
+            &tasks,
+            3,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+            TIGHT,
+        );
+        let gamma = AttemptIdentities::new(TaskKey(2), GenerationId(0), AttemptNumber(1)).worker();
+        let runner = std::sync::Arc::clone(&wide.env.runner);
+        let mut drained_beside: Option<Vec<InvocationId>> = None;
+        let mut scheduler = Scheduler::scripted(
+            &runner,
+            Box::new(|view: &Quiescent<'_>| {
+                if view.run.fold().budget_stop().is_some() && drained_beside.is_none() {
+                    drained_beside = Some(view.invoking.clone());
+                    return Some(Release::Append(Box::new(planted_settlement(
+                        TaskKey(1),
+                        SettlementTransition::Failed {
+                            halts_run: true,
+                            reason: "the drained settlement halts".to_owned(),
+                        },
+                    ))));
+                }
+                released(view, |invocation| attempt_key(invocation) == Some(0))
+            }),
+        );
+        let progress = drive(&mut wide, Some(&mut scheduler));
+        drop(scheduler);
+        let beside = drained_beside.expect("the budget stop was recorded with pipelines live");
+        assert!(
+            beside.contains(&gamma),
+            "gamma's worker was inside the Runner when beta's halting settlement was drained after \
+             the stop: {beside:?}"
+        );
+        let endings = runner.endings();
+        assert!(
+            endings.contains(&(gamma.clone(), Ending::Cancelled)),
+            "the halt the drained settlement records converts the drain: gamma's live worker is \
+             cancelled through the Runner, not run on: {endings:?}; the command ended {progress:?}"
+        );
+        assert_eq!(
+            outcome_of(&progress.expect("the closure ends the run")),
+            RunOutcome::Halted
+        );
+        let events = wide.env.durable_events();
+        let kinds = kinds_of(&events);
+        let stop = position(&kinds, "budget_exceeded", 0);
+        let interrupted: Vec<TaskKey> = events[stop..]
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::AttemptInterrupted { data } => Some(data.key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            interrupted,
+            vec![TaskKey(2)],
+            "the closure ran as Halted from step (2) and settled gamma's attempt interrupted: \
+             {kinds:?}"
+        );
+        assert!(
+            !kinds.iter().any(|kind| matches!(
+                *kind,
+                "merge_prepared" | "merge_verification_started" | "task_merged"
+            )),
+            "nothing was published: {kinds:?}"
+        );
+        let TopologyEventBody::RunFinished { data } = &events.last().expect("an end").body else {
+            panic!("the run ended: {kinds:?}");
+        };
+        assert_eq!(
+            (data.outcome.clone(), data.halted_at),
+            (RunOutcome::Halted, Some(TaskKey(1))),
+            "halt outranks budget: the run finished Halted at beta, never BudgetExceeded"
+        );
+        assert!(wide.run.invocations_balance());
+        replay_equals_live(&wide);
     }
 
     #[test]
@@ -9374,7 +9823,9 @@ mod tests {
             let held = crate::runner::RunnerRequest {
                 command: crate::runner::CommandSpec::new("sh")
                     .arg("-c")
-                    .arg(format!("echo $$ > '{}'; exec sleep 600", pidfile.display())),
+                    .arg("echo $$ > \"$1\"; exec sleep 600")
+                    .arg("held")
+                    .arg(pidfile.to_string_lossy()),
                 timeout: Duration::from_secs(900),
                 ..request.clone()
             };
@@ -9432,7 +9883,7 @@ mod tests {
         use std::ffi::OsStr;
         let tasks = three();
         let logs = crate::engine::topology::scaffold::kill_dir("reapers");
-        let pids = logs.path().join("pids");
+        let pids = logs.path().join("the reaper's pids");
         crate::workspace_manager::fixture::write_file(&pids.join("created"), b"\n");
         let child = served(
             logs.path(),
@@ -10428,7 +10879,7 @@ mod tests {
             }
         }
 
-        fn duplicating() -> Inject<'static> {
+        fn duplicating(crossed: std::rc::Rc<std::cell::Cell<usize>>) -> Inject<'static> {
             let mut seen: BTreeMap<PipelineId, Identity> = BTreeMap::new();
             Box::new(move |view, released, dice| {
                 seen.extend(view.live.iter().cloned());
@@ -10523,6 +10974,7 @@ mod tests {
                             .iter()
                             .find(|(other, _)| other != pipeline)
                             .map_or_else(|| mismatched(identity), |(_, other)| other.clone());
+                        crossed.set(crossed.get() + 1);
                         Some(ToCoordinator::Judged {
                             pipeline: *pipeline,
                             identity: other,
@@ -10538,6 +10990,7 @@ mod tests {
             let tasks = mixed();
             let mut seeds = Vec::new();
             let mut total = 0_usize;
+            let mut total_crossed = 0_usize;
             for seed in scheduled_here(0..8, &[0]) {
                 let reference = seeded_run(
                     Shape::of(
@@ -10550,6 +11003,7 @@ mod tests {
                     Adverse::Seeded,
                     None,
                 );
+                let crossed = std::rc::Rc::new(std::cell::Cell::new(0_usize));
                 let injected = seeded_run(
                     Shape::of(
                         format!("interleaving-st05-injected-{seed}"),
@@ -10559,7 +11013,7 @@ mod tests {
                     ),
                     seed,
                     Adverse::Seeded,
-                    Some(duplicating()),
+                    Some(duplicating(std::rc::Rc::clone(&crossed))),
                 );
                 let SeededRun {
                     wide: mut plain,
@@ -10669,6 +11123,23 @@ mod tests {
                     injections,
                     "seed {seed}: every injection is accounted for exactly once"
                 );
+                let refused_by_the_binding = duplicated
+                    .run
+                    .warnings()
+                    .iter()
+                    .filter(|warning| {
+                        warning.starts_with("a completion for") && warning.contains(BINDING)
+                    })
+                    .count();
+                assert_eq!(
+                    refused_by_the_binding,
+                    crossed.get(),
+                    "seed {seed}: every completion injected for a live pipeline under another \
+                     identity was refused by the binding to that pipeline's identity, which an \
+                     injected completion meets before it is refused as injected: {:?}",
+                    duplicated.run.warnings()
+                );
+                total_crossed += crossed.get();
                 seeds.push(serde_json::json!({
                     "seed": seed,
                     "injected": injections,
@@ -10694,6 +11165,10 @@ mod tests {
                 total >= 5 * seeds.len(),
                 "{total} injections over {} seeds",
                 seeds.len()
+            );
+            assert!(
+                total_crossed > 0,
+                "a completion under another identity was injected in some seed"
             );
             export(
                 "ledgers/invocation",

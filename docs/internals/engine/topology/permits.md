@@ -86,6 +86,14 @@ An empty broker whose slot limits default to the run's recorded
 `max_parallel` (`permits.agent_pool_slots`: "max_per_agent, default
 max_parallel … max_per_pool, default max_parallel").
 
+## `impl PermitBroker` › `pub fn for_pipelines(slots: SlotLimits) -> Self {`
+
+An empty broker at `slots` for the coordinator, whose pipelines run the
+invocations and report each end: its invocation ledger is
+[`InvocationLedger::for_pipelines`], so an append error's discharge settles
+no running registration before its end is reported (round R5 of the PR11
+record, the full review's `FULL-CONC-1`).
+
 ## `impl PermitBroker` › `pub fn reserve(`
 
 Take a provisional reservation for `key`, or refuse; never wait. `derived`

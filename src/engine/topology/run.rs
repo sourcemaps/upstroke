@@ -1161,7 +1161,7 @@ impl TopologyRun {
                     .to_owned(),
             });
         }
-        self.broker = PermitBroker::new(limits);
+        self.broker = PermitBroker::for_pipelines(limits);
         Ok(())
     }
 
