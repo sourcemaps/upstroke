@@ -1126,7 +1126,7 @@ comes to exist. `hosted` (Unix) is a coordinator whose pipelines run real host p
 ## `mod tests` › `fn holds_nothing(run_dir: &std::path::Path, repo: &std::path::Path) -> Result<(), String> {`
 
 R17, observed (R-AQ): nobody holds the run — `rundir::is_running` answers from this process's
-claims, then from the OS — and the repository's worktree lock can be taken, and is let go at once.
+claims, then from the OS — and the fixture checkout's worktree lock can be taken, and is let go at once.
 
 ## `mod tests` › `fn broker_is_empty(run: &mut TopologyRun) -> Result<(), String> {`
 
