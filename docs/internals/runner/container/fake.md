@@ -432,54 +432,6 @@ on `ProcessGone`, so a test that arms another reclaimer's removal sees the
 container survive exactly as the daemon's would.
 
 
-## `const REAPER_STUB: &str = r#"#!/bin/sh`
-
-The `docker` a coordinator's cleanup reaper execs in a test (the PR11 record's
-round R5, `FULL-SC-1`). A reaper is a `fork`-only child of the coordinator that
-closes every inherited descriptor, so after its coordinator dies nothing of the
-child's stdio reaches the daemon; the stub reaches it through files beside
-itself: each call's arguments appended to `calls`, `ps` answered from
-`listing`, and `rm` taking the removed id out of `listing`, so the reaper's
-second listing finds nothing and its loop ends. Constant text: every value is an
-argument or the stub's own path, never spliced into the program (standards §9).
-
-## `const REAPER_STUB: &str = r#"#!/bin/sh` › `relay=${0%/*}`
-
-The relay directory is the directory the stub was executed from — the reaper
-`execv`s the scope's absolute program, so `$0` is that path — and not a name
-the environment carries. Round R5's stub read `UPSTROKE_TEST_REAPER_RELAY`,
-which only the two-process witness set in its child's environment; the
-in-process control never could, so a reaper that listed, killed or removed on
-a coordinator's normal end appended its calls to `/calls` and the control's
-"no call" assertion read the empty relay file and passed (the PR11 record's
-round R6, review round 6's `R6-D2`: replacing the reaper's cancellation with
-its end-of-file settlement left every coordinator test green). Located by its
-own path, every reaper that execs the stub is observed, in this process or in
-a child.
-
-## `impl FakeRuntime` › `pub(crate) fn install_reaper_relay(relay: &Path) -> PathBuf {`
-
-Write the stub, executable, and an empty `listing` and `calls` under `relay`,
-and return the stub's path: the program a coordinator's scope names.
-
-## `impl FakeRuntime` › `pub(crate) fn list_for_reaper(`
-
-What this daemon holds under both of a scope's labels — the private root's label
-and the incarnation — written as `docker ps --quiet` prints it, for the stub to
-answer the reaper's listing with. Written before the coordinator dies, because
-the reaper lists at once.
-
-## `impl FakeRuntime` › `pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {`
-
-The stub's calls in order, each its arguments.
-
-## `impl FakeRuntime` › `pub(crate) fn deliver_reaper_calls(&self, relay: &Path) -> Vec<String> {`
-
-The daemon's side of the stub's calls: each `kill` and `rm` applied in order,
-acting as `reaper`, through the `daemon_*` bodies, so the journal records them
-as the reaper's. What it returns is each call's settlement, for a test's
-message.
-
 ## `pub(crate) const RUNTIME_REQUEST: &str = "UPSTROKE-RUNTIME-REQUEST ";`
 
 The wire between a child process and the parent's daemon: a child writes

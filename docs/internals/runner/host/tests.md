@@ -2316,18 +2316,6 @@ Linux CI executes the inheritance and `ETXTBSY` witness. The existing native
 Linux and macOS marker tests execute the Unix writer; Windows tests retain
 their existing batch-shim behavior.
 
-## `mod inherited_writer` › `fn the_fixture_program_writer_leaves_no_writer_in_another_threads_fork() {`
-
-The same ownership witness over the shared fixture's program writer,
-`workspace_manager::fixture::write_executable`, which writes the reaper relay
-stub the PR11 coordinator tests hand their reapers (the PR11 record's round R6,
-review round 6's `R6-D3`). Round R5's writer wrote the stub through this
-process's own descriptor, and this witness — the reviewer's port of the one
-above — saw the forked holder keep it: `WouldBlock`, not EOF. Its helper,
-`fixture_program_writer_helper`, runs isolated for the reason the shim's does.
-`writes_leave_no_writer_in_another_threads_fork` is the FIFO oracle both
-helpers share, unchanged but for taking the writer as an argument.
-
 ## `fn environment_on_path(dirs: &[&Path], pathext: Option<&str>) -> HostEnvironment {`
 
 This process's environment with `PATH` — and `PATHEXT` — replaced.

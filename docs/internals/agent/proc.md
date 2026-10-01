@@ -2333,72 +2333,6 @@ Rendered here so a scope that cannot be turned into argv is refused
 by the caller that set it, rather than silently doing nothing inside
 a reaper that has no error channel.
 
-## `mod termination` › `pub struct ContainerReaper {`
-
-A cleanup reaper armed for an incarnation's containers rather than for
-one process: the run's half of `os_matrix`'s Unix row for containers
-(the PR11 record's round R5, the full review's `FULL-SC-1`; round R6,
-review round 6's `R6-C1` and `R6-C2`). Its owner is the coordinator's
-`IncarnationReaper`, which arms it before the incarnation's first
-container — a resume's pre-flight probe included — and keeps it until
-every container is established gone, or until this process exits.
-
-A reaper is otherwise forked by [`Supervisor::begin`] for one host
-process and ends with it, so between a container runner's `docker`
-calls none is alive, and a coordinator that dies while its containers
-run leaves them to the next write command's census. A `Supervisor`
-cannot be held for a run instead: `begin` takes the process-wide launch
-claim, which no other launch proceeds past until its group registers.
-This guard holds a [`Reaper`] from `spawn_reaper` — the same fork, the
-same R28 hold through the lease paths it is handed, the same container
-scope rendered before the fork — with no process group and no launch
-claim. If its coordinator dies, the reaper's own loop settles the empty
-group and kills and removes the containers the scope labels
-(`settle_after_coordinator_death`).
-
-## `mod termination` › `pub fn arm_container_reaper(`
-
-Fork the run's container reaper at Process.Terminate. The site is taken
-by value and any other refused, as [`Supervisor::begin`] does: it is the
-Terminate site's own fork, and no new effect site.
-
-### Errors
-
-[`UpstrokeError::Agent`] when the site is not Process.Terminate or the
-reaper cannot be started (`spawn_reaper`'s account), or the signal monitor
-cannot be installed (`shared_state`'s account, below), and
-[`UpstrokeError::Refused`] when no container scope is registered
-([`set_container_reclaim_scope`]): a reaper armed then would hold R28 and
-kill nothing.
-
-## `pub fn arm_container_reaper(` › `shared_state()?;`
-
-Install the process's signal monitor before the fork, as every
-`Supervisor::begin` does (the PR11 record's round R6, review round 6's
-`R6-D1`). A cancellation this reaper does not acknowledge
-(`Reaper::cancel`) fails closed by setting `PENDING_TERMINATION`, and the
-monitor is the only thing that acts on it: it kills the registered groups
-and raises the signal, so this process ends and the reaper, seeing its
-coordinator gone, settles and releases R28. `Supervisor::begin` is
-reached only through the process funnel, so in a process whose every
-invocation runs in a container nothing else had installed the monitor;
-the failed cancellation set the flag, nothing read it, and the caller went
-on with the cleanup lease still held by its stopped or wedged reaper —
-`monitor initialized=false, pending termination=15, R28 still held=true`.
-
-## `mod termination` › `impl Drop for ContainerReaper {`
-
-Cancel the reaper and wait for it (`Reaper::cancel`), as a `Supervisor`
-that never registered a group does: the reaper settles nothing and kills
-no container, `authoritative_state`'s "a live incarnation's containers
-must not be touched". Only the coordinator's death leaves the reaper to
-act. Dropping one is therefore the coordinator's statement that every
-container its scope labels has its termination established: the
-coordinator's `IncarnationReaper` drops it only then, and on any other end
-keeps it armed until this process exits (the PR11 record's round R6,
-`R6-C1`). A cancellation that is not acknowledged fails closed through
-the signal monitor `arm_container_reaper` installed.
-
 ## `mod termination` › `fn resolve_reaper_program(program: &std::path::Path) -> Result<PathBuf, UpstrokeError> {`
 
 The absolute program the reaper will `execv`, resolved **before** the
@@ -2571,26 +2505,6 @@ to be settled; killing its labeled containers there would kill the
 containers of a coordinator that is still spending through them, which is
 `authoritative_state`'s "a live incarnation's containers must not be
 touched" — the opposite of what this exists for.
-
-## `mod tests` › `fn a_container_reapers_failed_cancel_ends_its_caller_through_the_signal_monitor() {`
-
-`R6-D1` (the PR11 record's round R6; the delta lens's witness, kept). An isolated container-only
-caller — no host launch has installed the signal monitor — arms a container reaper, which installs it;
-the reaper is killed and reaped, so the cancellation in its guard's drop is not acknowledged and
-fails closed; the caller is then ended by `SIGTERM` from the monitor. At `9f60fca2` the monitor was
-never installed and the caller went on with `PENDING_TERMINATION` set and nothing to read it.
-
-## `mod tests` › `fn a_stopped_container_reaper_holding_r28_ends_its_caller_rather_than_releasing_it() {`
-
-`R6-D1`'s consequence. The isolated caller holds a run's lock and cleanup scope, arms the reaper —
-which takes the run's cleanup lease — and stops it, then cancels: the stopped reaper cannot answer, so
-the cancellation fails while the stopped reaper holds R28, and the caller ends by `SIGTERM` rather
-than going on as if the lease were free. The parent resumes the orphaned reaper (the kernel may
-already have, for an orphaned stopped process group), which finds its coordinator gone, settles and
-releases the lease; then the run directory is removed. Each isolated caller
-is bounded at sixty seconds and killed after it, so a caller that neither
-ends nor returns fails the test rather than wedging the suite — what a
-cancellation that waits without a bound for a stopped reaper would do.
 
 ## `mod tests` › `fn the_reapers_cleanup_hold_is_shared_between_overlapping_invocations() {`
 

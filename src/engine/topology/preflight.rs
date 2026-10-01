@@ -38,8 +38,6 @@ pub struct RunPreflight<'a> {
     agents: Vec<String>,
     ledger: Mutex<InvocationLedger>,
     probed: Mutex<Option<Probed>>,
-    #[cfg(unix)]
-    reaper: Option<&'a super::coordinator::IncarnationReaper>,
 }
 
 impl std::fmt::Debug for RunPreflight<'_> {
@@ -70,16 +68,7 @@ impl<'a> RunPreflight<'a> {
             agents,
             ledger: Mutex::new(InvocationLedger::new()),
             probed: Mutex::new(None),
-            #[cfg(unix)]
-            reaper: None,
         }
-    }
-
-    #[cfg(unix)]
-    #[must_use]
-    pub const fn reaping(mut self, reaper: &'a super::coordinator::IncarnationReaper) -> Self {
-        self.reaper = Some(reaper);
-        self
     }
 
     #[must_use]
@@ -122,28 +111,6 @@ impl<'a> RunPreflight<'a> {
 
 impl RunnerPreflight for RunPreflight<'_> {
     fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
-        #[cfg(unix)]
-        let covered = match self.reaper {
-            Some(reaper) => Some(reaper.cover(&[]).map_err(|error| UpstrokeError::Refused {
-                message: format!(
-                    "pre-flight: the run's container reaper could not be armed before its first \
-                     probe ({error}); nothing was spawned for the run and no recovery event was \
-                     appended, so the run is resumable"
-                ),
-            })?),
-            None => None,
-        };
-        let certified = self.probe(policy);
-        #[cfg(unix)]
-        if let Some(covered) = covered {
-            covered.close(self.ledgers_balance());
-        }
-        certified
-    }
-}
-
-impl RunPreflight<'_> {
-    fn probe(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
         let registering = self.registering();
         let shell_id = PreflightIdentities::shell(0)?;
         crate::runner::host::run_shell_probe(

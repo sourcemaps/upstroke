@@ -910,25 +910,13 @@ it will ever need is rendered here, on the parent side, before the fork.
 [`crate::agent::proc::set_container_reclaim_scope`] is where it is handed
 over.
 
-**What a later slice must connect** — connected in PR11's rounds R5 and R6
-(the full review's `FULL-SC-1`; review round 6's `R6-C1` and `R6-C2`). The
-caller of a schema-4 run whose runner launches containers builds one
-`engine::topology::coordinator::IncarnationReaper` from the run's recorded
-private root, the incarnation it runs as and the runtime's CLI, and hands it
-to the resume's pre-flight (`RunPreflight::reaping`) and to the coordinator
-(`PipelineSeams::reaper`). The pre-flight registers this scope with
-[`crate::agent::proc::set_container_reclaim_scope`] and arms the reaper
-(`crate::agent::proc::arm_container_reaper`) before its first probe; the
-coordinator refuses a reaper whose scope is not the run's own
-(`TopologyRun::container_scope`) and covers the same one, so a reaper is
-live across every container invocation of the incarnation. It is cancelled,
-and the scope cleared, only once every container it covered is established
-gone; a coordinator that returns with a container unresolved leaves it armed
-until its process exits, and the reaper then kills what the scope labels. A
-fresh run's P4 probes, before `run_started`, are not covered: ST-16 (k) gives
-a probe killed there to the next census with its husk. What is still PR12's
-is a production caller: no run selects a container Runner, or calls the
-coordinator, until then. Windows stays the documented orphan window.
+**What a later slice must connect.** Nothing registers a scope in this
+slice: `production_effect` is "none" and no run selects a container Runner
+until PR12. PR7's `TopologyRun` registers it once run identity exists — the
+private root from `run_started.private_dir` and the incarnation from
+`run_started(4)`/`run_resumed(4)` — and must ensure a supervisor is live
+across a container invocation, or the window is closed only by the next
+write command's census.
 
 ## `impl ReaperContainerScope` › `pub fn new(`
 

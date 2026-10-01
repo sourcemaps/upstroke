@@ -2728,8 +2728,6 @@ impl WideEnv {
                 ))) as Box<dyn super::seams::TopologyHooks + Send>
             }),
             slots,
-            #[cfg(unix)]
-            reaper: None,
         }
     }
 

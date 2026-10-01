@@ -868,47 +868,6 @@ impl TopologyRun {
         self.handle.cleanup_scope()
     }
 
-    #[cfg(unix)]
-    pub(super) fn container_scope(
-        &self,
-        program: &std::path::Path,
-    ) -> Result<crate::runner::container::census::ReaperContainerScope, UpstrokeError> {
-        let started = &self.handle.started;
-        let private = std::path::Path::new(&started.private_dir);
-        let refused = || UpstrokeError::Refused {
-            message: format!(
-                "run `{}` records its private half at `{}`, which is not of the shape \
-                 `<root>/runs/{}`, so the private root its containers are labeled with cannot be \
-                 derived and no reaper was armed; nothing was spawned or appended",
-                started.run_id,
-                private.display(),
-                started.run_id
-            ),
-        };
-        let runs = private
-            .parent()
-            .filter(|runs| {
-                private.file_name() == Some(std::ffi::OsStr::new(&started.run_id))
-                    && runs.file_name() == Some(std::ffi::OsStr::new("runs"))
-            })
-            .ok_or_else(refused)?;
-        let root = runs
-            .parent()
-            .filter(|root| !root.as_os_str().is_empty())
-            .ok_or_else(refused)?;
-        let incarnation = self
-            .handle
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.body {
-                TopologyEventBody::RunResumed { data } => Some(data.incarnation.0.as_str()),
-                _ => None,
-            })
-            .unwrap_or(started.incarnation.0.as_str());
-        crate::runner::container::census::ReaperContainerScope::new(program, root, incarnation)
-    }
-
     pub(super) fn exceed_budget(
         &mut self,
         exceeded: crate::topology::events::BudgetExceeded4,

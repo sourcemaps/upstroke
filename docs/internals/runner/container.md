@@ -924,15 +924,8 @@ census can report the window it is closing rather than infer it.
 
 ## `pub enum OrphanWindow` › `ClosedByTheUnixReaper,`
 
-`cfg(unix)`: a cleanup reaper outlives the coordinator and kills its
-labeled containers. A container invocation spawns no process through the
-process funnel, so the reaper that does it is the incarnation's own
-(`engine::topology::coordinator::IncarnationReaper`, forking through
-`agent::proc::arm_container_reaper`; the PR11 record's rounds R5 and R6):
-armed before the incarnation's first container — a resume's pre-flight
-probe included — and cancelled only once every container it covered is
-established gone; otherwise it stays armed until the coordinator's process
-exits, and then kills them.
+`cfg(unix)`: the per-invocation cleanup reaper outlives the coordinator
+and kills its labeled containers.
 
 ## `pub enum OrphanWindow` › `UntilNextWriteCommandStart,`
 
