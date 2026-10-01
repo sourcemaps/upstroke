@@ -646,6 +646,91 @@ impl FakeRuntime {
     }
 }
 
+#[cfg(unix)]
+const REAPER_STUB: &str = r#"#!/bin/sh
+printf '%s\t' "$@" >> "$UPSTROKE_TEST_REAPER_RELAY/calls"
+printf '\n' >> "$UPSTROKE_TEST_REAPER_RELAY/calls"
+case "$1" in
+ps) cat "$UPSTROKE_TEST_REAPER_RELAY/listing" ;;
+rm) grep -v -x -F -e "$4" "$UPSTROKE_TEST_REAPER_RELAY/listing" > "$UPSTROKE_TEST_REAPER_RELAY/listing.next"
+    mv "$UPSTROKE_TEST_REAPER_RELAY/listing.next" "$UPSTROKE_TEST_REAPER_RELAY/listing" ;;
+esac
+exit 0
+"#;
+
+#[cfg(unix)]
+impl FakeRuntime {
+    pub(crate) const REAPER_RELAY: &'static str = "UPSTROKE_TEST_REAPER_RELAY";
+
+    pub(crate) fn install_reaper_relay(relay: &Path) -> PathBuf {
+        let program = relay.join("docker");
+        crate::workspace_manager::fixture::write_executable(&program, REAPER_STUB.as_bytes());
+        crate::workspace_manager::fixture::write_file(&relay.join("listing"), b"");
+        crate::workspace_manager::fixture::write_file(&relay.join("calls"), b"");
+        program
+    }
+
+    pub(crate) fn list_for_reaper(
+        &self,
+        relay: &Path,
+        private_root: &Path,
+        incarnation: &str,
+    ) -> Vec<String> {
+        let root = super::intent::private_root_label(private_root);
+        let names: Vec<String> = self
+            .state()
+            .containers
+            .iter()
+            .filter(|(_, container)| {
+                container.labels.get(super::intent::LABEL_PRIVATE_ROOT) == Some(&root)
+                    && container
+                        .labels
+                        .get(super::intent::LABEL_INCARNATION)
+                        .map(String::as_str)
+                        == Some(incarnation)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let listing: String = names.iter().map(|name| format!("{name}\n")).collect();
+        crate::workspace_manager::fixture::write_file(&relay.join("listing"), listing.as_bytes());
+        names
+    }
+
+    pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(relay.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                line.split('\t')
+                    .filter(|field| !field.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn deliver_reaper_calls(&self, relay: &Path) -> Vec<String> {
+        let daemon = self.acting_as("reaper");
+        let mut delivered = Vec::new();
+        for call in Self::reaper_calls(relay) {
+            let (verb, settled) = match (call.first().map(String::as_str), call.last()) {
+                (Some("kill"), Some(id)) => ("kill", daemon.daemon_stop(id, StopMode::Kill)),
+                (Some("rm"), Some(id)) => ("rm", daemon.daemon_remove(id)),
+                _ => continue,
+            };
+            delivered.push(match settled {
+                Ok(settled) => format!(
+                    "{verb} {}: {}",
+                    call.last().map_or("", String::as_str),
+                    settled_name(settled)
+                ),
+                Err(error) => format!("{verb} {}: {error}", call.last().map_or("", String::as_str)),
+            });
+        }
+        delivered
+    }
+}
+
 pub(crate) const RUNTIME_REQUEST: &str = "UPSTROKE-RUNTIME-REQUEST ";
 
 pub(crate) const RUNTIME_REPLY: &str = "UPSTROKE-RUNTIME-REPLY ";

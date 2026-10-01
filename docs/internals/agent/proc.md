@@ -2333,6 +2333,47 @@ Rendered here so a scope that cannot be turned into argv is refused
 by the caller that set it, rather than silently doing nothing inside
 a reaper that has no error channel.
 
+## `mod termination` › `pub struct ContainerReaper {`
+
+A cleanup reaper armed for a coordinator's whole run rather than for
+one process: the run's half of `os_matrix`'s Unix row for containers
+(the PR11 record's round R5, the full review's `FULL-SC-1`).
+
+A reaper is otherwise forked by [`Supervisor::begin`] for one host
+process and ends with it, so between a container runner's `docker`
+calls none is alive, and a coordinator that dies while its containers
+run leaves them to the next write command's census. A `Supervisor`
+cannot be held for a run instead: `begin` takes the process-wide launch
+claim, which no other launch proceeds past until its group registers.
+This guard holds a [`Reaper`] from `spawn_reaper` — the same fork, the
+same R28 hold through the lease paths it is handed, the same container
+scope rendered before the fork — with no process group and no launch
+claim. If its coordinator dies, the reaper's own loop settles the empty
+group and kills and removes the containers the scope labels
+(`settle_after_coordinator_death`).
+
+## `mod termination` › `pub fn arm_container_reaper(`
+
+Fork the run's container reaper at Process.Terminate. The site is taken
+by value and any other refused, as [`Supervisor::begin`] does: it is the
+Terminate site's own fork, and no new effect site.
+
+### Errors
+
+[`UpstrokeError::Agent`] when the site is not Process.Terminate or the
+reaper cannot be started (`spawn_reaper`'s account), and
+[`UpstrokeError::Refused`] when no container scope is registered
+([`set_container_reclaim_scope`]): a reaper armed then would hold R28 and
+kill nothing.
+
+## `mod termination` › `impl Drop for ContainerReaper {`
+
+Cancel the reaper and wait for it (`Reaper::cancel`), as a `Supervisor`
+that never registered a group does: a coordinator that ends — normally,
+on an error, or unwinding — never has its own live containers killed by
+its reaper, `authoritative_state`'s "a live incarnation's containers must
+not be touched". Only the coordinator's death leaves the reaper to act.
+
 ## `mod termination` › `fn resolve_reaper_program(program: &std::path::Path) -> Result<PathBuf, UpstrokeError> {`
 
 The absolute program the reaper will `execv`, resolved **before** the

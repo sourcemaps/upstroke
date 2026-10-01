@@ -2728,6 +2728,7 @@ impl WideEnv {
                 ))) as Box<dyn super::seams::TopologyHooks + Send>
             }),
             slots,
+            container_cli: None,
         }
     }
 

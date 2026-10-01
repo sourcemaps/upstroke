@@ -831,6 +831,8 @@ pub use self::ambient::{
 pub use self::ambient::{
     ambient_job_established, child_in_ambient_job, process_alive, process_creation_time,
 };
+#[cfg(unix)]
+pub use self::termination::{ContainerReaper, arm_container_reaper};
 
 #[cfg(windows)]
 mod windows_job {
@@ -4744,6 +4746,43 @@ mod termination {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *held = scope.cloned();
         Ok(())
+    }
+
+    pub struct ContainerReaper {
+        reaper: Option<Reaper>,
+    }
+
+    pub fn arm_container_reaper(
+        terminate_site: ProcessSite,
+        leases: &[PathBuf],
+    ) -> Result<ContainerReaper, UpstrokeError> {
+        if terminate_site != ProcessSite::Terminate {
+            return Err(UpstrokeError::Agent {
+                message: format!(
+                    "a container reaper requires Process.Terminate, got {}",
+                    terminate_site.name()
+                ),
+            });
+        }
+        if container_scope_for_a_new_reaper().is_none() {
+            return Err(UpstrokeError::Refused {
+                message: "no container reclaim scope is registered, so a reaper armed now would \
+                          kill nothing if this process died; nothing was forked"
+                    .to_owned(),
+            });
+        }
+        let reaper = spawn_reaper(leases).map_err(|message| UpstrokeError::Agent { message })?;
+        Ok(ContainerReaper {
+            reaper: Some(reaper),
+        })
+    }
+
+    impl Drop for ContainerReaper {
+        fn drop(&mut self) {
+            if let Some(reaper) = self.reaper.take() {
+                reaper.cancel();
+            }
+        }
     }
 
     fn resolve_reaper_program(program: &std::path::Path) -> Result<PathBuf, UpstrokeError> {

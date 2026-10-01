@@ -502,6 +502,16 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write a fixture file");
 }
 
+/// Write `bytes` to `path` as [`write_file`] does, and make the file a program: readable and
+/// executable by everyone, writable by its owner — a stub a test hands to a process that execs it.
+#[cfg(unix)]
+pub(crate) fn write_executable(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    write_file(path, bytes);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("make a fixture file executable");
+}
+
 /// Create `path` and every missing parent.
 pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");

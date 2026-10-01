@@ -1397,8 +1397,12 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
-shared = { deref = 2, drop = 5 }
+shared = { deref = 2, drop = 6 }
 funnel = [
+    # PR11 round R5 (`FULL-SC-1`): `arm_container_reaper` takes `ProcessSite::Terminate` by value, refuses any other site,
+    # and forks one cleanup reaper through `spawn_reaper`, as `begin` does, with no process group, for a coordinator's
+    # whole run; `ContainerReaper`'s `Drop` (the sixth `drop`) cancels it as `Supervisor`'s cancels its own.
+    "arm_container_reaper",
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
     # (`ProcessFailure`), for the host Runner's `RunnerError`.

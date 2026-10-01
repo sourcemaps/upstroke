@@ -240,6 +240,14 @@ The scope is read **before** the fork, by every reaper started after this
 call: a reaper already running keeps the scope it was started with, because
 it is a `fork`-only child that cannot be handed anything afterwards.
 
+A reaper is alive only while one is: a host process's reaper for that
+process's life, and the run's own for the coordinator's whole run once the
+coordinator arms one with `arm_container_reaper` (`proc.rs`). The schema-4
+coordinator registers its run's scope here and arms that reaper at
+`run_concurrently`'s entry whenever its caller names the container runtime's
+CLI, and clears both before it returns (the PR11 record's round R5,
+`FULL-SC-1`).
+
 ### Errors
 
 [`UpstrokeError::Refused`] when the scope cannot become the argument vectors

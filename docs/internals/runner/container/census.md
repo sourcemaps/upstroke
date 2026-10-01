@@ -910,13 +910,19 @@ it will ever need is rendered here, on the parent side, before the fork.
 [`crate::agent::proc::set_container_reclaim_scope`] is where it is handed
 over.
 
-**What a later slice must connect.** Nothing registers a scope in this
-slice: `production_effect` is "none" and no run selects a container Runner
-until PR12. PR7's `TopologyRun` registers it once run identity exists — the
-private root from `run_started.private_dir` and the incarnation from
-`run_started(4)`/`run_resumed(4)` — and must ensure a supervisor is live
-across a container invocation, or the window is closed only by the next
-write command's census.
+**What a later slice must connect** — connected in PR11's round R5 (the
+full review's `FULL-SC-1`). The schema-4 coordinator registers the scope
+once run identity exists: `run_concurrently`, given the container runtime's
+CLI by its caller (`PipelineSeams::container_cli`), builds it with
+`TopologyRun::container_scope` — the private root from
+`run_started.private_dir` (its `<root>/runs/<run id>` shape), the
+incarnation from the last `run_resumed(4)`, else `run_started(4)` — hands it
+to [`crate::agent::proc::set_container_reclaim_scope`], and arms a reaper for
+the run's whole life (`crate::agent::proc::arm_container_reaper`), so one is
+live across every container invocation; it cancels the reaper and clears the
+scope before it returns. What is still PR12's is a production caller: no run
+selects a container Runner, or calls the coordinator, until then. Windows
+stays the documented orphan window.
 
 ## `impl ReaperContainerScope` › `pub fn new(`
 

@@ -1112,6 +1112,20 @@ and the only way the coordinator selects too. A selection is never cached: the
 coordinator asks again after every message it applies, because the fold's
 append checks do not re-check admission (INV-21).
 
+## `impl TopologyRun` › `pub(super) fn container_scope(`
+
+The run's container scope for a reaper (Unix; the PR11 record's round R5, `FULL-SC-1`): the private
+root the run's containers are labeled with — `run_started.private_dir` less its `runs/<run id>`, the
+shape recovery's own locator refuses any other of, so a different shape is refused here too and no
+reaper is armed — and this process's incarnation, the last `run_resumed(4)`'s (recovery appends it
+before the handle is handed over), else `run_started(4)`'s. `program` is the container CLI the
+reaper execs.
+
+### Errors
+
+[`UpstrokeError::Refused`] when the private half is not of that shape, or the scope refuses the
+values (`ReaperContainerScope::new`: an empty value, or one carrying a newline, a comma or an `=`).
+
 ## `impl TopologyRun` › `pub(super) fn exceed_budget(`
 
 `loop`: "a breach appends `budget_exceeded` before any effect".
