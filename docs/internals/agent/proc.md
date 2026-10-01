@@ -2571,6 +2571,23 @@ containers of a coordinator that is still spending through them, which is
 `authoritative_state`'s "a live incarnation's containers must not be
 touched" — the opposite of what this exists for.
 
+## `mod tests` › `fn a_container_reapers_failed_cancel_ends_its_caller_through_the_signal_monitor() {`
+
+`R6-D1` (the PR11 record's round R6; the delta lens's witness, kept). An isolated container-only
+caller — no host launch has installed the signal monitor — arms a container reaper, which installs it;
+the reaper is killed and reaped, so the cancellation in its guard's drop is not acknowledged and
+fails closed; the caller is then ended by `SIGTERM` from the monitor. At `9f60fca2` the monitor was
+never installed and the caller went on with `PENDING_TERMINATION` set and nothing to read it.
+
+## `mod tests` › `fn a_stopped_container_reaper_holding_r28_ends_its_caller_rather_than_releasing_it() {`
+
+`R6-D1`'s consequence. The isolated caller holds a run's lock and cleanup scope, arms the reaper —
+which takes the run's cleanup lease — and stops it, then cancels: the stopped reaper cannot answer, so
+the cancellation fails while the stopped reaper holds R28, and the caller ends by `SIGTERM` rather
+than going on as if the lease were free. The parent resumes the orphaned reaper (the kernel may
+already have, for an orphaned stopped process group), which finds its coordinator gone, settles and
+releases the lease; then the run directory is removed.
+
 ## `mod tests` › `fn the_reapers_cleanup_hold_is_shared_between_overlapping_invocations() {`
 
 R28 is a **shared** hold, and one run has more than one reaper.

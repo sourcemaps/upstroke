@@ -104,6 +104,13 @@ a time, so it is never contended.
 What the last `certify` established, for the caller that has to record
 `probed_agents`.
 
+## `pub struct RunPreflight<'a>` › `reaper: Option<&'a super::coordinator::IncarnationReaper>,`
+
+The resuming incarnation's container reaper, when its caller hands one in
+([`Self::reaping`]); Unix only, as `os_matrix` gives Windows no reaper.
+Borrowed: the caller owns it for the incarnation's whole life and hands
+the same one to the coordinator afterwards.
+
 ## `impl<'a> RunPreflight<'a>` › `pub fn new(`
 
 The pre-flight of a run whose recorded shell is `shell` and whose
@@ -114,6 +121,23 @@ recorded agents are `agents`.
 [`crate::agent::probe_request`] — "a probe asks a CLI about itself and
 has no workspace of its own" — and that decision is the adapter
 module's, not this one's.
+
+## `impl<'a> RunPreflight<'a>` › `pub const fn reaping(mut self, reaper: &'a super::coordinator::IncarnationReaper) -> Self {`
+
+Arm `reaper` before this pre-flight's first probe (the PR11 record's round
+R6, review round 6's `R6-C2`). A run whose recorded runner launches
+containers runs its shell probe and its agent probes **in containers**, and
+T-CONTAINER's boundary says "the RunnerPreflight shell and agent probe
+containers are container invocations like every other": a coordinator killed
+inside one leaves it running unless a reaper holding the run's container
+scope is already armed. Round R5 armed the run's reaper at
+`run_concurrently`'s entry, after recovery — and the frozen
+`run_recovery_order` calls this pre-flight at its step (c) — so the probe
+ran with no reaper alive and no cleanup lease held. The caller builds the
+reaper (`IncarnationReaper::contained`) from the run's recorded private
+root, the incarnation it resumes as and the container runtime's CLI, hands
+it here and then to the coordinator, so one reaper covers the incarnation's
+probes and its pipelines.
 
 ## `impl<'a> RunPreflight<'a>` › `pub fn probed(&self) -> Option<Probed> {`
 
@@ -174,20 +198,41 @@ named in the refusal, which is what a caller needs it for.
 ### Errors
 
 [`UpstrokeError::Refused`] naming the shell or the agent whose CLI did
-not answer. Every invocation registered before the refusal is settled —
-completed, or cancelled with its slot pair released — so the ledger
-balances on both paths, with one exception: a probe whose process the
+not answer, or a reaper that could not be armed (before any probe, so
+nothing was spawned). Every invocation registered before the refusal is
+settled — completed, or cancelled with its slot pair released — so the
+ledger balances on both paths, with one exception: a probe whose process the
 Runner could not establish as ended (`ProcessFate::Unresolved`) is not
 settled. Its registration stays running and keeps its pair until this
 process exits (`InvocationLedger::end`, round R1 of the PR11 record), so
 after that refusal `running()` names it and the ledger does not balance.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let shell_id = PreflightIdentities::shell(0)?;`
+## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let covered = match self.reaper {`
+
+The incarnation's reaper, armed — once: a reaper already armed is covered,
+not forked again — before anything is probed, and covering the probes until
+they are settled. When they are, it closes with this pre-flight's ledger: a
+balanced ledger says every probe container's termination was established;
+an unbalanced one (a probe left `Unresolved`) leaves the reaper armed for the
+rest of this process, so if the process ends before anything establishes
+that probe gone, the reaper kills and removes it (`R6-C1`'s rule, which
+holds of a probe as of a pipeline). A pre-flight that refuses does not
+disarm the reaper either way: it is the caller's, and recovery's error
+reaches the caller with the reaper still armed, which is then disarmed by
+the reaper's drop only if nothing was left unresolved.
+
+## `impl RunPreflight<'_>` › `fn probe(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {`
+
+`certify`'s probes: the shell, then one per recorded agent, recording
+what they established. Its own function so that `certify` closes the
+reaper's cover on every path the probes take, `?` included.
+
+## `fn probe(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let shell_id = PreflightIdentities::shell(0)?;`
 
 (1) The shell. Non-slotted, and `is_slotted` is what makes that true
 rather than an argument here.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
+## `fn probe(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
 
 (2) One probe per recorded agent, sequentially, in recorded order.
 

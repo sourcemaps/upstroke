@@ -178,14 +178,15 @@ What a spawned pipeline takes to its thread: owned seams, where `RunSeams` borro
 keeps why each `Arc` is shared beside the struct (standards §6, §10). `slots` are the command's
 `[engine]` slot limits (R-K), installed in the broker before anything is admitted.
 
-## `pub struct PipelineSeams` › `pub container_cli: Option<PathBuf>,`
+## `pub struct PipelineSeams` › `pub reaper: Option<Arc<IncarnationReaper>>,`
 
-The container runtime's CLI when the pipelines' Runner launches containers, `None` when they run on
-the host. Given it, the coordinator arms a reaper for the run on Unix (`arm_reaper`): the program a
-dead coordinator's reaper execs to list, kill and remove the run's labeled containers. It is the
-caller's to name because the caller builds the container Runner, and the same CLI is the one its
-runtime drives (the PR11 record's round R5, `FULL-SC-1`). On Windows it is unused: `os_matrix` gives
-Windows no reaper, and a dead coordinator's containers wait for the next write command's census.
+The incarnation's container reaper when the pipelines' Runner launches containers, `None` when they
+run on the host (Unix only; `os_matrix` gives Windows no reaper, and a dead coordinator's containers
+wait for the next write command's census there). It is the caller's because the caller owns the
+incarnation: it built the container Runner, it may already have armed this reaper for the resume's
+pre-flight (`RunPreflight::reaping`), and it holds it after the coordinator returns. Shared, not
+borrowed, because these seams are cloned into every pipeline's thread; no pipeline uses it (the
+PR11 record's rounds R5 and R6).
 
 ## `pub struct PipelineId(pub u64);`
 
@@ -265,16 +266,19 @@ anything it would settle or release is refused.
 Run the schema-4 loop at the run's width until it finishes, or until the command ends.
 
 It enters the run's cleanup scope on the caller's thread, reads the scope's lease paths once (Unix;
-elsewhere there are none) for every pipeline to carry, installs the command's slot limits, arms the
-run's container reaper when its caller names the container CLI (Unix), builds the runtime and drives.
-It joins every pipeline's handle before it returns, whatever the outcome, and disarms the reaper as
-it returns.
+elsewhere there are none) for every pipeline to carry, installs the command's slot limits, covers the
+incarnation's container reaper when its caller hands one in (Unix: armed now if the pre-flight did not
+arm it already), then builds the runtime and drives (`coordinate`). It joins every pipeline's handle
+before it returns, whatever the outcome, and ends the reaper's cover with the broker's balance: a
+balanced invocation ledger says every container the coordinator started was established gone, and the
+reaper is cancelled; an unbalanced one — a registration kept because its Runner could not establish
+its process ended (R1-CONC-1's rule) — leaves the reaper armed (the PR11 record's round R6, `R6-C1`).
 
 ### Errors
 
 A refusal before anything is spawned: slot limits that cannot replace the broker's (something is
-outstanding in it), a container scope that cannot be derived from the run or rendered, a reaper that
-cannot be started, or a runtime that could not be built. After that, whatever ends the command: a
+outstanding in it), a container scope that cannot be derived from the run or rendered, a reaper whose
+scope is not the run's own or that cannot be started, or a runtime that could not be built. After that, whatever ends the command: a
 pipeline's error or panic, a coordinator-side error (a settlement's Git failure, a refused
 dispatch, a poisoned fold), an append error (its protocol's report), a shutdown, a halt whose
 cancelled process the Runner could not establish as ended, or a closure step's own error. Every one
@@ -283,29 +287,98 @@ discarded, and no `attempt_interrupted` is appended by an error or a shutdown �
 settles the open attempts interrupted (R-AB). Only a halt's closure appends it, for the attempts it
 cancelled (R-AF).
 
-## `struct ArmedReaper(Option<crate::agent::proc::ContainerReaper>);`
+## `impl TopologyRun` › `fn coordinate(`
 
-The run's container reaper while the coordinator runs (Unix; the PR11 record's round R5,
-`FULL-SC-1`, which closes R-AR's Unix orphan window at the coordinator). While it is held, a cleanup
-reaper forked for the run holds R28 through the run's lease paths and, if this process dies, kills
-and removes every container labeled with the run's private root and incarnation; a container
-invocation spawns no process through the process funnel, so without it no reaper is alive across
-one.
+The coordinator itself: the runtime, the channels and the drive, then the join. Split from
+`run_concurrently` so that the reaper's cover ends on every path the drive takes, `?` included; a
+panic that unwinds through it leaves the cover open, which keeps the reaper armed.
 
-## `impl Drop for ArmedReaper {`
+## `pub struct IncarnationReaper {`
 
-Cancel the reaper, then clear the process's container scope, whatever ends the command — a return,
-an error, an unwinding panic. A coordinator that ends never has its own live containers killed by its
-reaper: each container is released by its own runner (stop, remove, view, intent), and one whose
-release did not establish it gone is the next write command's census's, as before.
+The container reaper of one incarnation of a run (Unix; the PR11 record's round R5, the full review's
+`FULL-SC-1`, and round R6, review round 6's `R6-C1` and `R6-C2`): `os_matrix`'s Unix row — "the
+cleanup reaper survives coordinator death … and additionally kills the dead coordinator's labeled
+containers, closing the orphan window" — for every container the incarnation starts. It holds one
+`agent::proc::ContainerReaper`, forked at Process.Terminate through `spawn_reaper` and holding R28
+through the run's lease paths, which kills and removes every container labeled with the run's private
+root and this incarnation if this process dies; a container invocation spawns no process through the
+process funnel, so without it no reaper is alive across one. The source keeps its concurrency protocol
+(owner, linearization point, transitions, cleanup) beside the struct (standards §10).
 
-## `fn arm_reaper(`
+Its property, which round R6 established: **while any container this incarnation started may still be
+running, this reaper is armed; it is disarmed only once every such container's termination is
+established; a normal end never kills a live container of its own; and disarming never leaves R28
+held** (a cancellation the reaper does not acknowledge ends the process, `arm_container_reaper`'s
+signal monitor).
 
-Register the run's scope and arm its reaper, in that order, because a reaper renders the scope it
-will use before its fork. The scope is the run's own (`TopologyRun::container_scope`: the private
-root from `run_started.private_dir`, the incarnation from the last `run_resumed(4)`, else
-`run_started(4)`), so the reaper's filter is exactly the labels this incarnation's containers carry.
-A failure to arm clears the scope again, through `ArmedReaper`'s drop.
+Its owner is the caller — the command that runs the incarnation, across recovery and the coordinator —
+and not the coordinator, for the two reasons review round 6 found. A resuming incarnation's first
+containers are its pre-flight probes, which the frozen recovery order runs before it returns, so a
+reaper armed at `run_concurrently`'s entry came too late (`R6-C2`); and a coordinator that returns an
+error with a container unresolved — its registration and pair kept for the rest of the process,
+R1-CONC-1's rule — has not established that container gone, so a guard dropped with its call cancelled
+the one mechanism that would kill it when the process died (`R6-C1`).
+
+## `impl IncarnationReaper` › `pub fn contained(`
+
+The reaper for the containers labeled with `private_root` and `incarnation`, which `program` — the
+container runtime's CLI — lists, kills and removes; not armed yet. The caller passes the run's
+recorded private root, the incarnation it resumes or runs as, and the CLI its container Runner drives:
+the labels that Runner writes.
+
+### Errors
+
+[`UpstrokeError::Refused`] when the scope refuses the values (`ReaperContainerScope::new`).
+
+## `impl IncarnationReaper` › `pub(super) fn cover(&self, leases: &[PathBuf]) -> Result<Covered<'_>, UpstrokeError> {`
+
+Arm the reaper if it is not armed — the scope registered first, because a reaper renders the scope it
+will use before its fork, and cleared again if the fork fails — and open a cover of container work
+under it. Arming happens once: a second cover finds it armed and forks nothing, which is how the
+resume's pre-flight and the coordinator share one reaper with no gap between them. R28 is the run's
+lease paths the calling thread has entered plus `leases`.
+
+## `impl IncarnationReaper` › `fn cover_run(`
+
+`cover`, for the coordinator, after checking that this reaper's scope is the run's own
+(`TopologyRun::container_scope`: the recorded private root and the current incarnation). Round R5
+built the scope from the run itself; the caller builds it now, before the run exists, so the check
+keeps the guarantee: a reaper that would kill none of the run's containers is refused before anything
+is spawned.
+
+## `impl IncarnationReaper` › `fn disarm(&self) {`
+
+Cancel the reaper and clear the process's container scope, under the lock that armed it. Cancelling is
+`ContainerReaper`'s drop: `REAPER_CANCEL`, acknowledged, and a wait for the reaper's exit, which is
+what releases R28 before this returns.
+
+## `impl Drop for IncarnationReaper {`
+
+The incarnation's end. A reaper that nothing left unsettled is cancelled, as `disarm` does. One that
+something did — a cover closed over a ledger that did not balance, or one dropped unclosed by a panic
+— is **kept armed for the rest of this process**: its descriptors are deliberately not closed, so the
+reaper sees nothing until the process exits, then finds its coordinator gone and kills and removes
+every container its scope labels, releasing R28 after them. Nothing in this process establishes an
+unresolved container gone after its command has ended, so its death is the moment the reaper may act,
+and a cancellation here would leave the containers to run until a later write command's census. Either
+way the process's container scope is cleared; an armed reaper has rendered its own.
+
+## `pub(super) struct Covered<'r> {`
+
+One stretch of container work under the reaper — the resume's pre-flight, or one coordinator call.
+Closing it says whether that work established every one of its containers' termination; dropping it
+unclosed says it did not.
+
+## `impl Covered<'_>` › `pub(super) fn close(mut self, established: bool) {`
+
+End a stretch the incarnation continues past (the pre-flight): `established` false marks the reaper
+unsettled, and nothing is cancelled either way.
+
+## `impl Covered<'_>` › `fn end(mut self, established: bool) {`
+
+End the coordinator's call: cancel the reaper now when `established` and nothing before it was left
+unsettled, so a coordinator that returns with every container gone holds no cleanup lease after it
+returns; otherwise leave it armed.
 
 ## `enum Busy {`
 
@@ -1151,7 +1224,10 @@ container runtime the parent's (`LinkedRuntime`). Its role is named by the envir
 runs its coordinator until it is killed (`run_held`: every container holds, since nothing in the
 parent completes a child's container); `resume` adopts a root, resumes it through the frozen
 recovery order over the parent's runtime and the production `LockProbe`, with a pre-flight whose
-shell probe is a container, reports what recovery settled and runs until killed; `census` is a
+shell probe is a container, reports what recovery settled and runs until killed — and when the
+parent names a container CLI (`child_reaper`), the incarnation's reaper is handed to that pre-flight
+and then to the coordinator, as a production caller hands it (a recovery error is reported and, when the
+parent asks, the child drops its last handle on the reaper and exits); `census` is a
 fresh write command in a second repository — a read-only pre-lock refusal first (an unknown run id),
 then the worktree lock, then `startup_census` — and reports the census, then, when asked, takes its
 own run lock and runs one agent-probe container that mounts the shared credential volume; `owner`
@@ -1204,8 +1280,8 @@ settlements and its running registrations — at every container site the census
 ## `mod tests` › `fn a_resuming_incarnation_reclaims_its_earlier_incarnations_containers_before_its_ledgers_probes_and_admission()`
 
 ST-16 (f) and R-AO. Incarnation 1, a fresh child, is killed with three pipelines' containers
-running — its caller named no container CLI, so it armed no reaper, as on Windows or where a Unix
-reaper could not act, and its three containers outlive it (the reaper's own path is
+running — its caller handed it no reaper, as on Windows or where a Unix reaper could not act, and
+its three containers outlive it (the reaper's own path is
 `a_killed_coordinators_reaper_kills_its_containers_before_any_census_at_width_three`); incarnation 2, a resuming child, reclaims those three in its census and is killed while its
 own shell probe's container runs. Incarnation 3, this process, resumes: its census reclaims
 incarnation 2's probe — the same deterministic `InvocationId` as its own shell probe, under another
@@ -1257,11 +1333,34 @@ carried (R-Z). The coordinator is killed; every one of the three processes is go
 settles, the holds are released after them, nothing of the dead coordinator is held, and the next
 coordinator resumes with empty ledgers and completes.
 
+## `mod tests` › `fn run_held_over(`
+
+A child's coordinator over the parent's runtime, with the seams its role adjusts — the incarnation's
+reaper, for the roles that have one (`run_held` is the role that adjusts nothing). Killed by the parent
+in the ordinary case. A role the parent asks to see past an error (`AFTER_AN_ERROR`, Unix) reports
+the error, whether the run's invocation ledger balances and whether the run's cleanup lease is held;
+then it parks until it is killed (`park`), or drops its seams — the last handle on the reaper — reports
+the lease again, and exits on its own (`exit`).
+
+## `mod tests` › `fn child_reaper(`
+
+The incarnation's reaper over the program the parent names (`UPSTROKE_TEST_CHILD_CONTAINER_CLI`, the
+relay stub), or none when it names none.
+
 ## `mod tests` › `fn reaped_child(parent: &crate::engine::topology::scaffold::ParentSide) {`
 
 The `reaped` child role (Unix): a fresh coordinator at width three over the parent's runtime, as
-`fresh` is, whose caller names the container CLI — the parent's relay stub — so it arms its reaper
-(`run_held`'s `container_cli`). It reports its fixture's root and private root and runs until killed.
+`fresh` is, handed the incarnation's reaper over the parent's relay stub (`child_reaper`), which it
+arms at its coordinator's entry: a fresh run's first container is a pipeline's. It reports its
+fixture's root and private root and runs until killed, or past an error as the parent asks.
+
+## `mod tests` › `fn reclaimed_by_one_reaper(`
+
+What a killed or exited coordinator's reaper did, from the relay's calls and the daemon's journal:
+**one** reaper listed the containers labeled with the run's private root and the incarnation, killed
+and removed exactly the ones listed, and listed again to find none — `2 + 2n` calls, the listing
+first and last, so two reapers acting at once could not pass; delivered to the daemon, each was
+stopped and removed by `reaper`, none is left, and no census listed the runtime after the death.
 
 ## `mod tests` › `fn a_killed_coordinators_reaper_kills_its_containers_before_any_census_at_width_three() {`
 
@@ -1270,19 +1369,104 @@ R5, `FULL-SC-1`; R-AR as repaired). A `reaped` child runs three containers on th
 run's cleanup lease is held while they run, by the reaper alone, since the coordinator has no host
 process of its own. The fake writes what it holds under the run's two labels for the stub to list
 (`FakeRuntime::list_for_reaper`); the parent kills the child; the reaper lists exactly those three
-under the scope's filters, kills and removes each, lists again to find none, and releases the lease.
-The stub's calls are delivered to the daemon (`deliver_reaper_calls`), whose journal then holds each
-container stopped and removed by `reaper` and no census listing at all: the containers were gone
-before any census ran. The next coordinator's census then finds the dead incarnation's intents and
-views only, reclaims them, and the resume completes.
+under the scope's filters, kills and removes each, lists again to find none, and releases the lease
+(`reclaimed_by_one_reaper`): the containers were gone before any census ran. The next coordinator's
+census then finds the dead incarnation's intents and views only, reclaims them, and the resume
+completes.
 
 ## `mod tests` › `fn a_coordinator_that_ends_disarms_its_reaper_and_its_containers_are_released_by_their_own_runner_at_width_three()`
 
-The control (Unix, in this process): a contained width-three run whose caller names the relay stub
-completes. At every quiescent point a container ran, the run's cleanup lease was held — the reaper
-armed for the run's whole life; when the coordinator returned the lease was free, the stub had been
-called not once, every container had been released by its own runner and none by a reaper, and the
-process's container scope was cleared (arming a reaper now is refused).
+The control (Unix, in this process): a contained width-three run whose caller hands it the
+incarnation's reaper over the relay stub completes. At every quiescent point a container ran, the
+run's cleanup lease was held — the reaper armed across every container; when the coordinator returned
+the lease was free, the stub had been called not once, every container had been released by its own
+runner and none by a reaper, and the process's container scope was cleared (arming a reaper now is
+refused). **The stub's calls are observed in this process too** (the PR11 record's round R6, review
+round 6's `R6-D2`): the stub finds its relay from its own path, so a reaper that listed, killed or
+removed on a normal end — the mutation that replaces the reaper's cancellation with its end-of-file
+settlement — turns this control red, where round R5's stub, reading a variable only the two-process
+witness set, wrote its calls to `/calls` and left the relay empty.
+
+## `mod tests` › `fn registering_a_container_scope() -> std::sync::MutexGuard<'static, ()> {`
+
+The container scope a reaper renders is process-wide (`set_container_reclaim_scope`), so the two
+tests that arm a reaper in this process take this lock and never interleave a registration with the
+other's fork or clearing. Every other reaper test arms its reaper in a child process.
+
+## `mod tests` › `struct Stranded {`
+
+What `three_containers_then_an_error` leaves the test: the parent's runtime, the relay, the child's
+fixture, the run's directory, the three containers the reaper would list, the child and what it
+reported about its error.
+
+## `mod tests` › `fn three_containers_then_an_error(`
+
+A `reaped` child runs three containers; the parent writes them for the stub to list, makes the
+runtime unreachable for `unreachable`, waits for the child to report its coordinator's error, and
+makes the runtime reachable again.
+
+## `mod tests` › `fn unresolved_and_still_reaped(stranded: &Stranded) {`
+
+The unresolved end, as the child reported it: the Runners could not establish their containers gone,
+so the coordinator returned with their registrations held and the run's cleanup lease still held by
+the reaper, the three containers running and the reaper not having acted.
+
+## `mod tests` › `fn a_coordinator_that_returns_with_its_containers_unresolved_keeps_its_reaper_armed_until_it_dies_at_width_three()`
+
+`R6-C1`, killed (the PR11 record's round R6; the concurrency lens's witness, ported to the repaired
+API). The runtime is unreachable for `stop`, `remove` and `observe`, so every Runner reports its
+process unresolved and the coordinator returns its error with their registrations and pairs held. The
+reaper is still armed after the return; the runtime becomes reachable again; the coordinator is
+killed; one reaper kills and removes the three containers before any census. At `9f60fca2` the guard
+dropped with `run_concurrently` had cancelled the reaper and the three survived with no reaper call.
+
+## `mod tests` › `fn a_coordinator_that_returns_with_its_containers_unresolved_leaves_its_reaper_armed_past_its_last_handle_until_the_process_exits_at_width_three()`
+
+`R6-C1`, exited: who owns the reaper after the error and when it is disarmed. The child drops its last
+handle on the reaper after the unresolved return — the lease is still held, because the drop keeps an
+unsettled reaper armed — and exits normally. The reaper then finds its coordinator gone, kills and
+removes the three, and releases the lease; the next coordinator's census finds the intents only, its
+ledgers start empty and it completes.
+
+## `mod tests` › `fn a_coordinator_that_returns_an_error_with_every_container_established_gone_disarms_its_reaper_at_width_three()`
+
+`R6-C1`'s control: an error whose containers were all established gone disarms. The runtime is
+unreachable for `observe` only, so each Runner fails its supervision but stops and removes its
+container, and the coordinator returns its error with its ledger balanced: the reaper was cancelled
+before `run_concurrently` returned, every container was removed by its own Runner, and after the
+child is killed the stub has still been called not once.
+
+## `mod tests` › `fn a_resuming_incarnations_reaper_is_armed_before_its_pre_flight_probe_and_reclaims_it_when_the_coordinator_dies_inside_it()`
+
+`R6-C2` (the concurrency lens's witness, ported): a resuming child is handed the incarnation's reaper,
+and the frozen recovery order runs the pre-flight's shell probe in a container. While the probe runs
+the run's cleanup lease is held — the reaper was armed before it — and when the child is killed inside
+the probe, one reaper kills and removes the probe container before any census after the death. At
+`9f60fca2` the probe container survived, with no lease held and no reaper call.
+
+## `mod tests` › `fn a_resuming_incarnation_keeps_one_reaper_from_its_pre_flight_through_its_coordinator_and_disarms_it_when_the_run_completes_at_width_three()`
+
+`R6-C2`'s hand-over, in this process: the reaper armed at the resume's pre-flight is the one the
+coordinator covers. The run's cleanup lease was held when the probe container started (the start
+policy observes it); still held between recovery's return and the coordinator; held at every
+quiescent point a pipeline's container ran; and free when the coordinator returned with the run
+complete — so no second reaper was armed and none outlived the cancellation — with the stub never
+called and every container released by its own Runner.
+
+## `mod tests` › `fn a_resume_whose_pre_flight_probe_is_left_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits()`
+
+`R6-C1`'s rule on the probe's path, the class rather than the instance: a resuming child's shell-probe
+container is left unresolved (the runtime unreachable for `stop`, `remove` and `observe`), so the
+pre-flight refuses with the probe's registration held and the recovery order returns its error. The
+reaper armed before the probe is still armed; the child drops its pre-flight and its last handle on
+the reaper — still armed, the lease still held — and exits; the reaper then kills and removes the probe
+container and releases the lease. The child keeps its adopted fixture alive to the end
+(`try_resume_over`), since dropping an adopted fixture removes the parent's run root.
+
+## `mod tests` › `fn a_coordinator_refuses_a_reaper_whose_scope_is_not_its_runs_own_before_anything_is_spawned()`
+
+A reaper built for another incarnation of the run is refused by `run_concurrently` before anything is
+spawned: no container operation in the journal, the ledgers balanced, no cleanup lease held.
 
 ## `mod tests` › `fn the_broker_ledgers_balance_at_every_end_and_start_empty_at_every_next_start_at_width_three()`
 
