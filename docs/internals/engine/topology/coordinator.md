@@ -672,7 +672,7 @@ schedule of the coordinator's logic, which has no platform branch and is reprodu
 machine (R-AD); what Windows adds is its own I/O — process creation, Git for Windows, its paths —
 which every schedule exercises alike, and there a seeded test costs 37 to 44 times what it costs run
 alone on Linux (the CI guest's reconstructed durations; each schedule starts two hundred to three
-hundred Git processes, one per Git effect of the manager's). So Windows runs the fewest schedules a test's assertions compare: one per
+hundred Git processes, nearly all of them the manager's Git effects). So Windows runs the fewest schedules a test's assertions compare: one per
 configuration, two where a test asserts equality across seeds, and for a claim made of *some* seed
 the seed that makes it (the Linux runs name it). Tests whose behaviour differs on Windows — the kill
 matrices, the two-process tests, the container runner, the scripted shapes — run in full everywhere.
