@@ -924,8 +924,16 @@ census can report the window it is closing rather than infer it.
 
 ## `pub enum OrphanWindow` › `ClosedByTheUnixReaper,`
 
-`cfg(unix)`: the per-invocation cleanup reaper outlives the coordinator
-and kills its labeled containers.
+`cfg(unix)`: the cleanup reaper outlives the coordinator and kills its
+labeled containers. For a container invocation that reaper is the container
+runner's own (`exec::Reaping`, PR11 follow-up A): armed at the runner's first
+launch, before that launch's first effect, and kept until every container the
+runner started is established gone or the process exits, so a coordinator
+killed while its containers run leaves a reaper that kills and removes them
+before any census. One limit is inherited: the reaper's `docker` calls wait
+for an uncollectable CLI with no deadline after `SIGKILL`
+(`PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL`), and for that case
+the window reopens until the next write command's census.
 
 ## `pub enum OrphanWindow` › `UntilNextWriteCommandStart,`
 
@@ -1679,3 +1687,30 @@ census — including `exec::tests::the_container_subtree_can_only_inspect_a_volu
 which is the census that keeps production able to *inspect* a volume and
 nothing else. A test fixture is not a production capability, and this is
 where the tree draws that line.
+
+## `pub(crate) use fake::{` › `LinkedRuntime, NO_OP_REAPER_PROGRAM, RecordingHooks, Start, StartPolicy, container_name_for,`
+
+`NO_OP_REAPER_PROGRAM` is re-exported for the test doubles outside this subtree that back a
+`ContainerRunner` and must say what their runner's reaper would run (`create/tests.rs`'s
+`Inventory`): a double that kept the trait's default would arm a reaper over the real
+`docker` CLI wherever one is on `PATH`, and be refused at its first launch where none is.
+
+## `pub(crate) fn write_program_in_its_own_process(path: &Path, script: &str) {`
+
+Test-only: writes `script` to `path` through `/bin/sh` in a process of its own (the process
+funnel's `run_with_timeout`, bounded at a minute), then makes it executable by path, which
+opens nothing. A write-then-exec fixture written through this test process's own descriptor
+can be inherited by another harness thread's fork, and an `execve` of it then fails `ETXTBSY`
+for as long as that fork holds it (`R6-D3`; `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY`'s
+mechanism, which #162 repaired for the host shims the same way); a reaper that cannot exec
+its `docker` lists and kills nothing. It lives here rather than in `fake.rs` because the fake
+forbids `std::process::Command`, and this file's allowance is module-wide.
+`runner::host::tests::inherited_writer::the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`
+holds it with the host suites' FIFO oracle.
+
+## `pub(crate) fn run_program_in_its_own_process(program: &Path, args: &[&str]) -> Option<i32> {`
+
+Test-only: runs a program by its path through the process funnel and returns its exit code;
+the relay's self-check in the coordinator's reaper controls uses it to prove the relay is
+bound in that process (`R6-D2`).
+

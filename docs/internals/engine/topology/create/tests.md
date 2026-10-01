@@ -1539,3 +1539,28 @@ nothing, so there is no event to replay. `startup::tests` carries the same prefi
 the funnels, with the error at the coordinate returned rather than fatal. Its fixture is built
 with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds, reclaimed when the
 witness returns and when it unwinds.
+
+## `impl crate::runner::container::runtime::ContainerRuntime for Inventory` › `fn reaper_program(&self) -> PathBuf {`
+
+The inventory backs a `ContainerRunner`, so it names the fake's no-op program rather than
+keeping the trait's `docker` default, which would arm a reaper over the real CLI where one is on
+`PATH` and be refused where none is (PR11 follow-up A).
+
+## `fn create_over_containers(`
+
+A fresh run's creation with production `RunnerProbes` (the shell and one agent) over a
+`ContainerRunner`.
+
+## `fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {`
+
+`R7-D1`: the creator, in a child over the parent's fake, is killed inside its first P4 probe
+while the run directory is still a husk — before `run_started` — and the reaper its runner armed
+at that probe's cover lists it by its labels, kills and removes it, and lists again to find
+nothing, before any census. ST-16 (k)'s census path is unchanged for what the reaper leaves: the
+husk and the probe's intent and view.
+
+## `fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope() {`
+
+The design property for creation: the shell and agent probes each start under an armed reaper
+whose scope selects their labels.
+

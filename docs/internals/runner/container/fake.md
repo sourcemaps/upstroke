@@ -738,3 +738,99 @@ The precondition, checked rather than documented. Before this the doc
 below said "callers must build them from their own fixed constants" and
 one of the two callers did exactly that -- fixed, and therefore shared
 with every concurrent slot. See [`unscoped_names`].
+
+## `struct State` › `reaper_program: Option<PathBuf>,`
+
+The relay stub once `install_reaper_relay` installed one; `None` until then. Shared by every
+`acting_as` view of one fake, so a runner built over any of them arms its reaper with the same
+program.
+
+## `struct State` › `covers: Option<Vec<(String, bool)>>,`
+
+`Some` once `observing_covers` asked for it: every container started from then on, with
+whether an armed container reaper in this process selected its labels at the instant it
+started.
+
+## `impl FakeRuntime` › `pub(crate) fn observing_covers(&self) {`
+
+The design property's in-process observation (PR11 follow-up A): "while any container this
+incarnation started may still be running, an armed reaper holding the run's container scope
+exists". `daemon_start` records, for each start, whether
+`agent::proc::armed_container_reaper_selects` answers yes for the container's
+`upstroke.private_root` and `upstroke.incarnation` labels. It sees only reapers armed in this
+process, so the two-process witnesses do not use it; they observe the reaper's calls instead.
+
+## `impl FakeRuntime` › `pub(crate) fn starts_observed(&self) -> Vec<(String, bool)> {`
+
+What `observing_covers` recorded, in start order.
+
+## `pub(crate) const NO_OP_REAPER_PROGRAM: &str = "/usr/bin/true";`
+
+The fake's reaper program until a relay is installed: a reaper armed over it that outlives its
+coordinator runs `/usr/bin/true ps …`, lists nothing and exits, so the many tests that build a
+`ContainerRunner` over the fake and never look at a reaper arm one that touches nothing.
+`/usr/bin/true` exists on both Unix legs; Windows arms no reaper.
+
+## `impl ContainerRuntime for FakeRuntime` › `fn reaper_program(&self) -> PathBuf {`
+
+The relay stub if one is installed, else `NO_OP_REAPER_PROGRAM` — never the trait's `docker`
+default, which would arm a reaper over a real CLI where one is installed.
+
+## `impl FakeRuntime` › `fn observe_cover(&self, name: &str, labels: &BTreeMap<String, String>) {`
+
+Called from `daemon_start` after the container is marked running and before its start policy
+plays it. On Windows there is no reaper and nothing is observed as covered.
+
+## `fn reaper_stub() -> String {`
+
+The relay: a `/bin/sh` program a reaper execs as its `docker`. **It finds its relay from its
+own path** (`relay=${0%/*}`; the reaper `execv`s the absolute program, so `$0` is it), never
+from an environment variable — round R5's stub read a variable only the two-process witness
+set, so the in-process control's reaper wrote its calls nowhere the test looked (`R6-D2`).
+It appends each call's arguments to `calls`, tab-separated. `ps` answers from `listing` the
+way the daemon would: each line is a container's name, private-root label and incarnation
+label, and only the names whose two labels equal the two `--filter label=…` values are
+printed — so a scope that does not select a container does not find it. `rm` drops the named
+container from `listing`; `kill` changes nothing, as `docker kill` leaves a container listed
+until it is removed.
+
+## `impl FakeRuntime` › `pub(crate) fn install_reaper_relay(&self, relay: &Path) -> PathBuf {`
+
+Creates the relay directory with an empty listing, writes the stub through
+`write_program_in_its_own_process` — a process of its own, so no fork of this multithreaded
+test process can inherit a writer of a file that is about to be exec'd (`R6-D3`) — and makes
+it this fake's reaper program.
+
+## `impl FakeRuntime` › `pub(crate) fn publish_for_reaper(&self, relay: &Path) -> Vec<(String, String, String)> {`
+
+Writes the listing from every container the fake holds, with their recorded labels (`-` for
+one a seeded container lacks). A witness publishes before it kills the coordinator: the reaper
+lists within ten milliseconds of the death.
+
+## `impl FakeRuntime` › `pub(crate) fn reaper_calls(relay: &Path) -> Vec<Vec<String>> {`
+
+The calls the stub recorded, one argument vector each, in order.
+
+## `impl FakeRuntime` › `pub(crate) fn deliver_reaper_calls(&self, relay: &Path) -> Vec<String> {`
+
+Applies each recorded `kill` and `rm` to this fake as the actor `reaper`, so a witness reads in
+the journal that the containers were stopped and removed by the reaper's own calls.
+
+## `const REAPER_PROGRAM_QUERY: &str = "reaper-program";`
+
+A request on the link that is not a runtime operation: the child's `LinkedRuntime` asks the
+parent's fake which program its reaper runs. The parent's fake is the one source, so a
+two-process witness installs its relay once, on the fake it serves, and the child coordinator
+arms over that relay without being told anything else.
+
+## `impl LinkedRuntime` › `fn exchange(&self, op: RuntimeOp, request: &Value) -> Result<Value, RuntimeError> {`
+
+One request and its reply, under the runtime's turn; `call` builds a runtime operation's
+request and hands it here, and `reaper_program` sends the query.
+
+## `impl ContainerRuntime for LinkedRuntime` › `fn reaper_program(&self) -> PathBuf {`
+
+The parent fake's answer. A link that does not answer yields an empty path, which the reaper's
+program resolution refuses, so the launch is refused rather than arming a reaper that would
+silently reclaim nothing.
+

@@ -1197,11 +1197,14 @@ reaper's exit is what releases the cleanup lease the caller is about to
 act on, so a budget here would release that caller while the lease was
 still held, which is a worse defect than the one the other arm fixes.
 Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` carves it out in
-those words. The other two variants take the bounded arm,
+those words. The other variants take the bounded arm,
 `wait_for_an_ended_helper` and with the identity path on
 `wait_for_an_ended_helper_through_identity`: `UnacknowledgedCleanup`,
 which `cleanup` passes when its transaction answered anything but
-`REAPER_OK`, and `AbandonedHelper`, which only `abandon` passes.
+`REAPER_OK`, `AbandonedHelper`, which only `abandon` passes, and
+`UnleasedExit`, which only `cancel_unleased` passes — the container
+reaper's acknowledged CANCEL, whose bounded wait is followed by a
+`SIGKILL` and a second bounded wait (`ReaperEnding` below).
 
 **The carve-out is the acknowledgement, not the operation.** Until the
 second round of review `cleanup` called `close_and_wait` whatever its
@@ -1268,6 +1271,23 @@ helper that will not die does not become collectable however long the
 wait is, so the unbounded form buys a wedged parent beside the wedged
 child rather than a released lease.
 
+## `enum ReaperEnding` › `UnleasedExit,`
+
+The container reaper's acknowledged CANCEL (`cancel_unleased`), PR11 follow-up A's
+`FUA-D1-CONC-1`. It acknowledged, so it is exiting, and it holds **no** cleanup lease
+(`arm_container_reaper` forks it with none), so nothing downstream depends on its exit:
+the reason `AcknowledgedExit` is unbounded does not apply. Its wait is
+`wait_for_an_ended_helper` (or, with the identity path on,
+`wait_for_an_ended_helper_through_identity`) within `HELPER_END_BUDGET`; a reaper still
+there is sent `SIGKILL` — after acknowledging CANCEL its only remaining step is its own
+`_exit`, so killing it loses nothing — and waited for once more within the same budget,
+through the identity when there is one (`end_helper_through_identity`, which closes the
+descriptor itself, so this arm returns before the shared `close_fd`). One still not
+collectable is left for the process's exit. The concurrency lens's sequence — the reaper
+writes `REAPER_OK`, is stopped before `_exit`, and the coordinator's drop then waits on it
+forever — ends here within two budgets:
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller`.
+
 ## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut leases = crate::rundir::active_cleanup_lease_paths();`
 
 The leases the reaper holds are the union of the spawning thread's scope and what
@@ -1277,7 +1297,7 @@ per lease, not two; a pipeline thread outside every scope takes the carried ones
 a caller with neither takes none, as before. Rendered before the fork, with the
 rest, because the reaper may not allocate.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
+## `fn fork_reaper(` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
 A helper that ends before it writes READY, so the failure path is
 driven with no clock in it at all: the parent's wait ends on the
@@ -1293,14 +1313,28 @@ same exit status afterwards, which is how the defect was found
 (`a_helper_that_never_acknowledged_reports_what_ending_it_answered`
 took ~4 s on macOS against ~6 ms on Linux in run 33987067020).
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let containers = container_scope_for_a_new_reaper();`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `fork_reaper(leases, container_scope_for_a_new_reaper())`
 
-Rendered BEFORE the fork, like `cleanup_paths` above and for the same
-reason: the reaper may not allocate. `None` is the ordinary state of
-every run today — nothing selects a container Runner until PR12 — and
-costs the reaper nothing at all.
+A host reaper's container scope is the process-wide one, rendered BEFORE the fork, like
+`cleanup_paths` and for the same reason: the reaper may not allocate. `None` is the
+ordinary state of every run — `set_container_reclaim_scope`'s callers are tests — and
+costs the reaper nothing at all. A container runner's reaper does not read it:
+`arm_container_reaper` renders the scope it is handed and passes it to `fork_reaper`
+itself, so two runners in one process never share a scope.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let (pid, identity) = match fork_helper() {`
+## `mod termination` › `fn fork_reaper(`
+
+The fork every reaper is made by, split out of `spawn_reaper` by PR11 follow-up A so a
+host reaper and a container reaper share it: the descriptor ceiling, the two pipes, the
+fork (or `clone3` with the identity path on), the child's dispositions, group, descriptor
+scrub, lease holds and READY, and the parent's bounded READY wait, all unchanged. What
+differs is only what the caller hands in: `spawn_reaper` passes the run's lease paths
+(the thread's scope merged with the carried ones) and the process-wide container scope,
+after `verify_group_scanner`; `arm_container_reaper` passes no lease and its own scope,
+and skips the scanner check, because a container reaper registers no process group and
+never consults it.
+
+## `fn fork_reaper(` › `let (pid, identity) = match fork_helper() {`
 
 The fork, and with the identity path on the name that comes with it.
 `fork_helper` answers `Err` only where no child exists — a `fork` that
@@ -1312,7 +1346,7 @@ takes the `pid == 0` arm below with `identity == NO_HELPER_IDENTITY`
 whichever way it was created, and the arm is master's. `spawn_guard`
 makes the same call and takes the same shape.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
+## `fn fork_reaper(` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
 
 A separate process group is the crucial boundary: an
 uncatchable kill of Upstroke's foreground job must not also kill
@@ -1342,12 +1376,12 @@ to be left behind, and the launch fails at the READY wait. The
 child-side call remains checked, and its failure is reported by step
 and errno.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut delay_left = ready_delay_ms;`
+## `fn fork_reaper(` › `let mut delay_left = ready_delay_ms;`
 
 Test subprocesses can hold READY back past the parent's deadline
 so the late-reaper path is driven deterministically.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
+## `fn fork_reaper(` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
 
 How the wait ended, in the message: the helper's own report of the
 step that refused, the pipe closing with no report, the budget
@@ -1356,7 +1390,7 @@ report is decoded with the lease paths this launch rendered before
 the fork, so the lease a refused `open` or `flock` names is the path,
 not a position.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
+## `fn fork_reaper(` › `let end = describe_helper_end(reaper.abandon());`
 
 With the identity path off the teardown is master's, unchanged and in
 master's order; what it answered becomes the diagnostic. Nothing is
@@ -2327,6 +2361,63 @@ this machine can ever start again".
 Arm or disarm the container scope. See
 [`super::set_container_reclaim_scope`].
 
+
+## `mod termination` › `pub struct ContainerReaper {`
+
+A container runner's reaper (PR11 follow-up A; `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`).
+`runner::container::exec`'s `Reaping` arms one per runner at the first container launch
+and holds it; it is re-exported from `agent::proc` under `cfg(unix)` beside
+`arm_container_reaper`. Windows has none (ST-16 (e)). The `Option` is only so `Drop` can
+take the handle: a `ContainerReaper` without one is never built in production.
+
+## `mod termination` › `pub fn arm_container_reaper(`
+
+Takes `ProcessSite::Terminate` by value and refuses any other site, as `Supervisor::begin`
+does. Then, in this order:
+
+- **The scope is rendered before anything else** (`render_container_argv`): a program that
+  cannot be resolved to a path, or a value with an interior NUL, refuses here, before the
+  monitor or the fork.
+- **`shared_state()?` installs the signal monitor** (`R6-D1`). A process whose every
+  invocation runs in a container never reaches `Supervisor::begin`, so without this the
+  fail-closed termination a missed CANCEL acknowledgement arms (`cancel_unleased`) would
+  set `PENDING_TERMINATION` with nothing reading it.
+- **One reaper is forked through `fork_reaper` with no cleanup lease** and the rendered
+  scope. No lease, by construction, for the reasons the follow-up's record gives (§1.3):
+  a held R28 would refuse the in-process resume the frozen
+  `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
+  requires, the census reclaims the same containers and the two converge, and "disarming
+  never leaves R28 held" becomes structural. No launch claim and no `REGISTER` either: the
+  reaper's `pgid` stays 0, so it never settles a group and never forks an anchor; when its
+  parent dies it runs only `reclaim_labeled_containers` over its scope.
+
+The test build records each armed reaper's scope (`ARMED_CONTAINER_REAPERS`, below) so the
+fake runtime can say, at each container start, whether an armed reaper selects it.
+
+## `mod termination` › `impl Drop for ContainerReaper {`
+
+The disarm: `cancel_unleased`. `Reaping` drops its reaper only when every launch it covered
+reached an established end; otherwise it `mem::forget`s it, so its descriptors stay open
+until the process exits and the reaper then kills and removes what its scope labels.
+
+## `impl Reaper` › `fn cancel_unleased(self) {`
+
+`cancel` for a reaper that holds no lease: the same five-byte `REAPER_CANCEL` frame and the
+same two-second acknowledgement, and the same fail-closed arm when it does not come (the
+reaper stopped, killed, or not answering — `R6-D1`'s rule for a helper whose state cannot
+be established), with its own message naming the container reaper. What differs is the
+exit wait after an acknowledgement: `ReaperEnding::UnleasedExit`, bounded, where `cancel`'s
+is the unbounded `AcknowledgedExit` (`FUA-D1-CONC-1`).
+
+## `mod termination` › `static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());`
+
+Test-only: the listing argv of every container reaper this test process has armed and not
+cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
+`note_disarmed_container_reaper` removes it before the CANCEL, and a forgotten reaper stays
+— it is still armed. `armed_container_reaper_selects` answers whether one lists a private
+root label and incarnation; `fake.rs` asks it at each container start
+(`FakeRuntime::observing_covers`), which is how the design property's in-process witnesses
+see "covered by an armed reaper with its scope" at the instant a container starts.
 ## `mod termination` › `if let Some(scope) = scope {`
 
 Rendered here so a scope that cannot be turned into argv is refused
@@ -2829,6 +2920,59 @@ release it, and the child's own `open` and `LOCK_SH | LOCK_NB` refuse
 at once, so no scheduling outcome reaches the assertion. This is also
 the only test that drives `report_setup_failure_and_exit` in a real
 child; the frame's encoding is pinned separately without a fork.
+
+## `mod tests` › `fn run_isolated(`
+
+Runs one ignored child test of this module in a process of its own (`--exact`, one test
+thread) under a deadline, its stdout and stderr in files of a scratch tree, and kills its
+process group at the deadline so a mutation that wedges the child fails the test instead of
+the run. The container reaper's isolated children use it: each needs a process whose signal
+monitor, cleanup scope or reaper state no other test shares.
+
+## `mod tests` › `fn a_container_reaper_is_armed_only_at_the_terminate_site() {`
+
+`arm_container_reaper` refuses `ProcessSite::Spawn` before rendering or forking anything.
+
+## `mod tests` › `fn a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor() {`
+
+`R6-D1`. The isolated caller arms a container reaper in a fresh process — nothing has
+installed the signal monitor yet, and arming reports that it did — then kills and reaps the
+reaper and drops the guard: the CANCEL is not acknowledged, `cancel_unleased` arms
+fail-closed termination, and the monitor ends the caller with `SIGTERM`. Without
+`shared_state()` in `arm_container_reaper` (`fua-m8`) the caller waits out ten seconds and
+exits 0.
+
+## `mod tests` › `fn a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it() {`
+
+`R6-D1`'s other half: the reaper is stopped before the drop, so the CANCEL is not
+acknowledged within its two seconds and the caller ends by `SIGTERM`. The reaper's program is
+the fake runtime's relay stub; once the caller is gone the kernel continues the orphaned
+stopped group (or, after five seconds, this test continues it, only if `process_is_stopped`
+still says it is stopped), and the reaper, finding its parent gone, lists by its scope — the
+relay's first call is exactly the scope's listing argv — and finds nothing to kill.
+
+## `mod tests` › `fn an_armed_container_reaper_holds_no_cleanup_lease() {`
+
+The design property's last clause, made structural. The isolated caller takes the run lock
+and enters its cleanup scope; a host reaper forked there holds the run's cleanup lease (the
+control: the read can see a hold), and once it is cancelled the lease is released; a
+container reaper armed in the same scope holds none. Both "not held" reads are bounded
+polls, never one read (requirement 8). With the container fork handed the thread's lease
+paths (`fua-m9`) the last read never sees the lease released.
+
+## `mod tests` › `fn a_container_reaper_that_acknowledges(pid: libc::pid_t) -> ContainerReaper {`
+
+A `ContainerReaper` over this fixture's own pipes with `REAPER_OK` already queued, for a
+stand-in pid, as `a_reaper_that_acknowledges` builds a host reaper: a real reaper exits the
+instant it acknowledges, so its exit wait cannot be observed.
+
+## `mod tests` › `fn a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller() {`
+
+`FUA-D1-CONC-1`. The isolated caller stops a stand-in (`spawn_sigchld_target`), wraps it in
+a `ContainerReaper` whose CANCEL is acknowledged, and drops it: the drop returns within two
+`HELPER_END_BUDGET`s with the stand-in killed and collected. With the exit wait made
+`AcknowledgedExit` again (`fua-m15`) the drop never returns and the child is killed at its
+60-second deadline.
 
 ## `pub(crate) mod test_support` › `pub(crate) fn run_with_timeout(`
 

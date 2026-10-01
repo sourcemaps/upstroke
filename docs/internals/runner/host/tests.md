@@ -3206,3 +3206,18 @@ handshake waits: a sibling test thread's fork can hold a copy of the lease
 for a moment after the reaper exits (the mechanism of
 `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
 that outlives the bound fails the test.
+
+## `mod inherited_writer` › `fn writes_leave_no_writer_in_another_threads_fork(`
+
+The FIFO oracle, shared since PR11 follow-up A: a writer fills a FIFO larger than its pipe while
+another thread forks a holder of this process's inherited descriptors; once the writer is done,
+the reader sees end-of-file only if no fork holds a writer. The marker shims and the container
+fake's relay writer are each judged by it.
+
+## `mod inherited_writer` › `fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {`
+
+`R6-D3`: the relay stub a container reaper execs is written by
+`runner::container::write_program_in_its_own_process`, a process of its own, so no fork of the
+test process holds a writer of it and its `execv` cannot fail `ETXTBSY`. Written in-process
+instead (`fua-m11`), the reader never sees end-of-file.
+

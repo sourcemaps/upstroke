@@ -532,6 +532,19 @@ gone.
 [`RuntimeError`] when the runtime cannot be reached, or the removal
 fails for a reason other than the container being absent.
 
+## `pub trait ContainerRuntime: Send + Sync` › `fn reaper_program(&self) -> PathBuf {`
+
+The program a container runner's reaper execs to list, kill and remove the runner's
+containers when its coordinator dies (PR11 follow-up A). The default is the `docker` CLI the
+real runtime runs itself (`DOCKER_PROGRAM`), so `DockerCli` inherits it and gains no
+function; `agent::proc` resolves a bare name on `PATH` before the fork and refuses one it
+cannot resolve. **Every test double that backs a `ContainerRunner` overrides it**: the fake
+answers its relay stub once one is installed and a no-op program (`/usr/bin/true`) otherwise,
+the linked runtime asks the parent's fake, and `exec/tests.rs`'s `Runtime` and
+`create/tests.rs`'s `Inventory` delegate or answer the no-op. A double that kept the default
+would arm a reaper over the real CLI where one is on `PATH` — this build box — and be
+refused at its first launch where none is, CI's macOS leg.
+
 ## `pub trait OwnerLiveness: Send + Sync {`
 
 ---------------------------------------------------------------------------

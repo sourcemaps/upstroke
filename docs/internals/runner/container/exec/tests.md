@@ -1916,3 +1916,116 @@ cause.
 
 A call cancelled before it starts reaches nothing: no intent, no view, no container, an empty trace,
 and the report is `NeverStarted`.
+
+## `impl ContainerRuntime for Runtime` › `fn reaper_program(&self) -> PathBuf {`
+
+The scripted double delegates to its fake, so its runners arm their reapers over the fake's
+no-op program (or its relay) and never over a real `docker` (PR11 follow-up A).
+
+## `const UNARMED_LAUNCHERS: &[&str] = &["launch", "create_container", "start_container"];`
+
+The funnel entries that start a container without a cover: the free `launch` and the two
+funnels it and `ContainerRunner::launch` call. The runtime's own `create` and `start` are the
+primitives below them, read separately.
+
+## `fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {`
+
+Every naming of `name` in blanked code (`FUA-D1-DES-1`): an occurrence of the identifier that is
+not its definition (`fn launch(`), a method call or field (`.launch`), or a field initializer
+(`launch:`), classified as a call, a function value, an import, an alias or a re-export. Inside
+a `use` declaration it is an import, an alias when `as` follows it, a re-export when the `use`
+is `pub` or `pub(…)`; elsewhere a call when `(` follows and a value otherwise. Every alias,
+function value and re-export names the original identifier somewhere, so counting namings
+rather than calls closes the gap the design review found: `use super::launch as
+start_uncovered;` and a call of `start_uncovered(` passed the census as designed.
+
+## `fn enclosing_fn(code: &str, at: usize) -> Option<String> {`
+
+The innermost `fn` whose body's braces contain `at`, read in blanked code, where every brace is
+code. A `fn(` pointer type has no name and is skipped.
+
+## `fn the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher() {`
+
+The reader over written snippets: an alias, two re-exports (`pub use … as`, `pub(crate) use`),
+an import, a function value, a call by bare name after a glob import and a call by path are
+named; a definition, a method call, a field and a field initializer are not.
+
+## `fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {`
+
+The domination census (§1.4 of the follow-up's record), over every production region of
+`src/` (`effects::production_code`, skipping the whole-file test modules, as the fold census
+does), five checks:
+
+1. the namings of `create_container` and `start_container` are exactly `exec.rs`'s import and
+   its two calls inside `ContainerRunner::launch`, and `container.rs`'s two calls inside the
+   free `launch`;
+2. the free `launch` has no production naming at all;
+3. in `container.rs` and `view.rs` — the two production modules whose `disallowed_methods`
+   allowance is module-wide, so clippy cannot guard them — the runtime's `create` and `start`
+   are named only by `runtime.create(` and `runtime.start(` inside the two funnels (the
+   standard library's `File::create(` aside), and `RuntimeOp::Create`/`RuntimeOp::Start` only
+   inside the real runtime's own `create` and `start`;
+4. in `exec.rs`, `fn launch(`'s signature names `Covered`, `self.launch(` occurs once, in
+   `contain`, after `contain`'s one `.cover(`, and `Covered {` is constructed once, in `cover`;
+5. the control: the regions naming `start_container` are exactly those two files, and the walk
+   read more than 40 files and 750,000 non-whitespace bytes.
+
+Every other production module forbids `disallowed_methods` outside tests, so a path to the
+primitives there — a call or a function value — is a clippy error, measured
+(`fua-p1-clippy-refuses-a-function-value-of-the-start-primitive`).
+
+## `fn reaper_labels(private_root: &Path, incarnation: &str) -> BTreeMap<String, String> {`
+
+The two labels a reaper's scope lists by, as `ContainerIntent::labels` writes them.
+
+## `fn armed_for(private_root: &Path, incarnation: &str) -> bool {`
+
+Whether a container reaper this process armed, and has not cancelled, lists that scope.
+
+## `fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {`
+
+`FUA-D1-DES-2`: an unarmed runner's cover is handed another incarnation's labels and refuses —
+and no reaper exists for either scope, in the runner's own state or the process's observation.
+The control arms on its own labels, and its established end disarms at the drop. With the
+comparison moved after the arming (`fua-m14`) a reaper is armed before the refusal.
+
+## `fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent() {`
+
+`R7-D2`'s per-launch half: a runner whose reaper was armed for another incarnation — as a
+caller-built reaper was in round R6 — refuses its own container before its intent is written:
+`NeverStarted`, no intent, nothing created, and no second reaper.
+
+## `fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop() {`
+
+`R6-C1` at the runner: the runtime cannot observe, stop or remove the container, so the
+invocation ends `Unresolved`, and the reaper is still armed after the runner is dropped.
+
+## `fn a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop() {`
+
+The control: one invocation completes, one ends `Gone` with its observation lost; the drop
+disarms.
+
+## `fn a_panic_inside_contain_leaves_the_reaper_armed() {`
+
+An observer panics after the start; the cover is dropped by the unwinding without a settle, and
+the reaper is still armed after the runner's drop (`fua-m7`).
+
+## `const REAPER_TESTS: &[(&str, &[&str])] = &[`
+
+The functions of this follow-up's reaper tests, by file. `no_reaper_test_reads_a_hold_as_released_once`
+reads each, so a renamed one fails the census rather than leaving it.
+
+## `fn negated_hold_reads_outside_a_bounded_wait(body: &str) -> Vec<String> {`
+
+Every `!…observe_cleanup_hold(` or `!…is_running(` not inside a `loop` or `while` whose block
+mentions a `deadline` or an `elapsed()`.
+
+## `fn no_reaper_test_reads_a_hold_as_released_once() {`
+
+Requirement 8 of `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED` (round R6's CI flake): a sibling
+test thread's fork holds an inherited cleanup-lease descriptor for a moment
+(`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), so a "not held" read must poll
+within a bound. A positive read is safe and is not refused: a fork can make a released lease
+look held, never a held one look released. `fua-m12` adds one one-shot read to the lease test's
+child and turns this census red.
+
