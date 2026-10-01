@@ -648,20 +648,19 @@ impl FakeRuntime {
 
 #[cfg(unix)]
 const REAPER_STUB: &str = r#"#!/bin/sh
-printf '%s\t' "$@" >> "$UPSTROKE_TEST_REAPER_RELAY/calls"
-printf '\n' >> "$UPSTROKE_TEST_REAPER_RELAY/calls"
+relay=${0%/*}
+printf '%s\t' "$@" >> "$relay/calls"
+printf '\n' >> "$relay/calls"
 case "$1" in
-ps) cat "$UPSTROKE_TEST_REAPER_RELAY/listing" ;;
-rm) grep -v -x -F -e "$4" "$UPSTROKE_TEST_REAPER_RELAY/listing" > "$UPSTROKE_TEST_REAPER_RELAY/listing.next"
-    mv "$UPSTROKE_TEST_REAPER_RELAY/listing.next" "$UPSTROKE_TEST_REAPER_RELAY/listing" ;;
+ps) cat "$relay/listing" ;;
+rm) grep -v -x -F -e "$4" "$relay/listing" > "$relay/listing.next"
+    mv "$relay/listing.next" "$relay/listing" ;;
 esac
 exit 0
 "#;
 
 #[cfg(unix)]
 impl FakeRuntime {
-    pub(crate) const REAPER_RELAY: &'static str = "UPSTROKE_TEST_REAPER_RELAY";
-
     pub(crate) fn install_reaper_relay(relay: &Path) -> PathBuf {
         let program = relay.join("docker");
         crate::workspace_manager::fixture::write_executable(&program, REAPER_STUB.as_bytes());

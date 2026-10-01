@@ -502,12 +502,61 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write a fixture file");
 }
 
-/// Write `bytes` to `path` as [`write_file`] does, and make the file a program: readable and
-/// executable by everyone, writable by its owner — a stub a test hands to a process that execs it.
+/// Write `bytes` to `path` and make the file a program: readable and executable by everyone,
+/// writable by its owner — a stub a test hands to a process that execs it.
+///
+/// **The bytes are written by a process of their own**, `/bin/sh` running `printf`, and never
+/// through a descriptor of this one. A test binary is multithreaded: a thread that forks while
+/// this process holds the file open for writing hands its child a copy of the writer, which the
+/// child keeps until it execs or exits, and an `execve` of the file fails `ETXTBSY` for as long as
+/// it does (`W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY`, `PR172-REAPER-ROUNDS-STUB-NEVER-RAN`). A
+/// reaper that cannot exec its `docker` lists nothing and kills nothing. Written by the shell, the
+/// only writer is the shell's own and it ends with the shell — what the host suites' `write_shim`
+/// does for their shims (the PR11 record's round R6, review round 6's `R6-D3`). The mode is set
+/// by path afterwards, which opens nothing. A writer still running after a minute is killed and
+/// reaped, and the fixture fails.
 #[cfg(unix)]
 pub(crate) fn write_executable(path: &Path, bytes: &[u8]) {
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt as _;
-    write_file(path, bytes);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the parent directory of a fixture program");
+    }
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "printf '%s' \"$2\" > \"$1\"", "write-executable"])
+        .arg(path)
+        .arg(OsStr::from_bytes(bytes))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("start the fixture program's writer in a process of its own");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let written = loop {
+        if let Some(status) = writer
+            .try_wait()
+            .expect("poll the fixture program's writer")
+        {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            writer
+                .kill()
+                .expect("kill the fixture program's writer the deadline ended");
+            let ended = writer
+                .wait()
+                .expect("reap the fixture program's writer the deadline ended");
+            panic!(
+                "the writer of {} did not finish within a minute and was killed: {ended}",
+                path.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        written.success(),
+        "write the fixture program {}: {written}",
+        path.display()
+    );
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .expect("make a fixture file executable");
 }

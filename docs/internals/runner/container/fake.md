@@ -437,12 +437,25 @@ container survive exactly as the daemon's would.
 The `docker` a coordinator's cleanup reaper execs in a test (the PR11 record's
 round R5, `FULL-SC-1`). A reaper is a `fork`-only child of the coordinator that
 closes every inherited descriptor, so after its coordinator dies nothing of the
-child's stdio reaches the daemon; the stub reaches it through files under the
-relay directory its environment names (`UPSTROKE_TEST_REAPER_RELAY`, inherited
-from the coordinator): each call's arguments appended to `calls`, `ps` answered
-from `listing`, and `rm` taking the removed id out of `listing`, so the reaper's
+child's stdio reaches the daemon; the stub reaches it through files beside
+itself: each call's arguments appended to `calls`, `ps` answered from
+`listing`, and `rm` taking the removed id out of `listing`, so the reaper's
 second listing finds nothing and its loop ends. Constant text: every value is an
-argument or the environment, never spliced into the program (standards §9).
+argument or the stub's own path, never spliced into the program (standards §9).
+
+## `const REAPER_STUB: &str = r#"#!/bin/sh` › `relay=${0%/*}`
+
+The relay directory is the directory the stub was executed from — the reaper
+`execv`s the scope's absolute program, so `$0` is that path — and not a name
+the environment carries. Round R5's stub read `UPSTROKE_TEST_REAPER_RELAY`,
+which only the two-process witness set in its child's environment; the
+in-process control never could, so a reaper that listed, killed or removed on
+a coordinator's normal end appended its calls to `/calls` and the control's
+"no call" assertion read the empty relay file and passed (the PR11 record's
+round R6, review round 6's `R6-D2`: replacing the reaper's cancellation with
+its end-of-file settlement left every coordinator test green). Located by its
+own path, every reaper that execs the stub is observed, in this process or in
+a child.
 
 ## `impl FakeRuntime` › `pub(crate) fn install_reaper_relay(relay: &Path) -> PathBuf {`
 

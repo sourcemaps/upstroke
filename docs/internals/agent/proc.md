@@ -2335,9 +2335,13 @@ a reaper that has no error channel.
 
 ## `mod termination` › `pub struct ContainerReaper {`
 
-A cleanup reaper armed for a coordinator's whole run rather than for
+A cleanup reaper armed for an incarnation's containers rather than for
 one process: the run's half of `os_matrix`'s Unix row for containers
-(the PR11 record's round R5, the full review's `FULL-SC-1`).
+(the PR11 record's round R5, the full review's `FULL-SC-1`; round R6,
+review round 6's `R6-C1` and `R6-C2`). Its owner is the coordinator's
+`IncarnationReaper`, which arms it before the incarnation's first
+container — a resume's pre-flight probe included — and keeps it until
+every container is established gone, or until this process exits.
 
 A reaper is otherwise forked by [`Supervisor::begin`] for one host
 process and ends with it, so between a container runner's `docker`
@@ -2361,18 +2365,38 @@ Terminate site's own fork, and no new effect site.
 ### Errors
 
 [`UpstrokeError::Agent`] when the site is not Process.Terminate or the
-reaper cannot be started (`spawn_reaper`'s account), and
+reaper cannot be started (`spawn_reaper`'s account), or the signal monitor
+cannot be installed (`shared_state`'s account, below), and
 [`UpstrokeError::Refused`] when no container scope is registered
 ([`set_container_reclaim_scope`]): a reaper armed then would hold R28 and
 kill nothing.
 
+## `pub fn arm_container_reaper(` › `shared_state()?;`
+
+Install the process's signal monitor before the fork, as every
+`Supervisor::begin` does (the PR11 record's round R6, review round 6's
+`R6-D1`). A cancellation this reaper does not acknowledge
+(`Reaper::cancel`) fails closed by setting `PENDING_TERMINATION`, and the
+monitor is the only thing that acts on it: it kills the registered groups
+and raises the signal, so this process ends and the reaper, seeing its
+coordinator gone, settles and releases R28. A container-only coordinator
+starts no host process, so nothing else had installed the monitor; the
+failed cancellation set the flag, nothing read it, and the caller went on
+with the cleanup lease still held by its stopped or wedged reaper —
+`monitor initialized=false, pending termination=15, R28 still held=true`.
+
 ## `mod termination` › `impl Drop for ContainerReaper {`
 
 Cancel the reaper and wait for it (`Reaper::cancel`), as a `Supervisor`
-that never registered a group does: a coordinator that ends — normally,
-on an error, or unwinding — never has its own live containers killed by
-its reaper, `authoritative_state`'s "a live incarnation's containers must
-not be touched". Only the coordinator's death leaves the reaper to act.
+that never registered a group does: the reaper settles nothing and kills
+no container, `authoritative_state`'s "a live incarnation's containers
+must not be touched". Only the coordinator's death leaves the reaper to
+act. Dropping one is therefore the coordinator's statement that every
+container its scope labels has its termination established: the
+coordinator's `IncarnationReaper` drops it only then, and on any other end
+keeps it armed until this process exits (the PR11 record's round R6,
+`R6-C1`). A cancellation that is not acknowledged fails closed through
+the signal monitor `arm_container_reaper` installed.
 
 ## `mod termination` › `fn resolve_reaper_program(program: &std::path::Path) -> Result<PathBuf, UpstrokeError> {`
 

@@ -53,7 +53,8 @@ pub struct PipelineSeams {
     pub input_policy: Arc<dyn ReviewInputPolicy + Send + Sync>,
     pub hooks: HooksFactory,
     pub slots: SlotLimits,
-    pub container_cli: Option<PathBuf>,
+    #[cfg(unix)]
+    pub reaper: Option<Arc<IncarnationReaper>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -212,12 +213,26 @@ impl TopologyRun {
         let leases = Vec::new();
         self.limit_slots(pipelines.slots)?;
         #[cfg(unix)]
-        let _reaper = match pipelines.container_cli.as_deref() {
-            Some(program) => Some(arm_reaper(self, program, &leases)?),
+        let covered = match pipelines.reaper.as_deref() {
+            Some(reaper) => Some(reaper.cover_run(self, &leases)?),
             None => None,
         };
-        #[cfg(not(unix))]
-        let _ = &pipelines.container_cli;
+        let outcome = self.coordinate(seams, pipelines, hooks, observer, leases);
+        #[cfg(unix)]
+        if let Some(covered) = covered {
+            covered.end(self.invocations_balance());
+        }
+        outcome
+    }
+
+    fn coordinate(
+        &mut self,
+        seams: &RunSeams<'_>,
+        pipelines: &PipelineSeams,
+        hooks: &mut dyn TopologyHooks,
+        observer: Option<&mut dyn Quiescence>,
+        leases: Vec<PathBuf>,
+    ) -> Result<Progress, UpstrokeError> {
         let width = Entitlements::of(self.fold()).max_parallel().max(1);
         let name = std::thread::current()
             .name()
@@ -271,31 +286,160 @@ impl TopologyRun {
     }
 }
 
+// The incarnation's container reaper (standards §10; the PR11 record's rounds R5 and R6).
+// Owner: the caller, for the incarnation's life; `RunPreflight` and `run_concurrently`
+// borrow it, and a pipeline's seams carry a handle it never uses. Linearization point:
+// `armed`'s lock, held across a fork and across a cancellation, so the reaper is armed
+// at most once and disarmed at most once. Transitions: unarmed, armed by the first
+// `cover`; armed, disarmed (cancelled) only by an `end` that established every container
+// gone with nothing unsettled before it, or by the drop when nothing is unsettled; armed
+// for the rest of this process when anything covered ended, or unwound, without
+// establishing its containers' termination (`unsettled`, which never clears). Cleanup:
+// the drop.
 #[cfg(unix)]
-struct ArmedReaper(Option<crate::agent::proc::ContainerReaper>);
+pub struct IncarnationReaper {
+    scope: crate::runner::container::census::ReaperContainerScope,
+    armed: std::sync::Mutex<Option<crate::agent::proc::ContainerReaper>>,
+    unsettled: std::sync::atomic::AtomicBool,
+}
 
 #[cfg(unix)]
-impl Drop for ArmedReaper {
+impl IncarnationReaper {
+    pub fn contained(
+        program: &std::path::Path,
+        private_root: &std::path::Path,
+        incarnation: &str,
+    ) -> Result<Self, UpstrokeError> {
+        Ok(Self {
+            scope: crate::runner::container::census::ReaperContainerScope::new(
+                program,
+                private_root,
+                incarnation,
+            )?,
+            armed: std::sync::Mutex::new(None),
+            unsettled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub(super) fn cover(&self, leases: &[PathBuf]) -> Result<Covered<'_>, UpstrokeError> {
+        let mut armed = self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if armed.is_none() {
+            crate::agent::proc::set_container_reclaim_scope(Some(&self.scope))?;
+            match crate::agent::proc::arm_container_reaper(
+                crate::topology::effects::ProcessSite::Terminate,
+                leases,
+            ) {
+                Ok(reaper) => *armed = Some(reaper),
+                Err(error) => {
+                    let _ = crate::agent::proc::set_container_reclaim_scope(None);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Covered {
+            reaper: self,
+            settled: false,
+        })
+    }
+
+    fn cover_run(
+        &self,
+        run: &TopologyRun,
+        leases: &[PathBuf],
+    ) -> Result<Covered<'_>, UpstrokeError> {
+        let own = run.container_scope(self.scope.program())?;
+        if own != self.scope {
+            let labels = |scope: &crate::runner::container::census::ReaperContainerScope| {
+                scope
+                    .list_argv()
+                    .into_iter()
+                    .filter(|argument| argument.starts_with("label="))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the container reaper this coordinator was handed covers the containers \
+                     carrying `{}`, and this run's own carry `{}` (its recorded private root and \
+                     its current incarnation): such a reaper would kill none of them if this \
+                     process died, so nothing was spawned or appended",
+                    labels(&self.scope),
+                    labels(&own)
+                ),
+            });
+        }
+        self.cover(leases)
+    }
+
+    fn disarm(&self) {
+        let mut armed = self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reaper) = armed.take() {
+            drop(reaper);
+            let _ = crate::agent::proc::set_container_reclaim_scope(None);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for IncarnationReaper {
     fn drop(&mut self) {
-        drop(self.0.take());
+        let armed = self
+            .armed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(reaper) = armed else {
+            return;
+        };
+        if *self.unsettled.get_mut() {
+            std::mem::forget(reaper);
+        } else {
+            drop(reaper);
+        }
         let _ = crate::agent::proc::set_container_reclaim_scope(None);
     }
 }
 
 #[cfg(unix)]
-fn arm_reaper(
-    run: &TopologyRun,
-    program: &std::path::Path,
-    leases: &[PathBuf],
-) -> Result<ArmedReaper, UpstrokeError> {
-    let scope = run.container_scope(program)?;
-    crate::agent::proc::set_container_reclaim_scope(Some(&scope))?;
-    let mut armed = ArmedReaper(None);
-    armed.0 = Some(crate::agent::proc::arm_container_reaper(
-        crate::topology::effects::ProcessSite::Terminate,
-        leases,
-    )?);
-    Ok(armed)
+pub(super) struct Covered<'r> {
+    reaper: &'r IncarnationReaper,
+    settled: bool,
+}
+
+#[cfg(unix)]
+impl Covered<'_> {
+    pub(super) fn close(mut self, established: bool) {
+        self.settled = established;
+    }
+
+    fn end(mut self, established: bool) {
+        self.settled = established;
+        if established
+            && !self
+                .reaper
+                .unsettled
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.reaper.disarm();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Covered<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.reaper
+                .unsettled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8455,7 +8599,15 @@ mod tests {
         parent: &crate::engine::topology::scaffold::ParentSide,
         wide: &mut Wide,
         incarnation: &str,
-        container_cli: Option<std::path::PathBuf>,
+    ) -> ! {
+        run_held_over(parent, wide, incarnation, |pipelines| pipelines)
+    }
+
+    fn run_held_over(
+        parent: &crate::engine::topology::scaffold::ParentSide,
+        wide: &mut Wide,
+        incarnation: &str,
+        seams: impl FnOnce(PipelineSeams) -> PipelineSeams,
     ) -> ! {
         let runner: std::sync::Arc<dyn crate::runner::Runner> =
             std::sync::Arc::new(crate::engine::topology::scaffold::container_runner(
@@ -8464,15 +8616,45 @@ mod tests {
                 Box::new(parent.runtime()),
                 Duration::from_millis(10),
             ));
-        let pipelines = PipelineSeams {
-            container_cli,
-            ..wide.env.pipelines_over(std::sync::Arc::clone(&runner))
-        };
+        let pipelines = seams(wide.env.pipelines_over(std::sync::Arc::clone(&runner)));
         let mut hooks = wide.env.hooks();
         let ended =
             wide.run
                 .run_concurrently(&wide.env.seams_over(&*runner), &pipelines, &mut hooks, None);
+        #[cfg(unix)]
+        if let (Err(error), Ok(after)) = (&ended, std::env::var(AFTER_AN_ERROR)) {
+            let public = wide.env.paths.public.clone();
+            let held = || crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks);
+            parent.event(&serde_json::json!({
+                "returned": error.to_string(),
+                "balanced": wide.run.invocations_balance(),
+                "held": held(),
+            }));
+            if after == "exit" {
+                drop(pipelines);
+                parent.event(&serde_json::json!({"dropped": true, "held": held()}));
+                std::process::exit(0);
+            }
+            loop {
+                std::thread::park();
+            }
+        }
         panic!("the parent kills this coordinator while its containers run; it ended {ended:?}");
+    }
+
+    #[cfg(unix)]
+    const AFTER_AN_ERROR: &str = "UPSTROKE_TEST_CHILD_AFTER_AN_ERROR";
+
+    #[cfg(unix)]
+    fn child_reaper(
+        private_root: &std::path::Path,
+        incarnation: &str,
+    ) -> Option<std::sync::Arc<IncarnationReaper>> {
+        let program = std::env::var_os("UPSTROKE_TEST_CHILD_CONTAINER_CLI")?;
+        Some(std::sync::Arc::new(
+            IncarnationReaper::contained(std::path::Path::new(&program), private_root, incarnation)
+                .expect("the incarnation's container reaper"),
+        ))
     }
 
     fn fresh_child(parent: &crate::engine::topology::scaffold::ParentSide) {
@@ -8489,13 +8671,12 @@ mod tests {
         parent.event(&serde_json::json!({
             "root": wide.env.fixture.root.to_string_lossy(),
         }));
-        run_held(parent, &mut wide, &incarnation, None);
+        run_held(parent, &mut wide, &incarnation);
     }
 
     #[cfg(unix)]
     fn reaped_child(parent: &crate::engine::topology::scaffold::ParentSide) {
         let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
-        let program = std::path::PathBuf::from(child_env("UPSTROKE_TEST_CHILD_CONTAINER_CLI"));
         let tasks = three();
         let mut wide = Wide::durable_contained(
             "coordinator-child-reaped",
@@ -8509,7 +8690,12 @@ mod tests {
             "root": wide.env.fixture.root.to_string_lossy(),
             "private": wide.env.fixture.private.to_string_lossy(),
         }));
-        run_held(parent, &mut wide, &incarnation, Some(program));
+        let reaper = child_reaper(&wide.env.fixture.private, &incarnation)
+            .expect("the parent names the container CLI");
+        run_held_over(parent, &mut wide, &incarnation, |pipelines| PipelineSeams {
+            reaper: Some(reaper),
+            ..pipelines
+        });
     }
 
     fn resume_child(parent: &crate::engine::topology::scaffold::ParentSide) {
@@ -8530,6 +8716,8 @@ mod tests {
             Box::new(parent.runtime()),
             Duration::from_millis(10),
         );
+        #[cfg(unix)]
+        let reaper = child_reaper(&env.fixture.private, &incarnation);
         let preflight = crate::engine::topology::preflight::RunPreflight::new(
             &probes,
             &*adapters,
@@ -8537,6 +8725,11 @@ mod tests {
             &base,
             Vec::new(),
         );
+        #[cfg(unix)]
+        let preflight = match reaper.as_deref() {
+            Some(reaper) => preflight.reaping(reaper),
+            None => preflight,
+        };
         let runtime = parent.runtime();
         let mut hooks = env.hooks();
         let (recovered, mut wide) = env
@@ -8554,7 +8747,13 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("the resuming child's recovery order: {error}"));
         parent.event(&serde_json::json!({"interrupted": recovered.interrupted}));
-        run_held(parent, &mut wide, &incarnation, None);
+        #[cfg(unix)]
+        run_held_over(parent, &mut wide, &incarnation, |pipelines| PipelineSeams {
+            reaper: reaper.clone(),
+            ..pipelines
+        });
+        #[cfg(not(unix))]
+        run_held(parent, &mut wide, &incarnation);
     }
 
     fn census_child(parent: &crate::engine::topology::scaffold::ParentSide) {
@@ -10035,10 +10234,87 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn reclaimed_by_one_reaper(
+        host: &crate::runner::container::FakeRuntime,
+        relay: &std::path::Path,
+        program: &std::path::Path,
+        private: &std::path::Path,
+        incarnation: &str,
+        listed: &[String],
+        censused_before_the_death: usize,
+    ) {
+        use crate::runner::container::FakeRuntime;
+        use crate::runner::container::runtime::RuntimeOp;
+        let scope = crate::runner::container::census::ReaperContainerScope::new(
+            program,
+            private,
+            incarnation,
+        )
+        .expect("the run's container scope");
+        let listing: Vec<String> = scope.list_argv().into_iter().skip(1).collect();
+        let calls = FakeRuntime::reaper_calls(relay);
+        let of = |verb: &str| -> Vec<String> {
+            sorted(
+                calls
+                    .iter()
+                    .filter(|call| call.first().map(String::as_str) == Some(verb))
+                    .filter_map(|call| call.last().cloned())
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            (
+                calls.first(),
+                calls.last(),
+                of("kill"),
+                of("rm"),
+                calls.len()
+            ),
+            (
+                Some(&listing),
+                Some(&listing),
+                listed.to_vec(),
+                listed.to_vec(),
+                2 + 2 * listed.len()
+            ),
+            "one reaper listed the containers labeled with the dead coordinator's private root and \
+             incarnation, killed and removed each, and listed again to find none left: {calls:?}"
+        );
+        let delivered = host.deliver_reaper_calls(relay);
+        let journal = host.journal();
+        assert_eq!(
+            (
+                sorted(by(&journal, "reaper", RuntimeOp::Stop)),
+                sorted(by(&journal, "reaper", RuntimeOp::Remove))
+            ),
+            (listed.to_vec(), listed.to_vec()),
+            "each was stopped and removed at the daemon by the reaper's own calls: {delivered:?}"
+        );
+        assert!(
+            host.container_names().is_empty(),
+            "none of the dead coordinator's containers is left: {:?}",
+            host.container_names()
+        );
+        assert_eq!(
+            censused(host),
+            censused_before_the_death,
+            "no census listed the runtime after the coordinator died: the containers were gone \
+             before any census ran"
+        );
+    }
+
+    #[cfg(unix)]
+    fn censused(host: &crate::runner::container::FakeRuntime) -> usize {
+        host.journal()
+            .iter()
+            .filter(|entry| entry.op == crate::runner::container::runtime::RuntimeOp::ListByLabel)
+            .count()
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_killed_coordinators_reaper_kills_its_containers_before_any_census_at_width_three() {
         use crate::runner::container::FakeRuntime;
-        use crate::runner::container::runtime::RuntimeOp;
         use std::ffi::OsStr;
         let tasks = three();
         let host = crate::engine::topology::scaffold::container_host();
@@ -10052,7 +10328,6 @@ mod tests {
                 ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("reaped")),
                 ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_1)),
                 ("UPSTROKE_TEST_CHILD_CONTAINER_CLI", program.as_os_str()),
-                (FakeRuntime::REAPER_RELAY, relay.as_os_str()),
             ],
             host.acting_as(INC_1),
         );
@@ -10081,6 +10356,7 @@ mod tests {
             "the daemon answers a listing by the run's private root and incarnation with the \
              coordinator's three running containers"
         );
+        let censused_before_the_death = censused(&host);
         let died = child.kill();
         assert!(!died.success(), "the coordinator was killed: {died:?}");
         drop(child);
@@ -10089,58 +10365,14 @@ mod tests {
             "the reaper settled and released the run's cleanup lease",
             || !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
         );
-        let scope =
-            crate::runner::container::census::ReaperContainerScope::new(&program, &private, INC_1)
-                .expect("the run's container scope");
-        let listing: Vec<String> = scope.list_argv().into_iter().skip(1).collect();
-        let calls = FakeRuntime::reaper_calls(&relay);
-        let of = |verb: &str| -> Vec<String> {
-            sorted(
-                calls
-                    .iter()
-                    .filter(|call| call.first().map(String::as_str) == Some(verb))
-                    .filter_map(|call| call.last().cloned())
-                    .collect(),
-            )
-        };
-        assert_eq!(
-            (
-                calls.first(),
-                calls.last(),
-                of("kill"),
-                of("rm"),
-                calls.len()
-            ),
-            (
-                Some(&listing),
-                Some(&listing),
-                listed.clone(),
-                listed.clone(),
-                2 + 2 * listed.len()
-            ),
-            "the reaper listed the containers labeled with the dead coordinator's private root and \
-             incarnation, killed and removed each, and listed again to find none left: {calls:?}"
-        );
-        let delivered = host.deliver_reaper_calls(&relay);
-        let journal = host.journal();
-        assert_eq!(
-            (
-                sorted(by(&journal, "reaper", RuntimeOp::Stop)),
-                sorted(by(&journal, "reaper", RuntimeOp::Remove))
-            ),
-            (listed.clone(), listed.clone()),
-            "each was stopped and removed at the daemon by the reaper's own calls: {delivered:?}"
-        );
-        assert!(
-            host.container_names().is_empty(),
-            "none of the dead coordinator's containers is left: {:?}",
-            host.container_names()
-        );
-        assert!(
-            !journal
-                .iter()
-                .any(|entry| entry.op == RuntimeOp::ListByLabel),
-            "no census had listed the runtime: the containers were gone before any census ran"
+        reclaimed_by_one_reaper(
+            &host,
+            &relay,
+            &program,
+            &private,
+            INC_1,
+            &listed,
+            censused_before_the_death,
         );
 
         let env = crate::engine::topology::scaffold::WideEnv::adopted(
@@ -10185,6 +10417,7 @@ mod tests {
      {
         use crate::runner::container::FakeRuntime;
         use crate::runner::container::runtime::RuntimeOp;
+        let _alone = registering_a_container_scope();
         let tasks = three();
         let mut wide = Wide::durable_contained(
             "coordinator-reaper-disarmed",
@@ -10216,7 +10449,10 @@ mod tests {
         );
         let mut hooks = wide.env.hooks();
         let pipelines = PipelineSeams {
-            container_cli: Some(program),
+            reaper: Some(std::sync::Arc::new(
+                IncarnationReaper::contained(&program, &wide.env.fixture.private, INC_A)
+                    .expect("the incarnation's container reaper"),
+            )),
             ..wide.env.pipelines_over(contained.clone())
         };
         let progress = wide
@@ -10263,6 +10499,512 @@ mod tests {
              armed now is refused"
         );
         assert!(wide.run.invocations_balance());
+    }
+
+    #[cfg(unix)]
+    fn registering_a_container_scope() -> std::sync::MutexGuard<'static, ()> {
+        static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ALONE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(unix)]
+    struct Stranded {
+        host: crate::runner::container::FakeRuntime,
+        _logs: crate::rundir::scratch_tree::ScratchTree,
+        relay: std::path::PathBuf,
+        program: std::path::PathBuf,
+        root: std::path::PathBuf,
+        private: std::path::PathBuf,
+        public: std::path::PathBuf,
+        listed: Vec<String>,
+        child: crate::engine::topology::scaffold::Served,
+        returned: serde_json::Value,
+    }
+
+    #[cfg(unix)]
+    fn three_containers_then_an_error(
+        tag: &str,
+        after: &str,
+        unreachable: &[crate::runner::container::runtime::RuntimeOp],
+    ) -> Stranded {
+        use crate::runner::container::FakeRuntime;
+        use std::ffi::OsStr;
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir(tag);
+        let relay = logs.path().join("relay");
+        let program = FakeRuntime::install_reaper_relay(&relay);
+        let child = served(
+            logs.path(),
+            tag,
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("reaped")),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_1)),
+                ("UPSTROKE_TEST_CHILD_CONTAINER_CLI", program.as_os_str()),
+                (AFTER_AN_ERROR, OsStr::new(after)),
+            ],
+            host.acting_as(INC_1),
+        );
+        let fixture = child.event("the coordinator's fixture");
+        let root = std::path::PathBuf::from(fixture["root"].as_str().expect("a fixture root"));
+        let private =
+            std::path::PathBuf::from(fixture["private"].as_str().expect("its private root"));
+        await_starts(&host, INC_1, 3);
+        within(BOUND, "the coordinator's three containers running", || {
+            running_in(&host).len() == 3
+        });
+        let public = crate::rundir::public_dir(
+            &root.join("repo"),
+            crate::workspace_manager::fixture::RUN_ID,
+        );
+        assert!(
+            crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "the incarnation's reaper holds the run's cleanup lease while its containers run"
+        );
+        let listed = sorted(host.list_for_reaper(&relay, &private, INC_1));
+        assert_eq!(listed, sorted(running_in(&host)));
+        for op in unreachable {
+            host.set_unreachable(*op);
+        }
+        let returned = child.event("the coordinator returned an error");
+        for op in unreachable {
+            host.set_reachable(*op);
+        }
+        Stranded {
+            host,
+            _logs: logs,
+            relay,
+            program,
+            root,
+            private,
+            public,
+            listed,
+            child,
+            returned,
+        }
+    }
+
+    #[cfg(unix)]
+    fn unresolved_and_still_reaped(stranded: &Stranded) {
+        use crate::runner::container::FakeRuntime;
+        let returned = &stranded.returned;
+        assert!(
+            returned["returned"]
+                .as_str()
+                .is_some_and(|error| error.contains("its registration and its slot pair stay held")),
+            "the Runners could not establish their containers gone: {returned}"
+        );
+        assert_eq!(
+            (returned["balanced"].as_bool(), returned["held"].as_bool()),
+            (Some(false), Some(true)),
+            "the coordinator returned with the containers' registrations still held, and their \
+             reaper still armed, holding the run's cleanup lease: {returned}"
+        );
+        assert_eq!(
+            sorted(running_in(&stranded.host)),
+            stranded.listed,
+            "the three containers outlived the error return"
+        );
+        assert!(
+            FakeRuntime::reaper_calls(&stranded.relay).is_empty(),
+            "the reaper acts on nothing while its coordinator lives: {:?}",
+            FakeRuntime::reaper_calls(&stranded.relay)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_coordinator_that_returns_with_its_containers_unresolved_keeps_its_reaper_armed_until_it_dies_at_width_three()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        let stranded = three_containers_then_an_error(
+            "unresolved-killed",
+            "park",
+            &[RuntimeOp::Stop, RuntimeOp::Remove, RuntimeOp::Observe],
+        );
+        unresolved_and_still_reaped(&stranded);
+        let Stranded {
+            host,
+            relay,
+            program,
+            private,
+            public,
+            listed,
+            child,
+            ..
+        } = stranded;
+        let censused_before_the_death = censused(&host);
+        let died = child.kill();
+        assert!(!died.success(), "the coordinator was killed: {died:?}");
+        drop(child);
+        within(
+            BOUND,
+            "the reaper settled and released the run's cleanup lease",
+            || !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+        );
+        reclaimed_by_one_reaper(
+            &host,
+            &relay,
+            &program,
+            &private,
+            INC_1,
+            &listed,
+            censused_before_the_death,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_coordinator_that_returns_with_its_containers_unresolved_leaves_its_reaper_armed_past_its_last_handle_until_the_process_exits_at_width_three()
+     {
+        use crate::runner::container::runtime::RuntimeOp;
+        let stranded = three_containers_then_an_error(
+            "unresolved-exited",
+            "exit",
+            &[RuntimeOp::Stop, RuntimeOp::Remove, RuntimeOp::Observe],
+        );
+        unresolved_and_still_reaped(&stranded);
+        let Stranded {
+            host,
+            relay,
+            program,
+            root,
+            private,
+            public,
+            listed,
+            child,
+            ..
+        } = stranded;
+        let dropped = child.event("the caller dropped its last handle on the incarnation's reaper");
+        assert_eq!(
+            dropped["held"].as_bool(),
+            Some(true),
+            "the last handle on the reaper was dropped with the containers unresolved, and the \
+             reaper was not cancelled: it still holds the run's cleanup lease: {dropped}"
+        );
+        let censused_before_the_death = censused(&host);
+        let exited = child.exited("the coordinator's process exits on its own");
+        assert!(exited.success(), "{exited:?}");
+        drop(child);
+        within(
+            BOUND,
+            "the reaper settled and released the run's cleanup lease",
+            || !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+        );
+        reclaimed_by_one_reaper(
+            &host,
+            &relay,
+            &program,
+            &private,
+            INC_1,
+            &listed,
+            censused_before_the_death,
+        );
+
+        let tasks = three();
+        let env = crate::engine::topology::scaffold::WideEnv::adopted(
+            root,
+            &tasks,
+            3,
+            WidePlans::default(),
+        );
+        holds_nothing(&env.paths.public, &env.fixture.base)
+            .expect("the exited coordinator's holds went with its process and its reaper");
+        let liveness = crate::runner::container::FakeOwnerLiveness::new();
+        let mut hooks = env.hooks();
+        let (recovered, mut resumed) = env
+            .resume_over(
+                INC_2,
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &host,
+                    liveness: &liveness,
+                    preflight: &crate::engine::topology::scaffold::Certifying,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .expect("the next coordinator's census finds the exited incarnation's intents only");
+        assert_eq!(recovered.interrupted, 3);
+        broker_is_empty(&mut resumed.run).expect("its ledgers start empty");
+        let progress = drive(&mut resumed, None).expect("the resumed run completes");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_coordinator_that_returns_an_error_with_every_container_established_gone_disarms_its_reaper_at_width_three()
+     {
+        use crate::runner::container::FakeRuntime;
+        use crate::runner::container::runtime::RuntimeOp;
+        let stranded =
+            three_containers_then_an_error("released-error", "park", &[RuntimeOp::Observe]);
+        let returned = &stranded.returned;
+        assert_eq!(
+            (returned["balanced"].as_bool(), returned["held"].as_bool()),
+            (Some(true), Some(false)),
+            "every Runner established its container gone, so the coordinator returned with its \
+             ledgers balanced and its reaper cancelled: {returned}"
+        );
+        let journal = stranded.host.journal();
+        assert_eq!(
+            sorted(by(&journal, INC_1, RuntimeOp::Remove)),
+            stranded.listed,
+            "each container was removed by its own Runner"
+        );
+        assert!(
+            stranded.host.container_names().is_empty(),
+            "{:?}",
+            stranded.host.container_names()
+        );
+        let Stranded {
+            relay,
+            public,
+            child,
+            ..
+        } = stranded;
+        let died = child.kill();
+        assert!(!died.success(), "the coordinator was killed: {died:?}");
+        drop(child);
+        assert!(
+            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "nothing of the coordinator holds the run's cleanup lease"
+        );
+        assert!(
+            FakeRuntime::reaper_calls(&relay).is_empty(),
+            "the cancelled reaper listed, killed and removed nothing, before or after its \
+             coordinator died: {:?}",
+            FakeRuntime::reaper_calls(&relay)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_resuming_incarnations_reaper_is_armed_before_its_pre_flight_probe_and_reclaims_it_when_the_coordinator_dies_inside_it()
+     {
+        use crate::runner::container::FakeRuntime;
+        use std::ffi::OsStr;
+        let tasks = three();
+        let Wide { run, env } = Wide::durable_contained(
+            "reaper-probe",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new(),
+            INC_1,
+        );
+        drop(run);
+        holds_nothing(&env.paths.public, &env.fixture.base).expect("no earlier holds");
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir("reaper-probe");
+        let relay = logs.path().join("relay");
+        let program = FakeRuntime::install_reaper_relay(&relay);
+        let child = served(
+            logs.path(),
+            "probe",
+            &[
+                ("UPSTROKE_TEST_CHILD_ROLE", OsStr::new("resume")),
+                ("UPSTROKE_TEST_CHILD_ROOT", env.fixture.root.as_os_str()),
+                ("UPSTROKE_TEST_CHILD_INCARNATION", OsStr::new(INC_2)),
+                ("UPSTROKE_TEST_CHILD_CONTAINER_CLI", program.as_os_str()),
+            ],
+            host.acting_as(INC_2),
+        );
+        await_starts(&host, INC_2, 1);
+        within(
+            BOUND,
+            "the resuming incarnation's shell probe running",
+            || running_in(&host).len() == 1,
+        );
+        let listed = sorted(host.list_for_reaper(&relay, &env.fixture.private, INC_2));
+        assert_eq!(listed, sorted(running_in(&host)), "its one probe container");
+        assert!(
+            crate::rundir::observe_cleanup_hold(&env.paths.public, &mut crate::rundir::NoHooks),
+            "the incarnation's reaper was armed before its probe, and holds the run's cleanup \
+             lease while the probe runs"
+        );
+        let censused_before_the_death = censused(&host);
+        let died = child.kill();
+        assert!(
+            !died.success(),
+            "the coordinator was killed inside its probe: {died:?}"
+        );
+        drop(child);
+        within(
+            BOUND,
+            "the reaper settled and released the run's cleanup lease",
+            || !crate::rundir::observe_cleanup_hold(&env.paths.public, &mut crate::rundir::NoHooks),
+        );
+        reclaimed_by_one_reaper(
+            &host,
+            &relay,
+            &program,
+            &env.fixture.private,
+            INC_2,
+            &listed,
+            censused_before_the_death,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_resuming_incarnation_keeps_one_reaper_from_its_pre_flight_through_its_coordinator_and_disarms_it_when_the_run_completes_at_width_three()
+     {
+        use crate::runner::container::FakeRuntime;
+        use crate::runner::container::runtime::RuntimeOp;
+        let _alone = registering_a_container_scope();
+        let tasks = three();
+        let Wide { run, env } = Wide::durable_contained(
+            "reaper-resumed",
+            &tasks,
+            3,
+            WidePlans::default(),
+            RecordingRunner::new(),
+            INC_1,
+        );
+        drop(run);
+        let host = crate::engine::topology::scaffold::container_host();
+        let logs = crate::engine::topology::scaffold::kill_dir("reaper-resumed");
+        let relay = logs.path().join("relay");
+        let program = FakeRuntime::install_reaper_relay(&relay);
+        let reaper = std::sync::Arc::new(
+            IncarnationReaper::contained(&program, &env.fixture.private, INC_2)
+                .expect("the incarnation's container reaper"),
+        );
+        let public = env.paths.public.clone();
+        let held_at_probe = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe_policy: crate::runner::container::StartPolicy = {
+            let held_at_probe = std::sync::Arc::clone(&held_at_probe);
+            let public = public.clone();
+            std::sync::Arc::new(move |_: &crate::runner::container::Launch<'_>| {
+                held_at_probe
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(crate::rundir::observe_cleanup_hold(
+                        &public,
+                        &mut crate::rundir::NoHooks,
+                    ));
+                crate::runner::container::Start::Exit(
+                    crate::runner::container::runtime::ContainerExecution {
+                        exit_code: Some(0),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    },
+                )
+            })
+        };
+        let base = env.fixture.base.clone();
+        let adapters = std::sync::Arc::clone(&env.adapters);
+        let probes = crate::engine::topology::scaffold::container_runner(
+            env.identity(INC_2),
+            &base,
+            Box::new(host.acting_as("probes").starting(probe_policy)),
+            Duration::from_millis(2),
+        );
+        let preflight = crate::engine::topology::preflight::RunPreflight::new(
+            &probes,
+            &*adapters,
+            crate::gates::ShellKind::Sh,
+            &base,
+            Vec::new(),
+        )
+        .reaping(&reaper);
+        let census = host.acting_as("census");
+        let mut hooks = env.hooks();
+        let (recovered, mut wide) = env
+            .resume_over(
+                INC_2,
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+                &crate::engine::topology::scaffold::ResumingOver {
+                    runtime: &census,
+                    liveness: &crate::runner::container::FakeOwnerLiveness::new(),
+                    preflight: &preflight,
+                    awaits_release: true,
+                },
+                &mut hooks,
+            )
+            .expect("the second incarnation resumes");
+        drop(hooks);
+        assert!(preflight.ledgers_balance());
+        assert_eq!(
+            held_at_probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[true],
+            "the run's cleanup lease was held — by the incarnation's reaper, armed before it — when \
+             the pre-flight's one probe container started"
+        );
+        assert!(
+            crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "the reaper is still armed between the pre-flight and the coordinator"
+        );
+        assert_eq!(recovered.interrupted, 0);
+        let contained = wide.env.contained(&host, INC_2);
+        let double = std::sync::Arc::clone(&wide.env.runner);
+        let mut held: Vec<bool> = Vec::new();
+        let mut scheduler = Scheduler::scripted(
+            &double,
+            Box::new(|view: &Quiescent<'_>| {
+                if !view.invoking.is_empty() {
+                    held.push(crate::rundir::observe_cleanup_hold(
+                        &public,
+                        &mut crate::rundir::NoHooks,
+                    ));
+                }
+                None
+            }),
+        );
+        let mut hooks = wide.env.hooks();
+        let pipelines = PipelineSeams {
+            reaper: Some(std::sync::Arc::clone(&reaper)),
+            ..wide.env.pipelines_over(contained.clone())
+        };
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams_over(&*contained),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the resumed contained run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert!(
+            !held.is_empty() && held.iter().all(|held| *held),
+            "the reaper held the run's cleanup lease at every quiescent point a container ran: \
+             {held:?}"
+        );
+        assert!(
+            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "the one reaper armed at the pre-flight was cancelled when the coordinator returned, \
+             and no other holds the lease"
+        );
+        assert!(
+            FakeRuntime::reaper_calls(&relay).is_empty(),
+            "the cancelled reaper listed, killed and removed nothing: {:?}",
+            FakeRuntime::reaper_calls(&relay)
+        );
+        let journal = host.journal();
+        assert!(
+            by(&journal, "reaper", RuntimeOp::Stop).is_empty()
+                && by(&journal, "reaper", RuntimeOp::Remove).is_empty()
+                && !by(&journal, INC_2, RuntimeOp::Remove).is_empty()
+                && host.container_names().is_empty(),
+            "every container was released by its own runner, none by a reaper: {:?}",
+            host.container_names()
+        );
+        assert!(wide.run.invocations_balance());
+        drop(pipelines);
+        drop(reaper);
+        assert!(
+            !crate::rundir::observe_cleanup_hold(&public, &mut crate::rundir::NoHooks),
+            "dropping the disarmed reaper holds nothing"
+        );
     }
 
     fn balanced_at_end(run: &mut TopologyRun) -> Result<(), String> {
