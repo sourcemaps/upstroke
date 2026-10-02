@@ -8,7 +8,7 @@ reviewed_sha: 92c4ca81f9209d218df4534ee71d3445dc2906e1
 location: src/workspace.rs:871
 provenance: pre_existing
 first_bad: predates PR11: the legacy engine's four registry Git children have run untolerant since before PR5 froze `src/workspace.rs`; measured at the Git level on master `92c4ca81`'s argv by PR #329's first design round
-guard: two changes under the owner's decision B, both PR5 unfreezes: corrected B1′, which routes `src/workspace.rs`'s three registry Git children through the workspace manager's tolerant registry access with the legacy retry predicate and the removal's success decision inside its attempt, and B-PRESERVE, which keeps a registry-refused attempt's output (`src/engine/coordinator.rs`, `src/engine/resume.rs`); PR #329 if the owner takes them before its implementation (its record, §4.4 and §4.5), or a later change
+guard: follow-up D, before G6 — the change `pr11_fud_design` designs on branch `fix-P1/correctness_legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry`, under the owner's decision B (both parts PR5 unfreezes): corrected B1′, which routes `src/workspace.rs`'s three registry Git children through PR #329's `tolerant_registry_access` (its record, §5.5) with the legacy retry predicate as the caller's veto and the removal's success decision inside its attempt, and B-PRESERVE, which keeps a registry-refused attempt's captured candidate (`src/engine/attempt.rs`, `src/engine/coordinator.rs`, `src/engine/resume.rs`); D's implementation follows PR #329's merge
 ---
 
 ## Failure sequence
@@ -62,9 +62,11 @@ output was discarded. The resume fails the same way until the residue is removed
   tolerant cycle in a linked one (record §2.10). The legacy side failed 13, 10, 14, 5 and 13 times
   in 6,000 commands a run; the topology side failed none in 40,000.
 
-**What PR #329 changes about it.** PR #329's topology readers tolerate any writer (record §3.3), so a
-legacy writer no longer tears a topology pipeline or verification. What remains is the legacy
-engine's own exposure, to legacy and topology writers alike.
+**What PR #329 changes about it.** PR #329's topology accesses attempt again past any writer (record §5.3),
+so a legacy writer no longer tears a topology pipeline or verification. What remains is the legacy
+engine's own exposure, to legacy and topology writers alike. PR #329's design round 6 moved it, with
+corrected B1′ and B-PRESERVE, to follow-up D (the PR11 orchestrator's decision on design review round 5,
+`~/orch-pr11/reviews/review-329-d5-triage.md`).
 
 ## Grading
 
@@ -82,45 +84,52 @@ three lenses, and design round 4 re-graded it.
 - **(e1) and (e1′)**, legacy against legacy, a write in flight or residue that stays torn: they do not apply to G6,
   which claims nothing of the legacy engine frozen at PR5. Each remains a P1.
 - **(e2)**, a topology writer tearing a legacy reader while it writes: it applies through Q6 across the shared registry
-  and R17, and blocks G6 until corrected B1′ is implemented and validated.
+  and R17, and blocks G6 until follow-up D's corrected B1′ is implemented and validated.
 - **(e2′)**, a topology writer's static residue (a killed writer's torn registration) or contention that outlasts the
   deadline: the legacy access refuses, and the coordinator then discards the paid output. It applies through Q6, and a
   crash producer engages Q1; no surviving writer is needed, so it is distinct from
   `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`. It blocks G6 **even after B1′**, until
-  B-PRESERVE is implemented and validated, unless the owner rules otherwise.
+  follow-up D's B-PRESERVE is implemented and validated, unless the owner rules otherwise.
 - **Filing waives neither case.**
 
 ## What the change that takes this up should do
 
-**Two changes, both the owner's: each unfreezes PR5-frozen legacy behaviour** (decision B; the PR11 orchestrator's
-escalation item 7). PR #329's record, §4.4 and §4.5, gives both with their exact unfreeze texts.
+**Follow-up D takes this up, before G6.** It is `pr11_fud_design`'s change, on branch
+`fix-P1/correctness_legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry`: two parts, both the owner's,
+each unfreezing PR5-frozen legacy behaviour (decision B; the PR11 orchestrator's escalation item 7). It starts from PR
+#329's round-5 text (its record, §4.4 and §4.5, with their exact unfreeze texts) and carries design review round 5's
+findings against it: FUB-D5-INDEX (pin the captured candidate, not the mutable index, which unfreezes
+`src/engine/attempt.rs` too), FUB-D5-RESTORE (a recovery command that restores deletions) and FUB-D5-UNFREEZETEXT. It
+calls PR #329's `tolerant_registry_access`, whose contract is PR #329's record §5.5, so its implementation follows PR
+#329's merge.
 
 **Corrected B1′ closes (e1) and (e2): every write in flight that finishes within the deadline, from any writer.**
-- `src/workspace.rs`'s three registry Git children each run as one attempt of the workspace manager's tolerant
-  registry access: `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree add`, and
-  `cleanup_gate_workspace`'s `git worktree remove` together with the `git worktree list` that decides its success.
+- `src/workspace.rs`'s three registry Git children each run as one attempt of PR #329's `tolerant_registry_access`:
+  `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
+  `git worktree remove` together with the `git worktree list` that decides its success.
 - The add is attempted again only while its destination is still the empty directory `PendingGateWorkspace` made for
-  it and no registration names it. Git takes the destination over only after its sibling scan, so an untouched
-  destination means the failure came first.
+  it and no registration names it: the caller's veto the contract provides. Git takes the destination over only after
+  its sibling scan, so an untouched destination means the failure came first.
 - The removal's success decision is inside its attempt, so a removal a torn sibling fails is attempted again; an
   already-unregistered destination still counts as reclaimed.
 - One private helper resolves the canonical common git dir as `recorded_objects_scope` does; nothing else in the
   module moves.
-- The access's name joins the manager's `effect_free` list in `effects/wrappers.toml`, and `src/workspace.rs`'s
-  `legacy_effect` text in `effects/allowlist.toml` takes a second amendment.
+- PR #329 adds the access's `effect_free` row in `effects/wrappers.toml`; `src/workspace.rs`'s `legacy_effect` text in
+  `effects/allowlist.toml` takes a second amendment.
 
 **B-PRESERVE closes (e1′) and (e2′): residue that outlasts the deadline.** It needs B1′, whose refusal it reads.
 - When an attempt ends in a registry refusal, `src/engine/coordinator.rs` does not discard the checkout. It pins the
-  attempt's captured candidate through `Workspace::prepare_commit_from_candidate`, at the attempt's prepared-pin name
-  followed by `-kept`, and its refusal names the pin.
+  attempt's captured candidate, carried from `src/engine/attempt.rs` rather than read from the mutable index
+  (FUB-D5-INDEX), at the attempt's prepared-pin name followed by `-kept`, and its refusal names the pin.
 - `src/engine/resume.rs` discards the checkout's copy as before, so the attempt runs again from a clean tree. It finds
-  the kept pin, names it in its warning, and never removes it.
+  the kept pin, names it in its warning with a command that restores deletions too (FUB-D5-RESTORE), and never removes
+  it.
 - Both modules' `legacy_effect` texts take an amendment, and the regression tests are appended to the frozen
   `src/engine/tests.rs`; no existing test changes.
 
-**The witnesses** (PR #329's record, §4.8): T-L1 to T-L6 for corrected B1′ and T-P1 to T-P5 for B-PRESERVE, among them
-(e2′) itself with a topology slot's torn registration as the residue. T-L1 to T-L4 and T-P1 to T-P3 were executed on
-a scratch prototype, and `switch_branch`'s sequence at the Git level
+**The witnesses** (PR #329's record, §4.8, now follow-up D's to carry): T-L1 to T-L6 for corrected B1′ and T-P1 to T-P5
+for B-PRESERVE, among them (e2′) itself with a topology slot's torn registration as the residue. T-L1 to T-L4 and T-P1
+to T-P3 were executed on a scratch prototype, and `switch_branch`'s sequence at the Git level
 (`~/orch-pr11/logs/pr11_fub_design5/census/probe-v/SUMMARY.txt`); every existing legacy test passed on it.
 
 **If the owner declines.** Without B-PRESERVE, (e2′) remains an applicable P1 and blocks G6, and (e1′) remains a P1;
