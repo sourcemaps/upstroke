@@ -1,4 +1,4 @@
-# PR11 follow-up B — registry access exclusive across coordinator processes: the working record
+# PR11 follow-up B — linked checkouts' race on the shared worktree registry: the working record
 
 The record of the change that repairs `PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`
 (`findings/P1_correctness_202610011002_linked-checkouts-race-the-shared-worktree-registry.md`, P1,
@@ -25,17 +25,21 @@ is `pr11_fub_design2`'s (`claude-opus-5-5`, `max`), spawned on `dfd69410` to ans
 round 1 (§1.11); its figures are under `~/orch-pr11/logs/pr11_fub_design2/`, cited as `d2/…`. **Design
 round 3** is `pr11_fub_design3`'s (`claude-opus-5-5`, `max`), spawned on `0874bcf3` to answer design
 review round 2 and the looping signal it raised (§2); its figures are under
-`~/orch-pr11/logs/pr11_fub_design3/`, cited as `d3/…`. Every figure below is in a saved file the
-sentence names. A fresh implementer writes the code after the design review, and its sections follow
-§2.
+`~/orch-pr11/logs/pr11_fub_design3/`, cited as `d3/…`. **Design round 4** is `pr11_fub_design4`'s
+(`claude-opus-5-5`, `max`), spawned on `8dd2214c` to carry out the orchestrator's decision on design
+review round 3: narrow this change to the registry race and split the dead coordinator's Git writers
+out (§3); its figures are under `~/orch-pr11/logs/pr11_fub_design4/`, cited as `d4/…`. Every figure
+below is in a saved file the sentence names. A fresh implementer writes the code after the design
+review, and its sections follow §3.
 
 ## 0. Status
 
 | Phase | State |
 |---|---|
 | Design rounds 1 and 2 (§1) | **Superseded by §2.** Round 1's lock handed to the Git child, and round 2's engine-only lock with a process record and quiescence waits, are withdrawn, with E-FUB-1, R29, Class C and round 2's unfreeze text. §1 is kept as the history the review rounds cite. |
-| Design round 3 (§2) | **PROPOSED.** Design review round 2 (three `gpt-6-astra` lenses at `max` on `0874bcf3`) returned CHANGES_REQUIRED: three P1s and four P2s, the P1s in round 2's own machinery, which raised MAINTAINING's looping signal (`~/orch-pr11/reviews/review-329-d2-triage.md`). §2 steps back: tolerant registry access and targeted removal for the race, and the run's existing cleanup lease handed to the manager's Git writers for the corruption a dead coordinator's Git children cause. **No owner decision is needed to proceed**: A needs no erratum (§2.12); B is optional, and its two texts are §2.10. This head changes no production code; it adds one finding file (§2.10). |
-| Implementation | not started. It waits on design review round 3, and it is sequenced after #328 only where §2.13 says. |
+| Design round 3 (§2) | **Superseded by §3 where §2's banner says.** Design review round 3 (three `gpt-6-astra` lenses at `max` on `8dd2214c`, the design lens refused on [cyber] grounds and recast) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d3-triage.md`). Its P1s in round 3's lease raised the looping signal a third time. |
+| Design round 4 (§3) | **PROPOSED, narrowed.** The registry race only: tolerant registry access (the parse inside the attempt, an exact classifier, one deadline per access, R-X shared by adds and held alone by the torn plan) and targeted removal, all executed on a scratch shape. The dead coordinator's Git writers (DESC) are filed as `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, P1, for follow-up C before G6. The legacy race is re-graded P1. **Decision B is the owner's** (ESCALATION item 7): §3.10 prepares B1′ and keeps B2′. This head changes no production code; it adds the DESC finding and renames the legacy one (§3.9, §3.10). |
+| Implementation | not started. It waits on design review round 4 and, for the legacy wrap only, on decision B. It does not depend on #328 or follow-up C (§3.12). |
 
 ## 1. Design
 
@@ -1615,7 +1619,19 @@ the 600 s bound, the verification's durable-arm analysis (§1.3.5), T1, T3, T7(a
 
 ## 2. Round 3 design
 
-> **PROPOSED — for design review round 3.** No owner decision is needed before this design is
+> **SUPERSEDED by §3 (design round 4) where this banner says; the rest of §2 stands as §3 cites it.**
+> - **Withdrawn:** §2.6, the run's cleanup lease handed to the manager's Git writers, and every claim
+>   that this change closes (c): §2.1's closure of (c) "by the kernel", §2.2's "So this change closes
+>   it (§2.6) rather than filing it", §2.3's row (iv), §2.8's claim 4, R5 and the (c) row, §2.9's T7
+>   and T8, §2.11's FUB-D2-DESC answer, §2.12's optional R28 sentence and §2.13's lease risks. (c) is
+>   filed instead (§3.9); §2.2's severity and G6 reading of it stand.
+> - **Replaced:** §2.4's classifier and bound by §3.3 and §3.4; §2.7's instrument list by §3.6 (no
+>   instrument moves); §2.8 by §3.7; §2.9 by §3.8; §2.10's P2 grading and its texts by §3.10.
+> - **Stands:** §2.2's account of (a), (b) and (c)'s mechanisms, §2.3's analysis of the remedy
+>   classes (ii) and (iii), §2.4's measurements, §2.5's targeted removal, and §2.11's round 1 and 2
+>   tables as history.
+>
+> *Round 3's banner:* **PROPOSED — for design review round 3.** No owner decision is needed before this design is
 > implemented. It adds no resource row, effect site or fault row, so it needs no erratum (§2.12), and
 > it edits no frozen module. Decision B is the owner's and optional: whether the frozen legacy
 > `src/workspace.rs` takes the same tolerance. The topology closure does not depend on it, and §2.10
@@ -2397,3 +2413,614 @@ name its holders could adopt this sentence. **It is optional, and nothing depend
   premise sentence is updated, and its policy question stays open.
 - **Foreign Git (R2, R3)** is tolerated by the reader, but its own commands are not the engine's to
   exclude.
+
+## 3. Round 4 design (narrowed)
+
+> **PROPOSED — for design review round 4.** This section supersedes §2 where it says so (the banner at §2's head
+> lists where). It is narrowed: #329 repairs the registry race and nothing else. The topology closure needs no owner
+> decision. It adds no resource row, effect site or fault row, edits no frozen module and moves no instrument (§3.6).
+> **Decision B is the owner's** (`~/orch-pr11/ESCALATION.md` item 7). §3.10 prepares B1′, wrapping the four legacy
+> registry enumerators, as the proposal, and keeps B2′, the filing, as the fallback. Neither is implemented. Nothing in
+> §3 is in force until the implementation lands.
+
+Design round 4 is `pr11_fub_design4`'s (`claude-opus-5-5`, `max`), spawned on `8dd2214c` to carry out the
+orchestrator's decision on design review round 3 (`~/orch-pr11/reviews/review-329-d3-triage.md`). Its figures are under
+`~/orch-pr11/logs/pr11_fub_design4/`, cited as `d4/…`.
+
+### 3.1 The looping signal again, the narrowing, and why this round converges
+
+**The signal appeared again.** MAINTAINING's second signal is "A pass finds a P1 in machinery an earlier round of this
+pull request added". Design review round 3 (`8dd2214c`) found P1s in round 3's own machinery. That machinery was the
+run's cleanup lease handed to the manager's Git writers as standard input, which closed (c), the corruption a dead
+coordinator's Git children cause.
+- A smudge filter's background helper gets a pipe, not the lease. It outlives Git and reverts paid edits in the
+  recreated slot. Executed by all three lenses (FUB-D3-DESC-FILTER). Git's own `checkout--worker` gets a pipe too.
+- On Windows nothing establishes that the dead coordinator's job has emptied before a slot is recreated
+  (FUB-D3-DESC-WIN).
+
+That is the third remedy for (c) to fail review: a lock handed to the child (round 1), a process record (round 2), and
+a lease on standard input (round 3). The signal has now appeared three times.
+
+**The narrowing.** Narrowing is the author's (MAINTAINING, "When a pull request may be looping").
+- **This round keeps what survived:** tolerant registry reads and targeted removal. Every lens of round 3 judged that
+  direction right for (a), (b) and (d), the registry race `PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`.
+- **It splits out what did not converge.** (c) is not R7-CONC-1. It is a crash-recovery corruption class, reachable
+  with one coordinator, and older than PR11 (§3.9). It is filed as its own P1 finding,
+  `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`. Its file carries rounds 1–3's
+  evidence, their lessons, and follow-up C's candidate directions. Follow-up C takes it up before G6.
+- MAINTAINING's rule for this case is exactly that: "keep what has survived a pass, drop the machinery those rounds
+  invented, and record what it was for as a finding carrying its proposal".
+- **The title changes** to name only what the pull request repairs. Round 3's title named the withdrawn lease ("a
+  resume waits out a dead coordinator's Git writers"), and MAINTAINING says "a title still naming a withdrawn fix is
+  the next finding".
+
+**Why this round converges.** What remains of round 3's review against the race are refinements of a direction every
+lens accepted, not new machinery. Each has an executed witness, and this round ran every one of them against round 4's
+shape on a scratch copy (§3.3, §3.4; `d4/census/probe-iv/SUMMARY.txt`):
+- **FUB-D3-TORNOK** is a classifier refinement. The parse moves inside the attempt, and the reads cover `HEAD`.
+- **FUB-D3-PERM** is a classifier refinement. Contention must be evidence that another process wrote the store; the
+  add's own entry is read as such evidence only after one confirming attempt.
+- **FUB-D3-BOUND** is a bound refinement. There is one deadline per access, and R-X stops serialising, so that a
+  bounded wait for it is not a new refusal (§3.4 says why the first form failed).
+
+None of the three adds a process, a file, a lock across processes, or anything that must know which processes exist.
+The R-X change removes waits rather than adding them. The DESC machinery, where rounds 1–3 kept finding the next
+process the construction could not see, leaves this pull request entirely.
+
+### 3.2 What #329 repairs now, and what it no longer claims
+
+| | Consequence | Round 4 |
+|---|---|---|
+| (a) | An attempt's registry access fails on another process's half-written entry; the coordinator cancels its other pipelines and ends the command (`src/engine/topology/coordinator.rs:1413`). | **Repaired** (§3.3–§3.5). |
+| (b) | The same failure in a verification is `UpstrokeError::Git`; `run::verified` maps it to `Verified::Unavailable` (`src/engine/topology/run.rs:279`), and the frozen `integrate.rs` spends a deferral or parks the candidate. | **Repaired.** |
+| (c) | A dead coordinator's Git writer, or a process it started, writes into the slot its resume recreated. | **Not repaired here.** Filed P1, blocks G6, follow-up C (§3.9). Round 3's lease on stdin is withdrawn with every claim that #329 closes (c). |
+| (d) | A legacy writer in another checkout tears a topology reader. | **Repaired**: tolerance does not care who the writer is (§2.10's mixed runs; §3.3). |
+| (e) | A legacy reader dies on another checkout's half-written entry, and the legacy coordinator discards the attempt's paid output. | **Re-graded P1** in its finding file. B1′ is proposed, pending the owner's decision B (§3.10). |
+
+### 3.3 Tolerant registry access, as round 4 specifies it
+
+**The attempt.** One attempt is the registry access's whole unit of work:
+- the list is `git worktree list --porcelain -z` **and** `parse_worktree_records` over its output;
+- the add is `git worktree add --detach --quiet`;
+- the removal's scan is `revalidate_removal_proving`;
+- the torn plan's scan is the body of `slots_with_torn_registrations`.
+
+**Output the parser refuses is a failed attempt**, classified like any other. That is FUB-D3-TORNOK's repair. Round 3
+classified the Git command alone and parsed afterwards (`src/workspace_manager.rs:5067`). Git 2.43 exits 0 over the
+prefix the design-recast lens constructed (`gitdir` written, `locked` holding `initializing`, `HEAD` opened and empty,
+no `commondir`). It prints a record whose `HEAD` is the zero id, with neither `branch` nor `detached`
+(`d4/witness/git-level.log`, TORNOK (a)). The parser refuses that record as `UpstrokeError::Git`
+(`src/workspace_manager/parsers.rs:540`), so round 3 returned it as Git state. `src/workspace_manager/tests.rs:6339`
+already documents this output.
+
+**Output the parser accepts is a success,** even when the second read finds an entry still in progress. Two outputs a
+writer in progress produces are accepted:
+- Git's own placeholder `HEAD` (the zero id) before `commondir` exists prints a detached record (`git-level.log`,
+  TORNOK (b));
+- so does every state after `commondir` is written.
+
+Those records are foreign, and no consumer reads a foreign record's `HEAD`. `revalidate` reads paths
+(`src/workspace_manager.rs:1712`), `assert_publishable` reads branches (`:3434`), and `quiescence` reads the record of
+its own slot (`:5070`). A record's path comes from `gitdir`, which Git writes before any record can show the entry.
+Until an add's own `update-ref` or `symbolic-ref` child runs, its record is detached at the zero id, so it claims no
+branch; after that it shows the branch the add checks out. Refusing accepted output would only turn a dead writer's
+parseable residue into a refusal of every list.
+
+**The two reads.** Each attempt is bracketed by two reads of the store, `<common git dir>/worktrees/`: one immediately
+before the attempt and one immediately after a failure.
+- A read is either the reason the store could not be listed (an absent store is no entries), or, for each entry by
+  name, the state of four files: `gitdir`, `commondir`, `HEAD` and `locked`.
+- Each file is absent, or present with its bytes (the files are tens of bytes; the read takes at most 4 KiB), its
+  modification time and its inode, or unreadable with the error kind that refused it.
+- Round 3 read three files, by length and modification time only. Adding `HEAD` is FUB-D3-TORNOK's other half.
+  Adding the bytes and the inode closes round 3's same-tick blind spot: Git's add rewrites `HEAD` from the zero-id
+  placeholder to the commit, which is the same length, through a lock file and a rename, so the inode changes.
+
+**The classifier.** A failed attempt is **contended** when any of these holds:
+1. **An entry in progress (C1).** At either read, some entry's `gitdir`, `commondir` or `HEAD` is absent or empty.
+   - Git 2.43's add writes `locked`, `gitdir`, the checkout's `.git`, `HEAD` and then `commondir`, each file opened
+     and truncated before it is written (`d3/git-src/v2.43.0/builtin/worktree.c`).
+   - So every prefix of an add before `commondir` holds its bytes has one of the three absent or empty, and so does
+     every prefix of a removal that has deleted one of them. After that, Git reads the entry whole, as a detached
+     record, and a reader has nothing to retry.
+   - A whole registration has all three written.
+2. **The store changed (C2).** The two reads differ: an entry appeared or went, or one of its four files differs in
+   presence, bytes, modification time, inode or error kind.
+3. **An entry that existed only during the attempt (C3).** The failure names an entry that neither read holds.
+   - "Names" means one of three things. The failure's text contains the store's path followed by the entry's name: the
+     canonical spelling, or the spelling relative to the directory the command ran in, which is how Git prints it
+     (`fatal: failed to read .git/worktrees/<name>/commondir`). Or the parser refused output that lists a checkout no
+     entry of either read registers through its `gitdir`. Or a scan refused the administrative directory by name.
+   - Git read that entry during the attempt, and no read sees it. So another process made it and removed it while
+     the attempt ran: an add that failed and removed its junk is the case.
+
+**The add's own entry.** When neither C1 nor C2 holds, and every entry C3 finds carries the add's own administrative
+name, the attempt is not contended. That name is the slot's basename, or the basename followed by the decimal counter Git appends on a
+collision (`add_worktree` in `builtin/worktree.c`; a slot component is ASCII alphanumerics, `-` and `_`,
+`src/workspace_manager/naming.rs:161`, so Git's sanitising leaves it alone). The add is attempted **exactly once
+more**, and a failure of that second attempt that names only its own entry is returned unchanged.
+- This is FUB-D3-PERM's repair. Its construction names the add's own entry: "`fatal: could not create directory of
+  '.git/worktrees/new': Permission denied`".
+- Nothing in the store distinguishes that from contention, and a second try does. The store is byte-identical before
+  and after (`git-level.log`, PERM), and Git prints the same text the second time.
+- The second attempt is what lets the rule also cover three contention cases that name the add's own entry:
+  - another process's prune deleting the add's entry in flight (R2's case, `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`);
+  - a removal emptying and deleting the store between Git creating it and creating the entry;
+  - another run's same-named slot (`kalpha-g1` is every run's first task) made and unmade during the sibling scan.
+- An entry of another slot whose name has the own form (`kalpha-g12` beside `kalpha-g1`) is read as the add's own.
+  That costs the one second attempt and nothing else.
+
+**What each verdict does.**
+
+| Verdict | Then |
+|---|---|
+| Not contended | Returned at once, **unchanged**: the error it was, Git state where it was Git state. |
+| Own entry only | One more attempt, if the add left nothing at the slot; that attempt's failure is classified again, and an own-entry verdict then is returned unchanged. |
+| Contended | Another attempt after a backoff (1 ms doubling to 50 ms), if the deadline allows (§3.4). At the deadline, `UpstrokeError::Refused` naming the store, the reason and the deadline, and carrying the last failure's text. **Never `UpstrokeError::Git`.** |
+
+- **The add is attempted again only when its failed attempt left nothing at the slot**, as round 3 specified. Git's
+  own failure paths remove their junk (`remove_junk`). An add killed from outside leaves residue, and its failure is
+  returned as it is.
+- **An unreadable file is not C1.** A file Git is writing is readable, and empty until written. Permission is not a
+  writer, so a quiet store with a file nobody may read is quiet. An unreadable file is contention only when it
+  changes, which C2 sees. Windows reports a file being deleted, or opened by another process without read sharing, as
+  unreadable; while that changes it is C2. One held unreadable across both reads is classified quiet (§3.7, R9).
+
+**Why it is exact, in both directions.**
+- **A failure another process's registry write caused is never returned as Git state.**
+  - The entry Git or the scan failed on is in progress at a read (C1), changed between the reads (C2), or existed only
+    between them. In the last case it is named, so C3 applies, or it is the add's own name, which gets the second
+    attempt.
+  - The measured failure kinds of §2.4 all name their entry: "failed to read …/commondir: Success", "failed to read
+    '…/locked'", "Invalid path '…/<name>'", "could not open '…/<name>/gitdir' for writing" and the scan's "is locked
+    and has no gitdir" (`d3/measure/race-none-*.log`).
+  - A refused parse names its checkout, which C3 matches against the `gitdir` of every entry either read holds.
+- **A failure across a quiet, whole store is returned unchanged.** Whole means no C1, quiet means no C2. On such a
+  store, C3 can find only an entry that existed during the attempt, which is not quiet, or the add's own entry, which
+  costs exactly one more attempt. FUB-D3-PERM's construction is executed below. Its quiet store with an unwritable
+  directory returns Git state after two attempts, in 1–2 ms, never `Refused`.
+- **A refusal is never Git state, and Git state is never retried into a refusal on a quiet store.** Round 3 could not
+  say the second half.
+
+**Executed on round 4's shape** (`d4/census/probe-iv/`; each test alone, three rounds, on the unpatched tree, round 3's
+tolerance and round 4's shape; `witness-runs/TABLE.txt`):
+
+| Witness | Unpatched | Round 3's tolerance | Round 4's shape |
+|---|---|---|---|
+| TORNOK, static: the lens's prefix as a foreign entry, then a list | Git, 0 ms | **Git, 0 ms** (first-bad) | `Refused` at 500 ms, naming the entry |
+| TORNOK, transient: the writer finishes 150 ms later | Git, 0 ms | Git, 0 ms | Ok, 168–170 ms |
+| TORNOK, transient, with T2's handshake (round 4 only) | — | — | Ok after one contended attempt |
+| Control: a whole entry whose `HEAD` names nothing (Git prints the TORNOK record shape) | Git, 0 ms | Git, 0 ms | **Git, 0 ms**: returned unchanged |
+| PERM: one complete registration, the store made unwritable, then an add | Git, 1 ms | **`Refused`, 525–527 ms** (first-bad) | **Git, 1–2 ms**, two `git worktree add` attempts, nothing created at the slot |
+
+The witness test files are kept in `d4/census/probe-iv/` (`d4-witnesses-common.rs`, `d4-witnesses-iv.rs`). The
+implementation's tests (§3.8) are written fresh.
+
+**Where it applies** (`src/workspace_manager.rs` at `8dd2214c`, which is master's):
+
+| Access | Its attempt | R-X (§3.4) |
+|---|---|---|
+| `worktree_records` (`:5051`) | the list and its parse | none |
+| `add_worktree` (`:2649`) | the add (`:2708`), inside its funnel | shared |
+| `remove_worktree_proving`'s scan (`:2988`) | `revalidate_removal_proving` (`:5119`) | none |
+| `slots_with_torn_registrations` (`:5345`) | the torn plan's scan | exclusive |
+
+**Not wrapped:**
+- `remove_bound`'s mutation: it enumerates nothing once it no longer prunes (§3.5), and it takes no R-X now;
+- `git fsck` on the refusing path (table B);
+- `read_only_git`'s reads, which enumerate no registry.
+
+### 3.4 One deadline per access, and what R-X becomes
+
+**The deadline.** Each access has one deadline, `REGISTRY_ACCESS_DEADLINE` after it begins: 10 s in production, and
+500 ms under test, where round 3 had its bound. Within it:
+- **every wait for R-X** is a try-loop that sleeps outside the lock and gives up at the deadline;
+- **no attempt starts** after the deadline;
+- **every backoff sleep** ends at the deadline.
+
+**What is bounded.** The access deadline bounds the access from end to end. The retry budget is not a second number:
+it is whatever of the deadline the attempts and the waits have not used. At the deadline the access returns `Refused`,
+naming what it was waiting for: the store's contention, or R-X.
+
+**What is not bounded: one attempt's own runtime.**
+- The deadline is checked between attempts. Nothing interrupts a Git command or a scan that has started; killing a
+  Git writer mid-write is exactly what leaves a torn registration.
+- Hooks are disabled for the manager's commands through `core.hooksPath` (`src/workspace_manager.rs:4994-5010`). A
+  filter the repository configures, the size of a checkout, and a slow or network filesystem are not.
+- So an access returns by its deadline **plus the runtime of the one attempt it started before the deadline**, and that
+  runtime has no bound here.
+- On this box, an add that checks out 100,000 files took 0.82 to 1.81 s, and deleting that checkout about 0.5 s
+  (`d4/measure/add-duration.log`, three runs each). Slower filesystems are slower, and Windows is not measured.
+- A pipeline whose own Git command stalls also stalls the command's end, because the coordinator joins its pipelines
+  (`src/engine/topology/coordinator.rs:261`). That is unchanged from `92c4ca81`. The deadline bounds the accesses that
+  would otherwise wait behind such a command; it does not end the command.
+
+**What R-X becomes.** R-X (`REGISTRY_LOCKS`, `src/workspace_manager.rs:1553-1601`) serialised every registry access of
+one process, so that none saw another's half done. Tolerance makes that unnecessary for every reader and writer:
+each one survives another's half-done work exactly as it survives another process's. One exclusion is still needed.
+- The torn plan reads an empty `commondir` as a dead add's residue, and the repair removes that slot
+  (`slots_with_torn_registrations`, `:5345`; `repair_torn_registrations`, `:5328`).
+- An add of this same process in flight passes through that state for the microseconds between `commondir`'s open and
+  its write.
+- The run lock keeps other processes of the run out, and nothing else keeps this process's own adds out.
+
+So R-X becomes a read-write lock:
+- **adds hold it shared:** two adds of one process no longer wait for each other;
+- **the torn plan holds it alone;**
+- **the list, the removal's scan and the removal's mutation take nothing.**
+
+**Why not the simpler form.** The orchestrator's brief named a `try_lock` loop on R-X as it is. This round built that
+first (`d4/census/probe-iv/patch-iv-mutex.py`; `suite-mutex-attempt/`).
+- Its suite failed PR11's own in-process concurrency test,
+  `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail` (`src/workspace_manager/tests.rs:7207`): "3 of
+  120 add/remove cycles failed", each one "… stayed held by this process's other registry work until the access's
+  deadline (500ms)".
+- Bounding a wait for a lock that serialises every access turns ordinary queueing under load into refusals. In
+  production that queue is every pipeline's adds and removals: a large tree or a slow disk would refuse parallel work
+  that PR11 completes.
+- With R-X shared by adds, the same suite passes that test, twice (`suite-2.log`, `suite-3.log`).
+
+**Executed** (`witness-runs/TABLE.txt`; another thread holds R-X for 1,500 ms, three times the test deadline):
+
+| | Unpatched | Round 3's tolerance | Round 4's shape |
+|---|---|---|---|
+| A list begins while R-X is held | waits it out: Ok at 1,501 ms | Ok at 1,501 ms | **Ok at 0 ms**: the list takes no R-X |
+| An add begins while R-X is held (alone, as the torn plan holds it in round 4) | waits it out: Ok at 1,504–1,506 ms | Ok at 1,504–1,506 ms | **`Refused` at 501–502 ms** |
+
+**The waits that remain**, both bounded by the waiter's deadline:
+- **An add waits while a torn plan runs.** The plan's scan reads small files, and its repairs run after it releases R-X,
+  each through `remove_worktree_proving`, which takes none.
+- **The plan waits for this process's adds in flight.** It runs only when an enumeration has already failed, in
+  `verify_worktree` (`:2745`) and `remove_intent` (`:2269`). A plan that cannot take R-X before its deadline makes
+  `repair_torn_registrations` answer `false`, and its caller returns the refusal it already had: the command ends
+  resumably, and the next resume plans again.
+
+### 3.5 Targeted removal
+
+Unchanged from §2.5:
+- no `git worktree prune`;
+- a bound registration that still names the slot is removed directly, `locked` first;
+- the store itself is removed when that leaves it empty, which the frozen
+  `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store` pins (`src/engine/topology/finalize.rs:486`);
+- a registration whose `gitdir` has gone converges with nothing removed.
+
+One thing changes: the removal's mutation no longer holds R-X (§3.4). Two removals of one process act on different
+slots, and the store's removal is `rmdir`, which fails on a store that is not empty. An add of the same process that has
+not yet made its entry meets a missing store as `could not create directory of '<store>/<own name>'`, which is the own-entry
+case of §3.3, and its second attempt creates the store again.
+
+### 3.6 Effect governance, instruments and the frozen set
+
+**Measured on the shape** (`d4/census/probe-iv/`: `patch-iv.py` on a scratch `git archive` of `8dd2214c`; nothing of
+it on the branch):
+- Clippy `-D warnings` over all targets: rc 0 (`suite/clippy-run.txt`).
+- The whole suite, twice: the library passed 2,998, failed 2 and ignored 113 (`suite/suite-2.log`, `suite-3.log`; a
+  first run's log was lost and its census kept, `NOTE-lost-suite-log.txt`).
+- **The two failures are the two non-frozen tests round 3's probe also moved**, each the implementation's to move:
+  - `workspace_manager::tests::a_removal_records_the_one_attempt_the_unix_arm_makes`
+    (`src/workspace_manager/tests.rs:1432`): the direct removal of the administrative directory is a second observed
+    removal;
+  - `workspace_manager::tests::an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup` (`:6675`),
+    `RESIDUE-UNBINDABLE…`'s guard test: its static tear is now `Refused` after the deadline, carrying the same Git
+    text.
+- **Every frozen module's tests pass:** `recover` 226, `integrate` 20, `repair` 5, `finalize` 5, `fold` 192,
+  `events::log` 47 (`frozen-modules-suite-{2,3}.txt`).
+- **Every instrument census passes:** the wrapper classification and its name pins, the effectful-wrapper denials, the
+  process-start and payload censuses, the allowlist scan and the sequential registry. **No instrument moves.** Round
+  3's four instrument edits were all the lease's (the `effects/wrappers.toml` row and its name count, two
+  `src/runner/contract.rs` rows), and they go with it. So do FUB-D3-CLIPPY's `clippy.toml` denial and FUB-D3-R28's
+  packet question.
+
+**What the implementation moves:**
+- **Code:** `src/workspace_manager.rs` only: the tolerant access (private), R-X's type, and targeted removal. These
+  hunks stay inside the registry-access wrapper and the removal, disjoint from follow-up C's Git writer spawn
+  configuration.
+- **Tests:** the two above, and the new tests of §3.8.
+- **Docs:**
+  - `DESIGN.md` §15's PROPOSED paragraph becomes the in-force one;
+  - `docs/internals/engine/topology/run.md:479-490` and its pin
+    `the_verification_notes_say_a_registry_another_process_is_writing_spends_a_deferral_or_parks`
+    (`src/engine/topology/run/tests.rs:535`): the paragraph now says that a registry another process is writing never
+    reaches this arm, because it is retried or refused; the mapping, the pin's second half, is unchanged;
+  - the module notes of `src/workspace_manager.rs`, for R-X, the wrapper and the removal;
+  - the findings: the repaired file is deleted, and the texts of `PR5-RD-003…`, `PR308-R3…`, `RESIDUE-UNBINDABLE…` and
+    `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` are updated (§3.7).
+- **Not `src/rundir.rs`,** and no R28 text: round 3's lease is withdrawn.
+
+**So the implementation is a subject under CLAUDE.md's first limb.** Its diff changes no gate, CI-contract test, lint,
+toolchain or runner configuration, and no effect allowlist: only the product's source, its own regression tests and
+documentation. B1′ is the exception (§3.10).
+
+### 3.7 What is closed, what remains, and what G6 meets
+
+**The claims, once implemented.**
+1. **No manager registry access returns `UpstrokeError::Git` for a failure another process's registry write caused**
+   (§3.3). So, for (b): no registry race reaches `run::verified`'s Git arm, no deferral is spent and no candidate is
+   parked on one.
+2. **(a):** an attempt's registry access passes another process's write. It ends the command only if the store stays
+   contended until the access's deadline, and then resumably.
+3. **(d):** the same, whoever the writer is: a legacy run, another topology run, an agent's Git, the user's.
+4. **A failure across a quiet, whole store is returned as it was:** at once, or, when it names the add's own entry,
+   after exactly one more attempt.
+5. **Each access returns by its deadline plus one attempt's runtime.** The only waits for R-X left are an add's while a
+   torn plan of its process scans, and a plan's while adds of its process run, each until its own deadline (§3.4).
+6. **No engine process deletes another process's registration** (§3.5).
+
+**What remains.**
+
+| | What | Consequence now | Finding |
+|---|---|---|---|
+| R1′ | A registration that stays torn until the deadline: a writer killed mid-registration, or one stalled there | the access refuses resumably, naming the entry; never Git state, never durable. On the topology path the command ends; on the legacy path see §3.10 | `PR308-R3-…` (consequence narrowed, precondition unchanged); `PR329-LEGACY-…` (§3.10) |
+| R2 | A host agent's own Git | its torn entries are tolerated; its prune of an engine add in flight costs the add one more attempt (§3.3); the agent's own prune still deletes entries | `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`: narrowed to the agent's own commands |
+| R3 | The user's Git in any checkout | tolerated the same way | none |
+| R4 | `fsck` on the refusing path (table B) | a refusal either way | none |
+| R5 | (c): a dead coordinator's Git writers against a recreated slot | not this change's | `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES` (P1, follow-up C, blocks G6) |
+| R6 | The legacy engine's registry readers | §3.10 | `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` (P1; closed for writes in flight under B1′) |
+| R7 | A Git message that names no entry for an entry made and unmade inside one attempt | C1 and C2 do not see such an entry, and C3 needs the name; none measured (§3.3) | stated |
+| R8 | One attempt's runtime (§3.4) | an access can exceed its deadline by one Git command or scan | stated |
+| R9 | Windows: a store spelt through an 8.3 alias in Git's text, or a file held unreadable across both reads | C3 misses the alias spelling, and the file reads quiet; C1 and C2 still apply. Reasoned, not executed | stated |
+
+**What G6 meets.** This is the classification the triage asks for.
+
+| Item | Severity | Here | Applies to G6 | Blocks G6 |
+|---|---|---|---|---|
+| `PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: (a), (b), (d) | P1 | repaired by §3.3–§3.5 once implemented; the finding file is deleted then | yes: R17 and the registry under concurrency, ST-16 | only until this change merges |
+| `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`: (c) | P1 | **filed at this head**, `pre_existing`; follow-up C | yes: Q1 ("reclaimed or repaired … before any slot reset, admission, or resource reuse"), ST-16, ST-18, INV-22 | **yes, until follow-up C merges; filing is not a waiver** |
+| `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: (e) | **P1** (re-graded) | filed; B1′ proposed, pending the owner's decision B | **the lenses split:** the pure legacy case does not (concurrency and regression lenses); the mixed case, a topology writer tearing a legacy reader, may, through R17 and Q6 (design-recast lens) | the mixed case, if G6's reviewers hold it applicable and B1′ is not taken; filing is not a waiver |
+| `PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION` | P2 | consequence narrowed | — | no |
+| `PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE` | P2 | no longer produced by an engine removal | — | no |
+| `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` | P2 | narrowed (R2) | — | no |
+
+### 3.8 Regression tests
+
+Each test is the implementation's, named by the implementer. Each lives outside the frozen modules and their test
+children, and waits on a handshake or a seam, with time only as a watchdog. T1, T2, T2′, T3, T5, T6 and T10 are §2.9's
+tests, carried over unchanged in substance. T4 and T9 are revised, T11 to T13 are new, and §2.9's T7 and T8, the lease
+tests, are withdrawn with it.
+
+- **T1, two processes in linked checkouts, at least 1,000 cycles, 0 failures.** This is review round 7's witness.
+  - Unpatched: red 10 of 10, 68 failed operations in 20,000 (`d3/census/witness-r7r8/r7-summary.txt`).
+  - Round 4's shape: green 5 of 5, 0 in 10,000 (`d4/census/probe-iv/witness-r7r8/SUMMARY.txt`).
+  - Mutation m1: the wrapper returns its first failure. Red.
+- **T2, the verification beside a transient foreign tear: no deferral.** The handshake is the test-only seam that
+  counts contended attempts; it is the shape `note_removal_attempt` already uses
+  (`src/workspace_manager.rs:1528-1551`).
+  - Unpatched: one and two deferrals.
+  - Round 4's shape: Complete, `merge_verification_unavailable` 0, for both (`witness-r7r8/SUMMARY.txt`).
+- **T2′, the verification beside a static tear.** It ends `Refused`, naming the entry, with nothing durable appended.
+  - Round 4's shape: `Refused`; 12 events; no `merge_verification_unavailable`, question or `run_finished`
+    (`witness-r7r8/SUMMARY.txt`).
+  - Mutation m2: the deadline's refusal typed `UpstrokeError::Git`. Red: the verification defers.
+- **T3, three processes:** T1's shape with three `LinkedChild` processes.
+- **T4, the classifier, as unit tests over stores built by hand.** It covers C1 for each of `gitdir`, `commondir` and
+  `HEAD`, absent and empty; C2 for a change of bytes at equal length within one clock tick (the inode and the bytes
+  see it); C3 by text, absolute and relative, and by a refused output's checkout; the own-entry rule; and the quiet
+  verdict. Mutations: each clause removed in turn, against the case only it catches.
+- **T5, no engine prune.** A census that `worktree` with `prune` appears in no production argv of
+  `src/workspace_manager.rs`; the store is removed only when empty; the frozen `finalize.rs` test stays green.
+- **T6, an add whose entry another process prunes.** A seam holds the add between its `mkdir` and its `locked` while a
+  foreign `git worktree prune` runs. The add succeeds on its second attempt.
+- **T9, the deadline (revised).** A thread holds R-X alone, as the plan does. An add begins: it refuses within the
+  deadline plus one backoff, and a list begins and succeeds at once.
+  - Round 4's shape: the add refuses at 501–502 ms; the list succeeds at 0 ms. The unpatched tree and round 3's waited
+    1,501–1,506 ms (`witness-runs/TABLE.txt`).
+- **T10, the legacy writer beside the manager.** A legacy `Workspace` gate-snapshot add and its drop, in a linked
+  checkout, run beside the manager in the main checkout. The manager has 0 failures.
+- **T11, TORNOK (new).** The design-recast lens's prefix as a foreign entry.
+  - Static: the list refuses at the deadline and is never Git state.
+  - Transient: it succeeds once the writer finishes (with T2's handshake).
+  - The control, a whole entry whose `HEAD` names nothing: the list returns Git state at once.
+  - Round 3's tolerance: Git state for both the static and the transient case. Round 4's shape: `Refused`, Ok and Git
+    state respectively, three rounds each (`witness-runs/TABLE.txt`).
+- **T12, PERM (new).** One complete registration and the store made unwritable, then an add. It returns Git state, the
+  add ran twice, and nothing is left at the slot.
+  - Round 3's tolerance: `Refused` at 525–527 ms. Round 4's shape: Git state at 1–2 ms
+    (`witness-runs/TABLE.txt`).
+  - A mutation that drops the own-entry rule returns `Refused`: red.
+- **T13, R-X shared (new).** PR11's `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail` stays green,
+  and a variant in which every add's checkout is held by a seam past the test deadline still completes every cycle.
+  - The mutex form failed the unmodified test, 3 of 120 cycles (`suite-mutex-attempt/suite-1.log`).
+
+**The budget.** The Windows guest's harness ran 468.44 s at `78f99c70`
+(`~/orch-pr11/logs/pr11_repair_r8/ci/ci-read-36861160153.txt`). T1 and T3 run bounded cycles there, and the rest are
+single scenarios.
+
+**The proof the implementer owes:**
+- each mutation, on a scratch tree whose Compiling line names it;
+- the witnesses red unpatched;
+- the frozen children unchanged;
+- the ten gates, and CI on every leg;
+- at least five full suites, with every frozen test's failures counted against the same number of suites at the
+  base. The lease's sibling-fork exposure, which §2.9 asked this for, is gone, but a change to a lock every pipeline
+  takes deserves the same count.
+
+### 3.9 DESC, split out
+
+**What it is.** One coordinator is `SIGKILL`ed inside an engine Git write. Its Git processes, and processes they started,
+outlive it on Unix. Its resume removes and recreates the same slot path, `tasks/k<key>-g<gen>`, which the packet names
+literally and `TaskDispatched.worktree_path` records. The orphan then acts on the recreated slot. Witnessed outcomes:
+- paid edits reverted to `base` by a late `reset`, by Git's `update-ref`, or by a smudge filter's background helper;
+- `remove_junk` deleting the recreated registration and checkout;
+- a replacement registration's `HEAD` rewritten.
+
+**Where it is now.** It is filed as
+`findings/P1_correctness_202610020436_a-resume-rebinds-a-slot-its-dead-coordinators-git-child-still-writes.md`:
+- id `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, the id round 3's ledger gave the
+  class, kept so the ledger has one row for it;
+- P1, `deferred`, `pre_existing`, category `correctness`.
+
+The file carries:
+- the executed failure sequence with one coordinator;
+- the evidence of all three design reviews;
+- why each remedy failed: a lock handed to the child (round 1), a process record (round 2), and a lease on standard
+  input (round 3);
+- follow-up C's candidate directions: group or job emptiness before reuse; unique slot paths per incarnation, which is a
+  packet change and so the owner's; disabling filters and parallel checkout for engine writes; and a documented
+  residual for persistent user helpers, which is the owner's call.
+
+**G6.** It blocks G6 under Q1's "reclaimed or repaired … before any slot reset, admission, or resource reuse", ST-16,
+ST-18 and INV-22. Filing it is not a waiver. Its guard is follow-up C, before G6, briefed in the orchestrator's
+follow-up C brief (`fu-c-orphan-git-writers-before-slot-reuse.md`, under `~/orch-pr11/briefs/followups/`).
+
+**`PR136-REMOVE-WORKTREE-VS-A-GIT-CHILD-NOTHING-KILLED` is the same class.**
+- Its file was on `fix/sampler-kill-and-inspection` (PR #145, closed unmerged), at
+  `reviews/findings/P2_correctness_202609042055_remove-worktree-vs-a-git-child-nothing-killed.md`; its text before
+  `510f24c4` trimmed it gives the full sequence.
+- Its sequence: "The engine dies … while `WorkspaceManager::add_worktree` has a `git worktree add` in flight. Nothing
+  kills that child … Its descendants (`git checkout` and what that spawns) … keep writing into the new worktree".
+- It recorded the liveness face of that sequence: recovery's forced removal fails `DirectoryNotEmpty` against the live
+  writer and does not converge. It named the missing capability: distinguishing the in-flight window from the residue
+  "needs liveness of the writer".
+- DESC is the same precondition, a dead coordinator's Git child that nothing kills against recovery that reuses its
+  paths, with the corruption face added: the removal succeeds and the orphan writes afterwards.
+- Master cites PR136's id only from
+  `findings/P3_docs-contract_202609050648_unbindable-task-registration-has-no-design-sentence.md`. The new file is
+  where both faces are tracked, with PR136's id as its prior id.
+
+### 3.10 The legacy path: (e) at P1, and decision B
+
+**The re-grade.** `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` moves from P2 to P1, as
+all three lenses of round 3 graded it. Its file is renamed to the `P1_` prefix and keeps its id:
+`findings/P1_correctness_202610020230_legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry.md`.
+- **Executed** by the concurrency and regression lenses
+  (`~/orch-pr11/reviews/329-d3-witnesses/pr329-d3-reg-legacy-chbhff16/result.txt`; the concurrency lens's
+  `legacy/result.json`, quoted in its review text).
+  - With one Git writer per checkout, A was held after opening its registration's `commondir`.
+  - B's exact legacy snapshot-add argv exited 128: "failed to read …/commondir: Success".
+  - `discard_uncommitted()`'s `reset --hard` and `clean -fd` then turned B's "paid worker edits" back into `base` and
+    removed its new file.
+- **The path is production's:**
+  - the snapshot add's error propagates through `?` (`src/engine/attempt.rs:154`);
+  - the legacy coordinator answers any attempt error with `discard_uncommitted()` (`src/engine/coordinator.rs:544-548`);
+  - which is `reset --hard` and `clean -fd` (`src/workspace.rs:1230-1235`).
+- **That meets MAINTAINING's serious-P1 criterion,** "loss or corruption of data in a user repository". A consistent
+  event log, a resumable command and a low measured rate do not restore discarded output, so round 3's P2 grading is
+  withdrawn.
+- **The same discard follows a registration that stays torn** (a writer killed mid-registration, R1′), because the
+  legacy reader dies on residue as it does on a write in flight. The finding's failure sequence now says so.
+
+**G6, as the lenses split.**
+- The concurrency and regression lenses hold that the **pure** legacy-against-legacy sequence does not apply to G6: it
+  exercises the frozen legacy error path, not topology recovery, slots or ledgers.
+- The design-recast lens holds that the **mixed** case, a topology writer tearing a legacy reader, which the filing
+  covers, applies through shared-registry R17 conformance and Q6 ("untouched user checkout" among the sequential
+  guarantees). On that view it blocks G6 while open.
+- This round records the split and does not decide it. Filing waives nothing.
+
+**B1′, the proposal, pending the owner's decision B** (ESCALATION item 7, recommended yes). The four legacy registry
+enumerators run through the same tolerant access:
+- `switch_branch`'s `git switch` (`src/workspace.rs:450`);
+- `add_gate_worktree`'s `git worktree add -q --detach --force` (`:871`);
+- `cleanup_gate_workspace`'s `git worktree remove --force` (`:1549`);
+- `worktree_is_registered`'s `git worktree list --porcelain -z` (`:1602`).
+
+What B1′ changes:
+- **In `src/workspace.rs`, those four calls and nothing else.** Each call's existing `Command`, and its own success
+  check, becomes the attempt closure handed to the access. The access's own-entry name is `add_gate_worktree`'s
+  target basename. For `cleanup_gate_workspace`'s removal, its own registration is the entry the removal deletes,
+  excluded from C2 because the attempt itself changes it.
+  - One private helper resolves the canonical common git dir in the two steps `recorded_objects_scope` already takes
+    (`:97-101`).
+  - No other function of the module moves, and no other legacy module moves. In particular `discard_uncommitted`,
+    the coordinator's error handling and the gate snapshot's lifecycle stay as they are.
+- **In `src/workspace_manager.rs`, the access becomes callable from the legacy module:** one `pub(crate)` function
+  over a common git dir, an own-entry name, a retry condition and the attempt.
+  - Its body reads the store, sleeps and takes R-X; the Git command is the caller's.
+  - So it is classified `effect_free`, by the same reading that classifies `worktree_records`, which runs Git.
+  - Under B2′ the access stays private and no classification moves.
+- **Instruments (B1′ only):**
+  - `effects/wrappers.toml`: that function's name in `src/workspace_manager.rs`'s `effect_free` list.
+  - `effects/allowlist.toml`: `src/workspace.rs`'s `legacy_effect` text, as below. Its `path`, its `allows` and
+    `FROZEN_LEGACY_ALLOWLIST` (`src/effects.rs:1306`) do not move.
+  - No `clippy.toml` change: an `effect_free` function is not denied.
+  - These are instruments under CLAUDE.md's first limb, so a B1′ implementation is merged by the owner, or under a
+    delegation the owner writes for that pull request, not under standing delegation.
+
+**The unfreeze text.** The `legacy_effect` entry for `src/workspace.rs` (`effects/allowlist.toml:899-923`) changes in
+two places:
+- "AMENDED ONCE" becomes "AMENDED TWICE";
+- the last sentence, "The schema-4 equivalents live behind funnels in `crate::workspace_manager` and nothing here calls
+  them: the constant is read, and no funnel is called.", is replaced by:
+
+> The second amendment, to close `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` on the
+> owner's decision to unfreeze the module for this one change, is one thing and no more: the four Git children that
+> enumerate the repository's worktree registry — `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree
+> add`, `cleanup_gate_workspace`'s `git worktree remove` and `worktree_is_registered`'s `git worktree list` — each run
+> through `crate::workspace_manager`'s tolerant registry access, which attempts one again while the repository's
+> worktree store shows another process writing it and refuses one still contended at its deadline, never as Git
+> state; one private helper resolves the canonical common git dir as `recorded_objects_scope` does. Every other
+> behaviour of the module stays frozen. The schema-4 equivalents live behind funnels in `crate::workspace_manager`, and
+> nothing here calls a funnel: the constant is read, and the tolerant access is called, which takes no site.
+
+**What B1′ closes.** It closes every write in flight that finishes within the deadline, from any writer: the race in
+(e), and its mixed case. Its test is T10 with the roles swapped (the legacy engine in a linked checkout beside a
+topology writer, 0 legacy failures), plus the two lenses' witnesses with A released within B's deadline: B's snapshot
+add then succeeds on a later attempt, and nothing is discarded.
+
+**What B1′ does not close: R1′ on the legacy path.**
+- A registration that stays torn until the deadline still fails the legacy access. It fails as `Refused` after the
+  deadline, naming the entry, rather than as a Git error at once.
+- The frozen coordinator answers it with `discard_uncommitted()`, as it answers any failed attempt today.
+- Closing that would need the legacy coordinator not to discard on a refusal: a second unfreeze, of
+  `src/engine/coordinator.rs`, which this round does not propose.
+- So under B1′ the finding file stays open, narrowed to that residue, at P1, with that remedy.
+- That residue is not specific to parallel execution. A sequential topology run and the legacy engine leave the same
+  residue when killed, and the dead run's own resume repairs its own slots' residue.
+
+**B2′, the fallback, if the module stays frozen.** The finding stays filed at P1 with B1′ as its guard.
+- What it leaves for G6: the pure legacy case, which two lenses hold inapplicable, and the mixed case, which one lens
+  holds applicable through R17 and Q6. If G6's reviewers agree with that lens, an open applicable P1 fails G6. The
+  route to a passing G6 then runs through B1′ in a later change, under the owner's decision.
+- What B2′ costs the topology path: nothing. Tolerance closes (d) without the legacy side.
+
+### 3.11 Design review round 3, answered
+
+**Design review round 3** ran three `gpt-6-astra` lenses at `max` on `8dd2214c` on 2026-10-02, from 03:05:05Z to
+03:35:23Z (the `run-lens` logs).
+- The design lens's first run was refused on [cyber] grounds: "This content was flagged for possible cybersecurity
+  risk", no output (`~/orch-pr11/reviews/review-329-d3-design-8dd2214c.log`, kept as `…-CYBER-REFUSED.log`). Under the
+  owner's standing rule that is not a review, so it was recast as a conformance reading (`lens-fub3-design-recast.md`)
+  and run again from 03:21:30Z.
+- All three returned CHANGES_REQUIRED. The texts are
+  `~/orch-pr11/reviews/review-329-d3-{concurrency,regression,design-recast}-8dd2214c.review.md`, with their hashes in
+  `SHA256SUMS-329-d3`; the witnesses are in `329-d3-witnesses/`, and the triage is `review-329-d3-triage.md`.
+
+| Finding | Sev | Kind | Round 4 | Where | Evidence |
+|---|---|---|---|---|---|
+| FUB-D3-TORNOK | P1 | executed | **Fixed (design), witnessed on the shape.** The parse is inside the attempt; the reads cover `HEAD`; C1 counts an absent or empty `gitdir`, `commondir` or `HEAD`. | §3.3 | `d4/witness/git-level.log`; `d4/census/probe-iv/witness-runs/TABLE.txt` (static, transient, handshake and control) |
+| FUB-D3-PERM | P2 | executed | **Fixed (design), witnessed on the shape.** C3 needs an entry neither read holds; the add's own entry gets one more attempt; an unreadable file is not C1. | §3.3 | `git-level.log` (PERM); `witness-runs/TABLE.txt` (`d4_perm_add`, `d4_iv_perm_attempts`) |
+| FUB-D3-BOUND | P2 | reasoned | **Fixed (design), witnessed on the shape.** One deadline per access covers every wait for R-X; R-X is read-write and taken only by adds (shared) and the torn plan (alone). One attempt's runtime is stated unbounded. | §3.4 | `witness-runs/TABLE.txt` (`d4_iv_bound_*`); `suite-mutex-attempt/suite-1.log` (the form not chosen) |
+| FUB-D3-DESC-FILTER | P1 | executed | **Filed**, with the lease withdrawn and every claim that #329 closes (c) removed. | §3.9 | the finding file |
+| FUB-D3-DESC-WIN | P1 | reasoned | **Filed**, the same finding. | §3.9 | the finding file |
+| FUB-D3-LEGACY | P1 | executed | **Re-graded P1**; the lenses' G6 split recorded; B1′ prepared, B2′ kept. | §3.10 | the renamed finding file |
+| FUB-D3-CLIPPY | P2 | reasoned | **Moot.** The lease helper it asked to deny is not added: the mechanism is withdrawn, and round 4 adds no effectful callable. | §3.6 | — |
+| FUB-D3-R28 | P2 | reasoned | **Moot.** No new R28 holder: R28's row, its `NoRunFinished` case and INV-22's accounting stay as the packet has them, and no erratum is needed. Follow-up C may raise its own packet question. | §3.6 | — |
+
+### 3.12 Risks, sequencing, and what is out of scope
+
+**Sequencing.**
+- The implementation does not depend on #328, which owns `src/agent/proc.rs` and the container launch funnel.
+- It does not depend on follow-up C. C owns Git writer spawn configuration and the recovery-side wait before slot
+  reuse; this change's hunks are the registry-access wrapper, R-X and the removal. Whichever merges second rebases.
+- The two meet in `design/15` in different paragraphs.
+
+**Risks.**
+- **R-X changes shape.** Adds no longer wait for each other in one process, and only the torn plan excludes them.
+  Every reader of the registry relies on tolerance instead of exclusion. That is measured clean in two suites and in
+  PR11's concurrency test, and T13 and the five-suite count are owed.
+- **Static tears now cost a deadline.** A resume over its own torn residue, or any run over another run's, waits the
+  deadline before it refuses or repairs (R1′). Round 3's design had the same cost under its bound.
+- **Genuine failures under sustained churn** wait up to the deadline and are then returned as a non-durable refusal.
+- **Lost healing.** Another run's torn registration is no longer pruned by this run's removals (`PR308-R3-…`).
+- **Git versions.** This box has 2.43.0; CI has 2.50.1 on the Windows guest and 2.55.0 elsewhere.
+  - From 2.43 to 2.55, `add_worktree` writes `locked`, then `gitdir` and `commondir`.
+  - From 2.50 on it writes `HEAD` in-process (`d3/git-src/`).
+  - C1 counts each of the three files, absent or empty, so the order among them does not matter to it.
+- **Windows (R9)** is reasoned, not executed.
+
+**Out of scope, and said so.**
+- (c), DESC: follow-up C (§3.9).
+- A dead legacy coordinator's Git children against its own resume, which §2.13 already set out of scope.
+- `RESIDUE-UNBINDABLE-TASK-REGISTRATION-HAS-NO-DESIGN-SENTENCE`'s policy question: round 3's suggestion that the lease
+  could license `WriterProof::NoWriterAlive` goes with the lease.
+- Foreign Git's own commands (R2, R3).

@@ -63,48 +63,54 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
-**A registry another process is writing, and a dead coordinator's Git writers.** *PROPOSED — the
-third design round of `reviews/2026-10-01-pr11-follow-up-b-record.md` (§2); nothing in this paragraph
-is in force until it is implemented. It needs no packet change. Whether the frozen `src/workspace.rs`
-takes the same tolerance is the owner's decision.*
+**A registry another process is writing.** *PROPOSED — the fourth design round of
+`reviews/2026-10-01-pr11-follow-up-b-record.md` (§3), narrowed to the registry race; nothing in this
+paragraph is in force until it is implemented. It needs no packet change. Whether the frozen
+`src/workspace.rs` takes the same tolerance is the owner's decision.*
 
-**The defects.** Every checkout of a repository registers its linked worktrees in one shared store,
+**The defect.** Every checkout of a repository registers its linked worktrees in one shared store,
 `<common git dir>/worktrees/`, and Git writes a registration one file at a time.
-- Every enumeration of the store dies on an entry half written: `git worktree list`, the sibling scan
-  inside `git worktree add`, the engine's own scans. `git worktree prune` deletes an entry caught
-  before its `locked` file exists.
+- Every enumeration of the store dies on an entry half written, or prints a record for it that no
+  reader can use: `git worktree list`, the sibling scan inside `git worktree add`, the engine's own
+  scans. `git worktree prune` deletes an entry caught before its `locked` file exists.
 - The worktree lock excludes a second engine only from the same checkout, so two runs in two linked
   checkouts of one repository raced in the store
   (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`). In an attempt the lost race ended the
   command resumably. In a merge verification it was foreign Git state: it spent one of the candidate's
   deferrals, or parked the candidate at `max_defers`.
-- A coordinator killed inside a Git command leaves that command running on Unix, with its own
-  subprocesses. When the coordinator's resume removed and recreated the same slot, the orphan went on
-  acting on the slot's paths: it could reset the worker's edits, or delete the recreated registration
-  and checkout.
 
-**Tolerant registry access.** Every registry read or add the workspace manager makes is attempted again
-while the store shows a write in progress there: an entry no reader can read, a change while the
-attempt ran, or Git's error naming an entry of the store. A failure across a quiet, whole store is
-returned as it was. A contention that outlasts the bound, ten seconds, refuses resumably. It is never
-Git state a verification could defer or park a candidate on.
+**Tolerant registry access.** Every registry access the workspace manager makes is one attempt
+between two reads of the store: a list together with the parse of its output, an add, or one of the
+manager's scans.
+- A failed attempt is attempted again while the store shows another process writing it: an entry
+  whose `gitdir`, `commondir` or `HEAD` is absent or empty, a change between the two reads, or an
+  entry the failure names that neither read holds.
+- A failure across a quiet, whole store is returned as it was. One that names only the add's own new
+  entry gets one more attempt, whose failure is returned as it is unless the store shows contention.
+- Each access has one deadline, ten seconds. It covers the access's waits, its retries and the start
+  of every attempt. Contention that outlasts it refuses resumably, never as Git state a verification
+  could defer or park a candidate on.
+- The deadline does not bound one Git command already running, which a filter, a large checkout or a
+  slow filesystem can extend.
 
-**No engine prune.** The manager's removals delete their own registration directly, and the store itself
-when that leaves it empty. They never run `git worktree prune`, which deletes another process's add in
-flight.
+**Within one process.** The registry lock no longer serialises registry access: tolerance makes each
+access safe against another's half-done work, whichever process or thread does it. The lock is held
+shared by adds and alone by the repair that removes torn registrations, which must not read an add of
+the same process in flight as a dead add's residue.
 
-**The dead coordinator's Git writers hold the run's cleanup lease.** Every Git child the manager starts
-to write a worktree, its index or its registration is handed the run's cleanup lease as its standard
-input, and so is every `git update-ref` it starts. Their descendants inherit it, Git's own `update-ref`
-and `reset` under `worktree add` among them; a filter, which Git feeds through a pipe, does not. A
-resume, or any coordinator of the checkout, refuses while the lease is held, so it never removes or
-recreates a slot while one of the dead coordinator's writers can still act on its paths. On Windows the
-ambient job ends those children with the coordinator, as for every other child.
+**No engine prune.** The manager's removals delete their own registration directly, and the store
+itself when that leaves it empty. They never run `git worktree prune`, which deletes another
+process's add in flight.
 
-**What stays foreign.** An agent's own Git on the host runner and the user's Git in any checkout are
-tolerated as readers, and their own commands are theirs. A writer that died mid-write leaves an entry
-that stays torn; the access that meets it refuses resumably, naming it, until its own run's resume
-repairs it.
+**What stays outside it.**
+- A coordinator killed inside a Git write leaves that write's processes running on Unix. When its
+  resume recreates the slot, they can still act on the slot's paths. That is
+  `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, a separate finding
+  with its own change before G6, and this tolerance does not address it.
+- An agent's own Git on the host runner and the user's Git in any checkout are tolerated as writers,
+  and their own commands are theirs.
+- A writer that died mid-write leaves an entry that stays torn. The access that meets it refuses
+  resumably, naming it, until its own run's resume repairs it.
 
 **When a Unix helper does not start.** The cleanup reaper and the job-control guard are forked before any agent exists, and each acknowledges its own startup within a fixed budget. A launch that does not see that acknowledgement fails, ends the helper with one `SIGKILL` and a **bounded** wait — by number, or through the identity the next paragraph describes — and reports what those two calls answered, alongside how long it waited, that budget, the descriptor ceiling the helper was closing against, and how the wait ended: on the helper's own report of the setup step that refused and the error it left, on the acknowledgement pipe closing with no report, or on the budget elapsing with nothing on the pipe. A helper that cannot finish its setup writes that report on the acknowledgement pipe it already owns before it ends, and the wait ends the moment the helper ends on every supported platform. On macOS the wait is a `select`, because `poll` on the FIFO the channel is built from never reports the writer's close. The point of reporting these is one distinction: a helper that had **already ended itself** before the signal, whose report or exit status names which of its own setup steps refused, against one that was **still running** and had to be killed, which says it was still working when the budget ran out. Nothing else is claimed. **The wait after the signal is bounded, and a helper still there when it runs out is left behind.** The wait asks the kernel for what it can answer without blocking and asks again until the helper is collected or a second budget of its own elapses; a helper that has not become collectable by then is one the kernel is not ready to hand back — in uninterruptible I/O with the signal pending, say — so the launch reports that it was left for this process's exit to collect and returns, rather than waiting on it. It must return: these launches hold the barrier under which the signal monitor refuses to kill or stop any registered group, so a launch that never returns is every running agent outliving a `SIGTERM` for as long as the kernel takes. Of the waits that end a helper, one is **not** bounded, and deliberately: the end of a run's cleanup reaper that has **acknowledged** CLEANUP or CANCEL, whose exit is what releases the run's cleanup lease the caller is about to act on, so releasing that caller early would let it proceed against a lease still held. A reaper that did not acknowledge CLEANUP — its pipe ended with no answer, it refused, or the request could not be written — is ended with the bounded wait instead, because its caller acts on nothing: the supervisor answers that failure by arming fail-closed termination of this process and returning an error, and a reaper the wait leaves behind holds the lease until it exits, as a reaper does after any coordinator death. The parent asks the kernel nothing about the helper beyond those two calls and the pipe it was already reading, and in particular a pid is never treated as evidence of which process it names — a wait that answers *not collectable yet* is reported as that and never as the helper: while an embedding host may reap this process's children with a wildcard wait, no observation the parent can make establishes that, and the message says only what the pipe carried and what `kill` and `waitpid` returned.
 
