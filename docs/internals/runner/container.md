@@ -457,9 +457,20 @@ census cannot account for.
 [`UpstrokeError::Io`] on any filesystem failure, [`UpstrokeError::Git`] when the
 record will not serialize.
 
-## `pub fn create_container(`
+## `pub(in crate::runner::container) fn create_container(`
 
 `Container.Create` (R26) — create the container **from an image id**.
+
+**Nameable only inside the container module tree** (`FUA-I1-MACRO`), as is `start_container`.
+Their production callers are this module's free `launch` and `exec.rs`'s
+`ContainerRunner::launch`, the covered one, and every other caller is a test of this tree; a
+`pub` funnel let any module of the crate start a container no reaper covers, guarded only by
+the domination census's reading of source text, which a macro argument evaded. With this
+visibility the compiler refuses a naming from anywhere else however it is spelled — an alias, a
+re-export, a function value, a macro's expansion — and the census
+(`every_container_start_in_production_is_reached_only_through_a_covered_launch`) is the guard
+inside the tree. Private (`fn`) would say the same to the compiler, but the effects census
+classifies by the visibility a fn declares, and these two are funnels reached from another file.
 
 INV-23: "every container of every epoch is created from the recorded image
 id". [`CreateSpec`] carries no reference at all, so creating from one is not
@@ -520,10 +531,11 @@ instead of consuming the outage deferral (`PR8-R4-START-NOT-ATTEMPTED`).
 The flag comes from [`funnel_reporting_attempt`], which is the only thing
 that knows on which side of the primitive the failure happened.
 
-## `pub fn start_container(`
+## `pub(in crate::runner::container) fn start_container(`
 
 `Container.Start` (R26). Its failure says whether the start was attempted
-([`StartFailure`]), because the launch's fate turns on exactly that.
+([`StartFailure`]), because the launch's fate turns on exactly that. Nameable only inside the
+container module tree, for `create_container`'s reason.
 
 **The container to start is named by the proof and by nothing else.**
 `expected_failures_refusals[6]` is "container start without an intent is

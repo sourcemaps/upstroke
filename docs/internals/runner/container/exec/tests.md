@@ -1928,16 +1928,43 @@ The funnel entries that start a container without a cover: the free `launch` and
 funnels it and `ContainerRunner::launch` call. The runtime's own `create` and `start` are the
 primitives below them, read separately.
 
+## `fn macro_arguments(code: &str) -> Vec<(usize, usize)> {`
+
+The span of every macro invocation's argument in blanked code: an identifier immediately
+followed by `!`, then, after any whitespace, `(`, `[` or `{`, to its matching delimiter, every
+kind of bracket counted. `x != (y)` opens nothing — the `!` follows a space — and neither does
+`macro_rules! name {`, whose body is read as ordinary code: a launcher it names there is named
+by the ordinary rules. A macro invocation's argument is a token tree the macro can splice
+anywhere, which is why `namings` treats it apart (`FUA-I1-MACRO`).
+
+## `fn inside_a_macro_argument(spans: &[(usize, usize)], at: usize) -> bool {`
+
+Whether `at` falls strictly inside one of those spans — nested invocations included.
+
 ## `fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {`
 
-Every naming of `name` in blanked code (`FUA-D1-DES-1`): an occurrence of the identifier that is
-not its definition (`fn launch(`), a method call or field (`.launch`), or a field initializer
-(`launch:`), classified as a call, a function value, an import, an alias or a re-export. Inside
-a `use` declaration it is an import, an alias when `as` follows it, a re-export when the `use`
-is `pub` or `pub(…)`; elsewhere a call when `(` follows and a value otherwise. Every alias,
-function value and re-export names the original identifier somewhere, so counting namings
-rather than calls closes the gap the design review found: `use super::launch as
-start_uncovered;` and a call of `start_uncovered(` passed the census as designed.
+Every naming of `name` in blanked code (`FUA-D1-DES-1`, made conservative by `FUA-I1-MACRO`).
+Inside a macro's argument every occurrence is a naming, `MacroArgument`, whatever precedes or
+follows it: the macro decides what the tokens become, so `uncovered_delegate!(launch: hooks, …)`
+expanding to `super::launch(hooks, …)` — the implementation review's mutation, which every check
+passed while the census skipped `launch:` as a field initializer — is named. Outside one, an
+occurrence that is its definition (`fn launch(`) or a method call or field access (`.launch`) is
+not a naming; every other is, classified as a call, a function value, an import, an alias, a
+re-export or a field. Inside a `use` declaration it is an import, an alias when `as` follows it, a
+re-export when the `use` is `pub` or `pub(…)`; elsewhere a call when `(` follows, a field when a
+single `:` does — a field's declaration or initializer, a struct pattern's field or a typed
+binding, none of which names the function outside a macro, but each is pinned rather than
+skipped, so no colon is passed over unread — and a value otherwise. Every alias, function value
+and re-export names the original identifier somewhere, so counting namings rather than calls
+closes the gap the design review found: `use super::launch as start_uncovered;` and a call of
+`start_uncovered(` passed the census as designed.
+
+What no reading of source text can see: an identifier a procedural macro builds from pieces, a
+path inside a string an attribute hands a derive (`#[serde(with = "…")]`; strings are blanked),
+and a file `include!`d from outside `src/**/*.rs`. That is why the compiler's refusal is the
+stronger guard where it can be had: `create_container` and `start_container` are
+`pub(in crate::runner::container)`, so outside the container module tree no spelling of either
+compiles at all.
 
 ## `fn enclosing_fn(code: &str, at: usize) -> Option<String> {`
 
@@ -1947,8 +1974,18 @@ code. A `fn(` pointer type has no name and is skipped.
 ## `fn the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher() {`
 
 The reader over written snippets: an alias, two re-exports (`pub use … as`, `pub(crate) use`),
-an import, a function value, a call by bare name after a glob import and a call by path are
-named; a definition, a method call, a field and a field initializer are not.
+an import, a function value, a call by bare name after a glob import, a call by path and a field
+initializer are named; a definition, a method call and a field access are not.
+
+## `fn the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it() {`
+
+`FUA-I1-MACRO`'s census witness, red on the census as reviewed at `17d7c605`, which read none of
+these occurrences: the implementation review's macro verbatim and its invocation
+`uncovered_delegate!(launch: hooks, runtime, view, plan)`, the same with braces and
+`start_container:`, a field access `plan.launch` inside `spliced![…]`, all named as macro
+arguments, and a struct field `launch: LaunchPlan` named as a field; `a != (b)` opens no macro.
+The primitives' reader over a second snippet names `start:` inside a macro argument and a field
+`start: usize`, and still passes over `OpenOptions::new().create(true)`.
 
 ## `fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {`
 
@@ -1959,15 +1996,18 @@ does), five checks:
 1. the namings of `create_container` and `start_container` are exactly `exec.rs`'s import and
    its two calls inside `ContainerRunner::launch`, and `container.rs`'s two calls inside the
    free `launch`;
-2. the free `launch` has no production naming at all;
+2. the free `launch` has no production naming at all but the two `launch:` fields of `exec.rs`'s
+   `InvocationPlan`, its declaration and its initializer in `plan`, pinned as fields; any
+   occurrence inside a macro's argument is a naming, whatever follows it;
 3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
    stated in its header or inherited from a parent that states it, twenty-seven modules today —
-   where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call or path
-   naming `create` or `start` is one of seventeen pinned namings: `runtime.create(` and
-   `runtime.start(` inside the two funnels, and fourteen others none of which is a container
-   runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(` and the like); and
-   `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own `create` and
-   `start`;
+   where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call, path,
+   field or macro-argument occurrence of `create` or `start` is one of twenty-one pinned namings:
+   `runtime.create(` and `runtime.start(` inside the two funnels, and nineteen others none of
+   which is a container runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(`,
+   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!` and the
+   like); and `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
+   `create` and `start`;
 4. in `exec.rs`, `fn launch(`'s signature names `Covered`, `self.launch(` occurs once, in
    `contain`, after `contain`'s one `.cover(`, and `Covered {` is constructed once, in `cover`;
 5. the control: the regions naming `start_container` are exactly those two files, and the walk
@@ -2035,12 +2075,16 @@ child and turns this census red.
 
 ## `fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {`
 
-The namings of a primitive's name that could reach it: a call by any receiver, a path, or a
-naming inside a `use`; not a definition, a module path segment (`create::`), a field, or a local
-variable used as a value — a trait method is reachable only by a call or a path. A call whose only
-argument is a `bool` literal is skipped: neither `ContainerRuntime::create(&CreateSpec)` nor
-`::start(&str)` takes one, and `OpenOptions::create(true)` is the common case. Each is spelled with
-its receiver or path segment and the character after it, so the pinned list is readable.
+The namings of a primitive's name that could reach it: a call by any receiver, a path, a naming
+inside a `use`, a field or typed binding (`start:`), and every occurrence inside a macro's
+argument, whatever surrounds it (`FUA-I1-MACRO`: a macro can splice `start` after any receiver);
+outside a macro, not a definition, a module path segment (`create::`), or a local variable used
+as a value — a trait method is reachable there only by a call or a path. A call whose only
+argument is a `bool` literal is skipped outside a macro: neither
+`ContainerRuntime::create(&CreateSpec)` nor `::start(&str)` takes one, and
+`OpenOptions::create(true)` is the common case. Each is spelled with its receiver or path segment
+and the character after it, and `in a macro argument` after that when it is one, so the pinned
+list is readable.
 
 ## `fn stated_disallowed_methods(source: &str) -> Option<bool> {`
 

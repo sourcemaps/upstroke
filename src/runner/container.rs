@@ -275,7 +275,7 @@ pub fn write_intent(
     })
 }
 
-pub fn create_container(
+pub(in crate::runner::container) fn create_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
@@ -332,7 +332,7 @@ pub struct StartFailure {
     pub error: UpstrokeError,
 }
 
-pub fn start_container(
+pub(in crate::runner::container) fn start_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,

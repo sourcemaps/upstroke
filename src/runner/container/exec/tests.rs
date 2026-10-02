@@ -4922,6 +4922,8 @@ enum Naming {
     Import,
     Alias,
     Reexport,
+    Field,
+    MacroArgument,
 }
 
 #[cfg(unix)]
@@ -4982,15 +4984,54 @@ fn is_public(code: &str, use_at: usize) -> bool {
 }
 
 #[cfg(unix)]
+fn macro_arguments(code: &str) -> Vec<(usize, usize)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    for (bang, _) in code.match_indices('!') {
+        let named = bang
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_some_and(|byte| is_identifier_byte(*byte));
+        let rest = &code[bang + 1..];
+        let open = bang + 1 + (rest.len() - rest.trim_start().len());
+        if !named || !matches!(bytes.get(open), Some(b'(' | b'[' | b'{')) {
+            continue;
+        }
+        let mut depth = 0_usize;
+        for (offset, byte) in bytes.iter().enumerate().skip(open) {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        spans.push((open, offset));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    spans
+}
+
+#[cfg(unix)]
+fn inside_a_macro_argument(spans: &[(usize, usize)], at: usize) -> bool {
+    spans.iter().any(|(open, close)| *open < at && at < *close)
+}
+
+#[cfg(unix)]
 fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
+    let macros = macro_arguments(code);
     let mut found = Vec::new();
     for at in identifier_occurrences(code, name) {
+        if inside_a_macro_argument(&macros, at) {
+            found.push((Naming::MacroArgument, at));
+            continue;
+        }
         let before = code[..at].trim_end();
         let after = code[at + name.len()..].trim_start();
         if ends_with_word(before, "fn") || before.ends_with('.') {
-            continue;
-        }
-        if after.starts_with(':') && !after.starts_with("::") {
             continue;
         }
         let kind = match use_declaration_of(code, at) {
@@ -5000,6 +5041,7 @@ fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
             }
             Some(_) => Naming::Import,
             None if after.starts_with('(') => Naming::Call,
+            None if after.starts_with(':') && !after.starts_with("::") => Naming::Field,
             None => Naming::Value,
         };
         found.push((kind, at));
@@ -5009,26 +5051,29 @@ fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {
 
 #[cfg(unix)]
 fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {
+    let macros = macro_arguments(code);
     let mut found = Vec::new();
     for at in identifier_occurrences(code, name) {
         let before = code[..at].trim_end();
         let after = code[at + name.len()..].trim_start();
-        if ends_with_word(before, "fn") {
+        let in_a_macro = inside_a_macro_argument(&macros, at);
+        if !in_a_macro && ends_with_word(before, "fn") {
             continue;
         }
-        if after.starts_with("::") && !after.starts_with("::<") {
+        if !in_a_macro && after.starts_with("::") && !after.starts_with("::<") {
             continue;
         }
         let called = after.starts_with('(');
         let pathed = before.ends_with("::");
-        if !(called || pathed || use_declaration_of(code, at).is_some()) {
+        let colon = after.starts_with(':') && !after.starts_with("::");
+        if !(in_a_macro || colon || called || pathed || use_declaration_of(code, at).is_some()) {
             continue;
         }
         let argument = after
             .strip_prefix('(')
             .and_then(|arguments| arguments.split(')').next())
             .map(str::trim);
-        if called && matches!(argument, Some("true" | "false")) {
+        if !in_a_macro && called && matches!(argument, Some("true" | "false")) {
             continue;
         }
         let separator = if before.ends_with("::") {
@@ -5048,7 +5093,15 @@ fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {
             &path[start..]
         };
         let next = after.chars().next().map(String::from).unwrap_or_default();
-        found.push((format!("{receiver}{separator}{name}{next}"), at));
+        let spelled = format!("{receiver}{separator}{name}{next}");
+        found.push((
+            if in_a_macro {
+                format!("{spelled} in a macro argument")
+            } else {
+                spelled
+            },
+            at,
+        ));
     }
     found
 }
@@ -5225,12 +5278,13 @@ fn launch(&self, plan: &InvocationPlan) {
         ("start_container", Naming::Value, 7),
         ("launch", Naming::Call, 9),
         ("create_container", Naming::Call, 10),
+        ("launch", Naming::Field, 15),
     ];
     expected.sort();
     assert_eq!(
         read, expected,
-        "the reader names every alias, re-export, import, function value and call of an unarmed \
-         launcher, and no definition, method call, field or field initializer"
+        "the reader names every alias, re-export, import, function value, call and field \
+         initializer of an unarmed launcher, and no definition, method call or field access"
     );
     assert_eq!(
         enclosing_fn(
@@ -5238,6 +5292,78 @@ fn launch(&self, plan: &InvocationPlan) {
             snippet.find("launch(hooks, runtime").expect("the call")
         ),
         Some("bypass".to_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it() {
+    let snippet = "\
+macro_rules! uncovered_delegate {
+    ($function:ident: $($argument:expr),* $(,)?) => {
+        super::$function($($argument),*)
+    };
+}
+pub fn delta_uncovered(hooks: &mut dyn ContainerHooks, plan: &LaunchPlan) -> bool {
+    uncovered_delegate!(launch: hooks, runtime, view, plan).is_ok()
+}
+fn braces(hooks: &mut dyn ContainerHooks) {
+    uncovered_delegate! { start_container: hooks, site, runtime, intent };
+    spliced![plan.launch, hooks];
+    let unchanged = a != (b);
+}
+struct InvocationPlan {
+    launch: LaunchPlan,
+}
+";
+    let mut read: Vec<(&str, Naming, usize)> = Vec::new();
+    for name in UNARMED_LAUNCHERS {
+        for (kind, at) in namings(snippet, name) {
+            read.push((name, kind, snippet[..at].lines().count()));
+        }
+    }
+    read.sort();
+    let mut expected = vec![
+        ("launch", Naming::MacroArgument, 7),
+        ("start_container", Naming::MacroArgument, 10),
+        ("launch", Naming::MacroArgument, 11),
+        ("launch", Naming::Field, 15),
+    ];
+    expected.sort();
+    assert_eq!(
+        read, expected,
+        "a macro can splice any identifier of its argument anywhere, so the reader names every \
+         occurrence of an unarmed launcher inside a macro's delimiters -- `name:`, `.name` and \
+         all -- and a field declaration outside one; `!=` opens no macro"
+    );
+    assert_eq!(
+        enclosing_fn(
+            snippet,
+            snippet.find("launch: hooks").expect("the macro argument")
+        ),
+        Some("delta_uncovered".to_owned())
+    );
+
+    let primitives = "\
+fn plant(runtime: &dyn ContainerRuntime) {
+    delegate!(start: runtime, \"probe\");
+    let options = OpenOptions::new().create(true);
+}
+struct Span {
+    start: usize,
+}
+";
+    let mut spelled: Vec<String> = ["create", "start"]
+        .into_iter()
+        .flat_map(|name| primitive_namings(primitives, name))
+        .map(|(spelled, _)| spelled)
+        .collect();
+    spelled.sort();
+    assert_eq!(
+        spelled,
+        ["start:", "start: in a macro argument"],
+        "the primitives' reader names a `create` or `start` inside a macro argument and a field \
+         named after one, and still passes over `OpenOptions::create(true)`"
     );
 }
 
@@ -5415,14 +5541,27 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
             Naming::Call,
             Some("launch".to_owned()),
         ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "launch",
+            Naming::Field,
+            None,
+        ),
+        (
+            "src/runner/container/exec.rs".to_owned(),
+            "launch",
+            Naming::Field,
+            Some("plan".to_owned()),
+        ),
     ];
     expected.sort();
     assert_eq!(
         found, expected,
         "a production region names an unarmed launcher — the free `launch`, `create_container` or \
          `start_container` — outside the two funnels that may: by a call, an import, an alias, a \
-         function value or a re-export. Every container must be started through \
-         `ContainerRunner::launch`, which only `contain` calls with the cover its reaper armed"
+         function value, a re-export, a field or anywhere inside a macro's argument. Every \
+         container must be started through `ContainerRunner::launch`, which only `contain` calls \
+         with the cover its reaper armed"
     );
     assert_eq!(
         naming_start_container,
@@ -5466,6 +5605,10 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
             "paths.create(",
             "resume_harness_inner_on",
         ),
+        ("src/agent/proc.rs", "create:", ""),
+        ("src/export.rs", "start:", ""),
+        ("src/export.rs", "start:", ""),
+        ("src/util.rs", "start. in a macro argument", "tail"),
         ("src/runner/container.rs", "File::create(", "write_synced"),
         (
             "src/runner/container.rs",
@@ -5505,7 +5648,7 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
         (
             file.to_owned(),
             spelled.to_owned(),
-            Some(function.to_owned()),
+            (!function.is_empty()).then(|| function.to_owned()),
         )
     })
     .collect();
