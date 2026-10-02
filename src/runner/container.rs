@@ -275,17 +275,18 @@ pub fn write_intent(
     })
 }
 
-pub fn create_container(
+pub(in crate::runner::container) fn create_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
-    spec: &CreateSpec,
+    covered: exec::CoveredCreate<'_>,
 ) -> Result<CreatedContainer, UpstrokeError> {
     expect_site(site, Operation::Create)?;
+    let spec = covered.spec();
     expect_intent_for(intent, &spec.name, "created")?;
     expect_mounted_volumes_present(runtime, spec)?;
-    funnel(hooks, site, || runtime.create(spec).map_err(refused))
+    funnel(hooks, site, || runtime.create(covered).map_err(refused))
 }
 
 fn expect_mounted_volumes_present(
@@ -332,18 +333,20 @@ pub struct StartFailure {
     pub error: UpstrokeError,
 }
 
-pub fn start_container(
+pub(in crate::runner::container) fn start_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
+    covered: exec::CoveredStart<'_>,
 ) -> Result<(), StartFailure> {
-    expect_site(site, Operation::Start).map_err(|error| StartFailure {
+    let unattempted = |error| StartFailure {
         attempted: false,
         error,
-    })?;
-    let name = intent.name().as_str().to_owned();
-    funnel_reporting_attempt(hooks, site, || runtime.start(&name).map_err(refused))
+    };
+    expect_site(site, Operation::Start).map_err(unattempted)?;
+    expect_intent_for(intent, covered.name(), "started").map_err(unattempted)?;
+    funnel_reporting_attempt(hooks, site, || runtime.start(covered).map_err(refused))
         .map_err(|(attempted, error)| StartFailure { attempted, error })
 }
 
@@ -440,73 +443,6 @@ pub struct Launched {
     pub intent_path: PathBuf,
     pub view_path: PathBuf,
     pub reported_image_id: String,
-}
-
-pub fn launch(
-    hooks: &mut dyn ContainerHooks,
-    runtime: &dyn ContainerRuntime,
-    view: &dyn GitView,
-    plan: &LaunchPlan,
-) -> Result<Launched, UpstrokeError> {
-    let written = write_intent(
-        hooks,
-        ContainerSite::WriteIntent,
-        &plan.private_root,
-        &plan.name,
-        &plan.intent,
-    )?;
-    let intent_path = written.path().to_path_buf();
-    let view_path = mount_git_view(hooks, ContainerSite::MountGitView, view, &plan.view)?;
-    let created = create_container(hooks, ContainerSite::Create, runtime, &written, &plan.spec)?;
-    if created.reported_image_id != plan.spec.image_id {
-        let residue = cancel_created(
-            hooks,
-            runtime,
-            view,
-            &plan.private_root,
-            &plan.name,
-            Some(&view_path),
-        );
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "the container runtime created `{}` and reports image id `{}`, and the run's \
-                 recorded image id is `{}`; a created container whose reported image id \
-                 differs from the record is refused before start (INV-23){}",
-                plan.name,
-                created.reported_image_id,
-                plan.spec.image_id,
-                render_residue(&residue)
-            ),
-        });
-    }
-    start_container(hooks, ContainerSite::Start, runtime, &written)
-        .map_err(|failure| failure.error)?;
-    Ok(Launched {
-        name: plan.name.clone(),
-        intent_path,
-        view_path,
-        reported_image_id: created.reported_image_id,
-    })
-}
-
-fn cancel_created(
-    hooks: &mut dyn ContainerHooks,
-    runtime: &dyn ContainerRuntime,
-    view: &dyn GitView,
-    private_root: &Path,
-    name: &ContainerName,
-    view_path: Option<&Path>,
-) -> Vec<String> {
-    cancel_reached(
-        hooks,
-        runtime,
-        view,
-        private_root,
-        name,
-        ContainerToRelease::MayBeRunning,
-        view_path,
-    )
-    .messages
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,18 +543,6 @@ fn removal_in_progress_establishes_nothing(step: &str, name: &ContainerName) -> 
     format!(
         "{step} of `{name}` was answered with another reclaimer's removal already in progress; the \
          daemon sets that flag before it kills, so this establishes nothing about the process"
-    )
-}
-
-fn render_residue(residue: &[String]) -> String {
-    if residue.is_empty() {
-        return String::new();
-    }
-    format!(
-        ". The cancel could not release everything the refused launch created, \
-         so this run's R19/R26 ledgers do not balance and a census will find the \
-         residue: {}",
-        residue.join("; ")
     )
 }
 
@@ -1354,7 +1278,8 @@ impl ContainerRuntime for DockerCli {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         let mut args: Vec<String> =
             vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
         if spec.read_only_root {
@@ -1396,7 +1321,8 @@ impl ContainerRuntime for DockerCli {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.exec(RuntimeOp::Start, name, &["start", name])
             .map(|_| ())
     }
@@ -1474,13 +1400,115 @@ fn mount_argument(mount: &runtime::Mount) -> String {
 }
 
 #[cfg(test)]
+mod uncovered {
+    use super::*;
+
+    pub fn launch(
+        hooks: &mut dyn ContainerHooks,
+        runtime: &dyn ContainerRuntime,
+        view: &dyn GitView,
+        plan: &LaunchPlan,
+    ) -> Result<Launched, UpstrokeError> {
+        let written = write_intent(
+            hooks,
+            ContainerSite::WriteIntent,
+            &plan.private_root,
+            &plan.name,
+            &plan.intent,
+        )?;
+        let intent_path = written.path().to_path_buf();
+        let view_path = mount_git_view(hooks, ContainerSite::MountGitView, view, &plan.view)?;
+        let created = create_container(
+            hooks,
+            ContainerSite::Create,
+            runtime,
+            &written,
+            CoveredCreate::without_a_reaper(&plan.spec),
+        )?;
+        if created.reported_image_id != plan.spec.image_id {
+            let residue = cancel_created(
+                hooks,
+                runtime,
+                view,
+                &plan.private_root,
+                &plan.name,
+                Some(&view_path),
+            );
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the container runtime created `{}` and reports image id `{}`, and the run's \
+                     recorded image id is `{}`; a created container whose reported image id \
+                     differs from the record is refused before start (INV-23){}",
+                    plan.name,
+                    created.reported_image_id,
+                    plan.spec.image_id,
+                    render_residue(&residue)
+                ),
+            });
+        }
+        start_container(
+            hooks,
+            ContainerSite::Start,
+            runtime,
+            &written,
+            CoveredStart::without_a_reaper(&plan.spec.name),
+        )
+        .map_err(|failure| failure.error)?;
+        Ok(Launched {
+            name: plan.name.clone(),
+            intent_path,
+            view_path,
+            reported_image_id: created.reported_image_id,
+        })
+    }
+
+    fn cancel_created(
+        hooks: &mut dyn ContainerHooks,
+        runtime: &dyn ContainerRuntime,
+        view: &dyn GitView,
+        private_root: &Path,
+        name: &ContainerName,
+        view_path: Option<&Path>,
+    ) -> Vec<String> {
+        cancel_reached(
+            hooks,
+            runtime,
+            view,
+            private_root,
+            name,
+            ContainerToRelease::MayBeRunning,
+            view_path,
+        )
+        .messages
+    }
+
+    fn render_residue(residue: &[String]) -> String {
+        if residue.is_empty() {
+            return String::new();
+        }
+        format!(
+            ". The cancel could not release everything the refused launch created, \
+             so this run's R19/R26 ledgers do not balance and a census will find the \
+             residue: {}",
+            residue.join("; ")
+        )
+    }
+}
+
+#[cfg(test)]
+pub use uncovered::launch;
+
+#[cfg(test)]
+pub(crate) use exec::cover::{CoveredCreate, CoveredStart};
+
+#[cfg(test)]
 mod fake;
 
 #[cfg(test)]
 pub(crate) use fake::{
     CHILD_EVENT, DOCKER_GATED_TESTS, FakeOwnerLiveness, FakeRuntime, Journaled, Launch,
-    LinkedRuntime, RecordingHooks, Start, StartPolicy, container_name_for, container_name_parts,
-    docker_gate, intent_path_for,
+    LinkedRuntime, NO_OP_REAPER_PROGRAM, RecordingHooks, Start, StartPolicy, container_name_for,
+    container_name_parts, docker_gate, intent_path_for,
 };
 
 #[cfg(test)]
@@ -1497,6 +1525,38 @@ impl DockerCli {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) fn write_program_in_its_own_process(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut writer = Command::new("/bin/sh");
+    writer
+        .args(["-c", "printf '%s' \"$2\" > \"$1\"", "write-program"])
+        .arg(path)
+        .arg(script);
+    let written =
+        crate::agent::proc::test_support::run_with_timeout(writer, "", Duration::from_secs(60))
+            .expect("run the program's writer in a process of its own");
+    assert_eq!(
+        written.code,
+        Some(0),
+        "write {}: {written:?}",
+        path.display()
+    );
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("make the written program executable");
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) fn run_program_in_its_own_process(program: &Path, args: &[&str]) -> Option<i32> {
+    let mut command = Command::new(program);
+    command.args(args);
+    crate::agent::proc::test_support::run_with_timeout(command, "", Duration::from_secs(60))
+        .expect("run the program in a process of its own")
+        .code
+}
 
 #[cfg(test)]
 #[inline]

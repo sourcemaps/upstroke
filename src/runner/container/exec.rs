@@ -19,8 +19,9 @@ use crate::runner::{
 };
 use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
 
+use super::census::ReaperContainerScope;
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
-use super::intent::{ContainerIntent, ContainerName};
+use super::intent::{ContainerIntent, ContainerName, LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
 use super::runtime::{ContainerRuntime, ContainerTrace, CreateSpec, Mount, RuntimeError};
 use super::view::{self, RoleGitView};
 use super::{
@@ -28,6 +29,7 @@ use super::{
     Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
+pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};
 
 pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -260,6 +262,66 @@ pub struct ContainerRunner {
     hooks: Option<Mutex<Box<dyn ContainerHooks + Send>>>,
     poll: Duration,
     output_limit: usize,
+    reaping: Reaping,
+}
+
+#[derive(Default)]
+struct Reaping {
+    state: Mutex<ReapingState>,
+}
+
+#[derive(Default)]
+struct ReapingState {
+    armed: Option<Armed>,
+    in_flight: usize,
+    unsettled: bool,
+}
+
+struct Armed {
+    #[cfg(unix)]
+    reaper: crate::agent::proc::ContainerReaper,
+    scope: ReaperContainerScope,
+}
+
+fn refuse_unless_selected(
+    scope: &ReaperContainerScope,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), UpstrokeError> {
+    if scope.selects(labels) {
+        return Ok(());
+    }
+    let label = |key: &str| labels.get(key).map_or("<absent>", String::as_str);
+    Err(UpstrokeError::Refused {
+        message: format!(
+            "the container is labeled `{LABEL_PRIVATE_ROOT}={}` and `{LABEL_INCARNATION}={}`, and \
+             this runner's container reaper lists `{}`, which would not find it; the launch is \
+             refused before any reaper is armed and before its intent is written",
+            label(LABEL_PRIVATE_ROOT),
+            label(LABEL_INCARNATION),
+            scope.list_argv().join(" ")
+        ),
+    })
+}
+
+impl Armed {
+    fn kept_until_the_process_exits(self) {
+        #[cfg(unix)]
+        std::mem::forget(self.reaper);
+    }
+}
+
+impl Drop for Reaping {
+    fn drop(&mut self) {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let Some(armed) = state.armed.take() else {
+            return;
+        };
+        if state.in_flight == 0 && !state.unsettled {
+            drop(armed);
+        } else {
+            armed.kept_until_the_process_exits();
+        }
+    }
 }
 
 impl std::fmt::Debug for ContainerRunner {
@@ -303,6 +365,7 @@ impl ContainerRunner {
             hooks: None,
             poll: SUPERVISION_POLL,
             output_limit: OUTPUT_LIMIT_BYTES,
+            reaping: Reaping::default(),
         })
     }
 
@@ -543,6 +606,8 @@ impl ContainerRunner {
         &self,
         hooks: &mut dyn ContainerHooks,
         plan: &LaunchPlan,
+        to_create: CoveredCreate<'_>,
+        to_start: CoveredStart<'_>,
     ) -> Result<Launched, RunnerError> {
         let written = match write_intent(
             hooks,
@@ -581,7 +646,7 @@ impl ContainerRunner {
             ContainerSite::Create,
             self.runtime.as_ref(),
             &written,
-            &plan.spec,
+            to_create,
         ) {
             Ok(created) => created,
             Err(error) => {
@@ -612,9 +677,13 @@ impl ContainerRunner {
                 },
             ));
         }
-        if let Err(failure) =
-            start_container(hooks, ContainerSite::Start, self.runtime.as_ref(), &written)
-        {
+        if let Err(failure) = start_container(
+            hooks,
+            ContainerSite::Start,
+            self.runtime.as_ref(),
+            &written,
+            to_start,
+        ) {
             return Err(self.cancelled(
                 hooks,
                 plan,
@@ -833,10 +902,20 @@ impl ContainerRunner {
         }
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
+        let (covered, to_create, to_start) = self
+            .reaping
+            .cover(self.runtime.as_ref(), &self.identity, &plan.launch.spec)
+            .map_err(never_started)?;
         let started = Instant::now();
         let deadline = started + request.timeout;
 
-        let launched: Launched = self.launch(hooks, &plan.launch)?;
+        let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {
+            Ok(launched) => launched,
+            Err(error) => {
+                covered.settle(error.fate);
+                return Err(error);
+            }
+        };
 
         let supervised = self.supervise(&launched.name, deadline, cancellation);
         let exit_observed = matches!(supervised, Ok(Watched::Exited));
@@ -862,6 +941,7 @@ impl ContainerRunner {
             Err(failure) if failure.container_gone => ProcessFate::Gone,
             Err(_) => ProcessFate::Unresolved,
         };
+        covered.settle(fate);
         match (outcome, released) {
             (Ok(None), Ok(())) => Err(RunnerError::cancelled(&request.invocation, fate)),
             (Ok(Some(output)), Ok(())) => Ok(output),
@@ -917,6 +997,121 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
         end -= 1;
     }
     (String::from_utf8_lossy(&bytes[..end]).into_owned(), true)
+}
+
+pub(super) mod cover {
+    use std::sync::PoisonError;
+
+    use crate::error::{ProcessFate, UpstrokeError};
+    use crate::runner::container::census::ReaperContainerScope;
+    use crate::runner::container::runtime::{ContainerRuntime, CreateSpec};
+
+    use super::{Armed, Reaping, RunIdentity, refuse_unless_selected};
+
+    pub(in crate::runner::container::exec) struct Covered<'a> {
+        reaping: &'a Reaping,
+        fate: Option<ProcessFate>,
+    }
+
+    pub struct CoveredCreate<'a> {
+        spec: &'a CreateSpec,
+    }
+
+    pub struct CoveredStart<'a> {
+        name: &'a str,
+    }
+
+    impl Reaping {
+        pub(in crate::runner::container::exec) fn cover<'a>(
+            &'a self,
+            runtime: &dyn ContainerRuntime,
+            identity: &RunIdentity,
+            spec: &'a CreateSpec,
+        ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(armed) = &state.armed {
+                refuse_unless_selected(&armed.scope, &spec.labels)?;
+            } else {
+                let scope = ReaperContainerScope::new(
+                    runtime.reaper_program(),
+                    &identity.private_root,
+                    &identity.incarnation,
+                )?;
+                refuse_unless_selected(&scope, &spec.labels)?;
+                state.armed = Some(Armed {
+                    #[cfg(unix)]
+                    reaper: crate::agent::proc::arm_container_reaper(
+                        crate::topology::effects::ProcessSite::Terminate,
+                        &scope,
+                    )?,
+                    scope,
+                });
+            }
+            state.in_flight = state.in_flight.saturating_add(1);
+            Ok((
+                Covered {
+                    reaping: self,
+                    fate: None,
+                },
+                CoveredCreate { spec },
+                CoveredStart { name: &spec.name },
+            ))
+        }
+    }
+
+    impl Covered<'_> {
+        pub(in crate::runner::container::exec) fn settle(mut self, fate: ProcessFate) {
+            self.fate = Some(fate);
+        }
+    }
+
+    impl Drop for Covered<'_> {
+        fn drop(&mut self) {
+            let mut state = self
+                .reaping
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.in_flight = state.in_flight.saturating_sub(1);
+            if !matches!(
+                self.fate,
+                Some(ProcessFate::Gone | ProcessFate::NeverStarted)
+            ) {
+                state.unsettled = true;
+            }
+        }
+    }
+
+    impl<'a> CoveredCreate<'a> {
+        #[must_use]
+        pub fn spec(&self) -> &'a CreateSpec {
+            self.spec
+        }
+    }
+
+    impl<'a> CoveredStart<'a> {
+        #[must_use]
+        pub fn name(&self) -> &'a str {
+            self.name
+        }
+    }
+
+    #[cfg(test)]
+    mod without_a_reaper {
+        use super::{CoveredCreate, CoveredStart, CreateSpec};
+
+        impl<'a> CoveredCreate<'a> {
+            pub(crate) fn without_a_reaper(spec: &'a CreateSpec) -> Self {
+                Self { spec }
+            }
+        }
+
+        impl<'a> CoveredStart<'a> {
+            pub(crate) fn without_a_reaper(name: &'a str) -> Self {
+                Self { name }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
