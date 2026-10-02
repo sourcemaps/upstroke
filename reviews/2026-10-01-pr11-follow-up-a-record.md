@@ -35,9 +35,13 @@ run-layout and lock text, and nothing below changes any of them.
   regression test per requirement, a witness per correction, the domination census, and a mutation
   for each. `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED` is fixed and its file deleted; the inherited
   limit the regression lens found is filed as its own finding.
-- **Next:** the orchestrator's implementation review (delta and fix-check over the four corrections
-  and the eight requirements, then regression, then concurrency), and the rounds `MAINTAINING.md`
-  prescribes. G6's input range must include this follow-up's merge.
+- **Implementation review, round 1: §3**, at `17d7c605`. Three `gpt-6-astra` lenses at `max`: delta
+  and regression one P2 each, both executed; concurrency passed. `pr11_fua_r1` (`claude-opus-5-5`,
+  `max`) repaired both: the free `container::launch` is test-only and the census reads macro
+  arguments (`FUA-I1-MACRO`); the test watchdog collects its killed child within a bound
+  (`FUA-I1-WATCHDOG`); the sweep's one pre-existing instance is filed.
+- **Next:** implementation review round 2 (delta and fix-check, and regression), and the rounds
+  `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
 
 ## 1. Design
 
@@ -353,7 +357,9 @@ field initializer (`launch:`). Every naming of an alias, a function value or a r
 original identifier somewhere, so a census of namings sees all three; only a glob import followed by
 a call by the same bare name escapes the `use` clause, and that call is itself a naming.
 
-1. **The funnels.** The production namings of `create_container` and `start_container` are exactly:
+1. **The funnels.** (Amended, `FUA-I1-MACRO`: since review round 1 the free `launch` is test-only, so
+   `container.rs`'s two calls below left the production region, §3.1.) The production namings of
+   `create_container` and `start_container` are exactly:
    in `src/runner/container/exec.rs`, its one `use super::{…}` import (one naming of each, with no
    `as`) and one call of each inside `ContainerRunner::launch`'s body; in `src/runner/container.rs`,
    one call of each inside the free `launch`'s body. Nothing else in any production region.
@@ -377,7 +383,8 @@ a call by the same bare name escapes the `use` clause, and that call is itself a
 4. **The covered launch.** In `exec.rs`: `fn launch(`'s signature names `Covered`; `self.launch(`
    occurs once, in `fn contain(`, after `self.reaping.cover(`; `Covered {` is constructed once,
    inside `fn cover(`.
-5. **The control.** The sorted list of production regions naming `start_container` is exactly
+5. **The control.** (Amended, `FUA-I1-MACRO`: since review round 1, `exec.rs` alone, §3.1.) The sorted list of
+   production regions naming `start_container` is exactly
    `["src/runner/container.rs", "src/runner/container/exec.rs"]`, and the walk scanned more than 40
    files and more than 750,000 non-whitespace bytes — the fold census's density checks — so a census
    that scanned nothing cannot pass; the lint-level walk read more than 100 modules as guarded and
@@ -395,7 +402,14 @@ denying the primitives instead — and `create_container` and `start_container` 
 `src/runner/container.rs` in `effects/wrappers.toml`, and `effects::tests::checks::reachable_fns_are_classified`
 refuses a row whose fn is no longer reachable — an edit of another module's rows, which this
 follow-up's brief reserves for the orchestrator — and the frozen `recover/tests.rs:3957` imports it.
-So the census is the guard, not a backstop, and it is written to refuse every naming.
+So the census is the guard, not a backstop, and it is written to refuse every naming. (Amended,
+`FUA-I1-MACRO`: review round 1 found a naming this census could not read — a launcher passed to a macro as
+`launch: …`, skipped as a field initializer — and took the visibility route as far as it goes. With the
+orchestrator's authorization of exactly that `funnel` row, the free `launch` is test-only (`#[cfg(test)] mod
+uncovered`), so no production build can name it; `create_container` and `start_container` are
+`pub(in crate::runner::container)`, so nothing outside the container module tree can. The census is now the guard
+inside that tree and in test builds, and it names every occurrence inside a macro's argument and every colon form:
+§3.1.)
 
 **How a mutation proves it can fail.** Four mutations, each a scratch copy built from itself (the
 `Compiling` line naming the copy) and each turning the census red with its own message while the
@@ -452,7 +466,11 @@ this table, so each row's red is measured against the whole set.
 - **Bounded "not held" waits.** Every read that a hold is released polls within the module's bound,
   as `holds_nothing` does (`coordinator.rs`, from `:8679`); the census row above keeps it so.
 - **Isolated children are bounded.** Every child process — the two-process coordinators and the
-  isolated callers — runs under a deadline and is killed after it, so a mutation fails the test
+  isolated callers — runs under a deadline and is killed after it (corrected, `FUA-I1-WATCHDOG`:
+  a kill ends nothing a tracer or an uninterruptible sleep holds. `run_isolated` collects its
+  killed child within a bound since review round 1, and fails the test when it cannot, §3.2. The
+  two-process coordinators are killed through `LinkedChild::kill`, which still waits for its child
+  without one, filed as `PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE`), so a mutation fails the test
   instead of wedging the run (round R6's two wedged first attempts); children that a mutation could
   leave waiting run completing doubles, not holding ones; a child that must be observed alive waits
   for the parent's word before it exits (round R6's `exit_on_the_parents_word`); and a wait for
@@ -491,7 +509,9 @@ this table, so each row's red is measured against the whole set.
 
 ### 1.7 Instruments
 
-One instrument file changes, `effects/wrappers.toml`, in the `src/agent/proc.rs` module only:
+One instrument file changes, `effects/wrappers.toml`, in the `src/agent/proc.rs` module only (amended,
+`FUA-I1-MACRO`: review round 1 changes one row of the `src/runner/container.rs` module as well, authorized for it,
+§3.3):
 
 | row | change | why, in one sentence |
 |---|---|---|
@@ -599,6 +619,8 @@ body.
   follow-up B's lock text), this record, and the deletion of the finding's file.
 - Not changed: `src/engine/topology/**` production code, `recover.rs`, `recover/tests.rs`, every
   frozen file, `src/rundir.rs`, `src/workspace_manager*`.
+- Review round 1 also changes `src/runner/container.rs`: the free `launch` test-only and the two
+  funnels' visibility (§3.1).
 
 ### 1.10 The design review's four corrections (round 1, at `793c3784`)
 
@@ -745,7 +767,7 @@ checks, as amended (`FUA-D1-DES-1`):
    40 files and 750,000 non-whitespace bytes read; the lint-level walk found more than 100 modules
    guarded and places `container.rs` and `view.rs` among the rest.
 
-Its two readers are tested on written input:
+(Review round 1 changes both readers and checks 1, 2 and 5: §3.1.) Its two readers are tested on written input:
 `the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher` and
 `the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid`.
 
@@ -828,7 +850,12 @@ child's events and exit are awaited within `workspace_manager::fixture::LINK_BOU
 that must be seen alive past its last handle waits for a file the parent writes (round R6's lesson);
 every isolated child of `agent::proc` runs under `run_isolated`'s deadline and is killed with its
 process group at it, so a mutation fails rather than wedges (`fua-m15`'s red is exactly that kill:
-its child was still in the unbounded wait at the deadline, `status None`).
+its child was still in the unbounded wait at the deadline, `status None`). (Corrected,
+`FUA-I1-WATCHDOG`: as written at `17d7c605` the kill was followed by `process.wait()`, which has no
+bound, so a child the kill could not make collectable held the harness past its own deadline; the
+regression lens held one at its exit stop and found the harness in `wait4` 68 s into a 60-second
+deadline. Since review round 1 the watchdog collects within a bound and otherwise fails the test,
+§3.2.)
 
 **Repeats.** The twenty-two tests, thirty consecutive runs at `a8ef3fb0` while the first campaign
 loaded the box: thirty of thirty green, about 2.1 s each (`proof/repeat-under-campaign/summary.txt`).
@@ -917,7 +944,9 @@ effects tests that read them: without the funnel row,
 `src/agent/proc.rs` `unclassified: ["arm_container_reaper"]` (`fua-r1`); with `drop = 5`,
 `every_name_more_than_one_callable_bears_is_pinned_by_its_count` fails: six callables bear `drop` in
 `src/agent/proc.rs` and the record pins five (`fua-r2`); as committed, both pass (`fua-r0`)
-(`mutation/fua-r{0,1,2}-*/test.log`). Nothing else in any instrument changes: no new effect
+(`mutation/fua-r{0,1,2}-*/test.log`). (Review round 1 changes one more row, authorized for it:
+`src/runner/container.rs`'s `funnel` row loses `"launch"`, now test-only; §3.3.) Nothing else in any instrument
+changes: no new effect
 site or primitive, no `clippy.toml`, `src/effects/**`, `Cargo.toml [lints]` or allowlist. The
 census of §2.2 is, by `MAINTAINING.md` step 7's reading, a subject: it asserts a fact about the
 product — every container start is covered — and governs nothing outside the launch funnel's own
@@ -936,3 +965,320 @@ section is committed before they run, so it names no figure of theirs.
 - Real Docker: G7's.
 - The 30-second bounds of the inherited `docker` calls and the deadline-less wait after them were
   not exercised: filed, not changed.
+
+## 3. Implementation review round 1
+
+Repaired by `pr11_fua_r1` (`claude-opus-5-5`, `max`). Every figure below is in a saved file under
+`~/orch-pr11/logs/pr11_fua_r1/` that the sentence names; code lines are at `17d7c605` unless another commit is
+named. The round's commits change `src/agent/proc.rs`'s tests, `src/runner/container.rs`, the census in
+`src/runner/container/exec/tests.rs`, one row of `effects/wrappers.toml`, the notes, and the finding ledger. No other
+production code changes.
+
+### 3.0 The review and its triage
+
+Three `gpt-6-astra` lenses at `max` reviewed `17d7c605`. Their texts are
+`~/orch-pr11/reviews/review-328-i1-{delta,regression,concurrency}-17d7c605.review.md`, hashed in `SHA256SUMS-328-i1`;
+the reviewers' witnesses are in `~/orch-pr11/reviews/328-i1-witnesses/{delta,reg}/`, hashed in
+`SHA256SUMS-328-i1-witnesses`.
+- **Delta and fix-check:** CHANGES_REQUIRED, one P2, executed (`FUA-I1-MACRO`, §3.1). It found no other defect in the
+  four design-review corrections or the instrument rows.
+- **Regression:** CHANGES_REQUIRED, one P2, executed (`FUA-I1-WATCHDOG`, §3.2). The frozen files are byte-identical,
+  legacy and host behaviour unchanged, 3,023 library tests and 10 binary tests pass, residue is equal, Windows took
+  456.12 s and macOS 1,136.19 s.
+- **Concurrency:** PASS.
+
+The orchestrator's triage (`~/orch-pr11/reviews/review-328-i1-triage.md`) fixes both: each carries an executed
+witness, and `CLAUDE.md` has such findings fixed whatever their label. The round asked the orchestrator one question
+(`~/orch-pr11/questions/pr11_fua_r1-1.md`) and followed its answer (`~/orch-pr11/answers/pr11_fua_r1-1.md`):
+- the free `launch` is made test-only, with the one instrument row that needs (§3.3);
+- the sweep's one pre-existing hit is filed rather than fixed (§3.2).
+
+### 3.1 `FUA-I1-MACRO`: a macro-mediated launch escaped the domination census
+
+**The reviewer's text** (delta lens):
+
+> `namings` skips any identifier followed by a single colon, assuming a field initializer. Macro arguments can use
+> that syntax to name a launcher: […] `uncovered_delegate!(launch: hooks, runtime, view, plan)` […] This expands to the
+> unarmed free `container::launch`. The census skips `launch:` and never sees the expanded call. […] All **23 submitted
+> tests**, including the domination census, passed. A new witness observed the container **Running**, its start
+> recorded as **uncovered**, and **no armed reaper selecting its scope**. Production Clippy with `-D warnings` and six
+> related effect/macro guards passed.
+
+**The witness, red.** A scratch copy of `17d7c605` carried the reviewer's `mutation.diff` verbatim and this round's own
+witness test, which calls the mutation's `delta_uncovered` over the fake runtime with covers observed
+(`witness/macro-17d7c605-reviewer-mutation/`). All 24 tests passed, the census included. The witness printed
+"container … state Some(Running); starts observed (name, covered by an armed reaper) [(…, false)]; an armed reaper
+selects this runner's scope: false". On the same mutation, `cargo clippy --all-targets --all-features -- -D warnings`
+exits 0 (`witness/macro-17d7c605-reviewer-mutation-clippy/`).
+
+**The witness, green.** At the campaign commit `d741a8aa`, the reviewer's mutation (`r1-c9`) turns the census red:
+it names `launch` as a macro argument inside `delta_uncovered`. In a production build the compiler refuses the same
+mutation (`r1-p1`, `error[E0425]`: cannot find function `launch` in module `super`). The census witness committed for it,
+`the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it`, carries the reviewer's macro
+verbatim. It is red on the reader as reviewed (`r1-o1`) and green on the reader as repaired.
+
+**Root cause, in two layers.**
+1. The reader classified an occurrence by its neighbouring characters. It skipped `name:` as a field initializer
+   (`exec/tests.rs:4993`, since `4bc56d21`), and a macro's argument is a token tree the macro can splice anywhere,
+   whatever the text around it.
+2. Underneath that, the unarmed free `launch` was nameable in production at all. §1.4 made the census "the guard, not
+   a backstop": privacy alone cannot hide the free `launch` from `exec.rs`, a child of its own module, and taking it out
+   of production needed an instrument row the follow-up's brief reserved for the orchestrator. A reading of source text
+   always has forms it cannot see; the reviewer found one.
+
+**The fix, compiler first.**
+- **The free `launch` is test-only.** It moves, with the two private helpers only it uses (`cancel_created`,
+  `render_residue`), into `#[cfg(test)] mod uncovered` in `container.rs`. `#[cfg(test)] pub use uncovered::launch;`
+  keeps the path the tests name, so the frozen `recover/tests.rs:3957` and the other callers compile unchanged. The
+  module sits before `mod fake;`, so the file's first test-only cut is a module, as `effects::production_region`
+  requires.
+  - **Before relying on it, the round proved no production path ever called the free `launch`** (the orchestrator's
+    condition (i); `proof/q1-free-launch-callers-17d7c605/summary-callers.txt`). The repaired reader, run over
+    `17d7c605`'s tree with the effects module's own region rules, finds the identifier in production only as
+    `InvocationPlan`'s two `launch:` fields (`exec.rs:207`, `:565`), neither a naming of the function. Every call and
+    import is in a test region. The path grep outside the test files is empty, and the effects census passed at
+    `17d7c605` (`gates-impl/final-17d7c605/03-test.log`). So production behaviour at runtime is unchanged: the move
+    takes out of the production build only functions no production path reached.
+  - In a production build any naming of it, however spelled, fails to compile. The probes `r1-p1` to `r1-p3` cover the
+    reviewer's macro, a fully qualified path from a topology module and an alias.
+- **The funnels are `pub(in crate::runner::container)`.** `create_container` and `start_container` were `pub`, so any
+  module of the crate could start a container no reaper covers. Restricted to the container module tree, a naming
+  from anywhere else fails to compile (probes `r1-p4` and `r1-p5`: a call from a topology module, and a `pub use`
+  re-export). The effects census still derives both as reachable funnels, because it classifies by the visibility a
+  function declares; private `fn` would have dropped them from its domain.
+
+**The fix, census second.** The census remains the guard where the compiler cannot be: inside the container module
+tree, and in test builds, where the free `launch` exists.
+- `namings` now names every occurrence of an unarmed launcher inside a macro invocation's delimiters as a
+  `MacroArgument` (`macro_arguments` finds the spans), whatever precedes or follows it, a `.launch` included.
+- Outside a macro it names a `name:` as a `Field`, pinned rather than skipped: `exec.rs`'s two `InvocationPlan`
+  fields.
+- `primitive_namings` counts macro arguments and colon forms the same way, in the twenty-seven modules where clippy
+  cannot refuse the runtime's primitives. That adds four pins: the parameters `create:` (`agent/proc.rs`) and `start:`
+  (twice, `export.rs`), and `util::tail`'s local `start` inside `format!`.
+- The notes name what no reading of source text can see: an identifier a procedural macro builds, a path inside a
+  string an attribute hands a derive, a file `include!`d from outside `src/`. The compiler covers those for the free
+  `launch` everywhere and for the funnels outside the tree.
+
+**What the census's expectations lost, and why** (condition (iii)). With the free `launch` test-only, its body left
+the production region. The expected namings lose exactly `container.rs`'s two calls inside it, of `create_container`
+and of `start_container`. The control's set of files naming `start_container` loses `container.rs` for the same reason:
+those calls were its only production naming.
+
+**Class search.**
+- **The census's two readers** are the class's members, and both are repaired.
+- **The other source census this follow-up added**, `no_reaper_test_reads_a_hold_as_released_once`, reads a named
+  list of this follow-up's test functions for a one-shot "not held" read. A macro that builds the negation would evade
+  it, but its subject is test code this programme writes, and it keeps requirement 8's flake out rather than guarding a
+  production boundary. It is not changed.
+- **The tree's older effects censuses** read text too. They are instruments outside this change, and their known
+  limits are already filed.
+
+**Mutations** (§3.4's method). Each runs against the 25 tests of `tools/round1-tests.txt`: the 22 of the reaper set,
+the two reader tests and the watchdog witness.
+
+| id | the mutation | witness for | red | green |
+|---|---|---|---|---|
+| `r1-control` | none | the set at the campaign commit | none | 25 |
+| `r1-c2` | a production fn in `exec.rs` calls `start_container(` | the census, check 1 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c3` | a production fn in `engine/topology/preflight.rs` calls `crate::runner::container::launch(` (a test build, where it exists) | the census, check 2: a fully qualified path | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c4` | `Covered {` built outside `cover` | the census, check 4 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c5` | `use super::launch as start_uncovered;` in `exec.rs` and a call of it | the census: an alias | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c6` | `let start = super::start_container;` in `exec.rs` and a call of it | the census: a function value | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c7` | `pub(in crate::runner::container) use super::create_container as create_uncovered;` in `census.rs` | the census: a re-export (one the compiler admits) | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c8` | `runtime.start("probe")` in `engine/resume.rs`, which allows `disallowed_methods` | the census, check 3 | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c9` | the review's mutation verbatim: `uncovered_delegate!(launch: hooks, runtime, view, plan)` in `exec.rs` | `FUA-I1-MACRO`: a macro argument | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c10` | the review's macro naming `start_container:` in `exec.rs`, inside the module tree | the census: a macro argument the compiler admits | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-c11` | `delegate!(start: runtime, "probe")` expanding to `runtime.start("probe")` in `engine/resume.rs` | the census, check 3: a macro argument | 1: `every_container_start_in_production_is_reached_only_through_a_covered_launch` | 24 |
+| `r1-o1` | `namings` as reviewed: skips `name:`, no macro rule | the census witness, red on the reader as reviewed | 3: `every_container_start_in_production_is_reached_only_through_a_covered_launch`, `the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it`, `the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher` | 22 |
+| `r1-p1` | `r1-c9`, clippy on the production library | the compiler refuses the free `launch` | rc 101: `error[E0425]` cannot find function `launch` in module `super` at `src/runner/container/exec.rs:1074:25` | — |
+| `r1-p2` | `r1-c3`, clippy on the production library | the compiler refuses the free `launch` | rc 101: `error[E0425]` cannot find function `launch` in module `crate::runner::container` at `src/engine/topology/preflight.rs:118:31` | — |
+| `r1-p3` | `r1-c5`, clippy on the production library | the compiler refuses the free `launch` | rc 101: `error[E0432]` unresolved import `super::launch` at `src/runner/container/exec.rs:23:5` | — |
+| `r1-p4` | `engine/topology/preflight.rs` calls `crate::runner::container::create_container(` | the compiler refuses a funnel outside the module tree | rc 101: `error[E0603]` function `create_container` is private at `src/engine/topology/preflight.rs:118:31` | — |
+| `r1-p5` | `pub use super::create_container as create_uncovered;` in `census.rs` | the compiler refuses widening a funnel | rc 101: `error[E0364]` `create_container` is private, and cannot be re-exported at `src/runner/container/census.rs:20:9` | — |
+
+Each red census names what was planted (`mutation/<name>/test.log`):
+- `r1-c9`: `("src/runner/container/exec.rs", "launch", MacroArgument, Some("delta_uncovered"))`;
+- `r1-c10`: `("src/runner/container/exec.rs", "start_container", MacroArgument, Some("start_through_a_macro"))`;
+- `r1-c11`: `("src/engine/resume.rs", "start: in a macro argument", Some("start_through_a_macro"))`;
+- `r1-c3`: `("src/engine/topology/preflight.rs", "launch", Call, Some("launch_uncovered"))`;
+- `r1-c5`: `("src/runner/container/exec.rs", "launch", Alias, None)`;
+- `r1-c7`: `("src/runner/container/census.rs", "create_container", Reexport, None)`.
+
+A `pub use` re-export of a funnel no longer compiles at all (`r1-p5`); `r1-c7` re-exports one at the visibility the
+compiler admits, for the census to read.
+
+### 3.2 `FUA-I1-WATCHDOG`: the test watchdog waited for a killed child with no bound
+
+**The reviewer's text** (regression lens):
+
+> `run_isolated` sends `SIGKILL` when its deadline expires, then calls unbounded `process.wait()`. A child that
+> remains uncollectable therefore wedges the harness despite the watchdog. I reproduced this on a clean rebuild of
+> `17d7c605…`: ran the stopped-after-acknowledgement test, held its isolated child at `PTRACE_EVENT_EXIT`, and let the
+> 60-second deadline expire. At 68.08 seconds, the harness remained blocked in `wait4(child, …, 0)`. […] This is newly
+> introduced, separate from the deferred Docker wait, and contradicts the record's claim that the watchdog prevents
+> wedging.
+
+**The witness, red, by the reviewer's own method**, out of tree (`witness/watchdog-ptrace-17d7c605/`;
+`tools/exit-hold-tracer.c`). The tracer starts `17d7c605`'s test binary as its child, so it may trace what the binary
+starts under Yama's `ptrace_scope` 1. It seizes the isolated child of
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` with `PTRACE_O_TRACEEXIT`, holds
+it at its exit stop for 90 s, and samples the harness's threads once a second:
+- the child was held from 2.004 s;
+- the harness thread polled until the deadline and was in `wait4(353144, …, 0)` from 60.012 s to 91.030 s;
+- the test failed "status None" when the tracer released the child at 92.03 s ("finished in 92.03s").
+
+The deadline's `SIGKILL` did not release a child already held at its exit stop, so a kill alone ends nothing here.
+
+**The witness, red, in the suite.** The committed witness is
+`the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end`. Its isolated caller refuses `kill` on
+its own thread with the module's seccomp policy, so `run_isolated`'s `SIGKILL` at a 2-second deadline cannot end
+`child_that_outlives_its_kill_child`, which lives 60 s or until its parent is gone. The caller reports how long the
+watchdog took and how it ended. Applied to a copy of `17d7c605` it fails: "the watchdog ended its run after 60009 ms
+and returned status None" (`witness/watchdog-17d7c605-red/test.log`).
+
+It refuses the kill rather than tracing the child because `ptrace`, `prctl`, the `PTRACE_*` and `PR_SET_PTRACER`
+constants and `__WALL` are `libc::` items this crate does not name. Using them would need rows in
+`effects/wrappers.toml`'s `[libc]` section, an instrument edit the round did not ask for. The reviewer's exact sequence
+is therefore reproduced out of tree, before and after.
+
+**The witness, green.**
+- The committed witness passes at the head (at `d741a8aa` its isolated caller reports "the watchdog ended its run after 12001 ms and failed its test": the child was "still not collectable" 10s after a `SIGKILL` the policy refused ("Operation not permitted (os error 1)"), and the parent passed in 12.01 s (`witness/watchdog-witness-d741a8aa/`, the same binary as the reproduction below)).
+- The reviewer's sequence at the head (`witness/watchdog-ptrace-d741a8aa/`: the child was held at its exit stop from 2.015 s, the harness thread was sampled in a blocking `wait4` 0 times (it polled from its deadline on), the test failed at 70.01 s with the child "still not collectable" 10 s after a delivered `SIGKILL`, and the test binary had ended at 70.059 s, its child still held).
+- With the fix reverted (`r1-w1`) the witness is red again; with the watchdog giving up silently, a child it cannot
+  collect reported as merely killed (`r1-w2`), it is red too.
+
+**Root cause.** `run_isolated` took its `SIGKILL` for the end of the child and collected it with `process.wait()`,
+which has no bound (`src/agent/proc.rs:9034`, since `4bc56d21`). A kill makes a child collectable only if it reaches
+the child and nothing holds the child. It fails when:
+- a tracer holds the child at its exit stop (the review's case);
+- the child is in an uninterruptible sleep;
+- the kill is refused, or aimed at a process group the child has left.
+
+The watchdog then waited as long as the child did: the wedge it existed to prevent.
+
+**The fix.**
+- After the kill, `run_isolated` keeps polling `try_wait`, and the polls stop at `ISOLATED_CHILD_COLLECTION_BOUND`
+  (10 s).
+- A child collected in that time is reported as before, `status: None`.
+- A child still not collectable fails the test with a message saying so, the kill's result (`delivered` or the errno),
+  and the child's output. It is left to the process's exit, as `UnleasedExit` leaves a reaper it could not collect.
+
+**The sweep (class search): every wait in this follow-up's test harness and production code, for a signal followed by
+an unbounded wait.**
+- **Production.** `cancel_unleased`'s `UnleasedExit` was already bounded on both paths, and is unchanged: a bounded
+  wait, `SIGKILL`, a second bounded wait; with the identity path on, `end_helper_through_identity`, whose wait is
+  bounded too.
+- **`run_isolated`**: fixed, above.
+- **Three of the new isolated children** signalled and then waited with a blocking `waitpid`. Each now waits through
+  `waited_within`, `waitpid(…, options | WNOHANG)` polled within the same bound:
+  - `container_reaper_whose_cancellation_fails_child` (`SIGKILL`, then a collection);
+  - `container_reaper_stopped_before_its_cancellation_child` (`SIGSTOP`, then the stop);
+  - `container_reaper_stopped_after_its_acknowledgement_child` (`SIGSTOP`, then the stop).
+
+  A signal that lands makes a blocking wait and a bounded poll indistinguishable, so each child is witnessed in two
+  more ways:
+  - It refuses every blocking `wait4` on its thread (`answer_a_wait_by_number_that_would_block_with`, Linux), so a
+    wait there that goes back to blocking fails the child at once.
+  - It reports only after its wait, and its parent requires the report.
+
+  The second is needed because a failed assertion in a child that holds a container reaper unwinds through the
+  reaper's drop. That drop's missed CANCEL acknowledgement ends the child by `SIGTERM`, the very status two of the
+  parents expect. The first campaign, at `a2e21304`, had the policy alone
+  (`mutation-campaign-a-a2e21304/TABLE-r1.md`):
+  - `r1-s2`'s reverted wait passed;
+  - `r1-s1`'s was red only because libtest exited before the monitor's `SIGTERM`.
+
+  At `d741a8aa`, `r1-s1` to `r1-s3` are red. `r1-s1x`, `r1-s1` without the policy, stays green: a blocking wait the
+  signal satisfies cannot be told from a poll, which is why the policy is there.
+- **`a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`** sends `SIGCONT` and waits for nothing; its
+  reads are polls within its deadline.
+- **The isolated writer and the relay's self-check** (`write_program_in_its_own_process`,
+  `run_program_in_its_own_process`) run through `agent::proc::test_support::run_with_timeout`. That is the production
+  supervised runner, with PR6's termination contract, not this follow-up's code, and it is not changed.
+- **The two-process witnesses** wait for their child's events and exit within `LINK_BOUND` (`Served::event`,
+  `Served::exited`). But they kill it through `Served::kill`, which calls `LinkedChild::kill`
+  (`src/workspace_manager/fixture.rs:3107`): `child.kill()`, then `child.wait()` with no bound. `Served`'s and
+  `LinkedChild`'s `Drop`s call it again. **This is the one instance of the shape this round did not fix.**
+  - It predates the follow-up (first bad `ad1a36b5`, PR11 phase 5).
+  - It lives in `src/workspace_manager*`, which follow-up B (#329) owns, and B's own two-process tests lean on
+    `LinkedChild`.
+  - By the orchestrator's decision it is filed, `fixture.rs` untouched:
+    `PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE` (P3, `pre_existing`, deferred, guarded by #329's
+    implementation phase).
+  - Its callers are six PR11 phase-5 tests and helpers and this follow-up's two two-process witnesses.
+
+**Mutations:**
+
+| id | the mutation | witness for | red | green |
+|---|---|---|---|---|
+| `r1-control` | none | the set at the campaign commit | none | 25 |
+| `r1-w1` | `run_isolated` waits for its killed child with `process.wait()`, as at `17d7c605` | `FUA-I1-WATCHDOG` | 1: `the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end` | 24 |
+| `r1-w2` | a child still not collectable at the bound is reported as merely killed (`status: None`) | "report failure when the child stays uncollectable" | 1: `the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end` | 24 |
+| `r1-s1` | `container_reaper_whose_cancellation_fails_child` waits for its killed reaper with a blocking `waitpid` | the sweep | 1: `a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor` | 24 |
+| `r1-s1x` | `r1-s1` without `answer_a_wait_by_number_that_would_block_with` | why the sweep's policy is there | none | 25 |
+| `r1-s2` | `container_reaper_stopped_before_its_cancellation_child` waits for the stop with a blocking `waitpid` | the sweep | 1: `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it` | 24 |
+| `r1-s3` | `container_reaper_stopped_after_its_acknowledgement_child` waits for the stop with a blocking `waitpid` | the sweep | 1: `a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` | 24 |
+
+What each red witness reported (`mutation/<name>/test.log`):
+- `r1-w1`: "the watchdog ended its run after 60007 ms and returned status None", the behaviour at `17d7c605`.
+- `r1-w2`: "after 12011 ms and returned status None". The bound held, but a child it could not collect was reported
+  as an ordinary deadline kill, with no failure.
+
+### 3.3 The instrument row, and the sentences this round corrects
+
+**One instrument row**, authorized by the orchestrator for exactly this and nothing else
+(`~/orch-pr11/answers/pr11_fua_r1-1.md`):
+- `effects/wrappers.toml`, `[[module]] path = "src/runner/container.rs"`: `"launch"` leaves the `funnel` list, with a
+  one-line comment saying it is test-only since this follow-up (`FUA-I1-MACRO`).
+- **Why it is safe:** the free `launch` had no production caller (§3.1's proof). The row named a function only tests
+  reach, and every production container start is still classified through `ContainerRunner::launch`'s calls of the two
+  funnels, whose rows are unchanged.
+- Both effects tests that read the row pass with it removed: `every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified`
+  and `every_funnel_classified_fn_names_a_site` (`dev/full-q1.log`). On a scratch copy that kept the row they failed:
+  "invented: [\"launch\"]" and "classifies `launch` a funnel and declares no such fn"
+  (`witness/q1-experiment-tests/test.log`).
+- No other row, allowlist, `clippy.toml`, `src/effects/**` or frozen file changes.
+
+**Corrected or amended above, each marked:**
+- §2.3's sentence on the watchdog: it said the kill alone kept a mutation from wedging, and the watchdog then waited
+  without a bound.
+- §1.5's harness rule: every child "is killed after it" held for `run_isolated` only once a bounded collection
+  followed, and not for the two-process children (the filed P3).
+- §1.4's "Why the census and not visibility": the round took the visibility route.
+- §2.2 and §2.8: pointers to this section.
+
+### 3.4 How the mutations were run, gates and platforms
+
+**The campaign.** Each mutation is a scratch copy of the campaign commit `d741a8aa`'s tracked files with exact
+substitutions (`tools/campaign-r1.py` through `tools/mutate.py`), built from itself.
+- Every test log's `Compiling upstroke v0.1.0 (…/mut/src/<name>)` line names its own copy; the probes' `Checking`
+  lines do the same.
+- The test mutations run against `tools/round1-tests.txt`. The compiler probes run `cargo clippy --lib --all-features
+  -- -D warnings` on the production library, where the free `launch` does not exist.
+- The evidence is `mutation/<name>/{mutation.diff,test.log,summary.txt}`, and `mutation/TABLE-r1.md` tabulates it.
+- Each copy differs from the campaign commit only in its mutated files (`mutation/copies-vs-d741a8aa.txt`).
+- The unmutated control passed all 25.
+
+**Repeats.** The round's 25 tests ran 20 consecutive times at `d741a8aa` while campaign B loaded the box. All 20 were
+green, about 12 s each, the watchdog witness's two bounds being most of it
+(`proof/repeat-under-campaign-b-d741a8aa/summary.txt`). Each run used the binary that `witness/build-d741a8aa-norun.log`
+compiled from this worktree.
+
+**Gates and CI.** The ten gates run at the pushed head, in the foreground, cargo through `upstroke-build` on this
+session's private base. They and CI's legs, read by the newest run per workflow, are in the pull request body and
+`~/orch-pr11/handovers/pr11_fua_r1.md`. This section is committed before the gates run, so it names no figure of
+theirs.
+
+**Platforms.**
+- **Linux** (this box) runs everything.
+- **macOS** runs the census and both reader tests, all `cfg(unix)`, but not the watchdog witness or the sweep's policy:
+  both use seccomp and are Linux-only. There the bounded waits run unwitnessed.
+- **Windows** gains no test. Its visibility and module changes are type-checked and linted for
+  `x86_64-pc-windows-msvc`, not run.
+- CI speaks for macOS and Windows.
+
+**Not verified here:**
+- macOS and Windows behaviour (CI's);
+- a child held in a real uninterruptible sleep, which only the reviewer's tracer and the refused kill stand in for;
+- `LinkedChild::kill`'s wait (filed).
