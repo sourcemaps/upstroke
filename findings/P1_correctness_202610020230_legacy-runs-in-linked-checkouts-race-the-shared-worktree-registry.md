@@ -1,6 +1,6 @@
 ---
 id: PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY
-severity: P2
+severity: P1
 disposition: deferred
 category: correctness
 pr: 329
