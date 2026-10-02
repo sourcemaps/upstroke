@@ -50,8 +50,14 @@ run-layout and lock text, and nothing below changes any of them.
   The rest-selection test now forks and ends its real reapers in an isolated child under `run_isolated`, so a host
   reaper stopped after acknowledging CANCEL fails the test at its deadline instead of wedging the suite. The change is
   test-only.
-- **Next:** implementation review round 4 (delta and regression: the change is test-only, and concurrency passed at
-  `71e55dfc`), and the rounds `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
+- **Implementation review, round 4: §6**, at `3665cecb`. Two `gpt-6-astra` lenses at `max`: regression passed (on a
+  rerun, after a capacity error); delta found one P2, executed. `pr11_fua_r4` (`claude-opus-5-5`, `max`) repaired it
+  (amended, `FUA-I4-RELAY`). Every host launch a test of this follow-up makes now runs in a bounded child of the test
+  binary: the reaper relay's writer and runner, the six exec reaper tests' fixture Git, and the inherited-writer
+  witness's launch. A transitive census over rustc's MIR finds no test of the PR left reaching the funnel or the reaper's
+  acknowledged-exit wait from its own process. The change is test-only.
+- **Next:** implementation review round 5 (delta and regression: the change is test-only), and the rounds
+  `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
 
 ## 1. Design
 
@@ -496,6 +502,12 @@ this table, so each row's red is measured against the whole set.
   reaper's `cancel` and `cleanup` wait for its acknowledged exit without a bound, by design. So only a process a
   watchdog can kill may make that wait: the lease child and the rest-selection test's child both run under
   `run_isolated` (§5).
+- **Every host launch a test of this follow-up makes runs in an isolated child** (amended, `FUA-I4-RELAY`). The rule
+  above covers a test that ends a host reaper itself; a host launch ends one too, in `Supervisor::finish`, so the same
+  wait sits at the end of every launch, however many calls away. The relay's writer and runner, the exec fixture's
+  Git and the inherited-writer witness's launch run under `test_support::run_test_isolated`, the harness `run_isolated`
+  became (§6). The census that holds the rule is `tools/callgraph.py` over the test build's MIR (§6.2), not a search
+  for direct calls.
 
 ### 1.6 Platforms and budgets
 
@@ -646,6 +658,10 @@ body.
   every runtime double, and creation's two relay waits in `engine/topology/create/tests.rs` (§4).
 - Review round 3 (`FUA-I3-HOSTCANCEL`) changes only `src/agent/proc.rs`'s `#[cfg(test)]` test module, where the
   rest-selection test becomes the caller of an isolated child, and its notes (§5).
+- Review round 4 (`FUA-I4-RELAY`) changes only test code and its notes: `src/agent/proc.rs`'s `#[cfg(test)]` modules
+  (`run_test_isolated` in `test_support`), `src/runner/container/fake.rs` (the relay's bounded writer and runner),
+  `src/runner/container/exec/tests.rs` (the fixture's bounded build), `src/runner/host/tests.rs` (the inherited-writer
+  witness's launch) and the coordinator's relay self-check in `src/engine/topology/coordinator.rs`'s tests (§6).
 
 ### 1.10 The design review's four corrections (round 1, at `793c3784`)
 
@@ -1805,4 +1821,234 @@ Before it:
 Each is marked in place with `FUA-I3-HOSTCANCEL`:
 - §0: this round's entry and the next step.
 - §1.5: a harness rule for a test that ends a real host reaper.
+- §1.9: the files this round changes.
+
+## 6. Implementation review round 4
+
+Repaired by `pr11_fua_r4` (`claude-opus-5-5`, `max`). Every figure below is in a saved file under
+`~/orch-pr11/logs/pr11_fua_r4/` that the sentence names. Code lines are at the fix commit `6d352f49` unless another
+commit is named. The round's commits are `6d352f49` (the tests), `50e6329c` (the notes) and this section. They change
+only test code and its notes:
+- `src/agent/proc.rs`'s `#[cfg(test)]` modules;
+- the whole-file test modules `src/runner/container/fake.rs`, `src/runner/container/exec/tests.rs` and
+  `src/runner/host/tests.rs`;
+- the `#[cfg(test)] mod tests` of `src/engine/topology/coordinator.rs`.
+
+No production code, no instrument and no frozen file changes.
+
+### 6.0 The review and its triage
+
+Two `gpt-6-astra` lenses at `max` reviewed `3665cecb`. Their texts are
+`~/orch-pr11/reviews/review-328-i4-{delta,regression}-3665cecb.review.md`, hashed in `SHA256SUMS-328-i4`. The delta
+lens's witness is in `~/orch-pr11/reviews/328-i4-witnesses/`; `witness/reviewer-witness.sha256` hashes the script this
+round ran and its README.
+- **Delta:** CHANGES_REQUIRED, one P2, executed (`FUA-I4-RELAY`, §6.1). Nothing else: 28 focused tests passed, round
+  2's macro bypass fails both compile modes, the frozen files are unchanged, and round 3's red, green and mutation
+  evidence checked out.
+- **Regression:** PASS, on its second run. The first run ended "Selected model is at capacity", which is not a review
+  (`review-328-i4-regression-3665cecb-CAPACITY-ERROR.log`); the rerun passed. It found the 26 frozen production files
+  and eight frozen test children byte-identical and the instrument changes exactly the declared rows. The suite passed
+  3,028 library and 10 binary tests. Its own held-reaper witness of `FUA-I3-HOSTCANCEL` ended at 120.02 s with the
+  reaper still held.
+
+The orchestrator's triage (`~/orch-pr11/reviews/review-328-i4-triage.md`) fixes the P2 in this round, test-only, under
+the witness rule. It is the second finding of this class (rounds 3 and 4), so the sweep must be transitive and this
+record must say why the round converges (§6.3). Round 5 is delta and regression. The round asked no question.
+
+### 6.1 `FUA-I4-RELAY`: relay setup made a host launch in the libtest process
+
+**The reviewer's text** (delta lens):
+
+> **P2 — The HOSTCANCEL repair leaves the same suite-hang mechanism in new relay setup (executed).** At
+> src/runner/container.rs:1539, `write_program_in_its_own_process` calls `run_with_timeout` from the main test process.
+> The stopped-container-reaper test invokes this helper at proc.rs:9334, **before entering `run_isolated`**.
+>
+> Concrete sequence: the writer finishes → its host reaper acknowledges CLEANUP → the reaper stops before exiting →
+> `Supervisor::finish` reaches the deliberately unbounded `AcknowledgedExit` wait → libtest blocks indefinitely. The
+> helper’s 60-second command timeout does not bound this cleanup.
+>
+> [...]
+>
+> The record’s exclusion of indirect calls does not prevent this failure. Put these new helper operations, including
+> relay setup, inside an independently bounded child; preserve production host-wait semantics.
+
+**The witness** is the reviewer's `hold-relay-before-isolation.py` (`tools/`, byte-identical to theirs). It runs the
+stopped-container-reaper test alone under a `ptrace` tracer that follows every process the test binary starts. It holds
+the second helper forked by the first test-binary process to fork two — the host reaper of the relay's writer, wherever
+the writer runs — at its `PTRACE_EVENT_EXIT` stop, which a reaper reaches only after acknowledging CLEANUP. It holds it
+180 s, past the 120-second bound the fix gives the writer and the 10-second collection bound after it, sampling every
+test-binary thread's system call 11 times from 3 s to 175 s. Every run is under `upstroke-build` on this lane's witness
+base.
+- **Red at `3665cecb`** (`witness/red-3665cecb/`). The libtest process's test thread was in `wait4(<held reaper>, …, 0)`
+  at all 11 samples. The experiment's isolated child was forked 180.045 s in, after the release, and the test passed
+  ("finished in 182.07s").
+- **Green at the fix** (`witness/green-fix4/`; the binary is the worktree's, whose diff from `3665cecb` hashes the same
+  as `6d352f49`'s, `measure/fix4-equals-6d352f49.txt`). The writer ran in `reaper_relay_install_child`, whose thread was
+  in the wait. The libtest process ended 119.99 s after the hold began, with the reaper still held: the test failed at
+  its deadline ("finished in 120.02s").
+- **The mutation** (`witness/mutation-i4/`): the relay setup back in the libtest process before `run_isolated`, as at
+  `3665cecb`. It is `mutation/i4-relay-setup-back-in-the-libtest-process.patch`, which restores
+  `install_reaper_relay`'s in-process body, on a copy of `6d352f49` built from itself (`tools/build-copy.sh`). Red: the
+  wait at all 11 samples, the experiment's child forked after the release, the test passing in 182.07 s.
+- **The control** (`witness/control-6d352f49/`): the same copy without the patch. Green at 119.98 s.
+
+**Root cause.** A host launch ends in `Supervisor::finish` (`src/agent/proc.rs:1778`), whose wait after the reaper's
+acknowledged CLEANUP is `ReaperEnding::AcknowledgedExit` (`:2518`, through `close_and_wait`, `:2421`): unbounded by
+design, because that reaper's exit releases the cleanup lease. Round 3 moved the one test that ended a host reaper
+itself into a child (§5). Its sweep found the same wait at the end of 14 other tests' host launches and classed them
+as the launch path's, because none called the wait directly (record `3665cecb`, §5.1). The class is the wait, not the
+call: a launch made in the libtest process by a test of this PR is the defect wherever the launch sits in the call
+chain. The relay's writer runs through the funnel (`src/runner/container.rs:1539`), and `install_reaper_relay` ran it
+in the caller's process: the stopped-container-reaper test called it before `run_isolated` (`src/agent/proc.rs:9334`
+at `3665cecb`).
+
+**The fix** (`6d352f49`, test-only). Every operation of a test of this PR that reaches the funnel runs in a child of
+the test binary that the test bounds.
+- `termination::tests::run_isolated` becomes `agent::proc::test_support::run_test_isolated` (`src/agent/proc.rs:9690`),
+  unchanged but for the test path the caller names and its pause, one `nanosleep` from
+  `workspace_manager::fixture::rest`, the same single attempt as `rest_once`. `run_isolated` stays in
+  `termination::tests` as its name for it (`:9038`); the hold-read census reads that name.
+- **The relay.** `FakeRuntime::install_reaper_relay` (`src/runner/container/fake.rs:745`) has
+  `reaper_relay_install_child` (`:852`) write the relay under `REAPER_RELAY_CHILD_BOUND` (120 s, `:741`), then adopts
+  it. `FakeRuntime::run_reaper_relay` (`:764`) runs the relay in `reaper_relay_run_child` (`:863`), which returns the exit
+  code through a file. Every relay user is bounded from there: the stopped-container-reaper test, the coordinator's
+  five relayed tests and their relay self-check (`src/engine/topology/coordinator.rs:13761`), and creation's P4
+  witness.
+- **The exec fixture.** `Fixture::new`'s disk setup moves into `Layout::build` (`src/runner/container/exec/tests.rs:239`,
+  `:265`) unchanged, so `Fixture::new` (`:302`) is what it was for its 32 other call sites.
+  `Fixture::built_in_a_bounded_child` (`:309`) has `fixture_tree_child` (`:296`) build it under `FIXTURE_CHILD_BOUND`
+  (120 s, `:291`), and the six reaper tests this follow-up adds use it.
+- **The inherited-writer witness** (`src/runner/host/tests.rs:4734`) launches its helper through `run_test_isolated`,
+  not the funnel. Its pre-existing sibling is unchanged.
+- A child named wrongly runs zero tests and exits `0`, so each caller also requires libtest's `1 passed`.
+
+**Production is unchanged.**
+- The expanded non-test library (`tools/expand-identity.sh`, `proof/expand/RESULT.txt`) is byte-identical at
+  `3665cecb` and `6d352f49`, for the host, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`: 10,290,462, 10,121,405
+  and 10,274,501 bytes. The control, a one-token production change on the host
+  (`proof/control-one-token.patch`), makes it differ (`proof/expand-control/RESULT.txt`).
+- Every changed line of `src/` is in code compiled only under `cfg(test)`: a whole-file module its parent declares
+  `#[cfg(test)]`, or a `#[cfg(test)]` module (`proof/nontest-hunks-3665cecb-6d352f49.txt`).
+- The module diff proof passes at `50e6329c` (`proof/module-diff-proof-50e6329c.txt`).
+
+**Two more tests, the same witness** (`witness/extra-*`, `tools/extra-witnesses.sh`). The hold above, on the exec
+reaper test `a_start_cover_starts_only_the_container_it_was_minted_for` (the fixture's first Git) and on creation's P4
+witness (the relay's writer):
+- Red at `3665cecb`: the libtest process waited for the held reaper for the whole hold.
+- Green at `6d352f49`'s control copy: each ended 119.98 s into the hold, with the reaper still held.
+
+### 6.2 The transitive census
+
+The full census, with every entry point, operation, path and verdict, is `measure/census-fua-i4-relay.txt`
+(`tools/census-report.py`, assembled from the files it names).
+
+**The class and its sinks.** The class is a wait production leaves unbounded by design, reached from the libtest
+process by a test this PR adds, through any chain of calls. Production states one such wait, `AcknowledgedExit`; a
+search for every production sentence of that kind finds no other (`measure/unbounded-by-design-search.txt`). The sinks
+are:
+- the funnel: `test_support::run_with_timeout`, `run_with_timeout_at`, `run_with_timeout_classified`,
+  `run_with_timeout_and_limit`;
+- `Supervisor::{begin, begin_with_state, finish, drop}`;
+- `Reaper::{cleanup, cancel, close_and_wait}`.
+
+**The method** (`tools/callgraph.py`). A call graph from rustc's own MIR of the library in test mode
+(`tools/mir-dump.sh`: `-Zunpretty=mir -Ztrim-diagnostic-paths=false`, opt-level 0, so no MIR inlining and every callee
+printed in full).
+- Nodes are functions, methods, closures and async blocks.
+- Edges are call terminators, calls through `dyn` or a type parameter, functions handed on as values, closures and
+  coroutines by span, and drops of locals whose type names a crate type with a `Drop` impl.
+- A call through `dyn` or a type parameter goes to every impl, pruned by rapid type analysis to the types a reachable
+  body constructs.
+- A trait's default body is specialised per concrete `Self`, so `<ContainerRunner as Runner>::run_blocking` does not
+  dispatch to `HostRunner::run`.
+- An isolated child is a re-run of the test binary by test name, so no static edge crosses into one; each child is an
+  entry of its own. `measure/child-launchers-fix.txt` lists every place that names a child and the harness it is handed
+  to.
+
+Two checks keep the graph honest:
+- A std generic can call a crate impl of a std trait with no call terminator in the crate's MIR. Of the 209 such
+  impl bodies, the only one that reaches a sink is `Supervisor`'s `Drop`, itself a sink, and a `Supervisor` is only ever
+  a local, which the search traces (`callgraph/foreign-fix4/foreign-trait-impls.txt`).
+- One edge is pruned, with its reason checked: `fork_reaper`'s `cfg(test)` pid-path hook calls `Reaper::cancel` only
+  when `UPSTROKE_TEST_REAPER_PID_PATH` is set and the pid cannot be written. No code sets an environment variable of its
+  own process, and the two setters put it on a child's `Command` (`callgraph/prune.tsv`).
+
+**The entry points** (`tools/tests-from-mir.py`): every test the PR adds or whose source text it changes. At the start
+that is 38 added (10 of them ignored children) and 21 changed (`callgraph/tests-start/delta.txt`). At the fix it is 41
+added (13 ignored children: the start's ten and three new) and the same 21 changed (`callgraph/tests-fix4/delta.txt`).
+
+**The verdicts.**
+- **At the start** (`callgraph/start-pruned/`), 14 run tests reach a sink from their own process: the 14 of round 3's
+  §5.1, now each a hit. They are the stopped-container-reaper test, the coordinator's five relayed tests, creation's P4
+  witness, the six exec reaper tests and the inherited-writer witness. The other reaches are ignored children under
+  `run_isolated`, and pre-existing tests and children whose sinks are the merge base's.
+- **At the fix** (`callgraph/fix4-pruned/`), no test of this PR reaches a sink from its own process. The six it adds
+  that reach one are ignored children, each started in one place, by `run_isolated` or `run_test_isolated`. The other
+  five entries that reach one are tests and children the PR changed but did not add, with the same sinks at the merge
+  base.
+- **The whole suite, by test** (`callgraph/all-{base,start,fix4}-pruned/reach.json`): 380 of 3,113 tests reach a sink
+  at the merge base, 397 of 3,151 at the start and 386 of 3,154 at the fix. Against the merge base, no existing test's
+  sinks differ at either commit. Nothing this PR changed outside its own tests — a production path, a fixture, a fake
+  — gave an existing test a new way to a sink.
+
+**Dynamically** (`tools/census-waits.py`, each of the 28 run tests this PR adds, alone, under `strace -f -k`):
+- At `3665cecb` (`census/start-3665cecb/SUMMARY.txt`), 14 tests make 70 `AcknowledgedExit` waits in the libtest
+  process: exactly the 14 static hits.
+- At the fix (`census/fix4/SUMMARY.txt`), none; all 28 pass alone.
+- The blocking waits the libtest process still makes are all std's `Child::wait`, for a Git or cargo child
+  (`census/fix4-wait-callers.txt`): the workspace manager's and workspace's Git (production, unchanged since the merge
+  base, `measure/workspace-code-unchanged.txt`), the workspace fixture's Git and the effects census's `cargo metadata`
+  (test code), and `LinkedChild::kill` (filed, `PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE`, P3, deferred to #329).
+
+None of these is the funnel or a reaper's acknowledged exit, and production declares none of them unbounded by design.
+Every test that runs Git through the workspace code makes them, as it did before this PR; the regression lens lists
+them among the disclosed limitations.
+
+### 6.3 Why this round converges (`MAINTAINING.md`, "When a pull request may be looping")
+
+This is the second finding of one class, so the round says why it ends here.
+- **Round 3 counted calls; this round counts reaches.** Round 3's sweep found the 14 reaches and excused them as
+  indirect. The census here follows indirect calls through rustc's own resolution, closures, `dyn` dispatch, drops and
+  function values, and it closes its one blind spot, a std generic calling into the crate, by measurement (§6.2).
+- **It covers the class's whole domain**: every test the PR adds or changes, and every test of the suite at three
+  commits, so a changed helper that gave an existing test a new path would show.
+- **Static and dynamic agree**: 14 hits from the graph, 14 tests with the wait under `strace`, and none of either at the
+  fix.
+- **The fix bounds launches where they are made**, so no call path is left to argue about: every relay user goes
+  through `install_reaper_relay` and `run_reaper_relay`, every new exec reaper test through
+  `Fixture::built_in_a_bounded_child`. Both are in a bounded child, and so is the one direct launch left. The census
+  of the children (§6.2) shows each started only under a bound.
+- **The class has an edge.** It is production's one wait unbounded by design and the funnel that ends in it. The other
+  unbounded waits a test process makes (std's `Child::wait` for Git) are neither production's design nor this PR's.
+- **The rule is in §1.5, and its check is a script**: `tools/callgraph.py` reruns in seconds over a MIR dump, so the next
+  round can repeat this census instead of trusting it.
+- Neither looping signal is raised. The finding is a P2, the premise stands, and the fix moves an existing harness into
+  shared test support without adding a mechanism.
+
+### 6.4 Gates, CI and platforms
+
+The ten gates run at the pushed head, in the foreground, with cargo through `upstroke-build` on this session's private
+base. They and CI's legs, read by the newest run per workflow, are in the pull request body and
+`~/orch-pr11/handovers/pr11_fua_r4.md`. This section is committed before they run, so it names no figure of theirs.
+Before it:
+- the affected modules (termination, the coordinator, creation, exec, the inherited-writer tests and the fake) passed
+  254 tests with 44 ignored (`dev/targeted-fix4.log`);
+- Clippy passed for the host (`dev/clippy-fix4.log`), `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, and
+  `cargo +1.85.0 check` passed for `x86_64-pc-windows-msvc` (`gates/xtarget-50e6329c/`);
+- against `3665cecb` the suite gained three ignored children, the new ones, and lost nothing
+  (`callgraph/tests-fix4-vs-start.txt`, from the two builds' registered tests).
+
+**Platforms.**
+- **Linux** (this box) runs everything. The witnesses are Linux-only (`ptrace`, `/proc`).
+- **macOS** runs the relay's children, the exec reaper tests' bounded fixture and `run_test_isolated` (`cfg(unix)`).
+  The inherited-writer module is Linux-only. This box ran none of it on macOS; CI's macOS leg does.
+- **Windows** gains no test: every child this round adds is `cfg(unix)`, and `Fixture::new` builds the same tree in the
+  same order through `Layout`. The expanded non-test library is identical there too (§6.1).
+- CI speaks for macOS and Windows.
+
+### 6.5 The sentences this round amends
+
+Each is marked in place with `FUA-I4-RELAY`:
+- §0: this round's entry and the next step.
+- §1.5: a harness rule for every host launch a test of this follow-up makes.
 - §1.9: the files this round changes.
