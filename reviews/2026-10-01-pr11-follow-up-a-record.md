@@ -45,8 +45,13 @@ run-layout and lock text, and nothing below changes any of them.
   (amended, `FUA-I2-MACRO-WS`, `FUA-I2-EINTR`): every container start primitive takes a proof only the reaper's
   cover mints, so a start with no cover is a compile error and the census a lexical backstop; a container
   reaper's bounded endings rest once between their polls, so an interrupted rest goes back to the deadline.
-- **Next:** implementation review round 3 (delta, regression and concurrency: the proofs change production
-  signatures), and the rounds `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
+- **Implementation review, round 3: §5**, at `71e55dfc`. Three `gpt-6-astra` lenses at `max`: delta and concurrency
+  passed; regression found one P2, executed. `pr11_fua_r3` (`claude-opus-5-5`, `max`) repaired it (`FUA-I3-HOSTCANCEL`).
+  The rest-selection test now forks and ends its real reapers in an isolated child under `run_isolated`, so a host
+  reaper stopped after acknowledging CANCEL fails the test at its deadline instead of wedging the suite. The change is
+  test-only.
+- **Next:** implementation review round 4 (delta and regression: the change is test-only, and concurrency passed at
+  `71e55dfc`), and the rounds `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
 
 ## 1. Design
 
@@ -487,6 +492,10 @@ this table, so each row's red is measured against the whole set.
   for the parent's word before it exits (round R6's `exit_on_the_parents_word`); and a wait for
   running containers waits on the fake's running listing, not on its journal's `Start` entries (round
   R5's first contention run: 111 of 200 failed on that race, record `:5250`–`:5252`).
+- **A test that ends a real host reaper does so in an isolated child** (added, `FUA-I3-HOSTCANCEL`). A host
+  reaper's `cancel` and `cleanup` wait for its acknowledged exit without a bound, by design. So only a process a
+  watchdog can kill may make that wait: the lease child and the rest-selection test's child both run under
+  `run_isolated` (§5).
 
 ### 1.6 Platforms and budgets
 
@@ -635,6 +644,8 @@ body.
 - Review round 2 (amended, `FUA-I2-MACRO-WS`, `FUA-I2-EINTR`) changes `src/runner/container/runtime.rs` (the trait's
   `create` and `start` take the proofs), `container.rs`, `exec.rs` (`mod cover`), `src/agent/proc.rs` (`EndingRest`),
   every runtime double, and creation's two relay waits in `engine/topology/create/tests.rs` (§4).
+- Review round 3 (`FUA-I3-HOSTCANCEL`) changes only `src/agent/proc.rs`'s `#[cfg(test)]` test module, where the
+  rest-selection test becomes the caller of an isolated child, and its notes (§5).
 
 ### 1.10 The design review's four corrections (round 1, at `793c3784`)
 
@@ -1615,3 +1626,183 @@ Each is marked in place with `FUA-I2-MACRO-WS` or `FUA-I2-EINTR`:
 - §1.4, "Why the census and not visibility": the census is now a lexical backstop behind types, not the guard.
 - §1.9: the files this round changes.
 - §2.2, §2.4 and §3.1: pointers here.
+
+## 5. Implementation review round 3
+
+Repaired by `pr11_fua_r3` (`claude-opus-5-5`, `max`). Every figure below is in a saved file under
+`~/orch-pr11/logs/pr11_fua_r3/` that the sentence names; code lines are at the fix commit `f8b022a5` unless another
+commit is named. The round's commits are `f8b022a5` (the test), `aed7a299` (the notes) and this section. They change
+only `src/agent/proc.rs`'s `#[cfg(test)]` test module and its notes: no production code, no instrument and no frozen
+file.
+
+### 5.0 The review and its triage
+
+Three `gpt-6-astra` lenses at `max` reviewed `71e55dfc`. Their texts are
+`~/orch-pr11/reviews/review-328-i3-{delta,regression,concurrency}-71e55dfc.review.md`, hashed in `SHA256SUMS-328-i3`;
+the regression lens's witness is in `~/orch-pr11/reviews/328-i3-witnesses/`, hashed in `SHA256SUMS-328-i3-witnesses`.
+- **Delta and fix-check:** PASS. Round 2's macro mutation fails to build at the head, in production and test builds
+  (`E0308`, `E0061`), and the proof boundary holds.
+- **Concurrency:** PASS. 60 focused Linux tests passed.
+- **Regression:** CHANGES_REQUIRED, one P2, executed (`FUA-I3-HOSTCANCEL`, §5.1). It found no other regression: the
+  merge base is `92c4ca81`, the 26 frozen production files and eight frozen test children are byte-identical, and the
+  exact-head CI passed, macOS and Windows included.
+
+The orchestrator's triage (`~/orch-pr11/reviews/review-328-i3-triage.md`) fixes the P2 under the witness rule, as a
+test-only change, and sets round 4 to delta and regression. The round asked no question.
+
+### 5.1 `FUA-I3-HOSTCANCEL`: the rest-selection test made a deliberately unbounded wait in the libtest process
+
+**The reviewer's text** (regression lens):
+
+> **P2 — The new rest-selection test can wedge the entire suite (executed).** At src/agent/proc.rs:9224, the test
+> calls `host.cancel()` directly in the main test process, without a watchdog. Host cancellation deliberately waits
+> indefinitely for the acknowledged reaper’s exit.
+>
+> Concrete sequence: the host reaper acknowledges CANCEL → it becomes stopped before completing exit → `host.cancel()`
+> blocks in `AcknowledgedExit` → the suite cannot finish. On the exact head, I held this helper at `PTRACE_EVENT_EXIT`
+> and observed blocking `wait4(..., 0)` at both 3 and 10 seconds. The test finished only after I released it at 12
+> seconds. […]
+>
+> Run this test’s real reaper operations in an isolated child under the existing bounded `run_isolated` harness.
+> Preserve production host cancellation semantics.
+
+**The witness** (`tools/hold-host-reaper.py`; `witness/SUMMARY.txt`). It is the reviewer's method, made independent of
+where the test's body runs:
+- The test binary runs under a ptrace tracer that follows every process the binary or its isolated children start.
+- The test's body forks three helpers: the signal guard, the container reaper, then the host reaper. The tracer holds
+  the third helper of the first test-binary process to fork three — the host reaper, wherever the body runs — at its
+  `PTRACE_EVENT_EXIT` stop, which a reaper reaches only after acknowledging CANCEL.
+- It holds it 180 s, past the fixed test's 120-second deadline and the 10-second collection bound after it. It samples
+  every test-binary thread's system call 11 times, from 3 s to 175 s, then releases the reaper.
+- Every run is under `upstroke-build` on this lane's witness base.
+
+The runs:
+- **Red at `71e55dfc`** (`witness/red-71e55dfc/`). The libtest process's test thread was in
+  `wait4(<held reaper>, …, 0)` at all 11 samples. The libtest process ended 180.011 s after the hold began, 0.01 s
+  after the release, with the test passing ("finished in 180.03s").
+- **Green at `aed7a299`** (`witness/green-aed7a299/`; its Rust inputs are `f8b022a5`'s). The isolated child's test
+  thread was in that wait, and the libtest process's in `run_isolated`'s polling rest. The libtest process ended
+  120.0 s after the hold began, with the reaper still held. The test failed at its deadline, "the isolated caller
+  armed and dropped a container reaper, and spawned and cancelled a host reaper: status None" ("finished in 120.02s").
+- **The mutation, the test run directly again** (`witness/mutation-i3-direct-again/`). It is
+  `mutation/i3-direct-again.patch`, the reverse of `f8b022a5`'s `proc.rs` diff, on a copy of `aed7a299` built from
+  itself. It is red, as at `71e55dfc`: the wait at all 11 samples, and the end 180.011 s after the hold.
+
+**Root cause.** `a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before` came with round 2
+(`FUA-I2-EINTR`, §4.2). It is a white-box test: it arms a real container reaper, spawns a real host reaper, and reads
+each one's `rest`. It ended the host reaper with `cancel` in the libtest process itself. After an acknowledged CANCEL
+that call waits for the reaper's exit through `ReaperEnding::AcknowledgedExit` (`src/agent/proc.rs:2459`, or
+`wait_through_identity` on the pidfd path). That wait is unbounded and must stay so, because the reaper's exit is what
+releases the cleanup lease. So a reaper stopped between its acknowledgement and its exit held the test, and the suite
+with it, for as long as it stayed stopped. Round 2 wrote the test to read two fields and did not count the wait its
+cleanup makes.
+
+**The fix** (`f8b022a5`, test-only).
+- The reaper operations move to `container_and_host_reaper_rests_child` (`src/agent/proc.rs:9215`), an ignored child.
+  It arms a container reaper and drops it, spawns a host reaper, reports both rests, cancels the host reaper, and
+  reports that the cancel returned.
+- The rests are reported before the cancel, so a run whose cancel never returns still names them.
+- The test (`:9233`) runs the child through `run_isolated` under `CONTAINER_REAPER_CHILD_BOUND` (120 s). That is the
+  bound of the lease child, which also cancels a real host reaper. The test requires the child's success, its report
+  that the cancel returned, and the rests `Some(SingleAttempt)` and `Resuming`.
+- Production host cancellation is unchanged:
+  - The expanded non-test library (`cargo rustc --lib -- -Zunpretty=expanded`, `cfg(test)` configured out;
+    `tools/expand-identity.sh`, `proof/expand/RESULT.txt`) is byte-identical at `71e55dfc` and `f8b022a5` for the
+    host, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`: 10,290,462, 10,121,405 and 10,274,501 bytes. The
+    control, round 2's one-token production mutation `r2-e4`, makes it differ.
+  - Every changed line of `src/` lies in `mod termination`'s `#[cfg(test)] mod tests`
+    (`proof/nontest-hunks-71e55dfc-aed7a299.txt`).
+  - The module diff proof passes (`proof/module-diff-proof-aed7a299.txt`).
+- Round 2's mutations of this test still kill it; the unmutated control `mutation/i3-control/` passes.
+  - `r2-e3` fails it with "rests: container Some(Resuming), host Resuming"
+    (`mutation/i3-r2-e3-a-container-reaper-armed-to-resume/`).
+  - `r2-e4` fails it with "rests: container Some(SingleAttempt), host SingleAttempt"
+    (`mutation/i3-r2-e4-a-host-reaper-forked-to-rest-once/`).
+
+**The sweep** (`measure/sweep-fua-i3-hostcancel.txt`). It covers every test this PR adds over the merge base: 28 run
+and 9 ignored children (`measure/new-tests-71e55dfc-vs-base.txt`). It looks for a call, made in the libtest process,
+into a production wait that is unbounded by design.
+- **The wait and its entry points.** `AcknowledgedExit` is the only arm of `close_and_wait_reporting` that waits
+  without `WNOHANG`. It is reached through `Reaper::cancel` and `Reaper::cleanup` after an acknowledgement, and
+  through them from `Supervisor::finish` and `Supervisor`'s `Drop` while spawning. `Reaper` and its methods are
+  private to `agent::proc::termination`, and `Supervisor` is `pub(super)`. So outside `agent::proc` a test reaches the
+  wait only through a host launch.
+- **Statically**, the lines this PR adds that name an entry point are the two calls this test made, now in its child,
+  and `container_reaper_lease_child`'s `host.cancel()` (`src/agent/proc.rs:9417`). The lease child has run under
+  `run_isolated` since it was added.
+- **Dynamically**, `tools/census-waits.py` runs each new test alone under `strace -f -k` and lists the blocking
+  `wait4` and `waitid` calls of the libtest process's own threads, with their leaf frames (`census/start-71e55dfc/`,
+  `census/fix-aed7a299/`). 15 of the 28 new tests make the wait in their libtest process at `71e55dfc`, and 14 at
+  `aed7a299`. The one that changed is this test, from one wait to none: its wait is now made by its child. All 28
+  passed under the tracer at both commits.
+- **The 14 make it at the end of a host launch**, through the product's own launch path, and call no reaper's wait
+  themselves:
+  - in seven tests, the relay writer and the relay runner this PR adds to test support, through
+    `test_support::run_with_timeout` (`write_program_in_its_own_process` and `run_program_in_its_own_process`,
+    `src/runner/container.rs:1539` and `:1556`);
+  - in one test, the inherited-writer helper of `the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`
+    (`src/runner/host/tests.rs:4743`), which runs its helper as its pre-existing sibling does (`:4691`);
+  - in six `exec/tests.rs` tests, ten launches each, the git of `src/runner/container/view.rs`'s fixture
+    (`HostRunner`, `:470`, unchanged since the merge base).
+
+  None of them is a direct call, so all are outside this finding's class, and none is changed. A wait at the end of a
+  launch belongs to the launch path, and host-launching tests across the suite make it.
+- **The test harness's own waits** are not production's. `run_isolated` and `waited_within` are bounded
+  (`FUA-I1-WATCHDOG`). `LinkedChild::kill` is filed as `PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE` (P3,
+  deferred to #329).
+
+### 5.2 The residue run's recovery assertion: the filed PR281 neighbour, cited and not repaired
+
+The regression lens compared the entries a whole suite leaves behind, at the merge base and at the head. Its files are
+copied, with `SHA256SUMS`, to `residue/reviewer-copy/`, and summarised in `EXCERPT.txt`.
+- Each archive compiled from itself, and both left the same 44 top-level and 154 total entries.
+- The base run passed 3,000 library and 10 binary tests.
+- The head run failed one library test of 3,028:
+  `engine::topology::recover::tests::an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step`.
+  It failed at `src/engine/topology/recover/tests.rs:7120`, the one-shot `assert!(!rundir::is_running(…))`,
+  "answer-file: and no process holds the run", in `the_runs_first_resume_by_an_incarnation_that_then_dies` (`:7105`).
+- That file is a frozen test child, byte-identical to the merge base.
+
+The lens reproduced the failure on the merge base. It held an inherited cleanup lease in a parked fork through the
+unchanged assertion (`base-lease-witness.patch`, `base-lease-witness.log`), and got the same message, at line 7125 of
+the patched file: the five lines it inserted moved the assertion down. That is the filed neighbour of
+`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`
+(`findings/P2_correctness_202609131202_a-cancelled-job-hides-which-assertion-failed.md`, P2, deferred): a sibling test
+thread's fork inherits the run's cleanup-lease descriptor and holds it for an instant, and a one-shot read of the
+lease sees the hold. This round cites it and does not repair it. The read is in a frozen file, and the remedy is the
+change that closes the inheritance, which that finding's guard names.
+
+### 5.3 Why this round converges (`MAINTAINING.md`, "When a pull request may be looping")
+
+This round repairs a test round 2 added, so it says why the repair converges.
+- Neither signal is raised. The finding is a P2 and the premise stands.
+- The defect was a missing harness, not a turn of invented machinery. The fix moves the test's real reaper operations
+  into `run_isolated`, the harness this follow-up already has and round 1 bounded, and it adds no new mechanism.
+- The witness holds the fix: red at `71e55dfc`, green at `aed7a299`, red again under the mutation.
+- §1.5's harness rules now carry the lesson.
+
+### 5.4 Gates, CI and platforms
+
+The ten gates run at the pushed head, in the foreground, cargo through `upstroke-build` on this session's private
+base. They and CI's legs, read by the newest run per workflow, are in the pull request body and
+`~/orch-pr11/handovers/pr11_fua_r3.md`. This section is committed before they run, so it names no figure of theirs.
+Before it:
+- the whole suite at `aed7a299` passed 3,028 library tests (0 failed, 123 ignored) and 10 binary tests
+  (`dev/test-full-aed7a299.log`);
+- against `71e55dfc` the suite gained one ignored child, the new one, and lost nothing
+  (`measure/new-tests-aed7a299-vs-71e55dfc.txt`).
+
+**Platforms.**
+- **Linux** (this box) runs everything. The tracer witness is Linux-only (`ptrace`, `/proc`).
+- **macOS** runs the test and its child. Both are in `mod termination` (`cfg(unix)`), and `run_isolated` needs only a
+  process group and `kill`. This box ran neither on macOS; CI's macOS leg does.
+- **Windows** gains no test: `mod termination` is Unix-only. The expanded non-test library is identical there too
+  (above).
+- CI speaks for macOS and Windows.
+
+### 5.5 The sentences this round amends
+
+Each is marked in place with `FUA-I3-HOSTCANCEL`:
+- §0: this round's entry and the next step.
+- §1.5: a harness rule for a test that ends a real host reaper.
+- §1.9: the files this round changes.
