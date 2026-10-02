@@ -1513,15 +1513,18 @@ impl ContainerRuntime for LoggingRuntime {
 
     fn create(
         &self,
-        spec: &crate::runner::container::runtime::CreateSpec,
+        covered: crate::runner::container::CoveredCreate<'_>,
     ) -> Result<crate::runner::container::runtime::CreatedContainer, RuntimeError> {
         logged!(self, RuntimeOp::Create);
-        self.inner.create(spec)
+        self.inner.create(covered)
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(
+        &self,
+        covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), RuntimeError> {
         logged!(self, RuntimeOp::Start);
-        self.inner.start(name)
+        self.inner.start(covered)
     }
 
     fn stop(

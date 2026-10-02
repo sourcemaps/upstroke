@@ -29,6 +29,7 @@ use super::{
     Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
+pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};
 
 pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -282,45 +283,6 @@ struct Armed {
     scope: ReaperContainerScope,
 }
 
-struct Covered<'a> {
-    reaping: &'a Reaping,
-    fate: Option<ProcessFate>,
-}
-
-impl Reaping {
-    fn cover(
-        &self,
-        runtime: &dyn ContainerRuntime,
-        identity: &RunIdentity,
-        labels: &BTreeMap<String, String>,
-    ) -> Result<Covered<'_>, UpstrokeError> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(armed) = &state.armed {
-            refuse_unless_selected(&armed.scope, labels)?;
-        } else {
-            let scope = ReaperContainerScope::new(
-                runtime.reaper_program(),
-                &identity.private_root,
-                &identity.incarnation,
-            )?;
-            refuse_unless_selected(&scope, labels)?;
-            state.armed = Some(Armed {
-                #[cfg(unix)]
-                reaper: crate::agent::proc::arm_container_reaper(
-                    crate::topology::effects::ProcessSite::Terminate,
-                    &scope,
-                )?,
-                scope,
-            });
-        }
-        state.in_flight = state.in_flight.saturating_add(1);
-        Ok(Covered {
-            reaping: self,
-            fate: None,
-        })
-    }
-}
-
 fn refuse_unless_selected(
     scope: &ReaperContainerScope,
     labels: &BTreeMap<String, String>,
@@ -339,29 +301,6 @@ fn refuse_unless_selected(
             scope.list_argv().join(" ")
         ),
     })
-}
-
-impl Covered<'_> {
-    fn settle(mut self, fate: ProcessFate) {
-        self.fate = Some(fate);
-    }
-}
-
-impl Drop for Covered<'_> {
-    fn drop(&mut self) {
-        let mut state = self
-            .reaping
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.in_flight = state.in_flight.saturating_sub(1);
-        if !matches!(
-            self.fate,
-            Some(ProcessFate::Gone | ProcessFate::NeverStarted)
-        ) {
-            state.unsettled = true;
-        }
-    }
 }
 
 impl Armed {
@@ -667,7 +606,8 @@ impl ContainerRunner {
         &self,
         hooks: &mut dyn ContainerHooks,
         plan: &LaunchPlan,
-        _covered: &Covered<'_>,
+        to_create: CoveredCreate<'_>,
+        to_start: CoveredStart<'_>,
     ) -> Result<Launched, RunnerError> {
         let written = match write_intent(
             hooks,
@@ -706,7 +646,7 @@ impl ContainerRunner {
             ContainerSite::Create,
             self.runtime.as_ref(),
             &written,
-            &plan.spec,
+            to_create,
         ) {
             Ok(created) => created,
             Err(error) => {
@@ -737,9 +677,13 @@ impl ContainerRunner {
                 },
             ));
         }
-        if let Err(failure) =
-            start_container(hooks, ContainerSite::Start, self.runtime.as_ref(), &written)
-        {
+        if let Err(failure) = start_container(
+            hooks,
+            ContainerSite::Start,
+            self.runtime.as_ref(),
+            &written,
+            to_start,
+        ) {
             return Err(self.cancelled(
                 hooks,
                 plan,
@@ -958,18 +902,14 @@ impl ContainerRunner {
         }
         let never_started = |error| RunnerError::never_started(&request.invocation, error);
         let plan = self.plan(request).map_err(never_started)?;
-        let covered = self
+        let (covered, to_create, to_start) = self
             .reaping
-            .cover(
-                self.runtime.as_ref(),
-                &self.identity,
-                &plan.launch.spec.labels,
-            )
+            .cover(self.runtime.as_ref(), &self.identity, &plan.launch.spec)
             .map_err(never_started)?;
         let started = Instant::now();
         let deadline = started + request.timeout;
 
-        let launched: Launched = match self.launch(hooks, &plan.launch, &covered) {
+        let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {
             Ok(launched) => launched,
             Err(error) => {
                 covered.settle(error.fate);
@@ -1057,6 +997,121 @@ fn bounded(bytes: &[u8], limit: usize) -> (String, bool) {
         end -= 1;
     }
     (String::from_utf8_lossy(&bytes[..end]).into_owned(), true)
+}
+
+pub(super) mod cover {
+    use std::sync::PoisonError;
+
+    use crate::error::{ProcessFate, UpstrokeError};
+    use crate::runner::container::census::ReaperContainerScope;
+    use crate::runner::container::runtime::{ContainerRuntime, CreateSpec};
+
+    use super::{Armed, Reaping, RunIdentity, refuse_unless_selected};
+
+    pub(in crate::runner::container::exec) struct Covered<'a> {
+        reaping: &'a Reaping,
+        fate: Option<ProcessFate>,
+    }
+
+    pub struct CoveredCreate<'a> {
+        spec: &'a CreateSpec,
+    }
+
+    pub struct CoveredStart<'a> {
+        name: &'a str,
+    }
+
+    impl Reaping {
+        pub(in crate::runner::container::exec) fn cover<'a>(
+            &'a self,
+            runtime: &dyn ContainerRuntime,
+            identity: &RunIdentity,
+            spec: &'a CreateSpec,
+        ) -> Result<(Covered<'a>, CoveredCreate<'a>, CoveredStart<'a>), UpstrokeError> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(armed) = &state.armed {
+                refuse_unless_selected(&armed.scope, &spec.labels)?;
+            } else {
+                let scope = ReaperContainerScope::new(
+                    runtime.reaper_program(),
+                    &identity.private_root,
+                    &identity.incarnation,
+                )?;
+                refuse_unless_selected(&scope, &spec.labels)?;
+                state.armed = Some(Armed {
+                    #[cfg(unix)]
+                    reaper: crate::agent::proc::arm_container_reaper(
+                        crate::topology::effects::ProcessSite::Terminate,
+                        &scope,
+                    )?,
+                    scope,
+                });
+            }
+            state.in_flight = state.in_flight.saturating_add(1);
+            Ok((
+                Covered {
+                    reaping: self,
+                    fate: None,
+                },
+                CoveredCreate { spec },
+                CoveredStart { name: &spec.name },
+            ))
+        }
+    }
+
+    impl Covered<'_> {
+        pub(in crate::runner::container::exec) fn settle(mut self, fate: ProcessFate) {
+            self.fate = Some(fate);
+        }
+    }
+
+    impl Drop for Covered<'_> {
+        fn drop(&mut self) {
+            let mut state = self
+                .reaping
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.in_flight = state.in_flight.saturating_sub(1);
+            if !matches!(
+                self.fate,
+                Some(ProcessFate::Gone | ProcessFate::NeverStarted)
+            ) {
+                state.unsettled = true;
+            }
+        }
+    }
+
+    impl<'a> CoveredCreate<'a> {
+        #[must_use]
+        pub fn spec(&self) -> &'a CreateSpec {
+            self.spec
+        }
+    }
+
+    impl<'a> CoveredStart<'a> {
+        #[must_use]
+        pub fn name(&self) -> &'a str {
+            self.name
+        }
+    }
+
+    #[cfg(test)]
+    mod without_a_reaper {
+        use super::{CoveredCreate, CoveredStart, CreateSpec};
+
+        impl<'a> CoveredCreate<'a> {
+            pub(crate) fn without_a_reaper(spec: &'a CreateSpec) -> Self {
+                Self { spec }
+            }
+        }
+
+        impl<'a> CoveredStart<'a> {
+            pub(crate) fn without_a_reaper(name: &'a str) -> Self {
+                Self { name }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

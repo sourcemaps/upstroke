@@ -9,8 +9,8 @@ use crate::rundir::remove_public_husk;
 use crate::rundir::scratch_tree::{ScratchTree, acquire};
 use crate::rundir::{NoHooks, create_private_dir};
 use crate::runner::container::runtime::{
-    ContainerExecution, CreateSpec, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeError, RuntimeOp, StopMode,
+    ContainerExecution, CreatedContainer, DiscoveredContainer, ImageInspection, Liveness,
+    RuntimeError, RuntimeOp, StopMode,
 };
 use crate::topology::events::RunnerContract;
 
@@ -128,14 +128,21 @@ impl ContainerRuntime for Inventory {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        covered: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         Ok(CreatedContainer {
             name: spec.name.clone(),
             reported_image_id: spec.image_id.clone(),
         })
     }
 
-    fn start(&self, _name: &str) -> Result<(), RuntimeError> {
+    fn start(
+        &self,
+        _covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 

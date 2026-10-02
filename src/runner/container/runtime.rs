@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::topology::effects::ContainerSite;
 
+use super::exec::{CoveredCreate, CoveredStart};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimeOp {
     Probe,
@@ -269,9 +271,9 @@ pub trait ContainerRuntime: Send + Sync {
 
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError>;
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError>;
+    fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError>;
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError>;
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError>;
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError>;
 

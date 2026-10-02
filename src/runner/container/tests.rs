@@ -21,13 +21,13 @@ use super::runtime::{
     Mount, OwnerLiveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
 };
 use super::{
-    DOCKER_GATED_TESTS, DisposableDirView, DockerCli, FakeOwnerLiveness, FakeRuntime, FoundIntent,
-    GitView, GitViewRequest, LaunchPlan, Launched, NoHooks, OrphanWindow, PS_FIELD_SEPARATOR,
-    PS_FORMAT, PS_LABELS, RacingPause, RecordingHooks, TERMINATION_OBSERVATIONS,
-    classify_docker_failure, create_container, docker_gate, is_unreachable_diagnostic, launch,
-    list_intents, mount_git_view, observe_terminated, parse_ps_output, read_intent, reclaim,
-    release, remove_container, remove_intent, start_container, stop_container, unmount_git_view,
-    write_intent,
+    CoveredCreate, CoveredStart, DOCKER_GATED_TESTS, DisposableDirView, DockerCli,
+    FakeOwnerLiveness, FakeRuntime, FoundIntent, GitView, GitViewRequest, LaunchPlan, Launched,
+    NoHooks, OrphanWindow, PS_FIELD_SEPARATOR, PS_FORMAT, PS_LABELS, RacingPause, RecordingHooks,
+    TERMINATION_OBSERVATIONS, classify_docker_failure, create_container, docker_gate,
+    is_unreachable_diagnostic, launch, list_intents, mount_git_view, observe_terminated,
+    parse_ps_output, read_intent, reclaim, release, remove_container, remove_intent,
+    start_container, stop_container, unmount_git_view, write_intent,
 };
 use crate::error::UpstrokeError;
 use crate::rundir::scratch_tree::ScratchTree;
@@ -552,12 +552,16 @@ fn the_fake_can_report_an_image_id_that_differs_from_the_one_create_asked_for() 
         read_only_root: true,
     };
 
-    let honest = runtime.create(&spec).expect("created");
+    let honest = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
     assert_eq!(honest.reported_image_id, IMAGE_ID);
     runtime.remove(&spec.name).expect("removed");
 
     runtime.substitute_reported_image_id(&spec.name, OTHER_IMAGE_ID);
-    let substituted = runtime.create(&spec).expect("created");
+    let substituted = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
     assert_eq!(substituted.reported_image_id, OTHER_IMAGE_ID);
     assert_ne!(
         substituted.reported_image_id, spec.image_id,
@@ -607,10 +611,17 @@ fn volume_presence_is_a_toggle_and_absence_refuses_a_create() {
         workdir: None,
         read_only_root: true,
     };
-    let refused = runtime.create(&spec).expect_err("an absent volume refuses");
+    let refused = runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect_err("an absent volume refuses");
     assert!(!refused.is_unreachable(), "the runtime answered; it failed");
     runtime.add_volume("upstroke-claude");
-    assert!(runtime.create(&spec).is_ok(), "and present, it creates");
+    assert!(
+        runtime
+            .create(CoveredCreate::without_a_reaper(&spec))
+            .is_ok(),
+        "and present, it creates"
+    );
 }
 
 #[test]
@@ -643,7 +654,7 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
             RuntimeOp::Observe => runtime.observe("x").is_err(),
             RuntimeOp::Collect => runtime.collect("x").is_err(),
             RuntimeOp::Create => runtime
-                .create(&CreateSpec {
+                .create(CoveredCreate::without_a_reaper(&CreateSpec {
                     name: "x".to_owned(),
                     image_id: IMAGE_ID.to_owned(),
                     labels: BTreeMap::new(),
@@ -652,9 +663,9 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
                     command: Vec::new(),
                     workdir: None,
                     read_only_root: true,
-                })
+                }))
                 .is_err(),
-            RuntimeOp::Start => runtime.start("x").is_err(),
+            RuntimeOp::Start => runtime.start(CoveredStart::without_a_reaper("x")).is_err(),
             RuntimeOp::Stop => runtime.stop("x", StopMode::Kill).is_err(),
             RuntimeOp::Remove => runtime.remove("x").is_err(),
         })
@@ -751,8 +762,12 @@ fn the_call_log_is_ordered_and_holds_every_operation() {
         read_only_root: true,
     };
     runtime.probe().expect("reachable");
-    runtime.create(&spec).expect("created");
-    runtime.start(&spec.name).expect("started");
+    runtime
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    runtime
+        .start(CoveredStart::without_a_reaper(&spec.name))
+        .expect("started");
     runtime.stop(&spec.name, StopMode::Kill).expect("stopped");
     runtime.observe(&spec.name).expect("observed");
     runtime.remove(&spec.name).expect("removed");
@@ -999,7 +1014,7 @@ fn every_container_site_is_taken_by_value_by_a_funnel_that_hooks_both_phases() {
         ContainerSite::Create,
         &fixture.runtime,
         &written,
-        &fixture.plan.spec,
+        CoveredCreate::without_a_reaper(&fixture.plan.spec),
     )
     .expect("created");
     let view_path = mount_git_view(
@@ -1009,7 +1024,14 @@ fn every_container_site_is_taken_by_value_by_a_funnel_that_hooks_both_phases() {
         &fixture.plan.view,
     )
     .expect("view");
-    start_container(&mut hooks, ContainerSite::Start, &fixture.runtime, &written).expect("started");
+    start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(&fixture.plan.spec.name),
+    )
+    .expect("started");
     stop_container(
         &mut hooks,
         ContainerSite::Stop,
@@ -1119,11 +1141,25 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             }
             ContainerSite::Create => {
                 let proof = proof.as_ref().expect("the Create cell mints one");
-                create_container(hooks, site, &runtime, proof, &spec).map(|_| ())
+                create_container(
+                    hooks,
+                    site,
+                    &runtime,
+                    proof,
+                    CoveredCreate::without_a_reaper(&spec),
+                )
+                .map(|_| ())
             }
             ContainerSite::Start => {
                 let proof = proof.as_ref().expect("the Start cell mints one");
-                start_container(hooks, site, &runtime, proof).map_err(|failure| failure.error)
+                start_container(
+                    hooks,
+                    site,
+                    &runtime,
+                    proof,
+                    CoveredStart::without_a_reaper(name.as_str()),
+                )
+                .map_err(|failure| failure.error)
             }
 
             ContainerSite::MountGitView => mount_git_view(hooks, site, &view, &request).map(|_| ()),
@@ -2405,11 +2441,14 @@ impl ContainerRuntime for DockerLikeStop<'_> {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.inner.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
-        self.inner.create(spec)
+    fn create(
+        &self,
+        covered: CoveredCreate<'_>,
+    ) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.inner.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.inner.start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.inner.start(covered)
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -2704,11 +2743,14 @@ impl ContainerRuntime for NeverTerminates<'_> {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<super::runtime::CreatedContainer, RuntimeError> {
-        self.0.create(spec)
+    fn create(
+        &self,
+        covered: CoveredCreate<'_>,
+    ) -> Result<super::runtime::CreatedContainer, RuntimeError> {
+        self.0.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0.start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.0.start(covered)
     }
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.stop(name, mode)
@@ -3586,8 +3628,12 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         read_only_root: true,
     };
     let _ = docker.remove(name);
-    docker.create(&spec).expect("created");
-    docker.start(name).expect("started");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    docker
+        .start(CoveredStart::without_a_reaper(name))
+        .expect("started");
     assert!(
         wait_until_terminated(docker.as_ref(), name).is_terminated(),
         "the fixture container has to actually be exited"
@@ -3649,8 +3695,12 @@ fn real_docker_returns_both_streams_of_a_container_separately() {
         read_only_root: true,
     };
     let _ = docker.remove(name);
-    docker.create(&spec).expect("created");
-    docker.start(name).expect("started");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("created");
+    docker
+        .start(CoveredStart::without_a_reaper(name))
+        .expect("started");
     wait_until_terminated(docker.as_ref(), name);
 
     let collected = docker.collect(name).expect("collected");
@@ -4034,7 +4084,9 @@ fn real_docker_renders_a_comma_bearing_label_value_whole() {
         workdir: None,
         read_only_root: true,
     };
-    docker.create(&spec).expect("create the labelled container");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec))
+        .expect("create the labelled container");
 
     let found = docker
         .containers_with_label(LABEL_PRIVATE_ROOT, &root)
@@ -4304,11 +4356,15 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         "a listing that succeeded and holds nothing is the daemon saying the container is gone"
     );
 
-    docker.create(&spec(&name)).expect("created");
     docker
-        .create(&spec(&longer))
+        .create(CoveredCreate::without_a_reaper(&spec(&name)))
+        .expect("created");
+    docker
+        .create(CoveredCreate::without_a_reaper(&spec(&longer)))
         .expect("the colliding name created");
-    docker.start(&longer).expect("the colliding name started");
+    docker
+        .start(CoveredStart::without_a_reaper(&longer))
+        .expect("the colliding name started");
 
     let listing = docker
         .raw(
@@ -4341,7 +4397,9 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         Liveness::Running
     );
 
-    docker.start(&name).expect("started");
+    docker
+        .start(CoveredStart::without_a_reaper(&name))
+        .expect("started");
     assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
     assert_eq!(
         docker.stop(&name, StopMode::Kill).expect("killed"),
@@ -4884,7 +4942,7 @@ fn a_create_whose_named_volume_is_absent_is_refused_before_any_effect() {
                 ContainerSite::Create,
                 &fixture.runtime,
                 &written,
-                &spec,
+                CoveredCreate::without_a_reaper(&spec),
             );
 
             if present && reachable {

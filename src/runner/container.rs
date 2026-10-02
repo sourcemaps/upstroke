@@ -280,12 +280,13 @@ pub(in crate::runner::container) fn create_container(
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
-    spec: &CreateSpec,
+    covered: exec::CoveredCreate<'_>,
 ) -> Result<CreatedContainer, UpstrokeError> {
     expect_site(site, Operation::Create)?;
+    let spec = covered.spec();
     expect_intent_for(intent, &spec.name, "created")?;
     expect_mounted_volumes_present(runtime, spec)?;
-    funnel(hooks, site, || runtime.create(spec).map_err(refused))
+    funnel(hooks, site, || runtime.create(covered).map_err(refused))
 }
 
 fn expect_mounted_volumes_present(
@@ -337,13 +338,15 @@ pub(in crate::runner::container) fn start_container(
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
+    covered: exec::CoveredStart<'_>,
 ) -> Result<(), StartFailure> {
-    expect_site(site, Operation::Start).map_err(|error| StartFailure {
+    let unattempted = |error| StartFailure {
         attempted: false,
         error,
-    })?;
-    let name = intent.name().as_str().to_owned();
-    funnel_reporting_attempt(hooks, site, || runtime.start(&name).map_err(refused))
+    };
+    expect_site(site, Operation::Start).map_err(unattempted)?;
+    expect_intent_for(intent, covered.name(), "started").map_err(unattempted)?;
+    funnel_reporting_attempt(hooks, site, || runtime.start(covered).map_err(refused))
         .map_err(|(attempted, error)| StartFailure { attempted, error })
 }
 
@@ -1275,7 +1278,8 @@ impl ContainerRuntime for DockerCli {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         let mut args: Vec<String> =
             vec!["create".to_owned(), "--name".to_owned(), spec.name.clone()];
         if spec.read_only_root {
@@ -1317,7 +1321,8 @@ impl ContainerRuntime for DockerCli {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(&self, covered: exec::CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.exec(RuntimeOp::Start, name, &["start", name])
             .map(|_| ())
     }
@@ -1413,8 +1418,13 @@ mod uncovered {
         )?;
         let intent_path = written.path().to_path_buf();
         let view_path = mount_git_view(hooks, ContainerSite::MountGitView, view, &plan.view)?;
-        let created =
-            create_container(hooks, ContainerSite::Create, runtime, &written, &plan.spec)?;
+        let created = create_container(
+            hooks,
+            ContainerSite::Create,
+            runtime,
+            &written,
+            CoveredCreate::without_a_reaper(&plan.spec),
+        )?;
         if created.reported_image_id != plan.spec.image_id {
             let residue = cancel_created(
                 hooks,
@@ -1436,8 +1446,14 @@ mod uncovered {
                 ),
             });
         }
-        start_container(hooks, ContainerSite::Start, runtime, &written)
-            .map_err(|failure| failure.error)?;
+        start_container(
+            hooks,
+            ContainerSite::Start,
+            runtime,
+            &written,
+            CoveredStart::without_a_reaper(&plan.spec.name),
+        )
+        .map_err(|failure| failure.error)?;
         Ok(Launched {
             name: plan.name.clone(),
             intent_path,
@@ -1481,6 +1497,9 @@ mod uncovered {
 
 #[cfg(test)]
 pub use uncovered::launch;
+
+#[cfg(test)]
+pub(crate) use exec::cover::{CoveredCreate, CoveredStart};
 
 #[cfg(test)]
 mod fake;

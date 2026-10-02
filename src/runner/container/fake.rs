@@ -19,7 +19,7 @@ use super::runtime::{
     DiscoveredContainer, ImageInspection, Liveness, Mount, OwnerLiveness, RuntimeError, RuntimeOp,
     Settled, StopMode,
 };
-use super::{ContainerHooks, DockerCli};
+use super::{ContainerHooks, CoveredCreate, CoveredStart, DockerCli};
 use crate::runner::Cancellation;
 use crate::topology::effects::{EffectSiteId, HookPhase, Injection};
 use crate::workspace_manager::fixture::{LINK_BOUND, LinkedChild, ParentLink};
@@ -473,12 +473,12 @@ impl ContainerRuntime for FakeRuntime {
             })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
-        self.daemon_create(spec)
+    fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        self.daemon_create(covered.spec())
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.daemon_start(name)
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.daemon_start(covered.name())
     }
 
     fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
@@ -1000,8 +1000,11 @@ impl ContainerRuntime for LinkedRuntime {
         Ok(execution_of(&execution))
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
-        let created = self.call(RuntimeOp::Create, json!({"spec": spec_json(spec)}))?;
+    fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        let created = self.call(
+            RuntimeOp::Create,
+            json!({"spec": spec_json(covered.spec())}),
+        )?;
         Ok(CreatedContainer {
             name: created
                 .get("name")
@@ -1016,8 +1019,8 @@ impl ContainerRuntime for LinkedRuntime {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.call(RuntimeOp::Start, json!({"name": name}))
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        self.call(RuntimeOp::Start, json!({"name": covered.name()}))
             .map(|_| ())
     }
 

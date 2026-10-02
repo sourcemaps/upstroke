@@ -19,8 +19,8 @@ use crate::rundir::{
 use crate::rundir::{HuskDisposition, Reclaimable};
 use crate::runner::container::ContainerHooks;
 use crate::runner::container::runtime::{
-    ContainerExecution, CreateSpec, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeError, RuntimeOp, StopMode,
+    ContainerExecution, CreatedContainer, DiscoveredContainer, ImageInspection, Liveness,
+    RuntimeError, RuntimeOp, StopMode,
 };
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, LockSite, RunDirSite,
@@ -2845,7 +2845,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        covered: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         self.note(format!("create {}", spec.name));
         self.state
             .lock()
@@ -2857,7 +2861,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(
+        &self,
+        covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.note(format!("start {name}"));
         Ok(())
     }

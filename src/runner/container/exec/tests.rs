@@ -188,11 +188,12 @@ impl ContainerRuntime for Runtime {
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
         self.0.fake.collect(name)
     }
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
-        self.0.fake.create(spec)
+    fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+        self.0.fake.create(covered)
     }
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
-        self.0.fake.start(name)?;
+    fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError> {
+        let name = covered.name();
+        self.0.fake.start(covered)?;
         if self.0.exit_on_start {
             self.0.fake.set_container_state(name, Liveness::Exited);
             if let Some(execution) = self
@@ -3137,7 +3138,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Create,
         &fixture.runtime,
         &proof,
-        &spec,
+        CoveredCreate::without_a_reaper(&spec),
     )
     .expect_err("`other` has no record of its own");
     let message = refusal.to_string();
@@ -3160,7 +3161,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Create,
         &fixture.runtime,
         &proof,
-        &plan.launch.spec,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
     )
     .expect("its own proof creates");
     assert_eq!(
@@ -3172,6 +3173,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
         ContainerSite::Start,
         &fixture.runtime,
         &proof,
+        CoveredStart::without_a_reaper(mine.as_str()),
     )
     .expect("and starts the container the proof names");
     assert_eq!(
@@ -3179,6 +3181,92 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
             .runtime
             .fake()
             .container(mine.as_str())
+            .map(|held| held.state),
+        Some(Liveness::Running)
+    );
+}
+
+#[test]
+fn a_start_cover_starts_only_the_container_it_was_minted_for() {
+    let fixture = Fixture::new("start-cover-binding", false);
+    let mut hooks = RecordingHooks::new(fixture.trace.clone());
+    let plan = fixture
+        .runner()
+        .plan(&worker_request(
+            ShellKind::Sh.spec("exit 0"),
+            fixture.task_a.clone(),
+            AgentId::new("claude-code"),
+            Duration::from_secs(10),
+            worker_id(0),
+        ))
+        .expect("plans");
+    let other = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &worker_id(1))
+        .expect("another worker's name");
+    let written = crate::runner::container::write_intent(
+        &mut hooks,
+        ContainerSite::WriteIntent,
+        &fixture.private_root,
+        &plan.launch.name,
+        &plan.launch.intent,
+    )
+    .expect("the record publishes and certifies");
+    crate::runner::container::create_container(
+        &mut hooks,
+        ContainerSite::Create,
+        &fixture.runtime,
+        &written,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
+    )
+    .expect("its own cover creates");
+
+    fixture.trace.clear();
+    let refused = crate::runner::container::start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(other.as_str()),
+    )
+    .expect_err("a cover minted for `other` does not start this container");
+    let message = refused.error.to_string();
+    assert!(
+        !refused.attempted,
+        "refused before the runtime was asked: {message}"
+    );
+    assert!(message.contains(other.as_str()), "{message}");
+    assert!(
+        message.contains("expected_failures_refusals[6]"),
+        "{message}"
+    );
+    assert_eq!(
+        fixture.trace.rendered(),
+        Vec::<String>::new(),
+        "the mismatch refused and something still happened: {:#?}",
+        fixture.trace.rendered()
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .fake()
+            .container(plan.launch.name.as_str())
+            .map(|held| held.state),
+        Some(Liveness::Exited),
+        "created, and still not started"
+    );
+
+    crate::runner::container::start_container(
+        &mut hooks,
+        ContainerSite::Start,
+        &fixture.runtime,
+        &written,
+        CoveredStart::without_a_reaper(plan.launch.spec.name.as_str()),
+    )
+    .expect("the cover minted for it starts it");
+    assert_eq!(
+        fixture
+            .runtime
+            .fake()
+            .container(plan.launch.name.as_str())
             .map(|held| held.state),
         Some(Liveness::Running)
     );
@@ -4140,7 +4228,7 @@ fn real_docker_the_daemon_holds_exactly_the_specs_mounts_and_a_read_only_root() 
         ContainerSite::Create,
         docker.as_ref(),
         &written,
-        &plan.launch.spec,
+        CoveredCreate::without_a_reaper(&plan.launch.spec),
     )
     .expect("created");
 
@@ -5451,6 +5539,9 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
     let mut guarded = 0_usize;
     let mut unguarded: BTreeSet<String> = BTreeSet::new();
     let mut covered_launch = None;
+    let mut funnels = None;
+    let mut runtime_trait = None;
+    let mut test_mints: Vec<(String, Option<String>)> = Vec::new();
     for path in &files {
         if test_modules.contains(path) {
             continue;
@@ -5493,8 +5584,14 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
                 ));
             }
         }
-        if file == "src/runner/container/exec.rs" {
-            covered_launch = Some(production);
+        for at in identifier_occurrences(&production, "without_a_reaper") {
+            test_mints.push((file.clone(), enclosing_fn(&production, at)));
+        }
+        match file.as_str() {
+            "src/runner/container/exec.rs" => covered_launch = Some(production),
+            "src/runner/container.rs" => funnels = Some(production),
+            "src/runner/container/runtime.rs" => runtime_trait = Some(production),
+            _ => {}
         }
     }
     assert!(scanned > 40, "the walk found only {scanned} source files");
@@ -5689,13 +5786,40 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
          `ContainerRuntime::create` and `::start`"
     );
 
-    let exec = covered_launch.expect("exec.rs is scanned");
-    let definitions: Vec<usize> = exec.match_indices("fn launch(").map(|(at, _)| at).collect();
-    assert_eq!(definitions.len(), 1, "one `fn launch(` in exec.rs");
-    let signature_end = definitions[0] + exec[definitions[0]..].find('{').expect("a body");
     assert!(
-        exec[definitions[0]..signature_end].contains("Covered"),
-        "`ContainerRunner::launch` takes the cover its reaper armed"
+        test_mints.is_empty(),
+        "a production region names `without_a_reaper`, the test-only mint of a cover's proofs: \
+         {test_mints:?}"
+    );
+    let signature = |code: &str, definition: &str| {
+        let definitions: Vec<usize> = code.match_indices(definition).map(|(at, _)| at).collect();
+        assert_eq!(definitions.len(), 1, "one `{definition}`");
+        let end = definitions[0]
+            + code[definitions[0]..]
+                .find(['{', ';'])
+                .expect("a signature ends");
+        code[definitions[0]..end].to_owned()
+    };
+    let funnels = funnels.expect("container.rs is scanned");
+    let runtime_trait = runtime_trait.expect("runtime.rs is scanned");
+    for (code, definition, proof) in [
+        (&funnels, "fn create_container(", "CoveredCreate<"),
+        (&funnels, "fn start_container(", "CoveredStart<"),
+        (&runtime_trait, "fn create(", "CoveredCreate<"),
+        (&runtime_trait, "fn start(", "CoveredStart<"),
+    ] {
+        assert!(
+            signature(code, definition).contains(proof),
+            "`{definition}` no longer takes `{proof}…>`: a start primitive that takes no proof \
+             can be called with no cover, whatever spelling reaches it"
+        );
+    }
+
+    let exec = covered_launch.expect("exec.rs is scanned");
+    let launch = signature(&exec, "fn launch(");
+    assert!(
+        launch.contains("CoveredCreate<") && launch.contains("CoveredStart<"),
+        "`ContainerRunner::launch` takes the two proofs the cover minted"
     );
     let launches: Vec<usize> = exec
         .match_indices("self.launch(")
@@ -5716,25 +5840,44 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
         covers.len() == 1 && covers[0] < launches[0],
         "`contain` covers its invocation before it calls the launch"
     );
-    let constructions: Vec<usize> = exec.match_indices("Covered {").map(|(at, _)| at).collect();
+    for construction in ["Covered {", "CoveredCreate {", "CoveredStart {"] {
+        let made: Vec<usize> = exec.match_indices(construction).map(|(at, _)| at).collect();
+        assert!(
+            made.len() == 1 && enclosing_fn(&exec, made[0]).as_deref() == Some("cover"),
+            "`{construction}…}}` is built only by the cover that armed the reaper, and \
+             exec.rs builds it {} time(s)",
+            made.len()
+        );
+    }
+    let mint = exec.find("mod cover {").expect("the cover's module");
+    let mint_end = block_end(&exec, mint + "mod cover ".len()).expect("the module closes");
     assert!(
-        constructions.len() == 1
-            && enclosing_fn(&exec, constructions[0]).as_deref() == Some("cover"),
-        "a `Covered` is made only by the cover that armed the reaper"
+        identifier_occurrences(&exec[mint..mint_end], "mod").len() == 1,
+        "the module that mints the proofs declares no module of its own in production: a child \
+         module sees its private fields"
     );
 }
 
 #[cfg(unix)]
-fn reaper_labels(private_root: &Path, incarnation: &str) -> BTreeMap<String, String> {
-    [
-        (
-            LABEL_PRIVATE_ROOT.to_owned(),
-            crate::runner::container::intent::private_root_label(private_root),
-        ),
-        (LABEL_INCARNATION.to_owned(), incarnation.to_owned()),
-    ]
-    .into_iter()
-    .collect()
+fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {
+    CreateSpec {
+        name: format!("upstroke-reaper-scope-{incarnation}"),
+        image_id: IMAGE_ID.to_owned(),
+        labels: [
+            (
+                LABEL_PRIVATE_ROOT.to_owned(),
+                crate::runner::container::intent::private_root_label(private_root),
+            ),
+            (LABEL_INCARNATION.to_owned(), incarnation.to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: Vec::new(),
+        workdir: None,
+        read_only_root: true,
+    }
 }
 
 #[cfg(unix)]
@@ -5750,7 +5893,7 @@ fn armed_for(private_root: &Path, incarnation: &str) -> bool {
 fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {
     let fixture = Fixture::new("reaper-scope-refused", true);
     let reaping = Reaping::default();
-    let foreign = reaper_labels(&fixture.private_root, INCARNATION_2);
+    let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
     let refused = reaping
         .cover(&fixture.runtime, &fixture.identity, &foreign)
@@ -5773,8 +5916,8 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
         "no reaper was forked for either scope: nothing arms until the scope is validated"
     );
 
-    let own = reaper_labels(&fixture.private_root, INCARNATION_1);
-    let covered = reaping
+    let own = reaper_spec(&fixture.private_root, INCARNATION_1);
+    let (covered, _, _) = reaping
         .cover(&fixture.runtime, &fixture.identity, &own)
         .expect("the runner's own container is covered");
     assert!(
@@ -5798,15 +5941,12 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
         incarnation: INCARNATION_2.to_owned(),
         ..fixture.identity.clone()
     };
-    runner
+    let armed_for_another = reaper_spec(&fixture.private_root, INCARNATION_2);
+    let (covered, _, _) = runner
         .reaping
-        .cover(
-            &fixture.runtime,
-            &foreign,
-            &reaper_labels(&fixture.private_root, INCARNATION_2),
-        )
-        .expect("a reaper armed for another incarnation, as a caller-built one would have been")
-        .settle(ProcessFate::NeverStarted);
+        .cover(&fixture.runtime, &foreign, &armed_for_another)
+        .expect("a reaper armed for another incarnation, as a caller-built one would have been");
+    covered.settle(ProcessFate::NeverStarted);
     assert!(armed_for(&fixture.private_root, INCARNATION_2));
 
     let request = gate_request(
