@@ -32,14 +32,16 @@ the PR11 orchestrator on master `92c4ca81`, with the brief `~/orch-pr11/briefs/p
 in a saved file the sentence names. The probe's index is `fud/probe/SUITES.txt` and the two witness tables. They were
 made on scratch `git archive` copies of `92c4ca81`, whose `src/` is `4a126215`'s; nothing of the probe is on the
 branch. Round 2 (§2) is `pr11_fud_design2`'s; its figures are under `~/orch-pr11/logs/pr11_fud_design2/`, cited as
-`fud2/…`.
+`fud2/…`. Round 3 (§3) is `pr11_fud_design3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_design3/`, cited as
+`fud3/…`.
 
 ## 0. Status
 
 | Phase | State |
 |---|---|
 | Design (§1) | **PROPOSED, pending the owner's decision B** and design review. Corrected B1′ (§1.3) and B-PRESERVE (§1.4) carry #329's design review round 5 findings against them: FUB-D5-INDEX, FUB-D5-RESTORE and FUB-D5-UNFREEZETEXT. They are designed against #329's round-6 helper contract (§1.2). Each was executed through the real legacy engine on scratch prototypes, with the mutations that turn them red (§1.9). Design review round 1 (`37e4d8c4`): three lenses, CHANGES_REQUIRED, no P1. Round 2 (§2) amends §1 where it is marked. |
-| Design, round 2 (§2) | **PROPOSED, pending design review and the owner's decision B.** It answers round 1's review: the recovery commands refuse replacement objects (FUD-D1-REPLACE), every resume names every kept pin of the run (FUD-D1-PINWARN), and the progress claim is qualified (FUD-D1-PROGRESS). It carries R-G: every legacy Git child runs with Git's automatic maintenance off, as #330's round 3 requires. #329's round 7 published while this round ran (`85f5b09b`), and §1.2 is conformed to its dated §5.5 (§2.6). D's add adopts round 7's veto, which closes FUD-D2-PRUNE for a prune before the add returns (§2.7). Two of the five exact unfreeze texts change (§2.9). Each change was executed through the real legacy engine on Git 2.43.0, 2.50.1 and 2.55.0, with a mutation that turns it red (§2.8). This head changes no code: it carries this record's §2 and the amended PROPOSED paragraph in `design/15`. |
+| Design, round 2 (§2) | **PROPOSED, superseded by §3 where §3 says** (the probe, R-D9's G6 row, T-L2, T-L3 and T-L8, the `src/workspace.rs` text's add sentence). It answers round 1's review: the recovery commands refuse replacement objects (FUD-D1-REPLACE), every resume names every kept pin of the run (FUD-D1-PINWARN), and the progress claim is qualified (FUD-D1-PROGRESS). It carries R-G: every legacy Git child runs with Git's automatic maintenance off, as #330's round 3 requires. #329's round 7 published while this round ran (`85f5b09b`), and §1.2 is conformed to its dated §5.5 (§2.6). D's add adopts round 7's veto, which closes FUD-D2-PRUNE for a prune before the add returns (§2.7). Two of the five exact unfreeze texts change (§2.9). Each change was executed through the real legacy engine on Git 2.43.0, 2.50.1 and 2.55.0, with a mutation that turns it red (§2.8). This head changes no code: it carries this record's §2 and the amended PROPOSED paragraph in `design/15`. |
+| Design, round 3 (§3) | **PROPOSED, pending design review and the owner's decision B.** It answers round 2's review (`b13b4857`: three lenses, CHANGES_REQUIRED, two P1s, both inherited). The probe and D's private-gitdir variant are withdrawn: after a failed add, an empty destination the access can remove is attempted again, and anything else refuses at once and keeps the output, never Git state (FUD-D2-PROBECONFIG, FUD-D2-HOOKS). R-D9's G6 classification is corrected: the mixed case applies and blocks G6, as part of #329's external-prune finding. A consequence-side closure for it is evaluated, executed on a prototype and given its exact text, and not adopted. T-L2's oracle is split (FUD-D2-TL2). R-G stays P1 for the owner. §1.2 is conformed to #329's round 8 (`f7a9256c`). One of the five exact unfreeze texts changes (§3.8). Each change was executed through the real legacy engine on Git 2.43.0, 2.50.1 and 2.55.0, with a mutation that turns it red. This head changes no code. |
 | Implementation | **Not started.** It waits on design review, the owner's decision B, and #329's merge. |
 
 ## 1. Design
@@ -1180,6 +1182,9 @@ environment, and counts `Command::new(` (`:3745-3760`). The suites below include
 
 ### 2.6 §1.2 conformed to #329's §5.5, as round 7 dates it
 
+> **Round 3:** §3.3 conforms §1.2 to #329's §5.5 as its round 8 dates it (`f7a9256c`). Change 6 below no longer holds:
+> the probe is withdrawn, and D's add veto is the removal proof alone.
+
 **Round 7 published before this round finished.** #329 pushed its design round 7 at `85f5b09b` at
 2026-10-02T11:44Z (`fud2/sibling-heads.log`). Its §5.5 carries a dated change, "Changed 2026-10-02, design round 7",
 with §6.4 as the current contract and §6.3 as the add veto (#329's record at `85f5b09b`, saved as
@@ -1216,6 +1221,10 @@ that started before the deadline fails after it. So a writer that finishes durin
 store, is not passed. D's claim (§2.4) is stated in the steps' terms.
 
 ### 2.7 D's add veto, adopted from round 7, and FUD-D2-PRUNE
+
+> **Round 3:** the probe and D's private-gitdir variant are withdrawn (FUD-D2-PROBECONFIG, FUD-D2-HOOKS). After a
+> failed add, an empty destination the access can remove is attempted again, and anything else answers `Undecidable`
+> (§3.2). R-D9's G6 classification is corrected (§3.4). What follows is round 2's text, kept as history.
 
 **What FUD-D2-PRUNE was** (found while this round re-checked §1.3 against #329's round-6 review). #329's FUB-D6-PRUNE
 (P1) is a concurrent `git worktree prune` deleting an add's registration after Git took the destination over. D's add
@@ -1337,6 +1346,8 @@ refusal that keeps.
 
 ### 2.8 Tests: what round 2 adds to the plan
 
+> **Round 3:** T-L2, T-L3 and T-L8, and the mutations `d3-m-r6veto` and `d3-m-noprobe`, are replaced (§3.6, §3.7).
+
 §1.9's planned tests, witnesses and mutations stand. Round 2 adds the following. Each was prototyped as the witness in
 brackets.
 
@@ -1431,6 +1442,9 @@ touched first, its own Compiling line):
 
 ### 2.9 The exact unfreeze texts, all five, restated in full
 
+> **Round 3:** §3.8 restates all five texts again. The `src/workspace.rs` text's add sentence changes; the other four
+> are these, word for word.
+
 These are amendments to `effects/allowlist.toml`. Each entry's `path`, `allows`, `packet` and `shrinks_when` stay as
 they are, and so does `FROZEN_LEGACY_ALLOWLIST` (`src/effects.rs:1306`). **Two texts change in round 2, marked
 CHANGED:** `src/workspace.rs` (R-G) and `src/engine/resume.rs` (FUD-D1-PINWARN and FUD-D1-REPLACE). The other three
@@ -1523,6 +1537,8 @@ is read, and no funnel is called.", is replaced by:
 
 ### 2.10 `design/15`: the PROPOSED paragraph, amended
 
+> **Round 3:** its add-veto sentence changes again (§3.9).
+
 The paragraph §1.7 added, "A legacy attempt the worktree registry refused", stays PROPOSED and in the same place.
 Round 2 changes four things in it, and adds no sentence elsewhere:
 - **Its source** now reads "§1, as §2 amends it".
@@ -1541,6 +1557,8 @@ Round 2 changes four things in it, and adds no sentence elsewhere:
 No sentence `src/export.rs` pins moves, and the hunk stays apart from #329's PROPOSED paragraph.
 
 ### 2.11 What legacy users see, and what remains, after round 2
+
+> **Round 3:** §3.10 amends the snapshot-add item, R-D3, R-D4 and R-D9, and withdraws R-D13 with the probe.
 
 **§1.6, amended:**
 - **The progress claim** is §2.4's.
@@ -1574,6 +1592,8 @@ No sentence `src/export.rs` pins moves, and the hunk stays apart from #329's PRO
 
 ### 2.12 The G6 classification, round 2
 
+> **Round 3:** §3.11 replaces this table. R-D9 applies to G6 in the mixed case and blocks it.
+
 | Case | What D closes, given #329's helper | Severity | Applies to G6 | Blocks G6 |
 |---|---|---|---|---|
 | (e1), (e1′), (e2), (e2′) | as §1.8: unchanged by round 2, which makes the recovery exact (§2.2) and the warning durable (§2.3) | P1 each | as §1.8: (e2) and (e2′) yes, (e1) and (e1′) no | as §1.8: (e2) and (e2′) yes until #329 and D are implemented and validated, (e2′) unless the owner rules otherwise |
@@ -1604,6 +1624,9 @@ Every lens of round 1 kept (e2) and (e2′) applicable and blocking until #329 a
 
 ### 2.14 The Windows and macOS time budget, round 2's additions
 
+> **Round 3:** round 3 adds no planned test, and T-L3 and T-L8 run no probe. These estimates stand as upper bounds
+> (§3.13).
+
 Round 2's planned tests, costed by round 1's method (`fud2/wintime/BUDGET-r2.txt`, from `budget-r2.py`):
 - each witness's Linux wall time is the median of `d2`'s three rounds;
 - that time is split into its fixed waits (500 ms per refused access under test) and its Git work;
@@ -1628,6 +1651,8 @@ Round 2's planned tests, costed by round 1's method (`fud2/wintime/BUDGET-r2.txt
 
 ### 2.15 The findings round 2 answers
 
+> **Round 3:** FUD-D2-PRUNE is closed by `Undecidable`, not the probe (§3.14).
+
 | Finding | Sev | Kind | D | Where | Evidence |
 |---|---|---|---|---|---|
 | FUD-D1-REPLACE | P2 | executed (design and regression lenses) | **Fixed (design), witnessed.** Both recovery commands carry `--no-replace-objects -c core.useReplaceRefs=false` | §2.2 | `fud2/git-level/TABLE.txt` on three Gits; w10, w11, w12, w12g red on `r1` and `d2-m-plain`, green on `d2`, on three Gits |
@@ -1636,3 +1661,649 @@ Round 2's planned tests, costed by round 1's method (`fud2/wintime/BUDGET-r2.txt
 | R-G (`FUC-D2-RG`) | P1 (triage); P2 on this evidence | executed here | **Fixed (design), witnessed.** `git_command` refuses automatic maintenance, as #330's §3.4 requires. #330's premise of a legacy `git commit` is corrected | §2.5 | rg2 and l7 red on `base`, `r1` and `d2-m-maint`, green on `d2`, on three Gits; rg1 and rg3 green everywhere |
 | FUD-D2-PRUNE | P1 class | reasoned, found here; executed as its end state | **Fixed (design), witnessed, for a prune before the add returns:** D's add adopts round 7's veto. A deletion after the add returned stays R-D9 | §2.6, §2.7 | v1, v2 and l8 red on the round-6 veto, green on `d3`, on three Gits |
 | §1.2 against #329's §5.5 | — | conformance | **Conformed** to round 7's dated §5.5 (`85f5b09b`) | §2.6 | the six dated changes, each adopted |
+
+## 3. Round 3 design
+
+> **PROPOSED — pending design review and the owner's decision B** (`~/orch-pr11/ESCALATION.md` item 7). Round 3
+> answers design review round 2 on `b13b4857`. §1 and §2 stay the design except where §3 replaces them. Each place it
+> does is marked in §2, and §3.12 lists them. §3.8 restates all five exact unfreeze texts in full and marks every
+> change. **Every changed or new text is a PROPOSAL until it has been reviewed.** The owner decides B only on reviewed
+> exact text.
+
+**Who writes it.** Round 3 is `pr11_fud_design3`'s (`claude-opus-5-5`, `max`), a fresh session the PR11 orchestrator
+spawned with the brief `~/orch-pr11/briefs/pr11_fud_design3.md`. Its work list is the triage
+`~/orch-pr11/reviews/review-331-d2-triage.md`, items 1 to 5. Its figures are under `~/orch-pr11/logs/pr11_fud_design3/`,
+cited as `fud3/…`. Code is cited at master `5c222ff2`, as in round 2; the branch is not rebased.
+
+### 3.1 What round 2's review found, and what round 3 changes
+
+**The review.** Three `gpt-6-astra` lenses at `max` reviewed `b13b4857`: design (as a conformance reading),
+concurrency and regression. Each returned **CHANGES_REQUIRED**, with **two P1s**, both inherited rather than D's own.
+- The texts are `~/orch-pr11/reviews/review-331-d2-{design,concurrency,regression}-b13b4857.review.md`. Their hashes,
+  the lens prompts' and the witnesses' are in `SHA256SUMS-331-d2`; all 63 check (`sha256sum -c`).
+- The reviewers' witnesses are in `~/orch-pr11/reviews/331-d2-witnesses/`.
+- **What all three accepted, and round 3 keeps as it is:**
+  - REPLACE, PINWARN and PROGRESS (§2.2 to §2.4), the regression lens re-running w10 to w12g;
+  - §2.6's conformance to #329's dated round-7 contract;
+  - the `Undecidable` default for an absent or unremovable destination, "sound for legacy preservation, though not yet
+    this head's rule";
+  - §2.9's five texts as covering the files;
+  - R-G's census and its correction of #330's premises, with the P1 kept pending the owner.
+
+**The work list** (the triage's items 1 to 5).
+
+| Item | Severity | What round 3 does | Where | Evidence |
+|---|---|---|---|---|
+| FUD-D2-PROBECONFIG | P1 (all three lenses, executed) | The probe and D's private-gitdir variant are withdrawn. A destination gone, or empty and not removable, after a failed add answers `Undecidable`. | §3.2 | v1, v1c, v1n, v2, v3 and l8 through the real legacy engine on three Gits |
+| FUD-D2-HOOKS | P2 (all three, executed) | Closed by the same withdrawal: the veto starts no Git child. | §3.2 | the trace2 census in v1: one `read-tree` per run on round 2's design, none on round 3's |
+| FUD-D2-RD9 | P1 (all three, executed) | The G6 classification is corrected: the mixed case applies and blocks G6, under #329's external-prune finding. The consequence-side closure is evaluated, executed on a prototype, and given its exact text. It is not adopted. | §3.4 | p1, p1r, p2 and p4 red on round 3, green on the candidate; the controls p3 and p5 green on both |
+| FUD-D2-TL2 | P3 (concurrency, executed) | T-L2's oracle is split from the final-attempt rule. | §3.6 | the static tear at Git's speed and with every add 0.6 s slow, on three Gits |
+| R-G | P1, pending the owner | Kept at P1. D's P2 argument is recorded as the owner's reclassification question, not resolved. | §3.5 | rg1 to rg3 and l7 re-run on round 3 |
+| #329's contract | — | #329's round 8 published at `f7a9256c` while this round ran. §1.2 is conformed to its dated §5.5. | §3.3 | — |
+
+**What changes in the design's text:**
+- the `src/workspace.rs` unfreeze text's add sentence (§3.8); the other four texts are unchanged;
+- §2.7's veto (§3.2), and §2.6's conformance (§3.3);
+- R-D9's G6 row and residual (§3.4, §3.10, §3.11);
+- T-L2, T-L3 and T-L8, and the planned mutations (§3.6, §3.7);
+- the PROPOSED paragraph in `design/15` (§3.9).
+
+**The probe.** Every witness below ran through the real legacy engine, or the legacy module, on scratch `git archive`
+copies of `5c222ff2`. Nothing of it is on the branch (`fud3/probe/setup.sh`).
+- **`base3`:** master, with the witnesses.
+- **`d3w`:** round 2's conformed prototype `d3` (§2.7: the probe in D's private-gitdir form), with round 3's witnesses.
+- **`rd3`:** `d3` with the probe withdrawn (`fud3/probe/patch-rd3.py`): round 3's design.
+- **`rd3-m-return`:** `rd3` with a destination gone, or empty and not removable, answering `Return` (#329's option (i)).
+- **`rd3cp`:** `rd3` with the candidate consequence-side closure of §3.4, in the form §3.4 gives
+  (`patch-rd3.py --closure cside-private`). **It is a prototype for the evaluation, not the design.**
+- **`rd3c`:** the candidate's first form (`--closure cside`), which adds a crate-visible method and so fails the effects
+  classification census (§3.4). Kept as evidence.
+- **`rd3-nowit`, `rd3cp-nowit`, `rd3c-nowit`:** the same without witnesses, for clippy and the whole suite.
+- **The git wrapper** (`fud3/probe/wrap/git`), first on `PATH` where a witness needs an end state Git leaves only under a
+  race or a fault, then the real Git:
+  - `prune`: the first add runs and succeeds, then its registration and destination are removed and it exits 128 (a
+    prune after the takeover, with Git's junk removal done; round 2's v1);
+  - `always`: while a control file exists, every add does the same (a genuine failure after the takeover that recurs);
+  - `nonempty`: the first add leaves a file in its destination and exits 128 (round 2's v2);
+  - `postreturn`: the first add succeeds and is left alone; the snapshot's verification then finds its registration
+    deleted (R-D9);
+  - `slow`: every add sleeps 0.6 s first (FUD-D2-TL2).
+- **How each ran:** each test alone, `--exact`, one thread, from its own tree, three rounds, at Git's defaults
+  (`GIT_CONFIG_NOSYSTEM=1`, an empty global file), on Git 2.43.0, 2.50.1 and 2.55.0 unless a row says otherwise. Every
+  binary has its own Compiling line (`fud3/probe/build-summary.txt`; final hashes in `BINARIES.txt`).
+- **The tables:** `fud3/probe/witness-runs/TABLE.txt` (passes per cell), with `VERDICTS.txt`, `RESULTS.txt`, one log per
+  run, and the extracted `FIGURES.txt`. Each witness asserts round 3's requirement, and each p-series witness the
+  candidate closure's, so a red is a red.
+
+### 3.2 The probe withdrawn: the add's veto is the removal proof alone (FUD-D2-PROBECONFIG, FUD-D2-HOOKS)
+
+**What the lenses executed.**
+- **PROBECONFIG (P1).** Git's add copies the source worktree's `config.worktree`, and its sparse-checkout patterns, into
+  the new worktree. D's probe read only the common configuration. Two shapes made the probe fail where the real add
+  succeeds: a worktree-specific attributes file over a shared failing smudge filter, and `core.protectNTFS` true when
+  shared and false in the source worktree with `git~1/payload` in the tree. The probe answered `Return`, and the
+  coordinator discarded the paid output. R-D13 described only the safe direction of that disagreement.
+- **HOOKS (P2).** The probe ran through `git_output` without the add's private `core.hooksPath` and
+  `core.fsmonitor=false`, so a configured fsmonitor hook and `post-index-change` ran, outside the destination.
+  "`read-tree` runs no hook" (§2.7) was false.
+
+**The rule, as round 3 states it** (#329's round 8 dates the same for both adds, its record §7.2, §7.3 and §7.6).
+After a failed add, the veto reads the destination with `symlink_metadata`, and `read_dir` when it is a directory:
+
+| The destination after the failed attempt | The veto's answer | What the access does |
+|---|---|---|
+| an empty directory the access can remove | `Attempt` | removes it, makes the private directory again, and attempts the add again (the removal proof, kept from round 7) |
+| gone | `Undecidable` | refuses at once as `RegistryRefused`; B-PRESERVE pins the captured candidate |
+| an empty directory the access cannot remove | `Undecidable` | the same |
+| a non-empty directory, anything not a directory, or metadata it cannot read | `Undecidable` | the same |
+| a directory it removed and cannot make again | `Undecidable` | the same |
+
+- **No answer is `Return`.** So the add's own error never comes back as Git state, and the legacy coordinator never
+  discards because of it.
+- **The veto starts no Git child.** It reads no configuration, checks nothing out and runs no hook, so PROBECONFIG and
+  HOOKS have nothing left to act on. `src/workspace.rs` gains no `.env(` and no builder call site, as in round 2, and now
+  no call through `git_output` either.
+- **Why `Undecidable` and not `Return` for a destination that is gone.** Git takes the destination over only after its
+  registry phase, and its junk removal after any later failure removes it (§1.3; #329's §5.3). A destination gone
+  therefore means the failure came after the takeover, which is either the add's own (a checkout that cannot be made)
+  or a prune that deleted the add's registration (FUD-D2-PRUNE). Nothing D may read tells the two apart: round 7's
+  probe was the attempt to, and it is withdrawn. `Return` would discard the paid output in the second case;
+  `Undecidable` keeps it in both.
+- **Why not `Attempt` (#329's (ii′)).** It would attempt a genuine failure's full checkout again until the deadline,
+  churning the shared store, and refuse anyway. #329's round 8 measured it (its record §7.3) and chose `Undecidable`;
+  D's addendum set the same. One helper keeps one meaning.
+
+**Executed through the real legacy engine** (`fud3/probe/witness-runs/TABLE.txt` and `FIGURES.txt`; nine runs per cell,
+three rounds on each of the three Gits).
+
+| Witness | `base3` (master) | `d3w` (round 2) | `rd3` (round 3) | `rd3-m-return` |
+|---|---|---|---|---|
+| v1: the registration pruned after the takeover (`prune`) | red: Git, the output discarded | red: the probe answers `Attempt`, and the run commits (3 adds) | **ok**: `RegistryRefused` after 1 add, in 168 to 188 ms; the candidate pinned and in the checkout | red: Git, discarded |
+| v1c: the same, under the design lens's worktree-specific attributes file over a required failing smudge filter | red: Git, discarded | **red: Git, discarded** (PROBECONFIG, reproduced) | **ok**: refused, kept | red |
+| v1n: the same, under `core.protectNTFS` true when shared and false in the main checkout's worktree configuration, with `git~1/payload` | red: Git, discarded | **red: Git, discarded** (PROBECONFIG, reproduced) | **ok**: refused, kept | red |
+| v2: a file in the destination after the failure (`nonempty`) | red | ok: refused at once, kept | **ok**: refused at once, kept | ok |
+| v3: a failure after the takeover that recurs on every attempt (`always`), then fixed | red: Git on the run and on the resume, no pin; then the resume commits | ok, but only at the deadline: 14 or 15 adds, each followed by a probe, on the run, and as many again on the resume | **ok**: refused after 1 add on the run and on the resume, two pins; the fixed resume commits and names both | red: as `base3` |
+| l8 (T-L8): the veto on five destinations, no Git | — | — | **ok**: `Attempt` for the empty one (empty again); `Undecidable` for gone, a file in it, a file in its place, and an empty one under a read-only parent | **red**: gone and unremovable answer `Return` |
+
+- **FUD-D2-HOOKS, executed as a census.** v1 ran with Git's trace2 stream on, one file per Git process. Every `d3w` run
+  started exactly one `read-tree` process (the probe), and no `rd3`, `rd3-m-return` or `base3` run started one
+  (`VERDICTS.txt`, `read_tree_processes`; the first round's traces are kept as `fud3/probe/traces/*.tar.gz`).
+- **#329 round 5's legacy workspace witnesses on `rd3`** (`FIGURES.txt`, Git 2.43.0, three rounds):
+  - the transient tear: `Ok` after 2 adds, the destination empty after the first failure, so the removal proof, in 9 to
+    10 ms;
+  - the static tear: `RegistryRefused` after 16 add attempts, the last the final attempt, at 1,006 to 1,008 ms, the
+    intent left for the reclaim;
+  - **the checkout that cannot be made** (a 300-byte name): **`RegistryRefused` after 1 add, in 8 to 11 ms**, where
+    round 2 returned Git after 1 add and 1 probe;
+  - the removal: 2 attempts, the snapshot unregistered and its directory gone.
+
+**The genuine post-takeover failure's cost (triage item 1).**
+- **Which failures they are.** #329's §7.3 lists them for the add both engines share: a tree the destination cannot
+  hold (G1), a filter that fails (G2), a destination or filesystem that refuses a write (G3), a missing object (G4).
+  For the legacy snapshot, G1 needs the snapshot's longer path to cross a platform limit the run's own checkout did
+  not, since that checkout already holds the candidate's paths: Windows without `core.longpaths`, macOS's 1,024 bytes,
+  Linux's `PATH_MAX`. G2 needs a filter the legacy preflight's `check-attr` did not see, since it refuses filtered paths
+  first (`tree_input_problem`, `src/workspace.rs:813-815`). G3 and G4 are the run store's filesystem and a partial
+  clone with lazy fetching off.
+- **What each costs a legacy user.**
+  - **At master:** the add's Git error ends the attempt, the coordinator discards the worker's output
+    (`src/engine/coordinator.rs:544-548`), and the command fails. Every resume pays for another worker attempt and
+    fails the same way.
+  - **Under round 3:** the attempt ends at once as a resumable registry refusal that names Git's message, and the
+    captured candidate is kept in the checkout and pinned. Every resume pays for another worker attempt, refuses again,
+    and keeps one more pin. Once the cause is fixed (the environment, the path, the filter), the resume completes and
+    names every pin.
+  - **So the liveness is master's, and the output survives where master destroyed it.** v3 executes exactly this. On
+    `rd3` and on `base3` alike the three invocations ran the worker three times (`worker_runs=3`, nine runs each). `rd3`
+    kept two pins and named both after the fix; `base3` kept nothing.
+  - **The costs that remain:** pins accumulate, one per refused attempt (R-D7); the refusal costs the pending
+    snapshot's cleanup, which finds the destination gone and returns at once; and the operator, not the ladder, decides
+    what to do with a candidate the snapshot cannot hold.
+- **Where it differs from the topology add.** #329 files the same refusal as a P2 liveness cost for a verification
+  (`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`), because master's topology answer, a deferral and then
+  a question, made progress. The legacy answer at master is a discard and a failed command, so for legacy the refusal
+  loses nothing master kept. D files nothing for it.
+
+**R-D3, R-D4 and R-D13, after the withdrawal.**
+- **R-D3** (D's own Git child killed by a signal mid-add): a destination left non-empty, or gone, is `Undecidable`,
+  refused at once and kept. One left empty and removable is attempted again; it then meets whatever the killed add left,
+  and either completes or is refused at the deadline, kept. Never Git state.
+- **R-D4** (Windows, a delete-pending destination): an empty directory the access cannot remove is `Undecidable`, a
+  refusal that keeps.
+- **R-D13** (the probe's fidelity) is withdrawn with the probe.
+
+**The bound.** #329's §7.6 states the veto's term as a few metadata calls, one `rmdir` and one `mkdir`, for both adds. A
+refused legacy add returns by the deadline plus its last attempt's runtime plus that term. A refusal at once (v1) took
+168 to 188 ms for the whole legacy run under test.
+
+### 3.3 §1.2 conformed to #329's §5.5, as round 8 dates it
+
+**Round 8 published before this round finished.** #329 pushed its design round 8 at `f7a9256c` at 2026-10-02T13:36Z
+(its record and new findings saved as `fud3/sibling/`). Its §5.5 carries "Changed 2026-10-02, design round 8", with §7.6
+as the current text and §6.4 standing where §7.6 does not change it. The triage's instruction applies: §1.2 is conformed
+to it. The orchestrator still compares the two before D is implemented.
+
+| # | Round 8's dated change (§5.5; §7.6 governs) | D, conformed |
+|---|---|---|
+| 1 | the registry-free checkout probe is withdrawn; no add veto runs a Git command; D adopts no probe, "including a private gitdir/commondir variant" | §3.2: D's veto starts no Git child; D's private-gitdir variant is withdrawn |
+| 2 | the add veto is the removal proof alone: an empty destination the access can remove is `Attempt`; one absent, or empty and not removable, is `Undecidable`, never `Return`; anything else `Undecidable` | §3.2's table, word for word in substance; executed as l8 |
+| 3 | the bound's veto term is a few metadata calls, one `rmdir` and one `mkdir`, for both adds | §3.2, "The bound" |
+| 4 | the external-prune class is filed as `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` (P1); D's R-D9 refers to it and files no duplicate | §3.4; R-D9 refers to it |
+
+**The clauses D depends on, exactly.** All are round 8's "Unchanged from round 7" list, which §2.6 adopted:
+- the helper's signature: `tolerant_registry_access(common_git_dir, hold, again, attempt)`, with `again` returning
+  `Again { Attempt, Return, Undecidable { why } }`, its name, its module and its `effect_free` row;
+- `Undecidable` refusing at once as `RegistryRefused`, naming `why` (§6.4 step 5);
+- the final attempt after a sleep the deadline cut short (§6.4 step 7), and the end-to-end bound;
+- `CONTENDED_ATTEMPTS` and `contended_attempts(common_git_dir)`, for tests only, keyed as passed;
+- `RegistryHold`, the canonical `common_git_dir`, and nothing sampled;
+- the deadline: 10 s in production and 500 ms under `cfg(test)`;
+- `RegistryRefused` as the one refusal variant, the one B-PRESERVE keys on.
+
+**What D no longer uses:** `Again::Return`, from its add. The switch and the removal pass `Attempt` as before.
+
+**§2.6's note on round 7's claim stands.** §6.4 says a store a writer leaves whole by the deadline is passed, and its
+step 7 refuses when the last attempt that read the store fails after it. D's §2.4 states the steps' terms.
+
+### 3.4 R-D9, the post-return deletion: its legacy consequence, its G6 classification corrected, and a consequence-side closure evaluated
+
+**What the lenses executed (FUD-D2-RD9, P1).** A prune decides on the snapshot's entry before `locked` exists and is
+held. The add completes and the access returns `Ok`. The prune then deletes the entry, and the next Git command in the
+snapshot fails, "not a git repository". On all three Gits, with real barriers, this happened, including under
+`--expire 3.months.ago`. Through the engine, the snapshot's verification failed as Git state, and the coordinator
+discarded. Round 2's §2.7 said this residual does not block G6. The lenses found that true only for a legacy-only
+repository.
+
+**Executed through the real legacy engine on round 3** (`rd3`, nine runs per cell; `FIGURES.txt`):
+
+| Witness | `base3` | `rd3` (round 3) |
+|---|---|---|
+| p1: the gate snapshot's registration deleted after its add returned, before its verification (`postreturn`) | Git ("verifying gate worktree failed: … not a git repository"), the output discarded | the same |
+| p1r: the same at the review snapshot (no gates) | the same | the same |
+| p2: the gate snapshot's registration deleted while its gate runs; the gate's `git status` then exits 128 | the gate failure is judged: the chain spent, the task parked with a question, the output discarded | the same |
+| p4: the review snapshot's registration deleted while the review runs; the review fails | the review failure is judged: parked, discarded | the same |
+
+- **p2 and p4 are later gates and reviewers.** The deletion lands after snapshot construction returned, so neither
+  closure (a) nor (b) of §2.7 reaches them, as the concurrency lens said.
+- **A valid candidate is not only discarded there: its attempt is settled as a failure,** and the ladder escalates,
+  retries or asks a human about work nothing judged.
+
+**The G6 classification, corrected.**
+- **Legacy-only** (no topology run shares the repository): P1 by consequence, the discard of paid output. Outside G6's
+  topology claims, as (e1) and (e1′) are.
+- **Mixed** (a topology run shares the repository, and the pruner is the user, an IDE, a host agent, or Git's
+  maintenance in any checkout): **it applies to G6 through Q6 and R17, the shared registry, and it blocks G6.** It is
+  part of #329's `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, whose face 2 names this legacy
+  consequence and whose G6 section governs: it blocks G6 until a closure is implemented and validated, or the owner
+  rules explicitly on its scope.
+- **What does not downgrade it:** the host-agent finding's P2 label and its PR12 guard (a host agent in one checkout can
+  overlap another checkout's add at width one), and filing. Filing is no waiver.
+- **D files no separate finding** (the triage). Round 2's ledger row `FUD-D2-PRUNE-AFTER-RETURN` becomes the review's
+  `FUD-D2-RD9`, which refers to #329's finding.
+
+**Every discard of paid output a snapshot failure can reach** (the legacy engine at `5c222ff2`; the snapshot calls are
+`src/engine/attempt.rs:154` and `:178`, the only production callers of the legacy snapshot):
+
+| Discard | What reaches it from a snapshot |
+|---|---|
+| `src/engine/coordinator.rs:547` (`run_attempt` failed) | the snapshot's construction failing: its add (`src/workspace.rs:836`, now §3.2's veto) or its verification's `git status` (`:837`, `:908-944`); `gates::run_all` failing to run a gate (`src/engine/attempt.rs:159`); a review pass failing to run (`:185-205`) |
+| `src/engine/coordinator.rs:774` (a judged failure, unless the ladder retries in the same session) | a gate's failure in the gate snapshot (`src/engine/attempt.rs:159-167`); a review's failure, or its reviewer unavailable, in the review snapshot (`:209`) |
+| `src/engine/coordinator.rs:460` (the budget stops the run) | the same judged failure, after an in-session retry (`RetrySameRung { resume: true }`) skipped `:774` |
+| `src/engine/coordinator.rs:708`, `:719` (the settlement or its question cannot be written) | the same judged failure, with a second fault in the event log or the question file |
+| `src/engine/resume.rs:569` (the resume's discard) | none of its own: it follows a refusal, which B-PRESERVE has pinned, or a crash (R-D2) |
+
+The other discards (`:660`, `:677`, `:739`) follow a successful attempt, in which no snapshot failed.
+
+**Why the re-check cannot sit at those discards.** By the time `run_attempt` returns, both snapshots have been dropped,
+and their drop's cleanup (`src/workspace.rs:1673-1685`, `:1419-1433`, `:1549-1600`) has removed their registrations: a
+whole registration and a deleted one look the same at the coordinator. So the re-check has to run where the failure is
+seen, while its snapshot still exists. That is in `src/workspace.rs` for the verification, and in
+`src/engine/attempt.rs` for gates and reviews. Converting the failure there reaches none of the discards above.
+
+**The consequence-side closure (C-SIDE), stated exactly.** It is the legacy form of the first candidate in #329's
+finding, "re-check the checkout's registration before any durable negative outcome".
+- **The check.** A snapshot's registration is whole when the directory its `.git` file names still holds `gitdir`,
+  `commondir`, `HEAD` and `index`. It reads files and starts no Git child. It resolves a relative `gitdir:` line against
+  the snapshot (`worktree.useRelativePaths`, from Git 2.48; `fud3/git-level/relative-paths-citation.txt`), and compares
+  no path spelling, so Windows' `C:/…` form needs nothing.
+- **Where, and what it does.**
+  - **The verification** (`src/workspace.rs:837`): when it fails after the add succeeded, and the registration is not
+    whole, the snapshot call returns `RegistryRefused` instead of the Git error. `run_attempt`'s existing
+    `note_refused` records the candidate, keyed on the variant.
+  - **A gate** (`src/engine/attempt.rs:159`): when `gates::run_all` reports a failure or an error, and the gate
+    snapshot's registration is not whole, `run_attempt` records the candidate and returns `RegistryRefused`.
+  - **A review pass** (`:185-209`): the same, when the pass errs or `review_failure` reports a failure, on the review
+    snapshot.
+  - **The coordinator is unchanged.** B-PRESERVE's arm pins the recorded candidate and refuses resumably (§1.4).
+- **One private reader in each module, and no new crate-visible function.** `src/workspace.rs` reads the pending
+  snapshot's registration, and `src/engine/attempt.rs` reads the live snapshot's from its root, through
+  `Workspace::root`, which it already calls. The reader is about a dozen lines, written twice.
+  - **Why not one shared method.** The first form put it on `GateWorkspace` as a crate-visible method. Its whole suite
+    failed `effects::tests::every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified`: "src/workspace.rs
+    unclassified: ["registration_whole"]" (`fud3/probe/suite-rd3c-nowit/suite-1.log`).
+  - Classifying it would take an `effects/wrappers.toml` row, which is an instrument. The private form needs none.
+- **Why it is sound.** Nothing re-creates a deleted snapshot registration. The engine names each snapshot
+  `upstroke-gates-<pid>-<ulid>` and never adds one twice, and `git worktree repair` re-registers nothing for a deleted
+  entry (#329's face-2 runs, its finding's Evidence). So a registration missing at the check was deleted before it, and
+  preserving is the safe direction even when the failure was genuine and the deletion came after it. A registration
+  whole at the check was whole throughout the failed step, so that failure was the snapshot's own, and is judged as
+  before.
+- **What it leaves.**
+  - An entry a pruner, stopped or killed partway through deleting it, left with those four files; or one whose
+    deleted `index` a later Git command in the snapshot wrote again.
+  - A failure in a snapshot with a whole registration, which is judged as today, whatever caused it.
+  - A gate or review that passes in a snapshot whose registration is gone: nothing is discarded, and the candidate
+    commits.
+
+**Executed on the prototype `rd3cp`** (nine runs per cell; `TABLE.txt`; the first form `rd3c` gives the same cells):
+
+| Witness | `rd3` (round 3) | `rd3cp` (round 3 with C-SIDE) |
+|---|---|---|
+| p1: deletion before the gate snapshot's verification | red: Git, discarded | **ok**: `RegistryRefused`, the candidate pinned and in the checkout |
+| p1r: the same at the review snapshot | red | **ok** |
+| p2: deletion while a gate runs | red: judged, parked, discarded | **ok** |
+| p4: deletion while a review runs | red | **ok** |
+| p3 (control): a gate that runs Git in a whole snapshot and fails | ok: judged, parked, discarded, no pin | ok: the same |
+| p5 (control): a review that fails in a whole snapshot | ok: the same | ok: the same |
+| round 1's fifteen, round 2's w10 to w15, and l8 | ok | ok |
+
+- `rd3cp-nowit` also ran clippy and the whole suite (§3.7).
+- **`rd3` is C-SIDE's mutation:** the same tree without the check, red on p1, p1r, p2 and p4.
+
+**Weighed against (a) and (b)** (§2.7's two closures; each column as it would be adopted on round 3's veto):
+
+| Case | round 3 | (a) the verification inside the add's attempt | (b) keep on every snapshot failure after capture | C-SIDE |
+|---|---|---|---|---|
+| deletion during the add (face 1) | refused, kept | the same | the same | the same |
+| deletion after the add returned, before the verification (p1, p1r) | Git, discarded | refused, kept: a failed attempt leaves a populated destination, `Undecidable` | refused, kept | refused, kept |
+| deletion while a gate or a review runs (p2, p4) | judged, discarded | judged, discarded | judged, discarded: a gate's or review's failure is not an error | refused, kept |
+| a genuine verification failure, registration whole | Git, discarded | **kept**: a change for genuine failures | **kept** | Git, discarded, as at master |
+| a genuine snapshot error before the add, such as the store (w4b) | Git, discarded | the same | **kept, on every resume** | the same as round 3 |
+| a genuine gate or review failure, registration whole (p3, p5) | judged, discarded | the same | the same | the same |
+| the texts it widens | — | `src/workspace.rs` | `src/engine/attempt.rs`, `src/engine/coordinator.rs`; the expectations of `m-keepall` and T-P7b reverse | `src/workspace.rs`, `src/engine/attempt.rs`, `src/engine/tests.rs`'s wording; no instrument |
+| the registry lock | — | held shared through the verification's `git status` | — | — |
+
+**Does it cover later gates and reviewers?** C-SIDE does, and neither (a) nor (b) does.
+- It covers every failure a gate or a review pass reports while its snapshot exists. The snapshot is alive until the
+  gates, or every review pass, have run.
+- It does not need to cover what passes: nothing is discarded then.
+- A deletion that lands after the check cannot have caused the failure the check followed: the registration was whole
+  until the check.
+- It does not establish that a registration survives after construction. It establishes something narrower and
+  sufficient for the discard: no failure is judged once its snapshot's registration is gone.
+
+**The exact unfreeze text it would need.** It is not part of the five texts of §3.8. If the owner takes C-SIDE, three of
+them change as follows; `src/engine/coordinator.rs` and `src/engine/resume.rs` do not, because the coordinator's arm
+keys on a recorded candidate, whatever recorded it.
+- **`src/workspace.rs`:** after "The other two are attempted again whatever failed.", one sentence is added, and
+  nothing else moves:
+
+  > When a snapshot's verification fails after its add succeeded, the module reads whether the snapshot's own worktree
+  > registration is whole — the directory its `.git` file names still holds `gitdir`, `commondir`, `HEAD` and `index`
+  > — through one private function that reads files and starts no Git child; a verification that fails while the
+  > registration is not whole refuses as a registry refusal, and one that fails while it is whole is returned as
+  > before.
+- **`src/engine/attempt.rs`:** the text of §3.8 is replaced by:
+
+  > AMENDED ONCE, on the owner's decision to close the static and deadline residue of
+  > `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and the legacy consequence of
+  > `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`: `run_attempt` takes one more argument, a slot in
+  > which it records the candidate it captured — the branch ref, parent and tree `capture_candidate` returned — when
+  > the gate or the review snapshot's worktree-registry access refuses (`UpstrokeError::RegistryRefused`), and when a
+  > gate fails or cannot run in the gate snapshot, or a review pass fails or cannot run in the review snapshot, while
+  > that snapshot's own worktree registration is no longer whole; in that case the attempt returns a registry refusal
+  > instead, and the gate's or the review's result is not judged. One private function reads whether a snapshot's
+  > registration is whole — the directory its `.git` file names still holds `gitdir`, `commondir`, `HEAD` and `index`
+  > — from the snapshot's root, reading files and starting no process; two more record the candidate, one comparing
+  > the error's variant and one building the refusal, each copying the three strings; and the type that holds them is
+  > new. Every other error `run_attempt` returns, every judged result, and every other step, are as before. It calls
+  > nothing of the workspace, the runner or the event log that it did not already call, and nothing else in the module
+  > moves.
+- **`src/engine/tests.rs`:** "They drive the same entry points through a worktree registry another process has torn."
+  becomes "They drive the same entry points through a worktree registry another process has torn, and through a
+  snapshot whose registration another process has deleted."
+
+**Its tests, if adopted:** p1 and p1r need a git wrapper first on `PATH`, process-wide, so they stay design evidence.
+The planned tests would be T-C1 (a gate that deletes its snapshot's registration and fails: refused and kept, as p2),
+T-C2 (the same for a review, as p4), T-C3 and T-C4 (p3 and p5, the controls), and T-C5 in `src/workspace.rs`'s inline
+module (the verification over a registration deleted between the add and it, through the module's existing
+`gate_snapshot_for_candidate_in_with` and its `add_worktree` closure). Its mutation is `rd3`: the check removed. Its
+proof includes the effects censuses: the private form passes every one (§3.7).
+
+**Consistent with #329, in spirit and in its differences.**
+- **The same rule.** #329's candidate 1 re-checks a topology checkout's registration before a durable negative outcome
+  and refuses resumably when it is gone, on the same monotonicity argument.
+- **What D's check reads differently.** #329's reads the entry's `gitdir` naming the checkout back. D's reads four
+  files' presence, for two reasons: it compares no spelling (Windows' `C:/…`, relative paths), and it also catches an
+  entry partly deleted.
+- **#329's candidates 2 and 3 have no legacy counterpart.** The legacy snapshot is ephemeral and never recreated, and
+  its cleanup counts an unregistered destination as reclaimed (`src/workspace.rs:1572-1580`), with or without the
+  store.
+- **Candidates 4 and 5** (environmental requirements, the owner's scope ruling) apply to the legacy face unchanged.
+
+**Why it is not adopted.** The brief allows no new machinery in this round, and C-SIDE is new machinery: a reader in two
+modules, three call sites, and three widened texts. It is the smallest closure of R-D9's legacy consequence that covers the
+verification, the gates and the reviews, and changes nothing for a genuine failure. It goes to the owner's consolidated
+question with #329's finding, as a candidate with its exact text.
+
+### 3.5 R-G: the P1 kept, and D's P2 argument as the owner's question
+
+- **The grade stays P1.** All three lenses retained it: the constructed partial-clone state demonstrates a concrete
+  mechanism, and the negative controls do not establish that its preconditions are impossible. The regression lens
+  re-ran rg2 through the real engine and confirmed it.
+- **D's argument for P2, recorded for the owner, not resolved.**
+  - The legacy engine runs no production `git commit`; `Workspace::commit` has only test callers (§2.5).
+  - Its one path to automatic maintenance is a promisor lazy fetch. A full clone (rg1) and an ordinary blob-less clone
+    (rg3) never fetched and never started maintenance in 72 of 72 runs, and the failing state (rg2) was constructed.
+  - MAINTAINING reclassifies down "a P1 whose failure needs speculative preconditions".
+- **The question for the owner:** is R-G's legacy face a P1, or a P2 on prevalence? D closes it either way, by the
+  builder's four settings (§2.5).
+- **Re-run on round 3** (`rd3`, three rounds, three Gits): rg1, rg2, rg3 and l7 are green, 9 of 9 each.
+
+### 3.6 FUD-D2-TL2: T-L2's oracle, split
+
+**The finding (P3, executed by the concurrency lens).** T-L2's "16 attempts under the 500 ms test deadline" is a
+measurement of fast attempts. An attempt slower than the deadline is the only one: the access refuses after it,
+correctly.
+
+**Executed on `rd3`** (#329 round 5's static-tear witness; three rounds on each of three Gits; `FIGURES.txt`):
+- at Git's speed: `RegistryRefused` after 16 add attempts, the 16th the final attempt, at 1,006 to 1,008 ms;
+- with every add 0.6 s slow (`slow`): `RegistryRefused` after **1** add attempt, at 1,118 to 1,119 ms;
+- both are the same correct outcome, and both leave the intent for the reclaim.
+
+**The split.**
+- **T-L2 asserts only what is portable:** `RegistryRefused`, never Git; at least one add attempt; the error's text names
+  the store and the deadline; the snapshot's intent is left for the reclaim. No attempt count.
+- **The final-attempt rule is #329's to test, apart from real Git:** its T4 asserts that a failure repaired after the
+  last regular attempt is passed by the final attempt at the deadline, on the helper with a synthetic attempt, and its
+  mutation m8 (no final attempt) turns it red (#329's record §6.7, standing under §7.8).
+- **T-L1 stays handshake-driven** (`CONTENDED_ATTEMPTS`): a tear finished after the first failed attempt is passed. That
+  is the legacy add's own progress claim, and it uses no time but a watchdog.
+
+### 3.7 Tests: what round 3 changes in the plan
+
+**Revised:**
+- **T-L2:** as §3.6.
+- **T-L3, a checkout that cannot be made** (a 300-byte name): `RegistryRefused` after exactly 1 attempt, and the
+  destination gone. Round 2 had Git state after 1 attempt and 1 probe. Executed: #329 round 5's witness on `rd3`, above.
+- **T-L8, the veto on five destinations, called directly, no Git:** an empty one is `Attempt` and is empty again; one
+  gone is `Undecidable` and nothing is made there; one holding a file, a file in its place, and an empty one the access
+  cannot remove (Unix: its parent read-only) are `Undecidable`. Executed: l8.
+
+**Unchanged:** T-L1, T-L4, T-L5, T-L7, and T-P1 to T-P15. Round 3 adds no test. v1, v1c, v1n, v2 and v3 need a git
+wrapper first on `PATH`, process-wide, so they stay design evidence: their decisions are T-L8's, T-L3 takes the real add
+through them, and T-P1 takes a refusal through the coordinator.
+
+**The planned mutations:**
+- **`m-return`** (executed as `rd3-m-return`): a destination gone, or empty and not removable, answers `Return`. Red: v1,
+  v1c, v1n, v3 and l8, on the three Gits. It replaces round 2's `d3-m-r6veto` and `d3-m-noprobe`, which tested the
+  withdrawn probe.
+- **`again` always `Attempt` on the add:** T-L3 red: the checkout is attempted again until the deadline, then refused.
+- §1.9's and §2.8's other mutations stand.
+
+**Round 1's and round 2's witnesses on round 3** (`rd3`; and on `rd3cp` and `rd3c`, to show the candidate moves none of
+them):
+- round 1's fifteen (w1 to w9, w3b, w4b, and #329 round 5's four workspace witnesses), on Git 2.43.0, three rounds: all
+  green on all three;
+- round 2's w10 to w15, on Git 2.43.0, three rounds: all green on all three;
+- rg1 to rg3 and l7 on the three Gits, on `rd3`: green, 9 of 9 each.
+
+**The suites** (`fud3/probe/suite-rd3-nowit/`, `suite-rd3cp-nowit/`, `suite-rd3c-nowit/`; every source touched first,
+its own Compiling line):
+
+| Tree | Run | Result |
+|---|---|---|
+| `rd3-nowit` (round 3) | clippy `-D warnings`, all targets | rc 0 |
+| `rd3-nowit` | suite 1 | 3,026 passed, 2 failed, 126 ignored, in 118.66 s |
+| `rd3-nowit` | suite 2 | 3,026 passed, 2 failed, 126 ignored, in 124.86 s |
+| `rd3cp-nowit` (C-SIDE, the form §3.4 gives) | clippy | rc 0 |
+| `rd3cp-nowit` | suite 1 | 3,026 passed, 2 failed, 126 ignored, in 109.22 s |
+| `rd3c-nowit` (C-SIDE's first form) | clippy | rc 0 |
+| `rd3c-nowit` | suite 1 | 3,025 passed, **3** failed: the two below, and the classification census naming `registration_whole` |
+
+- **The two failures in every run** are the non-frozen manager tests every #329 round since 4 has moved, #329's to move:
+  `a_removal_records_the_one_attempt_the_unix_arm_makes` and
+  `an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup`.
+- **Every `engine::tests` and `workspace::tests` test passed in every run** (188 and 47 `ok` lines), and so did every
+  effects census but the first form's classification census (`fud3/probe/SUITES.txt`).
+- **No load flake** appeared in these five suites, where round 2's conformed prototype met two filed ones.
+
+### 3.8 The exact unfreeze texts, all five, restated in full
+
+These are amendments to `effects/allowlist.toml`. Each entry's `path`, `allows`, `packet` and `shrinks_when` stay as
+they are, and so does `FROZEN_LEGACY_ALLOWLIST` (`src/effects.rs:1306`). **One text changes in round 3, marked CHANGED:**
+`src/workspace.rs`, its add sentence and the private functions it names. The other four are the texts of §2.9, word for
+word. All five stay PROPOSED until reviewed. §3.4 gives the texts C-SIDE would need; they are not these.
+
+**`src/workspace.rs` (`:898-924`) — CHANGED in round 3.** "AMENDED ONCE" becomes "AMENDED TWICE". The last sentence,
+"The schema-4 equivalents live behind funnels in `crate::workspace_manager` and nothing here calls them: the constant
+is read, and no funnel is called.", is replaced by:
+
+> The second amendment, to close `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` on the
+> owner's decision to unfreeze the module for this one change, is two things and no more. First, the three Git
+> children that enumerate the repository's worktree registry — `switch_branch`'s `git switch`, `add_gate_worktree`'s
+> `git worktree add`, and `cleanup_gate_workspace`'s `git worktree remove` together with the `git worktree list` that
+> decides whether it took the registration — each run as the attempt of
+> `crate::workspace_manager::tolerant_registry_access`, which attempts one again until its deadline and then refuses
+> as a registry refusal (`UpstrokeError::RegistryRefused`), never as Git state. The add holds the registry lock
+> shared. After a failed add, an empty destination it can remove was never taken over by Git, so it is removed, made
+> again and attempted again; anything else at the destination — gone, an empty directory it cannot remove, a
+> directory that is not empty, anything that is not a directory, or metadata it cannot read — refuses at once as a
+> registry refusal, so the add's own failure is never returned as Git state. The other two are attempted again
+> whatever failed. One private helper resolves the canonical common git dir as `recorded_objects_scope` does, through
+> `git_command`, and private functions make the destination again and decide the add's veto, which reads only the
+> destination and starts no Git child. Second, `git_command`, the one builder every Git child of the module starts
+> from, also passes `-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c maintenance.autoDetach=false`
+> from one new constant, so no Git child of the module, and no Git process one of them starts, runs Git's automatic
+> maintenance, and none of them prunes a registration another checkout is writing. The test module gains the
+> regression tests for both. Every other behaviour of the module stays frozen. The schema-4 equivalents live behind
+> funnels in `crate::workspace_manager`, and nothing here calls a funnel: the constant is read, and the tolerant access
+> is called, which takes no site.
+
+**What changed from §2.9's text, exactly:**
+- **Removed:** "After a failed add, an empty destination it can remove is removed, made again and attempted again; an
+  absent destination, or an empty one it cannot remove, is decided by a checkout of the add's commit into it that reads
+  no registration — `read-tree` through the module's existing builder, in a Git directory of the destination's own
+  that names the repository's common git dir — and the add's failure is returned as Git state only when that checkout
+  cannot be made either; anything else at the destination refuses at once as a registry refusal."
+- **Added in its place:** "After a failed add, an empty destination it can remove was never taken over by Git, so it is
+  removed, made again and attempted again; anything else at the destination — gone, an empty directory it cannot
+  remove, a directory that is not empty, anything that is not a directory, or metadata it cannot read — refuses at once
+  as a registry refusal, so the add's own failure is never returned as Git state."
+- **Removed:** "and private functions make the destination again and probe it." **Added:** "and private functions make
+  the destination again and decide the add's veto, which reads only the destination and starts no Git child."
+- Nothing else in the text moves.
+
+**`src/engine/attempt.rs` (`:869-877`) — unchanged from round 1.** One paragraph is appended to `legacy_effect`:
+
+> AMENDED ONCE, on the owner's decision to close the static and deadline residue of
+> `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: `run_attempt` takes one more argument, a
+> slot in which it records the candidate it captured — the branch ref, parent and tree `capture_candidate` returned —
+> when the gate or the review snapshot's worktree-registry access refuses (`UpstrokeError::RegistryRefused`). The two
+> snapshot calls record it through one private function that compares the error's variant and copies the three
+> strings, and the type that holds them is new; the error `run_attempt` returns, and every other step, are as before.
+> It calls nothing of the workspace, the runner or the event log that it did not already call, and nothing else in the
+> module moves.
+
+**`src/engine/coordinator.rs` (`:834-853`) — unchanged from round 1.** One paragraph is appended to `legacy_effect`:
+
+> AMENDED ONCE, on the owner's decision to close the static and deadline residue of
+> `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: when `run_attempt` fails after recording a
+> refused candidate, the coordinator does not discard the checkout; it pins that candidate — the branch ref, parent and
+> tree captured before the refusal, never the index as it stands at the refusal — through
+> `Workspace::prepare_commit_from_candidate` at the attempt's `prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`, one new
+> constant, and returns a registry refusal (`UpstrokeError::RegistryRefused`) that names the pin, or the pin's failure.
+> Every other attempt error discards the checkout as before. The new arm calls only `prepared_pin_ref` and
+> `Workspace::prepare_commit_from_candidate`, both of which the module already calls, and nothing else in the module
+> moves.
+
+**`src/engine/resume.rs` (`:855-867`) — unchanged from round 2.** One paragraph is appended to `legacy_effect`:
+
+> AMENDED ONCE, on the owner's decision to close the same finding's static and deadline residue: for every attempt the
+> replayed log records — each task's attempts from the first to the last one started — the resume also asks, through
+> `Workspace::prepared_pin_target`, whether the coordinator kept that attempt's candidate at its `prepared_pin_ref`
+> followed by `KEPT_PIN_SUFFIX`, a pin no resume removes; it discards the checkout's uncommitted paths exactly as
+> before, so the attempt runs again from a clean tree, and one warning names every kept pin it found with the commands
+> that take its output back as the repository records it, deletions included, each carrying the replacement controls
+> the legacy workspace's Git children carry (`--no-replace-objects -c core.useReplaceRefs=false`), and says that
+> removing a pin stops the warning naming it. Of the workspace it calls only `prepared_pin_target`, which it already
+> calls; of the event log it reads the replayed state and changes nothing; and nothing else in the module moves.
+
+**`src/engine/tests.rs` (`:1138-1150`) — unchanged from round 1.** One paragraph is appended to `legacy_effect`:
+
+> AMENDED ONCE, on the owner's decision to close
+> `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: the file gains appended regression tests,
+> and no existing test changes. They drive the same entry points through a worktree registry another process has torn.
+> One of them makes that registration as a topology slot, through `crate::workspace_manager`'s funnels and its test
+> fixture's torn-registration shape, under the same allow.
+
+**How each changed clause matches its implementation** (§1.5's and §2.9's tables stand for every other clause):
+
+| Text | Clause | The implementation that makes it true |
+|---|---|---|
+| `workspace.rs` | "an empty destination it can remove was never taken over by Git, so it is removed, made again and attempted again" | `legacy_add_veto`'s directory arm: `read_dir` empty, `remove_dir` ok, `remake_destination` → `Again::Attempt` (`fud3/probe/patch-rd3.py`); executed: l8, the transient tear |
+| `workspace.rs` | "anything else at the destination — gone, … or metadata it cannot read — refuses at once as a registry refusal" | every other arm of `legacy_add_veto` answers `Again::Undecidable { why }`, which #329's contract refuses at once (§6.4 step 5); executed: l8, v1, v1c, v1n, v2, v3, T-L3's witness |
+| `workspace.rs` | "so the add's own failure is never returned as Git state" | no arm answers `Again::Return`; the access returns Git only on `Return` (§6.4 step 4); `rd3-m-return` is the mutation |
+| `workspace.rs` | "private functions make the destination again and decide the add's veto, which reads only the destination and starts no Git child" | `remake_destination` and `legacy_add_veto`: `symlink_metadata`, `read_dir`, `remove_dir`, `create_private_dir`; no `git_output`, no builder call; executed: no `read-tree` process in any `rd3` v1 trace |
+
+**Their union, unchanged:** the four production files and the appended tests; #329 owns the helper, its error variant
+and its classification.
+
+### 3.9 `design/15`: the PROPOSED paragraph, amended
+
+The paragraph stays PROPOSED and in the same place. Round 3 changes two things in it, and adds no sentence elsewhere:
+- **Its source** reads "§1, as §2 and §3 amend it".
+- **Its add-veto sentence** becomes: "After a failed snapshot add, an empty destination the engine can remove was never
+  taken over, and the add is attempted again; anything else at the destination refuses as a registry refusal, so the
+  add's own failure never comes back as Git state."
+
+No sentence `src/export.rs` pins moves, and the hunk stays apart from #329's PROPOSED paragraph.
+
+### 3.10 What legacy users see, and what remains, after round 3
+
+**§2.11, amended:**
+- **A snapshot add after a failure.** An empty, removable destination is made again and the add attempted again.
+  Anything else ends the command at once with a registry refusal that names Git's message, the captured output kept in
+  the checkout and pinned. No probe runs.
+- **A genuine failure after Git took the destination over** (a checkout the snapshot's longer path cannot hold, a
+  failing filter, a full or read-only store, a missing object): a resumable refusal, the output pinned, where master
+  discarded it and failed the command. Each resume over a cause that persists pays one more worker attempt, as master's
+  did, and keeps one more pin (§3.2).
+
+**§1.8's and §2.11's residuals, amended:**
+
+| | What | Consequence | Where |
+|---|---|---|---|
+| R-D3 (amended) | D's own Git child killed by a signal mid-add | a destination left non-empty or gone is refused at once and kept; one left empty and removable is attempted again; never Git state | §3.2 |
+| R-D4 (amended) | a takeover whose junk removal left the destination, on any platform; on Windows, a delete-pending destination | the removal proof answers `Attempt` when the access can remove it, and `Undecidable` otherwise: a refusal that keeps | §3.2 |
+| R-D9 (reclassified) | the post-return deletion: a prune that decided in the add's window deletes the registration after the add returned, before the verification or while a gate or a review runs | the failure is judged or returned as Git state, and the coordinator discards; executed (p1, p1r, p2, p4). Legacy-only: P1, outside G6. Mixed: applies to G6 (Q6, R17) and blocks it, as part of `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`. C-SIDE closes it except a partly deleted entry; not adopted | §3.4 |
+| R-D13 | the probe's fidelity | withdrawn with the probe | §3.2 |
+| R-D1, R-D2, R-D5 to R-D8, R-D10 to R-D12 | as §1.8 and §2.11 | as there | — |
+
+### 3.11 The G6 classification, round 3
+
+| Case | What D closes, given #329's helper | Severity | Applies to G6 | Blocks G6 |
+|---|---|---|---|---|
+| (e1), (e1′), (e2), (e2′) | as §1.8, unchanged by round 3 | P1 each | (e2) and (e2′) yes; (e1) and (e1′) no | (e2) and (e2′) until #329 and D are implemented and validated, (e2′) unless the owner rules otherwise |
+| FUD-D2-PRUNE (face 1: a prune deletes the registration during the add) | its consequence, the discard: a destination gone is `Undecidable`, so refused at once and kept (v1, v1c, v1n). Its liveness, a resumable end, is #329's face 1 | P1 class | legacy-only no; mixed, as #329's finding's face 1 | its discard: no, once D lands; the class's liveness: as #329's finding |
+| R-D9 (face 2: the deletion after the add returned) | **residual** at this head; C-SIDE, evaluated and not adopted, would close it but for a partly deleted entry | P1 | **legacy-only: no. Mixed: yes, Q6 and R17** | **yes for the mixed class**, as part of #329's finding, until a closure is implemented and validated or the owner rules on its scope |
+| R-G (`FUC-D2-RG`) | closed by the builder's four settings (§2.5) | P1, pending the owner's reclassification (§3.5) | yes: Q1; ST-18 and INV-22 per #330's lenses | until D lands, or the owner reclassifies or excludes it |
+
+### 3.12 What §3 replaces in §1 and §2
+
+| §1 or §2 says | Replaced by |
+|---|---|
+| §2.6, change 6: D's add adopts round 7's veto with its probe, in D's private-gitdir form | §3.3: round 8's dated §5.5; the removal proof alone |
+| §2.7: the probe, "`read-tree` runs no hook", the fidelity paragraph, and "absent, or an empty directory the access cannot remove: the probe decides" | §3.2 |
+| §2.7: R-D9 "does not block G6" | §3.4: legacy-only no; mixed yes, under #329's finding |
+| §2.8: T-L2's "16 attempts", T-L3's "Git state after 1 attempt and 1 probe", T-L8's five cases, and the mutations `d3-m-r6veto` and `d3-m-noprobe` | §3.6 and §3.7 |
+| §2.9: the `src/workspace.rs` text's add sentence and "private functions make the destination again and probe it" | §3.8 |
+| §2.10: the `design/15` add-veto sentence | §3.9 |
+| §2.11: "A snapshot add after a failure … one probe … comes back as Git state", R-D3, R-D4, R-D9 and R-D13 | §3.10 |
+| §2.12: the FUD-D2-PRUNE row's G6 columns | §3.11 |
+| §2.15: FUD-D2-PRUNE "fixed … for a prune before the add returns: D's add adopts round 7's veto" | §3.14: the same closure, by `Undecidable` |
+
+### 3.13 The Windows and macOS time budget, round 3
+
+- **Round 3 adds no planned test.** Two get cheaper:
+  - **T-L3** runs one add and no probe: 8 to 11 ms here, where round 2 measured 10 ms with its probe;
+  - **T-L8** runs no Git at all: five directory operations, where round 2's ran one probe.
+- **T-L2** keeps its fixed waits.
+- **So §2.14's estimates stand as upper bounds:** about +13 s on the guest harness, +48 s hosted and +23 s on macOS for
+  rounds 1 and 2 together (`fud2/wintime/BUDGET-r2.txt`). None of it is executed on those legs, and CI is the truth.
+- **C-SIDE, if adopted,** adds T-C1 to T-C5: four engine tests whose witnesses took 0.165 to 0.171 s each here (the
+  median over nine runs), and one module test. By §1.11's factors (19.8× guest, 26.3× hosted, 7.9× macOS) that is about
+  13 s, 18 s and 5 s of test time, or about +1 s, +4 s and +2 s of harness wall over 12, 4 and 3 threads
+  (`fud3/wintime/BUDGET-r3.txt`). It is an estimate, not a measurement.
+
+### 3.14 The findings round 3 answers
+
+| Finding | Sev | Kind | D | Where | Evidence |
+|---|---|---|---|---|---|
+| FUD-D2-PROBECONFIG | P1 | executed (all three lenses) | **Fixed (design), witnessed.** The probe and D's private-gitdir variant are withdrawn; a destination gone, or empty and not removable, answers `Undecidable`, so the output is kept | §3.2 | v1c and v1n red (Git, discarded) on `d3w` and green on `rd3`; v1, v3 and l8 green on `rd3`; `rd3-m-return` red |
+| FUD-D2-HOOKS | P2 | executed (all three) | **Fixed (design), witnessed.** The veto starts no Git child | §3.2 | one `read-tree` process in every `d3w` v1 run, none in any `rd3` run |
+| FUD-D2-RD9 | P1 | executed (all three) | **Reclassified and referred, not fixed.** Legacy-only: outside G6; mixed: applies and blocks G6, as part of #329's external-prune finding. C-SIDE evaluated, executed and given its exact text, not adopted | §3.4 | p1, p1r, p2, p4 red on `rd3`, green on `rd3cp` (and on the first form `rd3c`); p3, p5 green on all three |
+| FUD-D2-TL2 | P3 | executed (concurrency) | **Fixed (design), witnessed.** T-L2 asserts no count; the final-attempt rule is #329's T4 | §3.6 | the static tear: 16 add attempts at Git's speed, 1 with a 0.6 s add, `RegistryRefused` in both |
+| R-G (`FUC-D2-RG`) | P1 | executed (round 2; re-run by the regression lens) | **Kept at P1; the owner's question.** D's P2 argument recorded | §3.5 | rg1 to rg3 and l7 green on `rd3` |
+| FUD-D2-PRUNE | P1 class | reasoned (round 2) | **Fixed (design), witnessed,** now by `Undecidable` rather than the probe | §3.2 | v1 green on `rd3`, red on `rd3-m-return` |
+| §1.2 against #329's §5.5 | — | conformance | **Conformed** to round 8's dated §5.5 (`f7a9256c`) | §3.3 | the four dated changes, each adopted |
