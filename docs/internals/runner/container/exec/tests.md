@@ -126,6 +126,35 @@ for the worktrees — rather than from string literals, so a layout change
 moves the fixture with it. A hand-built layout is a fixture that keeps
 passing after the thing it describes has moved.
 
+## `struct Layout {`
+
+The fixture's paths, from the root its scratch tree holds: what `Fixture::new` builds and what a
+bounded child builds for `Fixture::built_in_a_bounded_child`, derived once so the two cannot
+disagree about where anything is.
+
+## `impl Layout` › `fn build(&self) {`
+
+The fixture's tree on disk, in the order the fixture always built it: the repository and its two
+commits, the run's two halves, the public log and a private artifact, the container namespace,
+the three worktrees, the sibling's file. The repository and the worktrees are Git through the
+view fixture, which runs it through `HostRunner`: host launches.
+
+## `#[cfg(unix)]` › `fn fixture_tree_child() {`
+
+The isolated builder `Fixture::built_in_a_bounded_child` runs: `Layout::build` over the root its
+parent names. Ignored, so libtest never runs it in its own process.
+
+## `impl Fixture` › `fn built_in_a_bounded_child(tag: &str, exit_on_start: bool) -> Self {`
+
+`Fixture::new` with the tree built by `fixture_tree_child` under `run_test_isolated` and
+`FIXTURE_CHILD_BOUND`, the scratch tree acquired and kept here. It requires the child's success
+and libtest's `1 passed`. The six reaper tests this follow-up adds build their fixture this way
+(`FUA-I4-RELAY`, PR #328's implementation review round 4): the fixture's Git is ten host
+launches, each ending in a wait for its reaper's acknowledged exit that is unbounded by design,
+and made in the test's own process one stopped reaper held the test, and the suite, for as long
+as it stayed stopped. In the child it holds only the child, which the deadline kills. The suite's
+other users of `Fixture::new` predate this follow-up and are unchanged.
+
 ## `impl Fixture` › `fn confinement(&self) -> Confinement {`
 
 Everything this run withholds.

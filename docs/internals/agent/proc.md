@@ -2985,41 +2985,17 @@ child; the frame's encoding is pinned separately without a fork.
 
 ## `mod tests` › `fn run_isolated(`
 
-Runs one ignored child test of this module in a process of its own (`--exact`, one test
-thread) under a deadline, its stdout and stderr in files of a scratch tree, and kills its
-process group at the deadline so a mutation that wedges the child fails the test instead of
-the run. The container reaper's isolated children use it: each needs a process whose signal
+This module's name for `test_support::run_test_isolated` (below), with the child named relative to
+this module: one ignored child test of `termination::tests` in a process of its own under a
+deadline. The container reaper's isolated children use it: each needs a process whose signal
 monitor, cleanup scope or reaper state no other test shares. So does the rest-selection test's
 child, for another reason (`FUA-I3-HOSTCANCEL`): it cancels a real host reaper, and the wait
 after a host reaper's acknowledgement is unbounded by design, so only a process this harness can
-kill may make it.
-
-The kill is not the end of the watchdog: the child is still collected by `try_wait` polls,
-and those stop at `ISOLATED_CHILD_COLLECTION_BOUND` after the kill (`FUA-I1-WATCHDOG`). Until
-PR #328's first implementation review the kill was followed by `process.wait()`, which has no
-bound, so a child the `SIGKILL` did not make collectable held the harness after its own
-deadline: the regression lens held the isolated child of
-`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` at
-`PTRACE_EVENT_EXIT` and found the harness blocked in `wait4(child, …, 0)` 68 s into its
-60-second deadline. A child that ends after the kill is reported as before, `status: None`; one
-still not collectable at the bound fails the test with a message saying so, the kill's result
-(`delivered`, or the errno) and the child's output, and is left to this process's exit, as
-`UnleasedExit` leaves a reaper it could not collect.
-
-Its pause between polls is `rest_once` (`FUA-I2-EINTR`'s sweep), as is every deadline loop this
-follow-up's harness added — `waited_within`, the lease child's `not_held_within`, the stopped
-reaper witness's wait for the relay, `wait_out_a_fail_closed_termination`,
-`child_that_outlives_its_kill_child`, and creation's two relay waits in
-`engine/topology/create/tests.rs` (through `workspace_manager::fixture::rest_within`): a
-`thread::sleep` there would hold a loop past its deadline on a thread whose rests are refused.
-
-## `mod tests` › `const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);`
-
-How long the watchdog waits, after its `SIGKILL`, for the child to become collectable. A
-killed child is collectable within milliseconds unless something holds it — a tracer at its
-exit stop, an uninterruptible sleep, a kill that did not reach it — and then this bound, not
-the child, ends the wait. Ten seconds is long against a kill's reap even on a loaded CI leg and
-short against the deadlines it follows. The sweep's bounded waits take it too.
+kill may make it. Until PR #328's implementation review round 4 the harness was this function;
+it moved to `test_support` so the other modules' tests of this follow-up can bound their own host
+launches the same way (`FUA-I4-RELAY`), and the name stayed here because the hold-read census
+(`runner/container/exec/tests.rs`, `no_reaper_test_reads_a_hold_as_released_once`) reads it by
+name.
 
 ## `mod tests` › `fn waited_within(`
 
@@ -3071,6 +3047,14 @@ the fake runtime's relay stub; once the caller is gone the kernel continues the 
 stopped group (or, after five seconds, this test continues it, only if `process_is_stopped`
 still says it is stopped), and the reaper, finding its parent gone, lists by its scope — the
 relay's first call is exactly the scope's listing argv — and finds nothing to kill.
+
+The relay is written by an isolated child of its own (`FakeRuntime::install_reaper_relay`), so
+this process makes no host launch (`FUA-I4-RELAY`, PR #328's implementation review round 4).
+Until then it wrote the relay itself, before `run_isolated`, through the host funnel, whose end
+waits for its reaper's acknowledged exit without a bound: held at `PTRACE_EVENT_EXIT` at
+`3665cecb`, that reaper kept this test in `wait4(reaper, …, 0)` for the whole hold, and the
+experiment's child started only after the release. The child that runs the experiment could not
+write the relay itself: it must arm in a process no host launch has touched.
 
 ## `mod tests` › `fn an_armed_container_reaper_holds_no_cleanup_lease() {`
 
@@ -3183,6 +3167,55 @@ it was reproduced out of tree for PR #328's record (§3).
 ## `pub(crate) mod test_support` › `pub(crate) fn run_with_timeout(`
 
 Test-only convenience entry. Production passes both sites explicitly.
+
+## `pub(crate) mod test_support` › `pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);`
+
+How long the watchdog waits, after its `SIGKILL`, for the child to become collectable. A
+killed child is collectable within milliseconds unless something holds it — a tracer at its
+exit stop, an uninterruptible sleep, a kill that did not reach it — and then this bound, not
+the child, ends the wait. Ten seconds is long against a kill's reap even on a loaded CI leg and
+short against the deadlines it follows. `termination::tests`' bounded waits take it too.
+
+## `pub(crate) mod test_support` › `pub(crate) fn run_test_isolated(`
+
+Runs one ignored test of this binary, named by its full path, in a process of its own
+(`--exact`, `--ignored`, one test thread) under a deadline, its stdout and stderr in files of a
+scratch tree, and kills its process group at the deadline, so a child that wedges fails the test
+that started it instead of the run. The caller reads `Isolated`: the exit status (`None` when
+the deadline killed it), and both streams. A caller that runs a child for its effect checks the
+status and libtest's own `1 passed`, so a child named wrongly — which libtest runs as zero tests
+and exits `0` — fails instead of passing vacuously.
+
+**The harness every host launch a test of this follow-up makes runs under** (`FUA-I4-RELAY`,
+PR #328's implementation review round 4). A host launch ends in `Supervisor::finish`, whose wait
+after the reaper's acknowledged `CLEANUP` is `ReaperEnding::AcknowledgedExit`: unbounded by
+design, because that reaper's exit releases the cleanup lease. Made in the libtest process, a
+host reaper stopped between its acknowledgement and its exit holds the test, and the suite with
+it, for as long as it stays stopped; made in a child of this harness, it holds only the child,
+which the deadline kills. Its callers outside `termination`: the reaper relay's writer and
+runner (`runner/container/fake.rs`), the exec reaper tests' fixture
+(`runner/container/exec/tests.rs`, `Fixture::built_in_a_bounded_child`) and the inherited-writer
+witness of the relay's writer (`runner/host/tests.rs`).
+
+The kill is not the end of the watchdog: the child is still collected by `try_wait` polls, and
+those stop at `ISOLATED_CHILD_COLLECTION_BOUND` after the kill (`FUA-I1-WATCHDOG`). Until PR
+#328's first implementation review the kill was followed by `process.wait()`, which has no
+bound, so a child the `SIGKILL` did not make collectable held the harness after its own
+deadline: the regression lens held the isolated child of
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` at
+`PTRACE_EVENT_EXIT` and found the harness blocked in `wait4(child, …, 0)` 68 s into its
+60-second deadline. A child that ends after the kill is reported as before, `status: None`; one
+still not collectable at the bound fails the test with a message saying so, the kill's result
+(`delivered`, or the errno) and the child's output, and is left to this process's exit, as
+`UnleasedExit` leaves a reaper it could not collect.
+
+Its pause between polls is one `nanosleep` (`workspace_manager::fixture::rest`, the same single
+attempt as `termination`'s `rest_once`; `FUA-I2-EINTR`'s sweep), as is every deadline loop this
+follow-up's harness added — `waited_within`, the lease child's `not_held_within`, the stopped
+reaper witness's wait for the relay, `wait_out_a_fail_closed_termination`,
+`child_that_outlives_its_kill_child`, and creation's two relay waits in
+`engine/topology/create/tests.rs` (through `workspace_manager::fixture::rest_within`): a
+`thread::sleep` there would hold a loop past its deadline on a thread whose rests are refused.
 
 ## `pub(crate) mod test_support` › `pub(crate) mod readiness;`
 

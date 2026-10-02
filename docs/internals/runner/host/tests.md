@@ -3221,3 +3221,8 @@ fake's relay writer are each judged by it.
 test process holds a writer of it and its `execv` cannot fail `ETXTBSY`. Written in-process
 instead (`fua-m11`), the reader never sees end-of-file.
 
+Its helper runs under `proc::test_support::run_test_isolated` and a 180-second deadline, not
+through the host funnel as its sibling's does (`FUA-I4-RELAY`, PR #328's implementation review
+round 4): the funnel's end waits for its reaper's acknowledged exit without a bound, by design,
+so a stopped reaper there held this test, and the suite with it.
+

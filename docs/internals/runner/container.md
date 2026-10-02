@@ -1766,9 +1766,16 @@ forbids `std::process::Command`, and this file's allowance is module-wide.
 `runner::host::tests::inherited_writer::the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`
 holds it with the host suites' FIFO oracle.
 
+Its callers are isolated children only: `fake.rs`'s `reaper_relay_install_child` and the host
+suites' `reaper_relay_writer_helper`, each started by `run_test_isolated` under a deadline. The
+funnel's end waits for its reaper's acknowledged exit without a bound, by design, so a call from
+a test's own process can hold the suite for as long as that reaper is stopped (`FUA-I4-RELAY`,
+PR #328's implementation review round 4).
+
 ## `pub(crate) fn run_program_in_its_own_process(program: &Path, args: &[&str]) -> Option<i32> {`
 
-Test-only: runs a program by its path through the process funnel and returns its exit code;
-the relay's self-check in the coordinator's reaper controls uses it to prove the relay is
-bound in that process (`R6-D2`).
+Test-only: runs a program by its path through the process funnel and returns its exit code.
+Its one caller is `fake.rs`'s `reaper_relay_run_child`, the isolated child through which the
+coordinator's reaper controls make their relay self-check (`R6-D2`); a call from a test's own
+process would make the funnel's unbounded end there (`FUA-I4-RELAY`).
 

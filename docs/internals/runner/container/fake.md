@@ -794,12 +794,33 @@ printed — so a scope that does not select a container does not find it. `rm` d
 container from `listing`; `kill` changes nothing, as `docker kill` leaves a container listed
 until it is removed.
 
+## `#[cfg(unix)]` › `const REAPER_RELAY_CHILD_BOUND: Duration = Duration::from_secs(120);`
+
+The deadline `run_test_isolated` gives each of the relay's two children below: generous against
+a child that starts, writes or runs one small script and ends, and the bound that makes a child
+held at its host launch's end a failed test rather than a wedged run.
+
 ## `impl FakeRuntime` › `pub(crate) fn install_reaper_relay(&self, relay: &Path) -> PathBuf {`
 
-Creates the relay directory with an empty listing, writes the stub through
-`write_program_in_its_own_process` — a process of its own, so no fork of this multithreaded
-test process can inherit a writer of a file that is about to be exec'd (`R6-D3`) — and makes
-it this fake's reaper program.
+Has `reaper_relay_install_child` write the relay in an isolated child of the test binary,
+under `REAPER_RELAY_CHILD_BOUND`, then makes its stub this fake's reaper program. It requires
+the child's success, libtest's `1 passed` (a misnamed child runs zero tests and exits `0`) and
+the program on disk.
+
+The write is a host launch (`write_program_in_its_own_process`, below), and a host launch ends
+in a wait for its reaper's acknowledged exit that is unbounded by design. Made in the test's own
+process it held the test, and the suite, for as long as that reaper was stopped; made in the
+child, it holds only the child (`FUA-I4-RELAY`, PR #328's implementation review round 4). Every
+test that installs a relay — the stopped-container-reaper test in `agent/proc.rs`, the
+coordinator's reaper controls, creation's P4 probe witness — gets the bound from here.
+
+## `impl FakeRuntime` › `pub(crate) fn run_reaper_relay(relay: &Path, args: &[&str]) -> Option<i32> {`
+
+Runs the relay's program with `args` in `reaper_relay_run_child`, an isolated child under
+`REAPER_RELAY_CHILD_BOUND`, and answers its exit code, which the child writes to a file of a
+scratch tree this call owns. The coordinator's reaper controls run their relay self-check
+through it (`R6-D2`): the run is a host launch, so it belongs in a bounded child for the reason
+`install_reaper_relay` gives.
 
 ## `impl FakeRuntime` › `pub(crate) fn publish_for_reaper(&self, relay: &Path) -> Vec<(String, String, String)> {`
 
@@ -815,6 +836,18 @@ The calls the stub recorded, one argument vector each, in order.
 
 Applies each recorded `kill` and `rm` to this fake as the actor `reaper`, so a witness reads in
 the journal that the containers were stopped and removed by the reaper's own calls.
+
+## `#[cfg(unix)]` › `fn reaper_relay_install_child() {`
+
+The isolated writer `install_reaper_relay` runs: the relay directory and its empty listing,
+then the stub through `write_program_in_its_own_process`. Ignored, so libtest never runs it in
+its own process; only `install_reaper_relay` starts it, by name, under its bound.
+
+## `#[cfg(unix)]` › `fn reaper_relay_run_child() {`
+
+The isolated runner `run_reaper_relay` runs: the relay's program with the arguments its parent
+names, through `run_program_in_its_own_process`, and the exit code (or `no code`) written to the
+file its parent names. This fake forbids the stdout macros, so the answer travels by file.
 
 ## `const REAPER_PROGRAM_QUERY: &str = "reaper-program";`
 

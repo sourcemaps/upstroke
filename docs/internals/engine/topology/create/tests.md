@@ -1559,6 +1559,12 @@ at that probe's cover lists it by its labels, kills and removes it, and lists ag
 nothing, before any census. ST-16 (k)'s census path is unchanged for what the reaper leaves: the
 husk and the probe's intent and view.
 
+The relay is written by an isolated child of the test binary under a deadline
+(`FakeRuntime::install_reaper_relay`), so this test makes no host launch of its own
+(`FUA-I4-RELAY`, PR #328's implementation review round 4): a host launch ends in a wait for its
+reaper's acknowledged exit that is unbounded by design, and made here one stopped reaper held the
+test, and the suite with it.
+
 ## `fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope() {`
 
 The design property for creation: the shell and agent probes each start under an armed reaper

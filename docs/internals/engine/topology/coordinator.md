@@ -1479,6 +1479,14 @@ An in-process width-three run over a contained runner whose reaper's program is 
 the relay's self-check (`R6-D2`): the stub, run by its path, records its call where the test
 reads, so a reaper's calls in this process would be seen.
 
+The relay is written and its self-check run by isolated children of the test binary
+(`FakeRuntime::install_reaper_relay`, `FakeRuntime::run_reaper_relay`), each under a deadline,
+so these controls make no host launch of their own (`FUA-I4-RELAY`, PR #328's implementation
+review round 4): a host launch ends in a wait for its reaper's acknowledged exit that is
+unbounded by design, and made here one stopped reaper held the test, and the suite with it. The
+relay's other users in this module, `a_resume_killed_inside_its_pre_flight_probe` and the
+stranded-runner test, install it the same way.
+
 ## `mod tests` › `fn a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three() {`
 
 `R6-D2`: a run that completes, its runner dropped: the relay holds only the self-check, and every
