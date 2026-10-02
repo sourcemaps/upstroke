@@ -40,8 +40,13 @@ run-layout and lock text, and nothing below changes any of them.
   `max`) repaired both: the free `container::launch` is test-only and the census reads macro
   arguments (`FUA-I1-MACRO`); the test watchdog collects its killed child within a bound
   (`FUA-I1-WATCHDOG`); the sweep's one pre-existing instance is filed.
-- **Next:** implementation review round 2 (delta and fix-check, and regression), and the rounds
-  `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
+- **Implementation review, round 2: §4**, at `8d0d8b86`. Three `gpt-6-astra` lenses at `max`: regression
+  passed; delta and concurrency one P2 each, both executed. `pr11_fua_r2` (`claude-opus-5-5`, `max`) repaired both
+  (amended, `FUA-I2-MACRO-WS`, `FUA-I2-EINTR`): every container start primitive takes a proof only the reaper's
+  cover mints, so a start with no cover is a compile error and the census a lexical backstop; a container
+  reaper's bounded endings rest once between their polls, so an interrupted rest goes back to the deadline.
+- **Next:** implementation review round 3 (delta, regression and concurrency: the proofs change production
+  signatures), and the rounds `MAINTAINING.md` prescribes. G6's input range must include this follow-up's merge.
 
 ## 1. Design
 
@@ -134,7 +139,9 @@ contain(request, cancellation, hooks):
 `launch` gains a parameter, `covered: &Covered<'_>`, and `Covered` has one constructor, inside
 `Reaping::cover`. So within `exec.rs` the type system enforces the order — no `launch` without a
 cover — and the census (§1.4) enforces what the type system cannot: that `launch` stays the only
-production path to `create_container` and `start_container`.
+production path to `create_container` and `start_container`. (Amended, `FUA-I2-MACRO-WS`: since review round 2 the
+type system enforces that too. The funnels and the runtime's `create` and `start` take proofs only the cover mints,
+and the census is a lexical backstop: §4.1.)
 
 **Why every launch in §1.1 is reached only through it.** Four facts, each checked:
 
@@ -247,7 +254,9 @@ gets a second reaper over the same scope, and each covers its own launches.
   `CANCEL`, so the only thing left for it to do is exit, and killing it loses nothing — and waited
   for once more within the same budget; one still not collectable then is left for the process's
   exit. Every wait in the container reaper's life has a deadline: READY (`HELPER_READY_BUDGET`), the
-  acknowledgement (two seconds), the exit (two `HELPER_END_BUDGET`s). Host reapers keep
+  acknowledgement (two seconds), the exit (two `HELPER_END_BUDGET`s). (Amended, `FUA-I2-EINTR`: a deadline
+  checked between polls holds only if the pause between them returns, and `thread::sleep` does not return under
+  a stream of interruptions; since review round 2 a container reaper rests once between its polls, §4.2.) Host reapers keep
   `Reaper::cancel` and its unbounded wait unchanged.
 - `spawn_reaper` (`proc.rs:2498`) takes the container scope as an argument rather than reading the
   process-global one (`proc.rs:2546`); `Supervisor::begin` passes `container_scope_for_a_new_reaper()`
@@ -409,7 +418,9 @@ orchestrator's authorization of exactly that `funnel` row, the free `launch` is 
 uncovered`), so no production build can name it; `create_container` and `start_container` are
 `pub(in crate::runner::container)`, so nothing outside the container module tree can. The census is now the guard
 inside that tree and in test builds, and it names every occurrence inside a macro's argument and every colon form:
-§3.1.)
+§3.1. Amended again, `FUA-I2-MACRO-WS`: review round 2 evaded the repaired reader with whitespace before a macro's
+`!`, and the guarantee moved into types. Every start primitive takes a proof only `Reaping::cover` mints, the census is
+a lexical backstop and not a proof, and inside the tree it is no longer the guard: §4.1.)
 
 **How a mutation proves it can fail.** Four mutations, each a scratch copy built from itself (the
 `Compiling` line naming the copy) and each turning the census red with its own message while the
@@ -621,6 +632,9 @@ body.
   frozen file, `src/rundir.rs`, `src/workspace_manager*`.
 - Review round 1 also changes `src/runner/container.rs`: the free `launch` test-only and the two
   funnels' visibility (§3.1).
+- Review round 2 (amended, `FUA-I2-MACRO-WS`, `FUA-I2-EINTR`) changes `src/runner/container/runtime.rs` (the trait's
+  `create` and `start` take the proofs), `container.rs`, `exec.rs` (`mod cover`), `src/agent/proc.rs` (`EndingRest`),
+  every runtime double, and creation's two relay waits in `engine/topology/create/tests.rs` (§4).
 
 ### 1.10 The design review's four corrections (round 1, at `793c3784`)
 
@@ -767,7 +781,8 @@ checks, as amended (`FUA-D1-DES-1`):
    40 files and 750,000 non-whitespace bytes read; the lint-level walk found more than 100 modules
    guarded and places `container.rs` and `view.rs` among the rest.
 
-(Review round 1 changes both readers and checks 1, 2 and 5: §3.1.) Its two readers are tested on written input:
+(Review round 1 changes both readers and checks 1, 2 and 5: §3.1. Amended, `FUA-I2-MACRO-WS`: review round 2 makes
+the census a lexical backstop behind type-level proofs and adds shape checks to check 4: §4.1.) Its two readers are tested on written input:
 `the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher` and
 `the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid`.
 
@@ -874,7 +889,8 @@ Saved in `measure/class-searches.txt` (at `4bc56d21`; `cdd72177` changed only th
   caller is listed with the runtime it is handed (24 and 8 sites): each is one of the five.
 - **Every wait of the container reaper's life has a deadline**: READY (`await_ready`,
   `HELPER_READY_BUDGET`), the CANCEL acknowledgement (two seconds), the exit after it
-  (`UnleasedExit`'s two bounded waits); the fail-closed arm waits for nothing. The one deadline-less
+  (`UnleasedExit`'s two bounded waits); the fail-closed arm waits for nothing. (Amended, `FUA-I2-EINTR`: the exit
+  wait's pause did not return under interrupted rests; the round-2 sweep is §4.2.) The one deadline-less
   wait left is inside the reaper, in PR6's inherited `docker` machinery — filed (§1.8,
   `PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL`).
 - **Write-then-exec fixtures this change adds**: one, the relay stub, through the isolated writer.
@@ -1048,7 +1064,8 @@ verbatim. It is red on the reader as reviewed (`r1-o1`) and green on the reader 
   function declares; private `fn` would have dropped them from its domain.
 
 **The fix, census second.** The census remains the guard where the compiler cannot be: inside the container module
-tree, and in test builds, where the free `launch` exists.
+tree, and in test builds, where the free `launch` exists. (Amended, `FUA-I2-MACRO-WS`: round 2 found the next spelling
+the reader missed. Since then the compiler is the guard inside the tree too, and the census is a backstop: §4.1.)
 - `namings` now names every occurrence of an unarmed launcher inside a macro invocation's delimiters as a
   `MacroArgument` (`macro_arguments` finds the spans), whatever precedes or follows it, a `.launch` included.
 - Outside a macro it names a `name:` as a `Field`, pinned rather than skipped: `exec.rs`'s two `InvocationPlan`
@@ -1282,3 +1299,319 @@ theirs.
 - macOS and Windows behaviour (CI's);
 - a child held in a real uninterruptible sleep, which only the reviewer's tracer and the refused kill stand in for;
 - `LinkedChild::kill`'s wait (filed).
+
+## 4. Implementation review round 2
+
+Repaired by `pr11_fua_r2` (`claude-opus-5-5`, `max`). Every figure below is in a saved file under
+`~/orch-pr11/logs/pr11_fua_r2/` that the sentence names; code lines are at the campaign commit `b612aa16` unless another
+commit is named. The round's commits are `99d38e65` (`FUA-I2-MACRO-WS`), `b612aa16` (`FUA-I2-EINTR`), `2aa86514` (the
+notes), `6f5a0e40` (one test attribute) and this section. They change `src/runner/container.rs`, `exec.rs`, `runtime.rs`
+and `src/agent/proc.rs` in production, the container and topology test doubles and tests, and the notes. No instrument
+and no frozen file changes.
+
+### 4.0 The review and its triage
+
+Three `gpt-6-astra` lenses at `max` reviewed `8d0d8b86`. Their texts are
+`~/orch-pr11/reviews/review-328-i2-{delta,regression,concurrency}-8d0d8b86.review.md`, hashed in `SHA256SUMS-328-i2`;
+the reviewers' witnesses are in `~/orch-pr11/reviews/328-i2-witnesses/{delta,conc}/`, hashed in
+`SHA256SUMS-328-i2-witnesses`.
+- **Regression:** PASS. The 26 frozen production files and eight frozen test children are byte-identical, the
+  instrument changes are exactly the declared rows, 3,025 library and 10 binary tests passed, and the exact-head CI
+  passed (Windows 537.89 s, macOS 1,368.94 s).
+- **Delta and fix-check:** CHANGES_REQUIRED, one P2, executed (`FUA-I2-MACRO-WS`, §4.1).
+- **Concurrency:** CHANGES_REQUIRED, one P2, executed (`FUA-I2-EINTR`, §4.2).
+
+The orchestrator's triage (`~/orch-pr11/reviews/review-328-i2-triage.md`) fixes both under the witness rule and raises
+the looping note for the census, §4.3. Neither is a P1 and the design stands. The round asked no question.
+
+### 4.1 `FUA-I2-MACRO-WS`: an uncovered start must fail to compile, not merely fail the census
+
+**The reviewer's text** (delta lens):
+
+> `macro_arguments` requires an identifier byte immediately before `!`. Rust permits whitespace there, and rustfmt
+> preserves it inside this nested macro definition: […] `delegate ! (plan.start_container, $($argument),*)` […] The
+> reader misses `delegate ! (...)`, then skips `.start_container` as field access. The expansion calls
+> `super::start_container`. The same construction hides `create_container`; both remain accessible inside `exec.rs`.
+> […] All **25 submitted tests**, including the domination census, passed. […] A fake-runtime witness observed
+> **Running**, **coverage false**, and **no armed reaper selecting the scope**. All-target Clippy with `-D warnings`
+> and `fmt --check` passed. […] This leaves `FUA-I1-MACRO` incompletely repaired and contradicts the claim that the
+> census reads anything inside macro arguments.
+
+**The witness, red at `8d0d8b86`.** A scratch copy of `8d0d8b86` carried the reviewer's `mutation.diff` verbatim
+(`witness/macro-8d0d8b86-reviewer-mutation/`, by `tools/witness-copy.py`). Round 1's 25 tests and the reviewer's
+witness, 26 in all, passed, the census among them. The witness printed "launched true; container upstroke-… state
+Some(Running); starts observed (name, covered by an armed reaper) [(…, false)]; an armed reaper selects this runner's
+scope: false". `cargo clippy --all-targets --all-features -- -D warnings` on the same copy exited 0
+(`witness/macro-8d0d8b86-reviewer-mutation-clippy/`).
+
+**The witness, now a compile error.** The same mutation, verbatim, on a copy of `99d38e65`:
+- a production build (`cargo clippy --lib --all-features -- -D warnings`) exits 101 with `error[E0308]: mismatched
+  types` (the create is handed `&CreateSpec` where it takes `CoveredCreate`) and `error[E0061]: this function takes 5
+  arguments but 4 arguments were supplied` (the start lacks its `CoveredStart`)
+  (`witness/macro-99d38e65-reviewer-mutation-production/`);
+- a test build (`cargo test --lib --all-features --no-run`) exits 101 with the same two errors
+  (`witness/macro-99d38e65-reviewer-mutation-test-build/`).
+
+The campaign repeats it at `b612aa16` as `r2-p1`, with the variants that try to supply a proof (§4.4).
+
+**Root cause, in two layers.**
+1. The reader classified an invocation by the byte before its `!`. A reading of source text has spellings it cannot
+   see, and round 1's repair of it (`FUA-I1-MACRO`, §3.1) closed one spelling and left the next.
+2. Underneath, the guarantee was a reading of text at all. Round 1 took the free `launch` out of production and
+   restricted the funnels to the container module tree, but inside that tree `create_container` and `start_container`
+   took no cover, and the runtime's own `create` and `start` were callable wherever the call was spelled so clippy's
+   `disallowed_methods` did not see it — in the twenty-seven modules that allow that lint, by any spelling at all. The
+   census was the only thing between a launch inside the tree and a start no reaper covers.
+
+**The fix: the guarantee moves into types.**
+- **Every start primitive takes a proof.** `create_container` and `start_container` (`src/runner/container.rs:278`,
+  `:336`), and `ContainerRuntime::create` and `::start` (`src/runner/container/runtime.rs:274`, `:276`), take a
+  `CoveredCreate` or a `CoveredStart` by value. The funnels pass theirs on to the runtime, so the proof is consumed by
+  the call that starts the container. All twelve runtime implementations take them: `DockerCli`, the two fakes and
+  nine test doubles.
+- **Only `Reaping::cover` mints one.** The proofs, the in-flight guard `Covered` and `cover` itself live in `pub(super)
+  mod cover` (`src/runner/container/exec.rs:1002`), a leaf module at the end of `exec.rs`. Their fields are private
+  to `cover`, so neither the rest of `exec.rs` nor any sibling or parent module can construct one. That is why
+  `clippy.toml`'s note that "a token, a sealed trait or a private constructor would all be reachable from a sibling"
+  does not apply: it is true of a token defined in `runner::container`, and this one is defined in a leaf.
+  `cover` (`exec.rs:1025`) validates the labels and arms as before, then returns `Covered` and the two proofs.
+- **Each proof is bound to what the cover validated.** `CoveredCreate` borrows the very spec `cover` checked against
+  the reaper's scope, and the create is made from that spec: `create_container` and every `ContainerRuntime::create`
+  read `covered.spec()` and take no spec of their own. `CoveredStart` borrows that spec's name, and `start_container`
+  refuses an intent for any other name before the runtime is asked (`expect_intent_for`, `attempted: false`). Both
+  carry the cover's single lifetime, the borrow of the runner's `Reaping` and of the spec at once, so neither can
+  outlive the runner whose reaper covers it.
+- **`ContainerRunner::launch` passes the two through** (`exec.rs:605`); until now it took `&Covered` and read nothing
+  from it.
+- **Nameable inside the container module tree only.** The proofs are re-exported `pub(in crate::runner::container)`
+  (`exec.rs:32`). Declared `pub` in a private module, they can appear in the public trait without a
+  `private_interfaces` lint, and outside the tree a production build cannot name them (`r2-p5`, `error[E0603]`).
+- **Tests mint through `without_a_reaper`.** It is `#[cfg(test)]`, in a child module of `cover` (`exec.rs:1100`). The
+  test-only free `container::launch` uses it, so its signature is unchanged and the frozen `recover/tests.rs` that
+  calls it compiles unchanged. So do the container suites' direct calls of the funnels and the runtimes. A test-only
+  `pub(crate)` re-export in `container.rs` lets the doubles outside the tree name the types. No production build has
+  either (`r2-p3`, `error[E0599]`). The `#[cfg(test)]` child module is the file's first `#[cfg(test)]`, so
+  `effects::production_region` cuts `exec.rs` at a module after every production item.
+
+**What the compiler does not cover, and the census.** Two things remain text the compiler cannot judge:
+- code inside `cover` itself, which can mint;
+- the runtime's implementation: `DockerCli`'s `create` and `start`, and the private `DockerCli::exec` they share, which
+  runs whatever `docker` argv it is handed.
+
+The domination census stays as a **lexical backstop, not a proof**: it is not made to read `name ! (…)`, and nothing
+depends on it doing so. What it now holds (`src/runner/container/exec/tests.rs`, from `:5790`):
+- the four primitives' signatures still name their proofs, so the type-level guarantee cannot be removed in silence;
+- `Covered {`, `CoveredCreate {` and `CoveredStart {` are each built once, in `cover`;
+- `cover` declares no production module of its own, since a child module sees its private fields;
+- no production region names `without_a_reaper`.
+
+`docker` and `DockerCli` stay confined to `container.rs` by `effects`' denylist census. Every `RuntimeOp::Create` stays
+pinned to `DockerCli::create`, and `RuntimeOp::Start` to `DockerCli::start`, by check 3.
+
+**The new test.** `a_start_cover_starts_only_the_container_it_was_minted_for` creates a container under its own
+intent. It then hands the start a proof minted for another worker's container, which is refused with
+`attempted: false` and nothing reaching the runtime, and the container is still `Exited`. The proof minted for it
+then starts it.
+
+**Class search: every path that starts a container** (`measure/class-search-macro-ws-b612aa16.txt`).
+- The funnels and the trait's two methods take proofs. The compiler holds all twelve implementations to the trait.
+- No production `docker` argv starts a container by any verb but `create` and `start`.
+- `RuntimeOp::Create` and `::Start` occur in production only in `DockerCli`'s two methods.
+- `DockerCli` is named only by `container.rs`; `runtime.rs` names `DOCKER_PROGRAM` as `reaper_program`'s default.
+- The fakes' relayed `Create` and `Start` are test-only.
+- The reaper's own `docker kill` and `rm` start nothing.
+
+The two older source censuses that pin `runtime.create(`/`runtime.start(` (`container/tests.rs`'s
+`every_container_effect_in_the_tree_goes_through_the_funnel` and `resolve/tests.rs`'s read-only check) are unchanged,
+and pass.
+
+### 4.2 `FUA-I2-EINTR`: interrupted rests must return to the deadline check
+
+**The reviewer's text** (concurrency lens):
+
+> The new `UnleasedExit` branches at `src/agent/proc.rs:2439` and `2479` use polling helpers whose pauses call
+> `thread::sleep` at lines 3886 and 3938. […] Sleep syscalls repeatedly return `EINTR`. Rust retries inside
+> `thread::sleep`, preventing the outer loop from checking its deadline. The caller never reaches the
+> deadline-triggered SIGKILL or returns from `Drop`. […] Both callers required the external watchdog's kill after
+> **8 seconds**, exceeding the promised two two-second budgets. Uninterrupted controls returned in approximately
+> **2 seconds**. […] The underlying helpers predate this PR, but their new use does not establish the claimed
+> `FUA-D1-CONC-1` bound.
+
+**The witness, red at `8d0d8b86`.**
+- The reviewer's `witness.patch` on a copy of `8d0d8b86` (`witness/eintr-8d0d8b86-reviewer-witness/`): the two controls
+  returned in 2.02 s, and both interrupted modes, number and identity, were killed by its watchdog at 8.01 s,
+  `status None`.
+- This round's own witness, applied to `8d0d8b86` (its block taken verbatim from `b612aa16` and inserted into
+  `8d0d8b86`'s `proc.rs`, `witness/patches/own-eintr-witness-b612aa16.patch`;
+  `witness/eintr-8d0d8b86-own-witness-from-b612aa16/`): both paths `status None` at their 30-second deadline, each
+  child having printed "the reaper is dropped" before it was held, and the test failed in 60.03 s.
+
+**The witness, green at `b612aa16`** (`tools/eintr-evidence.sh`):
+- The reviewer's `witness.patch` (`witness/eintr-b612aa16-reviewer-witness/`): the drop returned after 2.00 s in every
+  mode, the interrupted ones (2.000176 s, number; 2.000177 s, identity) as well as the controls.
+- The committed witness, `a_container_reaper_stopped_after_acknowledging_its_cancel_ends_its_caller_with_every_rest_refused`,
+  in this worktree (`witness/eintr-b612aa16-own-witness/`): it passed in 4.24 s. Its child, run alone per path,
+  reported "every rest refused, the drop returned after 2000ms; the stopped stand-in was collected: true" through the
+  number and through the identity, and "the harness's bounded wait came back after 100ms: None".
+
+The committed witness is Linux-only (seccomp). Its child stops a stand-in, wraps it in a `ContainerReaper` whose CANCEL
+is acknowledged, and opens a pidfd on the stand-in for the identity path. Then it refuses every rest on its thread
+(`clock_nanosleep` answered `EINTR`, the call a sleep makes here) and first sees the refusal in force. It drops the
+reaper and reports. It then asks the harness's own `waited_within` about a second child that never exits.
+
+**Root cause.** `UnleasedExit`'s two bounded waits (`FUA-D1-CONC-1`) were built from the module's pre-existing bounded
+endings, `wait_for_an_ended_helper` and `wait_for_an_ended_helper_through_identity`. Those check their deadline between
+polls and pause with `thread::sleep(HELPER_END_POLL_SLICE)`. Rust's `thread::sleep` makes an interrupted `nanosleep`
+again for what it had left, and a refused one again for all of it. Under a stream of `EINTR` the pause never returned,
+the deadline was never checked again, and the drop, with the coordinator's shutdown behind it, waited without bound.
+The bound `FUA-D1-CONC-1` claimed held only for an uninterrupted thread.
+
+**The fix.**
+- `EndingRest` (`src/agent/proc.rs:3787`) is how a bounded ending pauses between polls:
+  - `Resuming` is `thread::sleep`, as before;
+  - `SingleAttempt` is `rest_once` (`:3799`): one `nanosleep` with a null remainder, which an interruption ends early
+    and nothing makes again, so the loop goes back to its deadline check.
+- Every `Reaper` carries its kind's rest (`rest: EndingRest`, `:1676`), fixed where it is forked: `fork_reaper` takes it.
+  - `spawn_reaper` forks host reapers `Resuming`.
+  - `arm_container_reaper` forks container reapers `SingleAttempt`.
+  - `abandon` and the bounded arms of `close_and_wait_reporting` (`UnacknowledgedCleanup`, `AbandonedHelper`,
+    `UnleasedExit`) pass `self.rest` to the waits. So a container reaper's exit wait after CANCEL, on both paths, and
+    the abandonment an arming failure takes both rest once.
+- The pre-existing helpers gained the parameter. Their pre-existing callers pass `Resuming`: the guards'
+  `end_unready_guard` sites, and host reapers through their field. So no host path's pause changed, and
+  `a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before` pins both kinds.
+
+**The sweep** (`measure/class-search-eintr-b612aa16.txt`).
+- **This PR's production waits.**
+  - READY (`await_ready`) and the CANCEL acknowledgement (`acknowledged`) read through `read_guard_ack`. It recomputes
+    the remaining time every turn and answers `poll`'s `EINTR` by going back to that check, so it already has the
+    single-attempt shape.
+  - The CANCEL frame's `write_raw` retries `EINTR`, but it writes five bytes into a pipe nothing else has written, so
+    it cannot block and no signal can interrupt it.
+  - The exit wait and the arming abandonment are fixed above.
+- **The reaper child's loops** (`reaper_loop`'s 10 ms poll, `read_bounded`, `reap_bounded`'s `raw_sleep_10ms`) are PR6's,
+  shared with host reapers' container half, and have the resuming shape. No signal can interrupt a syscall in the
+  reaper child: `install_reaper_dispositions` leaves no handler (every catchable signal ignored, the synchronous ones
+  and `SIGCHLD` default), so only a seccomp policy inherited from the forking thread could inject `EINTR` there. They
+  sit in the machinery already filed as `PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL`, and are not changed
+  here.
+- **This follow-up's test harness.** Every deadline loop it added now rests once:
+  - in `proc.rs`: `run_isolated`, `waited_within`, `wait_out_a_fail_closed_termination`, the stopped-reaper witness's
+    relay wait, the lease child's `not_held_within` and `child_that_outlives_its_kill_child`, through `rest_once`;
+  - in `engine/topology/create/tests.rs`: its two relay waits, through `workspace_manager::fixture::rest_within`, which
+    the coordinator's witnesses already used.
+
+  The witness's harness check holds `waited_within`'s rest.
+
+### 4.3 The looping signal (`MAINTAINING.md`, "When a pull request may be looping")
+
+This round found a defect in machinery an earlier round of this pull request added: the domination census, written
+in phase 2 and repaired in round 1. **The census was being repaired one spelling at a time.**
+- Round 1 found it evaded by a macro's `launch:` argument and taught the reader macro arguments.
+- Round 2 found it evaded by whitespace before a macro's `!`.
+
+A third repair of the reader would have been the next turn of the same loop: machinery invented to keep the previous
+round's machinery safe, which a reading of text cannot finish. This round makes the smaller change `MAINTAINING.md`
+asks for:
+- **It keeps what survived every pass**: the cover inside the launch funnel, the reaper and its disarm rule.
+- **It moves the guarantee from text to types.** A start primitive without its proof is a compile error. Names are
+  resolved after macros expand, so no spelling reaches a primitive without a value only `Reaping::cover` can mint.
+- **It demotes the census to a lexical backstop.** The census is kept, and says it is not a proof.
+
+What holds the convergence is the compiler, witnessed by probes that each fail to build:
+- the reviewer's mutation (`E0308`, `E0061`);
+- the same mutation with forged proofs (`E0451`);
+- with the test-only mint (`E0599` in production);
+- a runtime start with no proof where clippy allows the call (`E0308`);
+- the proof named outside the tree (`E0603`);
+- a consumed proof used again (`E0382`);
+- a proof made to outlive its runner (a lifetime error).
+
+`FUA-I2-EINTR` is not of that kind. It is a defect in this pull request's own bounded wait, repaired at its cause and
+witnessed on both paths.
+
+### 4.4 How the mutations were run, gates and platforms
+
+**The campaign** (`tools/campaign-r2.py` through `tools/mutate.py`).
+- Each mutation is a scratch copy of the campaign commit `b612aa16`, by `git archive` (the worktree is not read), with
+  an exact single-occurrence substitution, built from itself. Every log's `Compiling` or `Checking` line names its own
+  copy.
+- Each copy differs from `b612aa16` only in its mutated file (`mutation/copies-vs-b612aa16.txt`).
+- Test mutations run `tools/round2-tests.txt`: round 1's 25 tests and this round's three. The unmutated control passed
+  all 28.
+- Compiler probes run twice: clippy on the production library, and a test build with no run.
+- `mutation/TABLE-r2.md` tabulates `mutation/<name>/{mutation.diff,test.log,summary.txt}`.
+
+| id | the mutation | witness for | result |
+|---|---|---|---|
+| `r2-control` | none | the set at the campaign commit | 28 green |
+| `r2-p1` | the reviewer's mutation verbatim | `FUA-I2-MACRO-WS` | production and test builds: `error[E0308]` and `error[E0061]` |
+| `r2-p2` | the reviewer's macro handed forged proofs (`CoveredCreate { spec: … }`) | the proofs' private fields | both builds: `error[E0451]` field `spec` / `name` is private |
+| `r2-p3` | the reviewer's macro handed `without_a_reaper` proofs | the test-only mint | production: `error[E0599]`; test build: compiles (see `r2-c4`) |
+| `r2-p4` | `runtime.start("probe")` in `engine/resume.rs`, which allows `disallowed_methods` (round 1's `r1-c8`) | the trait's proof | both builds: `error[E0308]` |
+| `r2-p5` | `engine/topology/preflight.rs` names `crate::runner::container::exec::CoveredCreate` | nameable only in the tree | both builds: `error[E0603]` struct import is private |
+| `r2-p6` | `launch` passes `to_create` to a second create | consumed by the call | both builds: `error[E0382]` use of moved value |
+| `r2-p7` | a method returning a cover's `CoveredStart<'static>` | bound to the runner | both builds: `lifetime may not live long enough` |
+| `r2-c1` | a second mint, inside `cover` | census: constructions | red: the census, "`CoveredCreate {…}` is built only by the cover …, and exec.rs builds it 2 time(s)" |
+| `r2-c2` | a child module inside `cover` minting with `Self { spec }` | census: no module in `cover` | red: the census, "the module that mints the proofs declares no module of its own in production" |
+| `r2-c3` | a production fn in `exec.rs` naming `without_a_reaper` | census: the test-only mint | red: the census, naming `mint_for_a_test` |
+| `r2-c4` | `r2-p3` in a test build | census: the test-only mint | red: the census, naming `delta_uncovered` twice |
+| `r2-b1` | `start_container` without its intent check of the proof's name | the start binding | red: `a_start_cover_starts_only_the_container_it_was_minted_for` (the start was attempted) |
+| `r2-e1` | the single-attempt arm back to `thread::sleep` | `FUA-I2-EINTR` | red: the witness, both paths `status None` after "the reaper is dropped" |
+| `r2-e2` | `rest_once` resumes an interrupted rest with its remainder | the single attempt | red: the witness, both paths `status None` |
+| `r2-e3` | `arm_container_reaper` forks `Resuming` | the container reaper's rest | red: the white-box test, `(Some(Resuming), Resuming)`; the witness alone passes it |
+| `r2-e4` | `spawn_reaper` forks `SingleAttempt` | host reapers unchanged | red: the white-box test, `(Some(SingleAttempt), SingleAttempt)` |
+| `r2-e5` | `waited_within` back to `thread::sleep` | the harness sweep | red: the witness, both paths: the drop returned after 2000 ms, the harness's wait never came back |
+
+Each test mutation turned red exactly the one test its row names, the other 27 green.
+
+**Round 1's census mutations against the new types**, measured as test builds of `b612aa16`
+(`tools/r1-census-at-r2.py`, `mutation/r1-at-b612aa16-*`):
+- **Six no longer compile.**
+  - `r1-c2` (a second production start), `r1-c6` (a function value of `start_container`) and `r1-c10` (a macro
+    argument naming a funnel) fail with `error[E0061]`.
+  - `r1-c8` and `r1-c11` (the runtime's `start` where clippy allows it, plain and through a macro) fail with
+    `error[E0308]`.
+  - `r1-c4` (a `Covered` built outside `cover`) fails with `error[E0425]` and `error[E0422]`, because `Covered` is no
+    longer in scope there.
+- **Four still build, and only in test builds.**
+  - `r1-c3`, `r1-c5` and `r1-c9` name the test-only free `launch`; round 1's `r1-p1` to `r1-p3` showed a production
+    build refusing each.
+  - `r1-c7` re-exports a funnel without calling it.
+  - The census turns red on each of the four, as in round 1 (`mutation/r1-at-b612aa16-{c3,c5,c7,c9}-test/`).
+
+**Gates and CI.** The ten gates run at the pushed head, in the foreground, cargo through `upstroke-build` on this
+session's private base. They and CI's legs, read by the newest run per workflow, are in the pull request body and
+`~/orch-pr11/handovers/pr11_fua_r2.md`. This section is committed before they run, so it names no figure of theirs.
+Before it:
+- the whole suite at `b612aa16` passed 3,028 library tests (0 failed, 122 ignored) and 10 binary tests
+  (`dev/test-full-2-b612aa16.log`);
+- against round 1's head the suite gained the three tests above and one ignored child, and lost none
+  (`measure/new-tests-b612aa16-vs-8d0d8b86.txt`);
+- the module diff proof passes: the 26 frozen production files and the eight frozen test children are identical to
+  the merge base (`measure/module-diff-proof-2aa86514.txt`).
+
+**Platforms.**
+- **Linux** (this box) runs everything.
+- **macOS** runs the census, the start-binding test and the white-box rest test, all `cfg(unix)`, but not the EINTR
+  witness, which uses seccomp and is Linux-only. There the single-attempt rest runs unwitnessed.
+- **Windows** gains no test. The proofs and the rest compile there:
+  - `clippy --target x86_64-pc-windows-msvc --all-targets` and `cargo +1.85.0 check --target x86_64-pc-windows-msvc
+    --locked --all-targets` are clean (`gates/xtarget-2aa86514/`, and `dev/clippy-8-windows.log` after `6f5a0e40`);
+  - so is `clippy --target aarch64-apple-darwin --all-targets`.
+- CI speaks for macOS and Windows.
+
+**Not verified here:**
+- macOS and Windows behaviour (CI's);
+- an `EINTR` stream from real signals rather than a seccomp policy;
+- the reaper child's inherited resuming rests, which no signal can reach (§4.2).
+
+### 4.5 The sentences this round amends
+
+Each is marked in place with `FUA-I2-MACRO-WS` or `FUA-I2-EINTR`:
+- §0: this round's entry and the next step.
+- §1.2: the census enforced "what the type system cannot"; since this round the type system enforces it.
+- §1.3: "every wait in the container reaper's life has a deadline" held only if the pauses between its polls return.
+- §1.4, "Why the census and not visibility": the census is now a lexical backstop behind types, not the guard.
+- §1.9: the files this round changes.
+- §2.2, §2.4 and §3.1: pointers here.
