@@ -9211,7 +9211,8 @@ mod termination {
         }
 
         #[test]
-        fn a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before() {
+        #[ignore = "isolated caller of a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before"]
+        fn container_and_host_reaper_rests_child() {
             let container = arm_container_reaper(
                 ProcessSite::Terminate,
                 &a_container_scope(std::path::Path::new("/usr/bin/true")),
@@ -9221,12 +9222,35 @@ mod termination {
             drop(container);
             let host = spawn_reaper(&[]).expect("spawn a host reaper");
             let host_rest = host.rest;
+            report(&format!(
+                "rests: container {container_rest:?}, host {host_rest:?}"
+            ));
             host.cancel();
-            assert_eq!(
-                (container_rest, host_rest),
-                (Some(EndingRest::SingleAttempt), EndingRest::Resuming),
+            report("the host reaper is cancelled");
+        }
+
+        #[test]
+        fn a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before() {
+            let ended = run_isolated(
+                "container_and_host_reaper_rests_child",
+                &[],
+                CONTAINER_REAPER_CHILD_BOUND,
+            );
+            assert!(
+                ended.status.is_some_and(|status| status.success())
+                    && ended.stdout.contains("the host reaper is cancelled"),
+                "the isolated caller armed and dropped a container reaper, and spawned and \
+                 cancelled a host reaper: {ended}"
+            );
+            assert!(
+                ended.stdout.contains(&format!(
+                    "rests: container {:?}, host {:?}",
+                    Some(EndingRest::SingleAttempt),
+                    EndingRest::Resuming
+                )),
                 "a container reaper's bounded endings rest once between their polls, so an \
-                 interrupted rest goes back to the deadline; a host reaper's rest as they did"
+                 interrupted rest goes back to the deadline; a host reaper's rest as they did: \
+                 {ended}"
             );
         }
 
