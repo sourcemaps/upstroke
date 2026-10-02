@@ -154,7 +154,7 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 `upstroke resume <run-id>` replays, verifies the run branch HEAD matches the last committed event (mismatch = refuse with an explanation), re-probes agents, re-snapshots capacity, and continues — parked questions intact. Git and the log cannot be updated atomically, so schema 3 makes the successful settlement itself carry the exact prepared identity: captured full run-branch ref, parent and tree feed hook-free `commit-tree`; the resulting commit, message, and deterministic private pin are verified before `attempt_finished` is appended. Publication compare-and-swaps the **recorded full branch ref**, never mutable symbolic `HEAD`, from the recorded parent to that commit, removes the pin with a non-dereferencing compare-and-swap, and then appends `task_committed`. Resume accepts only the resulting exact crash prefixes: parent plus matching pin means publish that object; commit plus matching pin means remove the pin; commit with the pin already gone means append the missing `task_committed`. A pin without a successful settlement is orphan residue and is removed without dereferencing symbolic refs. Any substituted or symbolic pin, third branch SHA, changed branch identity, or mismatched commit object refuses while preserving evidence. Schema-1/2 success has no prepared identity, so it is **never** adopted from parent plus subject alone; even a matching message can name an arbitrary tree. It also refuses when the frozen plan's digest moved, when the recorded chain structure no longer matches (a rung is an index into that chain), when the branch is gone, and when another process owns either the run or its physical worktree.
 
 **A legacy attempt the worktree registry refused.** *PROPOSED — follow-up D's design
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 and §3 amend it), pending the owner's decision to unfreeze the PR5-frozen
+(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it), pending the owner's decision to unfreeze the PR5-frozen
 legacy modules it changes; nothing in this paragraph is in force until it is implemented, after the registry
 access it calls, follow-up B's (pull request #329), has landed.* A schema 1–3 run shares its repository's
 worktree registry with every other checkout's runs. Its three Git children that
@@ -162,8 +162,8 @@ enumerate the registry — a gate or review snapshot's `git worktree add`, a sna
 `git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry
 access: a failed attempt is attempted again until the access's deadline, and what outlasts it refuses as a
 registry refusal, never as Git state. After a failed snapshot add, an empty destination the engine can remove
-was never taken over, and the add is attempted again; anything else at the destination refuses as a registry
-refusal, so the add's own failure never comes back as Git state. When a snapshot's registry access
+holds nothing to lose, so it is made again and the add is attempted again; anything else at the destination refuses
+as a registry refusal, so the add's own failure never comes back as Git state. When a snapshot's registry access
 refuses after the worker's output was captured, the coordinator does not discard the checkout: it pins the
 captured candidate — the branch, parent and tree captured before the refusal, never the index as it stands
 then — as a commit at the attempt's prepared pin followed by `-kept`, and its refusal names that pin. Of the
