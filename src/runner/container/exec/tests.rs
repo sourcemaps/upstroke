@@ -5506,18 +5506,6 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
     found.sort();
     let mut expected = vec![
         (
-            "src/runner/container.rs".to_owned(),
-            "create_container",
-            Naming::Call,
-            Some("launch".to_owned()),
-        ),
-        (
-            "src/runner/container.rs".to_owned(),
-            "start_container",
-            Naming::Call,
-            Some("launch".to_owned()),
-        ),
-        (
             "src/runner/container/exec.rs".to_owned(),
             "create_container",
             Naming::Import,
@@ -5561,11 +5549,11 @@ fn every_container_start_in_production_is_reached_only_through_a_covered_launch(
          `start_container` — outside the two funnels that may: by a call, an import, an alias, a \
          function value, a re-export, a field or anywhere inside a macro's argument. Every \
          container must be started through `ContainerRunner::launch`, which only `contain` calls \
-         with the cover its reaper armed"
+         with the cover its reaper armed; the free `launch` is test-only, `mod uncovered`"
     );
     assert_eq!(
         naming_start_container,
-        ["src/runner/container.rs", "src/runner/container/exec.rs"]
+        ["src/runner/container/exec.rs"]
             .into_iter()
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()

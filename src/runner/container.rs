@@ -442,73 +442,6 @@ pub struct Launched {
     pub reported_image_id: String,
 }
 
-pub fn launch(
-    hooks: &mut dyn ContainerHooks,
-    runtime: &dyn ContainerRuntime,
-    view: &dyn GitView,
-    plan: &LaunchPlan,
-) -> Result<Launched, UpstrokeError> {
-    let written = write_intent(
-        hooks,
-        ContainerSite::WriteIntent,
-        &plan.private_root,
-        &plan.name,
-        &plan.intent,
-    )?;
-    let intent_path = written.path().to_path_buf();
-    let view_path = mount_git_view(hooks, ContainerSite::MountGitView, view, &plan.view)?;
-    let created = create_container(hooks, ContainerSite::Create, runtime, &written, &plan.spec)?;
-    if created.reported_image_id != plan.spec.image_id {
-        let residue = cancel_created(
-            hooks,
-            runtime,
-            view,
-            &plan.private_root,
-            &plan.name,
-            Some(&view_path),
-        );
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "the container runtime created `{}` and reports image id `{}`, and the run's \
-                 recorded image id is `{}`; a created container whose reported image id \
-                 differs from the record is refused before start (INV-23){}",
-                plan.name,
-                created.reported_image_id,
-                plan.spec.image_id,
-                render_residue(&residue)
-            ),
-        });
-    }
-    start_container(hooks, ContainerSite::Start, runtime, &written)
-        .map_err(|failure| failure.error)?;
-    Ok(Launched {
-        name: plan.name.clone(),
-        intent_path,
-        view_path,
-        reported_image_id: created.reported_image_id,
-    })
-}
-
-fn cancel_created(
-    hooks: &mut dyn ContainerHooks,
-    runtime: &dyn ContainerRuntime,
-    view: &dyn GitView,
-    private_root: &Path,
-    name: &ContainerName,
-    view_path: Option<&Path>,
-) -> Vec<String> {
-    cancel_reached(
-        hooks,
-        runtime,
-        view,
-        private_root,
-        name,
-        ContainerToRelease::MayBeRunning,
-        view_path,
-    )
-    .messages
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerToRelease {
     Absent,
@@ -607,18 +540,6 @@ fn removal_in_progress_establishes_nothing(step: &str, name: &ContainerName) -> 
     format!(
         "{step} of `{name}` was answered with another reclaimer's removal already in progress; the \
          daemon sets that flag before it kills, so this establishes nothing about the process"
-    )
-}
-
-fn render_residue(residue: &[String]) -> String {
-    if residue.is_empty() {
-        return String::new();
-    }
-    format!(
-        ". The cancel could not release everything the refused launch created, \
-         so this run's R19/R26 ledgers do not balance and a census will find the \
-         residue: {}",
-        residue.join("; ")
     )
 }
 
@@ -1472,6 +1393,94 @@ fn mount_argument(mount: &runtime::Mount) -> String {
     }
     parts.join(",")
 }
+
+#[cfg(test)]
+mod uncovered {
+    use super::*;
+
+    pub fn launch(
+        hooks: &mut dyn ContainerHooks,
+        runtime: &dyn ContainerRuntime,
+        view: &dyn GitView,
+        plan: &LaunchPlan,
+    ) -> Result<Launched, UpstrokeError> {
+        let written = write_intent(
+            hooks,
+            ContainerSite::WriteIntent,
+            &plan.private_root,
+            &plan.name,
+            &plan.intent,
+        )?;
+        let intent_path = written.path().to_path_buf();
+        let view_path = mount_git_view(hooks, ContainerSite::MountGitView, view, &plan.view)?;
+        let created =
+            create_container(hooks, ContainerSite::Create, runtime, &written, &plan.spec)?;
+        if created.reported_image_id != plan.spec.image_id {
+            let residue = cancel_created(
+                hooks,
+                runtime,
+                view,
+                &plan.private_root,
+                &plan.name,
+                Some(&view_path),
+            );
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the container runtime created `{}` and reports image id `{}`, and the run's \
+                     recorded image id is `{}`; a created container whose reported image id \
+                     differs from the record is refused before start (INV-23){}",
+                    plan.name,
+                    created.reported_image_id,
+                    plan.spec.image_id,
+                    render_residue(&residue)
+                ),
+            });
+        }
+        start_container(hooks, ContainerSite::Start, runtime, &written)
+            .map_err(|failure| failure.error)?;
+        Ok(Launched {
+            name: plan.name.clone(),
+            intent_path,
+            view_path,
+            reported_image_id: created.reported_image_id,
+        })
+    }
+
+    fn cancel_created(
+        hooks: &mut dyn ContainerHooks,
+        runtime: &dyn ContainerRuntime,
+        view: &dyn GitView,
+        private_root: &Path,
+        name: &ContainerName,
+        view_path: Option<&Path>,
+    ) -> Vec<String> {
+        cancel_reached(
+            hooks,
+            runtime,
+            view,
+            private_root,
+            name,
+            ContainerToRelease::MayBeRunning,
+            view_path,
+        )
+        .messages
+    }
+
+    fn render_residue(residue: &[String]) -> String {
+        if residue.is_empty() {
+            return String::new();
+        }
+        format!(
+            ". The cancel could not release everything the refused launch created, \
+             so this run's R19/R26 ledgers do not balance and a census will find the \
+             residue: {}",
+            residue.join("; ")
+        )
+    }
+}
+
+#[cfg(test)]
+pub use uncovered::launch;
 
 #[cfg(test)]
 mod fake;

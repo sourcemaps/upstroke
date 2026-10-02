@@ -1962,9 +1962,11 @@ closes the gap the design review found: `use super::launch as start_uncovered;` 
 What no reading of source text can see: an identifier a procedural macro builds from pieces, a
 path inside a string an attribute hands a derive (`#[serde(with = "…")]`; strings are blanked),
 and a file `include!`d from outside `src/**/*.rs`. That is why the compiler's refusal is the
-stronger guard where it can be had: `create_container` and `start_container` are
-`pub(in crate::runner::container)`, so outside the container module tree no spelling of either
-compiles at all.
+stronger guard where it can be had: the free `launch` is test-only (`mod uncovered` in
+`container.rs`), so no production build can name it at all, and `create_container` and
+`start_container` are `pub(in crate::runner::container)`, so outside the container module tree
+no spelling of either compiles. The census is the guard where the compiler cannot be: inside the
+module tree, and in test builds, where the free `launch` exists.
 
 ## `fn enclosing_fn(code: &str, at: usize) -> Option<String> {`
 
@@ -1994,11 +1996,13 @@ The domination census (§1.4 of the follow-up's record), over every production r
 does), five checks:
 
 1. the namings of `create_container` and `start_container` are exactly `exec.rs`'s import and
-   its two calls inside `ContainerRunner::launch`, and `container.rs`'s two calls inside the
-   free `launch`;
+   its two calls inside `ContainerRunner::launch` — `container.rs`'s two calls inside the free
+   `launch` left the production region when it became test-only (`FUA-I1-MACRO`);
 2. the free `launch` has no production naming at all but the two `launch:` fields of `exec.rs`'s
    `InvocationPlan`, its declaration and its initializer in `plan`, pinned as fields; any
-   occurrence inside a macro's argument is a naming, whatever follows it;
+   occurrence inside a macro's argument is a naming, whatever follows it. The free `launch`
+   itself is test-only now, so in a production build a naming does not compile; this check is
+   the guard in test builds, where it exists;
 3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
    stated in its header or inherited from a parent that states it, twenty-seven modules today —
    where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call, path,
@@ -2010,8 +2014,9 @@ does), five checks:
    `create` and `start`;
 4. in `exec.rs`, `fn launch(`'s signature names `Covered`, `self.launch(` occurs once, in
    `contain`, after `contain`'s one `.cover(`, and `Covered {` is constructed once, in `cover`;
-5. the control: the regions naming `start_container` are exactly those two files, and the walk
-   read more than 40 files and 750,000 non-whitespace bytes.
+5. the control: the only region naming `start_container` is `exec.rs` (`container.rs` named it
+   only inside the free `launch`), and the walk read more than 40 files and 750,000
+   non-whitespace bytes.
 
 In every other production module the lint is denied or forbidden outside tests, so a path to the
 primitives there — a call or a function value — is a clippy error, measured in a forbidding module

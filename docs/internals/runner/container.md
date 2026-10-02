@@ -462,10 +462,10 @@ record will not serialize.
 `Container.Create` (R26) — create the container **from an image id**.
 
 **Nameable only inside the container module tree** (`FUA-I1-MACRO`), as is `start_container`.
-Their production callers are this module's free `launch` and `exec.rs`'s
-`ContainerRunner::launch`, the covered one, and every other caller is a test of this tree; a
-`pub` funnel let any module of the crate start a container no reaper covers, guarded only by
-the domination census's reading of source text, which a macro argument evaded. With this
+Their one production caller is `exec.rs`'s `ContainerRunner::launch`, the covered one; the free
+`launch` that also calls them is test-only (`mod uncovered`), and every other caller is a test of
+this tree. A `pub` funnel let any module of the crate start a container no reaper covers, guarded
+only by the domination census's reading of source text, which a macro argument evaded. With this
 visibility the compiler refuses a naming from anywhere else however it is spelled — an alias, a
 re-export, a function value, a macro's expansion — and the census
 (`every_container_start_in_production_is_reached_only_through_a_covered_launch`) is the guard
@@ -649,9 +649,26 @@ A container that is running, and what it took to get there.
 
 The id the runtime reported, already verified equal to the record.
 
-## `pub fn launch(`
+## `mod uncovered {`
 
-The ordering `side_effect_vs_event_ordering` states, in one place.
+The free `launch` and the two helpers only it uses (`cancel_created`, `render_residue`), compiled
+in tests alone since PR11 follow-up A's implementation review (`FUA-I1-MACRO`). The free `launch`
+starts a container with no reaper covering it, and no production path called it: every production
+container start is `ContainerRunner::launch`'s, which `contain` calls only after its cover armed
+the runner's reaper. While it was `pub` in production, any module could reach it — the review's
+`uncovered_delegate!(launch: hooks, …)` in `exec.rs` did, through a macro the domination census
+could not read — and nothing but that census stood in the way. Out of the production build, no
+spelling of it compiles there at all; the census keeps reading test builds, where it exists.
+`#[cfg(test)] pub use uncovered::launch;` keeps the path `crate::runner::container::launch` that
+the tests name — the frozen `engine/topology/recover/tests.rs` among them — so none of them
+changed. The module sits before `mod fake;`, so the file's first test-only cut is a module, as
+`effects::production_region` requires; its `funnel` row in `effects/wrappers.toml` went with it.
+
+## `mod uncovered` › `pub fn launch(`
+
+The ordering `side_effect_vs_event_ordering` states, in one place. Test-only (`mod uncovered`
+above): production's launch is `ContainerRunner::launch`, which keeps this order and adds the
+cover.
 
 > intent synced before docker create; container created from the recorded id
 > and verified before start; view mounted before start
@@ -711,7 +728,7 @@ released is named in the refusal rather than swallowed.
 [`UpstrokeError::Refused`] when the reported image id differs from the record,
 or whatever a step returns.
 
-## `fn cancel_created(`
+## `mod uncovered` › `fn cancel_created(`
 
 Release everything a refused launch created, **attempting every step even
 after one fails**, and answer what could not be released.
@@ -823,7 +840,7 @@ This is the fail-**closed** direction. Removing the record is the fail-open
 one, and it reads as the tidier cleanup right up until an operator has to
 find the directory by hand.
 
-## `fn render_residue(residue: &[String]) -> String {`
+## `mod uncovered` › `fn render_residue(residue: &[String]) -> String {`
 
 What a cancel could not release, appended to the refusal that caused it.
 

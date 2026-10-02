@@ -949,7 +949,7 @@ funnel = [
     # published half never landed. The frozen `ContainerSite` has eight
     # variants and this is that same site, not a ninth.
     "remove_staged_intent",
-    "launch",
+    # `launch` is test-only since PR11 follow-up A (`FUA-I1-MACRO`): `#[cfg(test)] mod uncovered`.
     "release",
     # `release` keeping whether the container itself was stopped and removed,
     # for the runner's process-fate classification (the reviews of `916852c9`,
