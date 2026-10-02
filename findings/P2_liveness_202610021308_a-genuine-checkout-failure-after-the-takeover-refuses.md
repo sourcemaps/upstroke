@@ -8,7 +8,7 @@ reviewed_sha: 4a126215be58fea36271db3423180d38c1bf3183
 location: src/workspace_manager.rs:2649
 provenance: introduced_by_feature
 first_bad: PR #329's design round 8 (its record §7.3, R14), which answers an add failure after Git may have taken the destination over with a refusal; prior ID FUB-D5-GENUINE (PR #329's design review round 5, at the reviewed SHA above), whose consequence this is, reopened deliberately
-guard: the PR11 orchestrator's one consolidated owner question after design reviews B8 (#329), C4 (#330) and D3 (#331), where round 8's narrowing is classified; it becomes accepted-risk if the owner keeps PR #329's record §7.3, and otherwise the closure needs machinery that tells a genuine checkout failure from a prune's deletion
+guard: before G6, the owner's disposition, asked in the PR11 orchestrator's one consolidated owner question after design reviews B9 (#329), C5 (#330) and D3 (#331), where round 8's narrowing is classified; it becomes accepted-risk if the owner keeps PR #329's record §7.3 and the design is amended to match, and otherwise the closure needs machinery that tells a genuine checkout failure from a prune's deletion
 ---
 
 ## Failure sequence
@@ -47,7 +47,22 @@ Round 7's attempt to tell the two apart, a registry-free checkout probe, carried
 path. Its reproduction, FUB-D5-GENUINE's tree, now ends in one attempt as a resumable refusal. That is why the owner
 classifies it, with round 8's narrowing, rather than the author.
 
-**G6.** It does not block G6. No wrong outcome is recorded under Q6. The run stops resumably and names the cause.
+**G6: it needs the owner's disposition before G6** (PR #329's record §8.8, answering design review round 8's
+FUB-D8-R14G6). No wrong candidate disposition is recorded, which is why it stays P2. But it narrows what the living
+design specifies, so its absence of a wrong outcome does not establish Q6's conformance:
+- `design/26_design_merge_queue_protocol.md:617-622`: a later pass's snapshot failure on an integration "settles the
+  sequence unavailable rather than ending the command";
+- `design/26_design_merge_queue_protocol.md:507-508`: "at `max_defers = 0` every integration outage parks rather
+  than defers".
+
+Under PR #329's record §7.3 a genuine snapshot failure after the takeover ends the command instead
+(`src/engine/topology/run.rs:289`), and every resume meets it again without reaching `max_defers` or parking the
+candidate. The frozen `infrastructure_failure_defers_then_parks_at_max_defers`
+(`src/engine/topology/integrate/tests.rs:1171`) proves defer-then-park for an outcome delivered as unavailable, so it
+keeps passing without proving that a genuine snapshot failure still reaches that outcome.
+
+The owner either accepts the narrowing, and `design/26` is amended in the change that implements it, or requires a
+closure that keeps the specified outcome for a genuine failure.
 
 **To close it,** something must tell a checkout that cannot be made from a deleted registration without reading the
 registry. Round 7's probe did that with a second checkout, and failed (FUB-D7-SPLITINDEX, FUB-D7-CONFIG). Any such

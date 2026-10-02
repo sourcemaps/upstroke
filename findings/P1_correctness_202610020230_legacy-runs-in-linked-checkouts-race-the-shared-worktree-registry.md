@@ -121,8 +121,8 @@ calls PR #329's `tolerant_registry_access`, whose contract is PR #329's record ย
   - **What round 8 corrects.** The round-5 and round-6 veto (the destination unchanged and empty) read a prune's failure
     after the takeover as the add's own, and a takeover whose junk removal failed as untouched (#329's FUB-D6-PRUNE and
     FUB-D6-INODE).
-  - **What D keeps.** A deletion that lands after the add returned is
-    `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`'s, which D refers to as R-D9.
+  - **What D keeps.** A deletion that leaves the add Ok, landing before the add returns or after (#329's record
+    ยง8.3), is `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`'s, which D refers to as R-D9.
 - The removal's success decision is inside its attempt, so a removal a torn sibling fails is attempted again; an
   already-unregistered destination still counts as reclaimed.
 - One private helper resolves the canonical common git dir as `recorded_objects_scope` does; nothing else in the

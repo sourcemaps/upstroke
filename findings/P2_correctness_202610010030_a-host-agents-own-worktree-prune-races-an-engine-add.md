@@ -80,4 +80,12 @@ grades either face.
 
 **What this file keeps** is a host agent's Git reaching the shared registry at all, and its remedies under its PR12
 guard: refuse `max_parallel > 1` with the host runner, or give the agent a Git view that cannot reach the registry, as
-the container runner does. Either one also removes this starter from the P1.
+the container runner does.
+
+**Corrected 2026-10-02, PR #329's design round 9** (its record §8.7, answering design review round 8's
+FUB-D8-HOSTWIDTH). Round 8 said either remedy also removes this starter from the P1. Only the second does:
+- refusing `max_parallel > 1` removes the overlap inside one run. Two width-one runs in two linked checkouts of one
+  repository are each admitted by their own checkout's lock, so one run's host agent can still prune while the other
+  run adds, in either face of the P1;
+- a Git view that cannot reach the registry, the container runner's or an equivalent on the host, removes the agent as
+  a starter.

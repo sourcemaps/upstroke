@@ -63,8 +63,8 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
-**A registry another process is writing.** *PROPOSED — the eighth design round of
-`reviews/2026-10-01-pr11-follow-up-b-record.md` (§7, over §6 and §5), narrowed to the topology's registry race;
+**A registry another process is writing.** *PROPOSED — the ninth design round of
+`reviews/2026-10-01-pr11-follow-up-b-record.md` (§8, over §7, §6 and §5), narrowed to the topology's registry race;
 nothing in this paragraph is in force until it is implemented. It needs no packet change. The frozen
 legacy engine's accesses are a separate change, follow-up D, and the owner's decision.*
 
@@ -96,8 +96,9 @@ one attempt: a list together with the parse of its output, an add, or one of the
   The access refuses at once, resumably, as a registry refusal, and never returns that failure as Git
   state. So a verification whose snapshot cannot be made, for a path, a filter or a missing object,
   stops resumably and spends no deferral, and the run stops at it again until the cause is repaired.
-- A destination that cannot be made, or that was not empty when the access began, is the add's own
-  failure, returned as Git state as before.
+- A destination that cannot be made, or that is not an empty directory when the access begins, is the
+  add's own failure. It is returned as Git state at once and no Git command runs, so the registry's
+  state cannot reach that answer.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
   left torn, and any other fault of the store, such as a store nothing can write or a registration
@@ -128,10 +129,11 @@ what a coordinator killed after making an add's destination leaves.
 - A prune that no engine process starts deletes an add's registration in one of two ways. Such a prune
   is a host agent's, the user's or an IDE's, or Git's automatic maintenance after a commit, a fetch or a
   merge in any checkout.
-  - During the add, after Git took its destination over: the access refuses that, resumably.
-  - After the add returned: no access can see that. The checkout is left with no registration, every
-    Git command in it fails, and a verification, a gate or a recovery there can reach a durable
-    outcome that is wrong for valid work.
+  - So that the add fails, after Git took its destination over: the access refuses that, resumably.
+  - Without failing the add: once Git has written the checkout, the add returns Ok whether the
+    deletion lands before it returns or after, and no access can see that. The checkout is left with
+    no registration, or part of one, its Git commands fail or misread it, and a verification, a gate,
+    a review or a recovery there can reach a durable outcome that is wrong for valid work.
 
   That is `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, a separate finding that
   blocks G6 until it is closed or the owner rules on its scope.
