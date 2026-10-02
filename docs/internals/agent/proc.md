@@ -2989,7 +2989,10 @@ Runs one ignored child test of this module in a process of its own (`--exact`, o
 thread) under a deadline, its stdout and stderr in files of a scratch tree, and kills its
 process group at the deadline so a mutation that wedges the child fails the test instead of
 the run. The container reaper's isolated children use it: each needs a process whose signal
-monitor, cleanup scope or reaper state no other test shares.
+monitor, cleanup scope or reaper state no other test shares. So does the rest-selection test's
+child, for another reason (`FUA-I3-HOSTCANCEL`): it cancels a real host reaper, and the wait
+after a host reaper's acknowledgement is unbounded by design, so only a process this harness can
+kill may make it.
 
 The kill is not the end of the watchdog: the child is still collected by `try_wait` polls,
 and those stop at `ISOLATED_CHILD_COLLECTION_BOUND` after the kill (`FUA-I1-WATCHDOG`). Until
@@ -3119,13 +3122,31 @@ mutations: the single-attempt arm back to `thread::sleep` (`r2-e1`), `rest_once`
 interrupted rest with its remainder (`r2-e2`), and `waited_within` back to `thread::sleep`
 (`r2-e5`), each red on both paths.
 
+## `mod tests` › `fn container_and_host_reaper_rests_child() {`
+
+The isolated caller of the test below. It arms a container reaper and drops it, spawns a host
+reaper, reports both reapers' `rest`, cancels the host reaper, and reports that the cancel
+returned. The rests are reported before the cancel, so a run whose cancel never returns still
+names them.
+
 ## `mod tests` › `fn a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before() {`
 
 The witness above builds its reaper by hand, so it cannot see how `arm_container_reaper` forks
-one: this test arms a real container reaper and spawns a real host reaper and reads each one's
-`rest` — `SingleAttempt` and `Resuming`. Red with the container reaper forked `Resuming`
-(`r2-e3`), which the witness alone passes, and with host reapers forked `SingleAttempt`
-(`r2-e4`), which would change every host ending's pause.
+one: this test's isolated child arms a real container reaper and spawns a real host reaper and
+reports each one's `rest` — `SingleAttempt` and `Resuming` — and this test requires both. Red
+with the container reaper forked `Resuming` (`r2-e3`), which the witness alone passes, and with
+host reapers forked `SingleAttempt` (`r2-e4`), which would change every host ending's pause.
+
+The reapers are forked and ended in the child, under `run_isolated` and
+`CONTAINER_REAPER_CHILD_BOUND`, never in this process (`FUA-I3-HOSTCANCEL`, PR #328's
+implementation review round 3). The host reaper is ended by `cancel`, whose wait after the
+acknowledgement is `ReaperEnding::AcknowledgedExit`: unbounded by design, because that reaper's
+exit is what releases the cleanup lease. Until round 3 the test made that wait itself, so a host
+reaper stopped between its acknowledgement and its exit held the test, and the suite with it, in
+`wait4(reaper, …, 0)` for as long as the reaper stayed stopped: held at `PTRACE_EVENT_EXIT` at
+`71e55dfc`, the test ended only when the reaper was released. In the child the same stop holds
+only the child, which the watchdog kills at its deadline. This test then fails with the rests the
+child reported and without its report that the cancel returned.
 
 ## `mod tests` › `const CHILD_THAT_OUTLIVES_ITS_KILL_LIFE: Duration = Duration::from_secs(60);`
 
