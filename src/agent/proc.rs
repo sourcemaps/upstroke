@@ -1673,6 +1673,7 @@ mod termination {
         _command_keepalive_fd: libc::c_int,
         pid: libc::pid_t,
         identity: libc::c_int,
+        rest: EndingRest,
     }
 
     #[derive(Clone, Copy)]
@@ -2395,7 +2396,7 @@ mod termination {
         fn abandon(self) -> HelperEnd {
             #[cfg(target_os = "linux")]
             if self.identity >= 0 {
-                let end = end_helper_through_identity(self.identity);
+                let end = end_helper_through_identity(self.identity, self.rest);
                 close_fd(self.command_fd);
                 close_fd(self.ack_fd);
                 close_fd(self._command_keepalive_fd);
@@ -2433,12 +2434,13 @@ mod termination {
                 let answered = match ending {
                     ReaperEnding::AcknowledgedExit => wait_through_identity(self.identity),
                     ReaperEnding::UnacknowledgedCleanup | ReaperEnding::AbandonedHelper => {
-                        wait_for_an_ended_helper_through_identity(self.identity)
+                        wait_for_an_ended_helper_through_identity(self.identity, self.rest)
                     }
                     ReaperEnding::UnleasedExit => {
-                        let answered = wait_for_an_ended_helper_through_identity(self.identity);
+                        let answered =
+                            wait_for_an_ended_helper_through_identity(self.identity, self.rest);
                         if answered.0 == STILL_THERE_AT_THE_BUDGET {
-                            let end = end_helper_through_identity(self.identity);
+                            let end = end_helper_through_identity(self.identity, self.rest);
                             return (end.waited, end.wait_errno, end.status.unwrap_or(0));
                         }
                         answered
@@ -2473,6 +2475,7 @@ mod termination {
                         self.pid,
                         EndingWait::CollectingStatus,
                         EndingRetry::WhileInterrupted,
+                        self.rest,
                     )
                 }
                 ReaperEnding::UnleasedExit => {
@@ -2480,6 +2483,7 @@ mod termination {
                         self.pid,
                         EndingWait::CollectingStatus,
                         EndingRetry::WhileInterrupted,
+                        self.rest,
                     );
                     if answered.0 != STILL_THERE_AT_THE_BUDGET {
                         return answered;
@@ -2492,6 +2496,7 @@ mod termination {
                         self.pid,
                         EndingWait::CollectingStatus,
                         EndingRetry::WhileInterrupted,
+                        self.rest,
                     )
                 }
             }
@@ -2553,12 +2558,17 @@ mod termination {
                 leases.push(path.clone());
             }
         }
-        fork_reaper(leases, container_scope_for_a_new_reaper())
+        fork_reaper(
+            leases,
+            container_scope_for_a_new_reaper(),
+            EndingRest::Resuming,
+        )
     }
 
     fn fork_reaper(
         leases: Vec<PathBuf>,
         containers: Option<ReaperContainers>,
+        rest: EndingRest,
     ) -> Result<Reaper, String> {
         use std::os::unix::ffi::OsStrExt;
 
@@ -2665,6 +2675,7 @@ mod termination {
             _command_keepalive_fd: command[0],
             pid,
             identity,
+            rest,
         };
         let ready_wait_began = std::time::Instant::now();
         let wait = await_ready(ack[0], REAPER_READY, HELPER_READY_BUDGET);
@@ -3168,7 +3179,7 @@ mod termination {
     }
 
     #[cfg(target_os = "linux")]
-    fn end_helper_through_identity(identity: libc::c_int) -> HelperEnd {
+    fn end_helper_through_identity(identity: libc::c_int, rest: EndingRest) -> HelperEnd {
         let flags: libc::c_long = 0;
         // SAFETY: `pidfd_send_signal` takes the descriptor, the signal and the
         // flags by value; the null `siginfo_t` pointer is the form the kernel
@@ -3188,7 +3199,7 @@ mod termination {
         // `wait_through_identity` directly for the acknowledged exit, and does
         // not come through here.
         let (waited, wait_errno, status) = if sent == 0 {
-            wait_for_an_ended_helper_through_identity(identity)
+            wait_for_an_ended_helper_through_identity(identity, rest)
         } else {
             (-1, 0, 0)
         };
@@ -3772,6 +3783,29 @@ mod termination {
     /// each.
     const INTERRUPTED_WAIT_ATTEMPTS: u32 = 1024;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EndingRest {
+        Resuming,
+        SingleAttempt,
+    }
+
+    fn rest_between_polls(rest: EndingRest) {
+        match rest {
+            EndingRest::Resuming => thread::sleep(HELPER_END_POLL_SLICE),
+            EndingRest::SingleAttempt => rest_once(HELPER_END_POLL_SLICE),
+        }
+    }
+
+    fn rest_once(span: Duration) {
+        let request = libc::timespec {
+            tv_sec: libc::time_t::try_from(span.as_secs()).unwrap_or(libc::time_t::MAX),
+            tv_nsec: libc::c_long::from(span.subsec_nanos()),
+        };
+        // SAFETY: `nanosleep` reads the one `timespec` it is handed, which lives
+        // for the call, and writes nothing: the remainder pointer is null.
+        let _ = unsafe { libc::nanosleep(&request, std::ptr::null_mut()) };
+    }
+
     impl EndingRetry {
         /// How many interrupted waits a site tolerates before it reports one.
         fn attempts(self) -> u32 {
@@ -3790,7 +3824,7 @@ mod termination {
     ) -> HelperEnd {
         #[cfg(target_os = "linux")]
         if identity >= 0 {
-            return end_helper_through_identity(identity);
+            return end_helper_through_identity(identity, EndingRest::Resuming);
         }
         #[cfg(not(target_os = "linux"))]
         let _ = identity;
@@ -3800,7 +3834,8 @@ mod termination {
         // kept, for the message below.
         let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
         let kill_errno = if killed == 0 { 0 } else { last_errno() };
-        let (waited_pid, wait_errno, status) = wait_for_an_ended_helper(pid, wait, retry);
+        let (waited_pid, wait_errno, status) =
+            wait_for_an_ended_helper(pid, wait, retry, EndingRest::Resuming);
         HelperEnd {
             kill_errno,
             waited: waited_pid,
@@ -3833,9 +3868,10 @@ mod termination {
         pid: libc::pid_t,
         wait: EndingWait,
         retry: EndingRetry,
+        rest: EndingRest,
     ) -> (libc::pid_t, libc::c_int, libc::c_int) {
         let mut status = 0;
-        poll_for_an_ended_helper(HELPER_END_BUDGET, retry, || {
+        poll_for_an_ended_helper(HELPER_END_BUDGET, retry, rest, || {
             // SAFETY: `pid` is a child this process forked and has not reaped.
             // The `CollectingStatus` arm's `status` is writable for the call;
             // the other arm passes a null status pointer, through which
@@ -3867,6 +3903,7 @@ mod termination {
     fn poll_for_an_ended_helper(
         budget: Duration,
         retry: EndingRetry,
+        rest: EndingRest,
         mut ask: impl FnMut() -> (libc::pid_t, libc::c_int, libc::c_int),
     ) -> (libc::pid_t, libc::c_int, libc::c_int) {
         let deadline = std::time::Instant::now() + budget;
@@ -3883,7 +3920,7 @@ mod termination {
                 if std::time::Instant::now() >= deadline {
                     return (STILL_THERE_AT_THE_BUDGET, 0, 0);
                 }
-                thread::sleep(HELPER_END_POLL_SLICE);
+                rest_between_polls(rest);
                 continue;
             }
             if wait_errno != libc::EINTR {
@@ -3906,6 +3943,7 @@ mod termination {
     #[cfg(target_os = "linux")]
     fn wait_for_an_ended_helper_through_identity(
         identity: libc::c_int,
+        rest: EndingRest,
     ) -> (libc::pid_t, libc::c_int, libc::c_int) {
         let Ok(id) = libc::id_t::try_from(identity) else {
             return (-1, libc::EBADF, 0);
@@ -3935,7 +3973,7 @@ mod termination {
                 if std::time::Instant::now() >= deadline {
                     return (STILL_THERE_AT_THE_BUDGET, 0, 0);
                 }
-                thread::sleep(HELPER_END_POLL_SLICE);
+                rest_between_polls(rest);
                 continue;
             }
             if !last_errno_is_interrupted() {
@@ -4883,7 +4921,7 @@ mod termination {
         }
         let containers = render_container_argv(scope)?;
         shared_state()?;
-        let reaper = fork_reaper(Vec::new(), Some(containers))
+        let reaper = fork_reaper(Vec::new(), Some(containers), EndingRest::SingleAttempt)
             .map_err(|message| UpstrokeError::Agent { message })?;
         #[cfg(test)]
         note_armed_container_reaper(reaper.pid, scope.list_argv());
@@ -5536,6 +5574,7 @@ mod termination {
                 _command_keepalive_fd: command[0],
                 pid,
                 identity: NO_HELPER_IDENTITY,
+                rest: EndingRest::Resuming,
             }
             .cancel();
             assert!(
@@ -6593,6 +6632,7 @@ mod termination {
                 _command_keepalive_fd: -1,
                 pid: stranger,
                 identity,
+                rest: EndingRest::Resuming,
             }
             .abandon();
 
@@ -8239,6 +8279,7 @@ mod termination {
                     _command_keepalive_fd: -1,
                     pid: stand_in,
                     identity,
+                    rest: EndingRest::Resuming,
                 }
                 .abandon(),
                 other => panic!("no ending is named {other}"),
@@ -8400,6 +8441,7 @@ mod termination {
                 _command_keepalive_fd: command_read,
                 pid,
                 identity: NO_HELPER_IDENTITY,
+                rest: EndingRest::Resuming,
             }
         }
 
@@ -8536,6 +8578,7 @@ mod termination {
                 _command_keepalive_fd: keepalive,
                 pid,
                 identity,
+                rest: EndingRest::Resuming,
             }
         }
 
@@ -8883,11 +8926,12 @@ mod termination {
 
             fn poll_over(script: &[Answer], retry: EndingRetry) -> (Answer, usize) {
                 let mut asked = 0_usize;
-                let answered = poll_for_an_ended_helper(OUT_OF_REACH, retry, || {
-                    let answer = script.get(asked).copied().unwrap_or(PAST_THE_SCRIPT);
-                    asked = asked.saturating_add(1);
-                    answer
-                });
+                let answered =
+                    poll_for_an_ended_helper(OUT_OF_REACH, retry, EndingRest::Resuming, || {
+                        let answer = script.get(asked).copied().unwrap_or(PAST_THE_SCRIPT);
+                        asked = asked.saturating_add(1);
+                        answer
+                    });
                 (answered, asked)
             }
 
@@ -9073,7 +9117,7 @@ mod termination {
                     ),
                     _ => {}
                 }
-                thread::sleep(Duration::from_millis(10));
+                rest_once(Duration::from_millis(10));
             };
             Isolated {
                 status,
@@ -9099,7 +9143,7 @@ mod termination {
                 if (waited < 0 && !last_errno_is_interrupted()) || Instant::now() >= deadline {
                     return None;
                 }
-                thread::sleep(Duration::from_millis(10));
+                rest_once(Duration::from_millis(10));
             }
         }
 
@@ -9113,7 +9157,7 @@ mod termination {
         fn wait_out_a_fail_closed_termination() {
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
+                rest_once(Duration::from_millis(10));
             }
             report(&format!(
                 "the caller went on after its reaper's CANCEL failed: pending termination {}",
@@ -9163,6 +9207,26 @@ mod termination {
                     .is_some_and(|error| error.to_string().contains("requires Process.Terminate")),
                 "a container reaper is forked only at Process.Terminate: {:?}",
                 refused.err()
+            );
+        }
+
+        #[test]
+        fn a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before() {
+            let container = arm_container_reaper(
+                ProcessSite::Terminate,
+                &a_container_scope(std::path::Path::new("/usr/bin/true")),
+            )
+            .expect("arm a container reaper");
+            let container_rest = container.reaper.as_ref().map(|reaper| reaper.rest);
+            drop(container);
+            let host = spawn_reaper(&[]).expect("spawn a host reaper");
+            let host_rest = host.rest;
+            host.cancel();
+            assert_eq!(
+                (container_rest, host_rest),
+                (Some(EndingRest::SingleAttempt), EndingRest::Resuming),
+                "a container reaper's bounded endings rest once between their polls, so an \
+                 interrupted rest goes back to the deadline; a host reaper's rest as they did"
             );
         }
 
@@ -9276,7 +9340,7 @@ mod termination {
                         continued_by_this_test = true;
                     }
                 }
-                thread::sleep(Duration::from_millis(10));
+                rest_once(Duration::from_millis(10));
             }
             let calls = FakeRuntime::reaper_calls(&relay);
             assert_eq!(
@@ -9318,7 +9382,7 @@ mod termination {
                     if Instant::now() >= deadline {
                         return false;
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    rest_once(Duration::from_millis(10));
                 }
             };
             let lock = crate::rundir::RunLock::acquire(&public).expect("take the run lock");
@@ -9389,6 +9453,7 @@ mod termination {
                     _command_keepalive_fd: command_read,
                     pid,
                     identity: NO_HELPER_IDENTITY,
+                    rest: EndingRest::SingleAttempt,
                 }),
             }
         }
@@ -9444,6 +9509,123 @@ mod termination {
         }
 
         #[cfg(target_os = "linux")]
+        const CONTAINER_REAPER_WAIT: &str = "UPSTROKE_TEST_CONTAINER_REAPER_WAIT";
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "isolated caller of a_container_reaper_stopped_after_acknowledging_its_cancel_ends_its_caller_with_every_rest_refused"]
+        fn container_reaper_stopped_after_its_acknowledgement_with_its_rests_refused_child() {
+            let through = std::env::var(CONTAINER_REAPER_WAIT).expect("the parent names the wait");
+            let (stand_in, lifetime) = spawn_sigchld_target();
+            let (running, running_lifetime) = spawn_sigchld_target();
+            answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
+            // SAFETY: `stand_in` is this isolated process's own unreaped child.
+            assert_eq!(unsafe { libc::kill(stand_in, libc::SIGSTOP) }, 0);
+            let stopped = waited_within(stand_in, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);
+            assert!(
+                stopped.is_some_and(|status| libc::WIFSTOPPED(status)),
+                "the stand-in {stand_in} stopped: {stopped:?}"
+            );
+            let mut reaper = a_container_reaper_that_acknowledges(stand_in);
+            if through == "identity" {
+                const NO_FLAGS: libc::c_long = 0;
+                // SAFETY: `pidfd_open` takes the pid and the flags by value, and
+                // `stand_in` is this process's own unreaped child.
+                let opened = unsafe {
+                    libc::syscall(libc::SYS_pidfd_open, libc::c_long::from(stand_in), NO_FLAGS)
+                };
+                let identity =
+                    libc::c_int::try_from(opened).expect("a descriptor fits the descriptor type");
+                assert!(
+                    identity >= 0,
+                    "open the stopped stand-in's identity: {opened}"
+                );
+                reaper.reaper.as_mut().expect("the reaper handle").identity = identity;
+            }
+            answer_call_with(libc::SYS_clock_nanosleep, seccomp_refuse_with(libc::EINTR));
+            let rest = libc::timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            };
+            let asked = Instant::now();
+            // SAFETY: `nanosleep` reads the one `timespec`, which lives for the
+            // call, and writes nothing: the remainder pointer is null.
+            let answered = unsafe { libc::nanosleep(&rest, std::ptr::null_mut()) };
+            assert!(
+                answered == -1
+                    && last_errno() == libc::EINTR
+                    && asked.elapsed() < Duration::from_millis(500),
+                "every rest this thread takes is refused before it has rested at all"
+            );
+            report(&format!(
+                "through the {through}, every rest refused, the reaper is dropped"
+            ));
+            let started = Instant::now();
+            drop(reaper);
+            let took = started.elapsed();
+            // SAFETY: `stand_in` was this process's child; a null status
+            // pointer is written through by nothing.
+            let waited = unsafe { libc::waitpid(stand_in, std::ptr::null_mut(), libc::WNOHANG) };
+            let collected = waited < 0 && last_errno() == libc::ECHILD;
+            report(&format!(
+                "through the {through}, every rest refused, the drop returned after {}ms; the \
+                 stopped stand-in was collected: {collected}",
+                took.as_millis()
+            ));
+            let harness_began = Instant::now();
+            let exited = waited_within(running, 0, Duration::from_millis(100));
+            let harness_took = harness_began.elapsed();
+            report(&format!(
+                "the harness's bounded wait came back after {}ms: {exited:?}",
+                harness_took.as_millis()
+            ));
+            drop(running_lifetime);
+            drop(lifetime);
+            assert!(
+                took < HELPER_END_BUDGET * 4
+                    && collected
+                    && exited.is_none()
+                    && harness_took < HELPER_END_BUDGET,
+                "the drop of a container reaper stopped after acknowledging CANCEL returned \
+                 within its two budgets with every rest refused, and collected it: {took:?}, \
+                 {collected}; the harness's own bounded wait came back: {harness_took:?}, \
+                 {exited:?}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_container_reaper_stopped_after_acknowledging_its_cancel_ends_its_caller_with_every_rest_refused()
+         {
+            let mut held = Vec::new();
+            for through in ["number", "identity"] {
+                let ended = run_isolated(
+                    "container_reaper_stopped_after_its_acknowledgement_with_its_rests_refused_child",
+                    &[(CONTAINER_REAPER_WAIT, std::ffi::OsStr::new(through))],
+                    Duration::from_secs(30),
+                );
+                let returned = ended.status.is_some_and(|status| status.success())
+                    && ended.stdout.contains(&format!(
+                        "through the {through}, every rest refused, the drop returned after"
+                    ))
+                    && ended
+                        .stdout
+                        .contains("the stopped stand-in was collected: true")
+                    && ended
+                        .stdout
+                        .contains("the harness's bounded wait came back after");
+                if !returned {
+                    held.push(format!("through the {through}: {ended}"));
+                }
+            }
+            assert!(
+                held.is_empty(),
+                "a container reaper stopped between its CANCEL acknowledgement and its exit held \
+                 its caller's drop while every rest of the caller's thread was refused: {held:#?}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
         const CHILD_THAT_OUTLIVES_ITS_KILL_LIFE: Duration = Duration::from_secs(60);
 
         #[cfg(target_os = "linux")]
@@ -9455,7 +9637,7 @@ mod termination {
             let deadline = Instant::now() + CHILD_THAT_OUTLIVES_ITS_KILL_LIFE;
             // SAFETY: as above.
             while Instant::now() < deadline && unsafe { libc::getppid() } == parent {
-                thread::sleep(Duration::from_millis(10));
+                rest_once(Duration::from_millis(10));
             }
         }
 

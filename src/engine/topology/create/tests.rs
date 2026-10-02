@@ -4794,7 +4794,10 @@ fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() 
         if !running.is_empty() || started.elapsed() > bound {
             break running;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
     };
     assert_eq!(running.len(), 1, "one P4 probe container runs: {running:?}");
     let probe = running[0].clone();
@@ -4834,7 +4837,10 @@ fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() 
         {
             break calls;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
     };
     let labels = host
         .container(&probe)
