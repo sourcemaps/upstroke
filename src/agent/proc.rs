@@ -7034,6 +7034,26 @@ mod termination {
         }
 
         #[cfg(target_os = "linux")]
+        fn seccomp_jump_if_set(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+            seccomp_instruction(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, jt, jf, k)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn answer_a_wait_by_number_that_would_block_with(action: u32) {
+            let (options_low, _) = seccomp_argument_words(2);
+            let polling = u32::try_from(libc::WNOHANG).expect("WNOHANG fits the kernel's field");
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_wait4), 0, 2),
+                seccomp_load(options_low),
+                seccomp_jump_if_set(polling, 0, 1),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+                seccomp_return(action),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        #[cfg(target_os = "linux")]
         fn answer_a_wait_by_number_with_options_with(action: u32) {
             let (options_low, _) = seccomp_argument_words(2);
             let mut program = [
@@ -9151,6 +9171,8 @@ mod termination {
         fn container_reaper_whose_cancellation_fails_child() {
             let reaper = arm_in_a_fresh_process(std::path::Path::new("/usr/bin/true"));
             let pid = armed_pid(&reaper);
+            #[cfg(target_os = "linux")]
+            answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
             // SAFETY: `pid` is this isolated process's own unreaped reaper.
             assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
             assert!(
@@ -9191,6 +9213,8 @@ mod termination {
             let reaper = arm_in_a_fresh_process(&program);
             let pid = armed_pid(&reaper);
             report(&format!("stopped reaper {pid}"));
+            #[cfg(target_os = "linux")]
+            answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
             // SAFETY: `pid` is this isolated process's own unreaped reaper.
             assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
             let stopped = waited_within(pid, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);
@@ -9367,6 +9391,8 @@ mod termination {
         #[ignore = "isolated caller of a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller"]
         fn container_reaper_stopped_after_its_acknowledgement_child() {
             let (stand_in, lifetime) = spawn_sigchld_target();
+            #[cfg(target_os = "linux")]
+            answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
             // SAFETY: `stand_in` is this isolated process's own unreaped child.
             assert_eq!(unsafe { libc::kill(stand_in, libc::SIGSTOP) }, 0);
             let stopped = waited_within(stand_in, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);

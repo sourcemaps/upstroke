@@ -2955,7 +2955,21 @@ short against the deadlines it follows. The sweep's bounded waits take it too.
 form of a wait for the change a signal this test sent should make. The isolated children that
 `SIGKILL` their reaper or `SIGSTOP` a reaper or stand-in wait for that change through it rather
 than through a blocking `waitpid` (`FUA-I1-WATCHDOG`'s sweep), so a signal that did not take
-effect fails the child's assertion instead of holding the child until its parent's deadline.
+effect fails the child's assertion instead of holding the child until its parent's deadline. On
+Linux each of the three children first refuses every blocking `wait4` on its thread
+(`answer_a_wait_by_number_that_would_block_with`), so a wait there that went back to blocking
+fails the child at once rather than passing whenever its signal happens to land.
+
+## `mod tests` › `fn answer_a_wait_by_number_that_would_block_with(action: u32) {`
+
+A seccomp policy for the calling thread and whatever it starts afterwards: a `wait4` whose
+options lack `WNOHANG` — a wait that can block — is answered with `action`; every other call,
+polling waits included, is allowed. `seccomp_jump_if_set` tests the bit, so `WUNTRACED |
+WNOHANG` polls pass, where `answer_a_wait_by_number_polling_for_nothing_with` admits `WNOHANG`
+alone. The sweep's three isolated children install it after they fork what they will wait for
+— the reaper, the stand-in — and before the signal, so nothing they forked earlier inherits it;
+the only waits left on their threads are their own bounded polls and `UnleasedExit`'s, which
+poll too.
 
 ## `mod tests` › `fn a_container_reaper_is_armed_only_at_the_terminate_site() {`
 
