@@ -31,8 +31,10 @@ orchestrator spawned on this branch at `92c4ca81`. Its figures are under `~/orch
 `c1/…`. #329's figures are cited by their own paths: `~/orch-pr11/logs/pr11_fub_design3/` as `d3/…`, and
 `~/orch-pr11/reviews/329-d3-witnesses/`. Design round 2 (§2), which answers design
 review round 1, is `pr11_fuc_design2`'s (the same model and effort, a fresh session on this branch at `6b28452d`); its
-figures are under `~/orch-pr11/logs/pr11_fuc_design2/`, cited as `c2/…`. A fresh implementer writes the code after the
-design review and the owner's decisions, and its sections follow §2.
+figures are under `~/orch-pr11/logs/pr11_fuc_design2/`, cited as `c2/…`. Design round 3 (§3), which answers design
+review round 2 and frames the closure choice, is `pr11_fuc_design3`'s (the same model and effort, a fresh session on this
+branch at `a9be94bc`); its figures are under `~/orch-pr11/logs/pr11_fuc_design3/`, cited as `c3/…`. A fresh implementer
+writes the code after the design review and the owner's decisions, and its sections follow §3.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -40,15 +42,18 @@ that uses only our own `git` commands in a temporary directory. That witness hol
 its only signal is a `SIGKILL` of its own coordinator child. Nothing was traced, preloaded or injected. Round 2 kept the
 same plan: it read Git's source at four tags and Microsoft's, Linux's and POSIX's documentation, and its one new witness
 runs only `git` commands in temporary directories, observed through Git's own trace2 event stream, with no signals
-(§2, opening).
+(§2, opening). Round 3 kept it again: it read our code at master `5c222ff2` and Git's source at four tags, and its one
+new witness runs only `git` commands in temporary directories, holding them with a filter or a hook that waits on a
+release file and sending no signal at all (§3, opening).
 
 ## 0. Status
 
 | Phase | State |
 |---|---|
-| Design, round 2 (§2) | **PROPOSED — pending the owner's decisions D1, D2 and D3 (§2.12).** It answers design review round 1, whose three lenses returned CHANGES_REQUIRED on `6b28452d`. Every engine Git command disables automatic maintenance and lazy fetching (§2.2). On Unix, the writer group no longer has its sentinel as leader, and the sentinel leaves when its coordinator dies (§2.4.1). The record names its PID namespace and filesystem class, and an observer that cannot see the group refuses (§2.4.3). Release is bounded (§2.4.4). On Windows, the recommended closure is a writer keeper started before the ambient join, which holds a job the coordinator joins and reports, through a durable marker, when that job is empty (D2b′, §2.5.4). The accounting is two rows, R29 and R30 (§2.7). This head changes no production code. |
+| Design, round 3 (§3) | **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
+| Design, round 2 (§2) | Superseded in part by §3; §3.10 lists what it replaces. Round 2 read: **PROPOSED — pending the owner's decisions D1, D2 and D3 (§2.12).** It answers design review round 1, whose three lenses returned CHANGES_REQUIRED on `6b28452d`. Every engine Git command disables automatic maintenance and lazy fetching (§2.2). On Unix, the writer group no longer has its sentinel as leader, and the sentinel leaves when its coordinator dies (§2.4.1). The record names its PID namespace and filesystem class, and an observer that cannot see the group refuses (§2.4.3). Release is bounded (§2.4.4). On Windows, the recommended closure is a writer keeper started before the ambient join, which holds a job the coordinator joins and reports, through a durable marker, when that job is empty (D2b′, §2.5.4). The accounting is two rows, R29 and R30 (§2.7). This head changes no production code. |
 | Design, round 1 (§1) | Superseded in part by §2; §2.13 lists every statement it replaces. Round 1 read: **PROPOSED — pending the owner's decisions D1 and D2 (§1.12).** On Unix the remedy is the brief's candidate (1): every engine Git child runs in one process group per write command, led by a sentinel and recorded durably before any Git child joins it, and the next write command of the checkout reuses nothing until that group is established empty. On Windows no in-lane mechanism can observe a dead coordinator's job empty (§1.6), so the Windows treatment is the owner's (D2). The packet's resource and site inventories must name the new record and its observation (D1). This head changes no production code. |
-| Implementation | not started. It waits on the design review of §2 and on D1, D2 and D3. It does not depend on #328 (follow-up A) or #329 (follow-up B) beyond the merge order of the shared finding file (§1.13). |
+| Implementation | not started. It waits on the design review of §3 and on the owner's decisions (§3.8). Under U it relies on #329's targeted removal (§3.3.5). Otherwise it depends on #329 (follow-up B) only through the merge order of the shared finding file (§1.13), and #328 (follow-up A) has merged (`5c222ff2`). |
 
 ## 1. Design
 
@@ -576,6 +581,8 @@ lists every §1 statement it replaces, and §1's own headings carry the same poi
 
 ### 2.2 Git's own processes: what every engine Git command is told (FUC-D1-GC)
 
+> **Round 3:** §3.4 replaces the paragraph on the legacy engine's own Git commands: a missing `gitdir` prunes with no expiry, and R-G is P1. The settings themselves stand under either closure (§3.3.6).
+
 **The escape, executed.** In a blob-less partial clone, the engine's own add, `git worktree add --detach <slot> HEAD`,
 checks out through a `reset --hard` child. That child fetches the missing blobs through a `fetch` child, and the fetch
 runs automatic maintenance (`c2/witness/gc/witness-gc-v2.43.0.log:3-12`).
@@ -705,6 +712,8 @@ it can race a topology recovery's remove-and-recreate only under a user's short 
   checkout, before it holds the lease (`common_git_dir`, `src/workspace_manager.rs:6330`), and they start no filter.
 
 ### 2.4 Unix, revised: the group, its record, the wait and the release
+
+> **Round 3:** under U, the recommended closure (§3.3), none of §2.4 is built. Under Q, §3.5 amends §2.4.1 (FUC-D2-SENTINELKILL, FUC-D2-PUBORDER), §2.4.3 (FUC-D2-XMACHINE), §2.4.4 and §2.4.6, and says that FUC-D2-PGIDREUSE stays open.
 
 #### 2.4.1 The group: no leader, and a sentinel that leaves it (FUC-D1-UNREAPED)
 
@@ -991,6 +1000,8 @@ function in this change's own code. `src/agent/proc.rs`, follow-up A's file, is 
 
 #### 2.5.4 The recommended closure, D2b′: a writer keeper and a joined job
 
+> **Round 3:** no longer the recommendation; §3.8's D2 recommends U. Under Q, §3.5 amends the opening (FUC-D2-WINOPEN), the keeper's loop (FUC-D2-KEEPERREF) and its refusal's advice (FUC-D2-XMACHINE).
+
 **The keeper.** The `upstroke` binary in a hidden mode.
 - **Started before the ambient join.** Every write command starts it before it joins the ambient job (`main.rs`'s
   `containment::establish`, `src/main.rs:185-200`), so it is outside that job.
@@ -1130,6 +1141,8 @@ R-1's exclusion, the Unix residual option, is decision D3 (§2.6, §2.12).
 
 #### 2.5.6 D2c, unique slot paths: the erratum text, and what it leaves
 
+> **Round 3:** §3.3 replaces D2c: the tag is the per-process incarnation's, not an epoch counted from durable starts (FUC-D2-D2CEPOCH), §3.2 settles the frozen-module question, and §3.3.7 replaces this E-FUC-3.
+
 **Erratum E-FUC-3**, only if the owner chooses D2c. It uses the errata file's form: anchor, current text, amendment.
 1. **`decisions.workspace_candidates.manager`.**
    - Current: "(tasks/k<key>-g<gen>, merge/s<seq>)".
@@ -1164,6 +1177,8 @@ reuses, R-1's and R-W's included: nothing is reused across epochs.
 **Not recommended.** It is a packet change with an open frozen-module question, and on Windows it closes less than D2b′.
 
 ### 2.6 The residuals, carried explicitly (the addendum's item 3)
+
+> **Round 3:** §3.7 replaces the grading and G6 columns. R-G is P1 (§3.4), and R-1, R-1W and R-W close under U (§3.3.3).
 
 Each residual is listed with its severity, the evidence for it, the G6 question it bears on, and whether it blocks G6.
 G6 blocks on an open critical or high finding, under its pass rule.
@@ -1256,6 +1271,8 @@ The design lens objected that one row cannot be both (finding 4). Under D1a they
     owned, by the next write command's acquisition, which refuses until it is released.
 
 #### 2.7.2 The outcome equations, and the ledger
+
+> **Round 3:** under Q, §3.5 amends the joint rule (FUC-D2-ACCOUNTSTATE) and the observations (FUC-D2-FROZENTESTS). Under U, R29 and R30 do not exist (§3.3.4).
 
 **The packet's equations gain these clauses.**
 - **Complete, Parked, Halted, BudgetExceeded.** "R29 released (retained only while R30 is held); R30 released (held only
@@ -1374,6 +1391,8 @@ owner's, as is each erratum.
 
 ### 2.8 The legacy boundary, corrected (FUC-D1-LEGACYBOUND)
 
+> **Round 3:** under U the legacy commands meet no record, and nothing here applies.
+
 The legacy commands create no record. They take the same lease, through `WorktreeLock::acquire_in`
 (`src/engine/coordinator.rs:132`, `src/engine/resume.rs:148`), and so read the record at acquisition. A schema 1–3
 command therefore waits, or refuses after 10 s, whenever a topology command of the same checkout has left a record
@@ -1389,6 +1408,8 @@ because the schema is not known at startup. A legacy command's keeper receives n
 extra process per legacy write command on Windows.
 
 ### 2.9 Placement, the frozen set, and the siblings
+
+> **Round 3:** under U, §3.3.6 gives the placement. §3.2 shows that no frozen file moves under either closure.
 
 - **Nothing frozen moves** (R-D's list in `reviews/2026-09-30-pr11-record.md`).
   - `src/rundir.rs` takes the lease side: the observation and reclaim at acquisition, the process-local table, the
@@ -1414,6 +1435,8 @@ extra process per legacy write command on Windows.
     directory, under the common one.
 
 ### 2.10 Tests and mutations, revised
+
+> **Round 3:** under Q, §3.5 replaces T6's oracle (FUC-D2-T6). Under U, §3.3.6 lists the tests.
 
 **How the tests hold processes.** Holds are release files, as in §1.10, plus the lease and job states each test sets
 up for itself. Every signal a test sends goes to its own children.
@@ -1479,6 +1502,8 @@ coordinator mode that starts its keeper first, as `main.rs` does.
 
 ### 2.11 G6 classification
 
+> **Round 3:** §3.7 replaces this table.
+
 The table reads the recommended choices: D1a and D2b′, with D3 open.
 
 | Portion | Closed or residual | Severity and evidence | Applies to | Blocks G6? |
@@ -1498,6 +1523,8 @@ The table reads the recommended choices: D1a and D2b′, with D3 open.
 The finding stays `deferred` at this head. The implementation's repair deletes it.
 
 ### 2.12 The owner's decisions
+
+> **Round 3:** §3.8 replaces this table and adds D4.
 
 | | Decision | Recommendation | If declined |
 |---|---|---|---|
@@ -1528,3 +1555,583 @@ The Unix design depends on neither D2 nor D3.
 | §1.10: T5 "each row of §1.5's crash table"; T8 | §2.10 |
 | §1.11 and §1.12 | §2.11 and §2.12 |
 | §1.13: "a v0.1 checkout sees a change only after a topology run of the same checkout died" | §2.8 |
+
+## 3. Round 3: the closure choice
+
+**What this section is.** Design review round 2 ran three `gpt-6-astra` lenses at `max` on `a9be94bc`, and all three
+returned CHANGES_REQUIRED (`~/orch-pr11/reviews/review-330-d2-{design,concurrency,regression}-a9be94bc.review.md`, hashed
+in `~/orch-pr11/reviews/SHA256SUMS-330-d2`). The orchestrator's triage (`~/orch-pr11/reviews/review-330-d2-triage.md`)
+names the findings used below, raises the looping signal, and frames this round: decide by evidence whether slot names can
+be made unique per coordinator incarnation without touching frozen code, repair the quiescence path only where no new layer
+is needed, place R-G in follow-up D's legacy scope, give one residual table, and frame the owner's decisions. Where this
+section disagrees with §2 or §1, it governs; §3.10 lists what it replaces, and §2's headings carry pointers.
+
+**Who wrote it, and the evidence.** `pr11_fuc_design3` (`claude-opus-5-5`, `max`), a fresh session on this branch at
+`a9be94bc`. Its figures are under `~/orch-pr11/logs/pr11_fuc_design3/`, cited as `c3/…`; round 2's stay `c2/…`.
+- **Our code at master `5c222ff2`**, follow-up A's merge. Every line §3 cites is printed there by `c3/code/cite.py` into
+  `c3/code/code-citations-5c222ff2.txt`, with each file's blob at `5c222ff2` and at this branch's base `92c4ca81`.
+  - Every cited file is byte-identical at the two commits except `src/engine/topology/coordinator.rs` and
+    `src/runner/container/exec.rs`, which follow-up A changed. §3 cites those two at `5c222ff2`.
+  - The whole frozen set, production files and test children, is byte-identical at both (`c3/census/census-5c222ff2.txt`
+    §1, from `c3/census/census.sh`).
+  - Among the files §1 and §2 cite, only `src/agent/proc.rs` moved, and §3 relies on none of its lines.
+- **Git source** at v2.43.0, v2.50.1, v2.55.0 and Git for Windows v2.50.1.windows.1, re-extracted from the tag tarballs
+  round 2 fetched, whose hashes match round 2's (`c3/git-src/PROVENANCE.txt`, `TARBALLS.sha256`). The cited lines are in
+  `c3/git-src/git-src-citations.txt`, which `c3/git-src/cite.sh` regenerates.
+- **The packet** (`~/tactus-artifacts/tactus-parallel-design-neutral-v17.json`, sha256 `a34417d6…`): the texts a
+  uniqueness erratum amends, extracted read-only into `c3/packet/packet-extract.txt`.
+- **One new witness** within the evidence plan (`c3/witness/uniq/`): only `git` commands in temporary directories. No
+  signal is sent to anything, and nothing is traced, preloaded or injected. It ran on the box's Git 2.43.0 and on a Git
+  2.55.0 built privately from its tag (`~/orch-pr11/logs/pr11_fub_design6/gits/2.55.0/bin/git`, #329 round 6's build).
+
+### 3.1 The looping signal, and why this round proposes the smaller change
+
+**The signal.** Round 2's pass found P1s in machinery the earlier rounds of this pull request added: a child of the dead
+coordinator joining a reused writer group (FUC-D2-PGIDREUSE, in §2.4.1's group), the cross-machine refusal's advice
+(FUC-D2-XMACHINE, in §2.4.3's record rules), and D2c's epoch repeating at a crash prefix (FUC-D2-D2CEPOCH, §2.5.6). Its
+P2s are in the sentinel, the keeper and the accounting that round 2 invented to keep round 1's group safe. That is
+`MAINTAINING.md`'s second signal, and the second of its two cases: "a third round of machinery invented to keep the second
+round's machinery safe". #329's rounds 1 to 3 showed the same pattern on this class.
+
+**What `MAINTAINING.md` asks for then:** "the smaller change is the one to propose: keep what has survived a pass, drop
+the machinery those rounds invented". This round does that.
+- **It adds no layer.** It establishes from the code that the brief's candidate (2), slot names unique per coordinator
+  incarnation, needs no frozen code (§3.2), and that it closes the finding's sequences without observing any process,
+  executed on 2.43.0 and 2.55.0 (§3.3).
+- **It keeps what survived a pass:** §2.2's Git settings, which all three round-2 lenses accepted for the manager.
+- **It would drop**, if the owner chooses it: the writer group and its record, the sentinel, the keeper, the
+  three-outcome probe, rows R29 and R30, and errata E-FUC-1 and E-FUC-2.
+- **The quiescence path is still given**, repaired where no new layer is needed (§3.5), with what it cannot close stated
+  plainly, because the choice between the two is the owner's (D2, §3.8).
+
+**Why this converges where rounds 1 and 2 did not.** Every earlier mechanism had to establish that a set of processes
+was gone, and each review found a process the set missed. Uniqueness makes no claim about any process. Its one claim is
+that no later incarnation creates a path or registration name an earlier incarnation used, and that is a property of
+string arithmetic in two non-frozen files. What it leaves is residue and disk at dead names (§3.3.4), not a slot two
+incarnations share.
+
+### 3.2 Uniqueness feasibility: where recovery's slot paths come from
+
+**The question.** Can every slot path and administrative name the engine creates be made unique per coordinator
+incarnation in non-frozen naming, with no change to frozen recovery or the fold? Or does recovery recreate at the fold's
+recorded `TaskDispatched.worktree_path`, which would need a G6-frozen change?
+
+**Recovery recomputes the slot; it never reads the recorded path.** At `5c222ff2` (`c3/code/code-citations-5c222ff2.txt`):
+1. Step (g) is `recreate_open_no_attempt` (`src/engine/topology/recover.rs:1029`, `:1616-1627`).
+2. Its `open_no_attempt` builds each `OpenGeneration` from the fold's `TaskFold` generations, with
+   `slot: task_slot(key, generation.id)` (`recover.rs:1629-1656`, the slot at `:1650`).
+3. `task_slot` is in the non-frozen `dispatch.rs`: `Slot::Task { key, generation }` (`src/engine/topology/dispatch.rs:122-128`).
+4. `verify_or_recreate` (`dispatch.rs:242-256`) passes that `Slot` to the manager's `verify_worktree`, then
+   `remove_worktree` and `create_worktree` (`write_intent`, then `add_worktree`, `dispatch.rs:187-194`).
+5. Every one of them turns the `Slot` into a path through `slot_target`, that is `slot_path`
+   (`src/workspace_manager.rs:2040-2043`, `:1674-1678`), which is `Slot::relative`, that is `Slot::parts`
+   (`src/workspace_manager/naming.rs:177-195`). `add_worktree` runs `git worktree add --detach --quiet <that path>`
+   (`workspace_manager.rs:2649-2711`).
+
+**`TaskDispatched.worktree_path` is written once and read by nothing.**
+- It is a `String` in the event (`src/topology/events.rs:649-658`), written by the non-frozen `dispatch.rs:141-156` from
+  `manager.slot_path(&slot)`.
+- The fold keeps no copy (`src/topology/fold/apply.rs:100-125`) and checks none.
+- Recovery never reads it. The frozen recovery tests write arbitrary values into it (`"wt/g0"`,
+  `src/engine/topology/recover/tests.rs:1729`, `:1744`, `:1768`).
+- No other production code names it. A coordinator test drops it from a canonical comparison
+  (`src/engine/topology/coordinator.rs:1953`, inside the test module that opens at `:1739`).
+- `c3/census/census-5c222ff2.txt` §2 lists every occurrence in `src/`.
+
+**The rest of the frozen code passes `Slot` values and never renders them.**
+- The frozen merge module builds `Slot::Staging { sequence }` with a struct literal (`src/engine/topology/integrate.rs:31-35`).
+  So a uniqueness tag cannot be a new field of `Slot`.
+- Recovery, the merge module and finalization walk `manager.intents()` and match variants with `{ .. }`
+  (`recover.rs:1158-1169`, `:1196-1219`, `:1445-1467`; `integrate.rs:1017-1026`; `finalize.rs:121-139`), and
+  `reclaim_closed_generations` compares slots by equality (`recover.rs:1451`, `:1459-1460`).
+- Every removal goes through the manager.
+- Outside tests, a whole slot becomes a path or a file name in three lines of the non-frozen manager:
+  `workspace_manager.rs:1677` (`slot_path`), `:1683` (`intent_path`) and `:2275` (`remove_intent`'s own join). The
+  intent-name parser is the inverse (`naming.rs:317-352`), a refusal message prints a slot (`workspace_manager.rs:2679`),
+  and the container runner reads only a slot's first component, its namespace directory
+  (`src/runner/container/exec.rs:148-172`). Census §11 and §12 list every use.
+
+**So the answer is yes, in non-frozen code.**
+- Everything a uniqueness tag needs is in `naming.rs` and the manager. `dispatch.rs` need not change.
+- No byte of `recover.rs`, the fold, `integrate.rs` or `finalize.rs` changes.
+- The event schema does not change either. Only the value of `worktree_path` does, and nothing reads it.
+- **The administrative name follows the path.** Git names a registration after the path's sanitized basename and adds a
+  counter only when that name is taken (`builtin/worktree.c:445-465` at 2.43.0; `:460-480` at 2.50.1 and at the Windows
+  tag; `:494-514` at 2.55.0). The witness's registrations were named `k1-g1_01KZTA7X` and `k1-g1_01KZTB9Q`.
+
+**What it is instead: a packet change, the owner's.** The packet states the reuse that uniqueness removes
+(`c3/packet/packet-extract.txt`):
+- `decisions.workspace_candidates.manager` names the paths literally: "(tasks/k<key>-g<gen>, merge/s<seq>)".
+- T-DISPATCH's `resume_action` verifies "the worktree at the recorded base with Worktree.Verify (linked worktree at the
+  recorded path, …)", and its `durable_state` includes the worktree path.
+- T-REPAIR-DISPATCH says "Worktree.Verify the recorded worktree at the recorded base".
+- R9's `OpenNoAttempt` lifecycle says "reused only after Worktree.Verify".
+- §3.3.7 gives erratum E-FUC-3, revised. It replaces §2.5.6's text.
+
+**One fact about production.** The topology engine is dead code outside tests at this head
+(`#![cfg_attr(not(test), allow(dead_code))]`, `src/engine/topology.rs:3`; no production `WorkspaceManager::derive` or
+`run_recovery_order`, census §9). The change that wires it must give the coordinator's manager the coordinator's own
+incarnation, the per-process id generated before any lock (`src/engine/topology/prelock.rs:114-116`). §3.3.1 depends on
+that, and the implementation states it where the wiring lands.
+
+### 3.3 U: a slot instance per incarnation
+
+U is the brief's candidate (2) and §2.5.6's D2c, re-specified so that it needs no durable epoch and no frozen code.
+
+#### 3.3.1 The names
+
+- **The tag.** Eight characters of Crockford base32, rendering the first 40 bits of SHA-256 over a fixed domain string
+  and the manager's incarnation id. The manager already holds that id: `WorkspaceManager::derive` takes it and stores it
+  (`workspace_manager.rs:1394-1399`, `:1616-1641`), and `write_intent` records it (`:2224`).
+- **An instance's component** is today's component, an underscore, and the tag: `tasks/k<key>-g<gen>_<tag>`,
+  `merge/s<seq>_<tag>`, `snapshots/<name>_<tag>`. `_` is a legal component character (`safe_component`,
+  `naming.rs:148-175`) that no slot component uses today, so the split is unambiguous.
+- **Its intent** is `intents/<namespace>.<component>_<tag>.intent`. The record's `slot` field names the instance, so it
+  still mirrors the relative path (`naming.rs:398-400`). The `incarnation` field is unchanged (`:403-405`).
+- **Its registration** is `<common git dir>/worktrees/<component>_<tag>`, Git's own naming from the basename (§3.2).
+- **`Slot` values do not change.** The tag is the manager's, applied when it renders a slot, because the frozen merge
+  module builds `Slot::Staging` by struct literal (§3.2).
+- **A name written before U** (an untagged intent or directory) is an instance of no current incarnation. It is reclaimed
+  like any other dead instance (§3.3.2).
+
+**Why the tag is unique.** It is unique if the incarnation id is, and the packet already makes that id the per-process
+identity:
+- `decisions.workspace_candidates.run_creation` lists "generation of the coordinator incarnation id (per-process ULID)"
+  among the pre-lock checks (`c3/packet/packet-extract.txt`). The code generates it there
+  (`prelock.rs:114-116`; `RealIds::incarnation`, `seams.rs:206-208`).
+- R26 names every container by "run id and incarnation", and every intent records it.
+- `crate::ulid` is SHA-256 over the clock's milliseconds, the pid and a per-process counter (`src/ulid.rs:17-51`). So two
+  incarnations share a tag only if they share all three, or if their 40-bit prefixes collide (2^-40 for a pair).
+- One coordinator dies before its successor starts, so their pids can be equal only after the pid is reused. Their
+  milliseconds can then be equal only if the clock stepped back, or on two machines sharing the checkout whose clocks
+  disagree; and their counters must agree as well.
+
+**FUC-D2-D2CEPOCH does not arise.** §2.5.6 counted the epoch from the run's durable starts. A recovery that died between
+its first write and `RunResumed` (`recover.rs:1029`, before `:1482`; the epoch's increment is the fold's) left the next
+process the same count, and so the same path. The tag is counted from nothing durable. The id is drawn at process start,
+before any lock, so a recovery that dies anywhere leaves its own tag behind, and the next process draws another.
+
+**Windows.** The tag spends Git for Windows' `$GIT_DIR` budget of 220 characters, measured on the guest
+(`c3/pathbudget/tag-length.txt`, citing `~/pr10-evidence/fix-g5-b/r9/guest/gitdir-threshold.log`).
+- The tightest path PR11 measured is 207 characters (`~/orch-pr11/logs/pr11_impl_g/measure/pathbudget-child-temporary.txt`).
+- So `207 + 1 + L <= 220` gives L at most 12. Eight characters give 216.
+- The tightest fixtures' tags are in `coordinator.rs`'s tests, which are not frozen, so the implementation can shorten
+  them for margin. It re-measures the class on the guest as PR11 did.
+
+#### 3.3.2 What the manager does with a slot
+
+| Operation | Acts on |
+|---|---|
+| `slot_path`, `intent_path`, `add_worktree`, `write_intent`, `verify_worktree`, and every Git funnel run in a slot | the current incarnation's instance |
+| `intents()` | every intent of every incarnation, reported as **logical** slots, each once, sorted. So the frozen walks see the slots they see today. |
+| `remove_worktree`, `remove_intent` | **every instance of the logical slot**: the current one, every other incarnation's found through its intent, and an instance directory under the namespace whose intent has already gone. One call is still one execution of its site, so the hooks fire once, as the frozen tests that count them expect (`recover/tests.rs:19752-19758` counts `Worktree.Remove` exactly). Inside the funnel the removal acts on each instance in turn, each bound to its own registration (#329's targeted removal). |
+
+**How a removal fails.**
+- **The current instance:** as today. An error ends the command resumably.
+- **A dead instance:** if it is still in use (a directory not empty during removal, a sharing violation or access
+  denial on Windows), it is **retained**. Its intent stays, the walk reports it as retained residue, and every later walk
+  retries.
+- **Any other error, a hook's refusal included:** the command's, as today. So the fault-injection tests keep their
+  refusals.
+
+**Why a dead instance may be left behind:** nothing will ever use it again. Leaving it costs disk, while a command that
+refused on it would let a dead incarnation's writer hold recovery: the dependency U exists to remove.
+
+**The alternative, if the owner reads Q1 literally.** Q1 asks that durable recovery records be reclaimed "before any slot
+reset, admission, or resource reuse", and a retained instance's intent outlives the next admission. E-FUC-3's item 2
+makes retention the registry's rule for a dead instance (§3.3.7). Without it, the removal of a dead instance refuses as
+today's removals do. That keeps Q1's literal order, and its cost is that a writer still using its dead instance holds the
+next command until it ends: R-3, as Q has it.
+
+**At a fresh-process recovery, through the frozen code:**
+1. `verify_or_recreate` verifies the current instance. It does not exist, so the verdict is
+   `VerifyFailure::NotRegistered` (`workspace_manager.rs:2768-2770`).
+2. `remove_worktree` removes the dead incarnation's instance, or retains it.
+3. `create_worktree` adds the current instance.
+4. `Reuse::Verified` therefore arises only within the incarnation that created the slot.
+
+**What that costs, and what it does not.**
+- An open generation's worktree is checked out again at every resume.
+- It holds no paid work. An `OpenNoAttempt` slot is the base checkout, and for a repair the materialization the
+  continuation runs again.
+- A `RetainedIdle` generation is already closed at a fresh-process recovery (`recover.rs:1425-1443`).
+- Promotion recovery reads refs and the fold, not a worktree (`candidate.rs:427-472`).
+
+#### 3.3.3 What U closes, without observing any process
+
+**Why it closes the class.** Everything a dead incarnation's Git writers do afterwards names the slot by path or by
+registration name, and no later incarnation creates either:
+- the add gives its children `GIT_DIR=<path>/.git` and `GIT_WORK_TREE=<path>` (`builtin/worktree.c:526-554` at 2.43.0,
+  `:558-600` at 2.55.0);
+- Git changes into that work tree before it writes (`setup_work_tree`, `setup.c:427-450` at 2.43.0);
+- `remove_junk` deletes the registration and the checkout by path (`builtin/worktree.c:258-272` at 2.43.0, `:273-287` at
+  2.55.0);
+- a prune deletes by registration name, in the loop iteration that decided it (`:142-168` and `:203-217` at 2.43.0).
+
+**Executed** (`c3/witness/uniq/witness-uniq-v2.43.0.log`, `witness-uniq-v2.55.0.log`).
+- **Coordinator A's add is held, and A does not wait for it.** That is what a dead coordinator's add sees: Git cannot
+  tell whether its parent lives.
+- **The successor then does what `verify_or_recreate` does.** It removes the slot's checkout, removes the registration
+  directly, adds the slot again at commit C2, and writes the paid edits.
+- **The hold is released.** A checks out C1, so a HEAD A writes into B's registration is visible.
+
+| Route of the dead add | Git | Same path (today) | A path unique to the incarnation |
+|---|---|---|---|
+| **exec**: held in the `reference-transaction` hook of its HEAD write, before the lock on 2.55.0 and after it on 2.43.0; then the HEAD write and the `reset --hard` child, by path | 2.55.0 | A's add ends rc 0. B's HEAD is rewritten to C1, and `a.txt` reads `C1 base`: **paid edits lost** | A's add fails: `not a git repository: '…/k1-g1_01KZTA7X/.git'`. **B intact** |
+| | 2.43.0 | `update_ref failed for ref 'HEAD'`, then `remove_junk`: **B's registration and checkout deleted** | the same failure, on A's paths. **B intact** |
+| **filter**: held in its `reset --hard` child's smudge filter; then the reset fails and the add runs `remove_junk` | both | `unable to create file b.dat`, then **B's registration and checkout deleted** | the same failure, on A's paths. **B intact** |
+| **helper**: the add completes; its filter started a helper that called `setsid` (R-1's shape) and later runs `git -C <the path it kept> reset --hard HEAD` | both | B's `a.txt` back to `C2 base`: **paid edits lost** | `fatal: cannot change to '…/k1-g1_01KZTA7X'`. **B intact** |
+
+`SUMMARY` lines: `exec/same=B DAMAGED; exec/unique=B INTACT; filter/same=B DAMAGED; filter/unique=B INTACT;
+helper/same=B DAMAGED; helper/unique=B INTACT`, on both versions. Each run ends with A and the helper gone, and nothing of
+the witness left running.
+
+**By class:**
+- **The finding's sequences.** The late writes by path and the late `reset`, `remove_junk`, and the HEAD rewrite are
+  closed. All are executed above.
+- **Cross-run reuse of a registration name** (`k1-g1` is every run's first task): closed. Each name carries the
+  creating incarnation's tag.
+- **FUC-D2-PGIDREUSE** does not arise: there is no writer group. A child of the dead coordinator that execs late still
+  acts on its own incarnation's paths.
+- **R-1 and R-1W, a deliberate escape, for slot paths and registrations:** closed. The helper row executes R-1's shape.
+- **R-W, Windows I/O in flight at termination, for slot paths:** closed. Pending I/O completes into the dead instance.
+  Its removal fails while handles are open (the retry covers about one second, `workspace_manager.rs:1464-1509`). The
+  dead instance is then retained (§3.3.2), so recovery does not wait for it.
+- **R-G's name-reuse variant** (§3.4): closed. A prune paused after deciding deletes the dead instance's name, not the
+  replacement's.
+
+#### 3.3.4 Residue, and how disk is reclaimed
+
+**When a dead instance goes.** At the first existing walk that removes its logical slot; U adds no walk:
+- an open generation's at step (g) (`recover.rs:1029`, through `dispatch.rs:251`);
+- a closed generation's at step (e) (`recover.rs:1022`, `:1445-1467`);
+- a promoted generation's in `finish_promotions` (`:1299-1318`);
+- staging and snapshot instances in `reclaim_stale_residue` and `finish_integration` (`:991`, `:1096-1169`, `:1196-1219`);
+- anything left over at finalization (`finalize.rs:121-139`).
+
+**When its writer is still running.**
+- **On Linux, Git's own processes cannot recreate a removed instance.** They work relative to the work tree they changed
+  into at start (`setup.c:427-450`), and a removed directory accepts no new entry. The witness's filter route shows it:
+  the dead reset failed with `unable to create file b.dat: No such file or directory`.
+- A creation racing the removal makes the removal fail with the directory not empty, and the instance is retained.
+- **On Windows** an open handle, or a process's current directory, blocks the removal, and the instance is retained
+  until it closes.
+- In every unique-name run of the witness, the store held only B's registration at the end, and `tasks/` only B's
+  checkout: nothing of A's came back.
+
+**What can come back.** A program that writes by absolute path can recreate the dead path after its removal: a helper,
+not Git.
+- The next walk that removes the slot removes it again.
+- After the run's finalization nothing does. The execution root then stays: R18 is "pruned by finalization when empty;
+  otherwise resumably_open", and `remove_execution_root` answers `false` (`workspace_manager.rs:2114-2175`).
+- That is R-UR (§3.7): disk at a dead name, P3. The operator removes it.
+
+**How the accounting reads.**
+- R9, R10 and R24 keep their rows, at a finer granularity: per generation (or transaction, or snapshot role) **and
+  creating incarnation**.
+- A retained dead instance is residue of its row, reclaimed at the next walk, like the `NoRunFinished` cells' "intents
+  reclaimed on resume".
+- E-FUC-3 (§3.3.7) gives the ended outcomes that clause.
+- No row, site, process or lock is added.
+
+#### 3.3.5 What U leaves
+
+- **R-G's in-window variant** (§3.4). A prune that reads the replacement's own entry before its `locked` exists is the
+  one U cannot reach, because the name it read is the new one. That needs the legacy change of §3.4.
+- **The engine's own repository-wide prune.** `remove_bound` runs `git worktree prune` (`workspace_manager.rs:3061`,
+  `:3100`, `:3123`; census §10).
+  - If a coordinator dies inside it, that orphaned prune is the same in-window hazard for the successor's add.
+  - #329's targeted removal deletes every one of those prunes (its record §3.5, kept in §5.4, at `ed3a97d9`). Both
+    changes land before G6.
+  - U's closure of this route depends on #329's text staying so. Under Q the orphaned prune is a group member and is
+    waited for.
+- **Refs** are unchanged (R-REF, §3.7). On Unix every engine `update-ref` holds the run's cleanup lease
+  (`workspace_manager.rs:3553-3570`). On Windows the ref-lock reclaim rests on the ambient job's kill-on-close, as
+  `design/26_design_merge_queue_protocol.md:398` says. Every engine ref write is a compare-and-swap, so a late landing
+  makes the successor's next write of that ref refuse rather than overwrite.
+- **Two frozen oracles go vacuous.** `finalize.rs:421-422` and `:456` assert that no registration path ends with
+  `kalpha-g1`, `s1-integration` or `kbravo-g1`. Under U no path ends with an untagged name, so both pass whatever is
+  registered.
+  - A non-frozen test that asserts the tagged names restores the coverage.
+  - Restoring them in place is a byte change to a frozen file: D4 (§3.8).
+- **Frozen tests that must change: none found by reading** (census §4–§8). Their reasoning:
+  - The in-process recovery tests plant and resume through one manager, `Fixture::manager` with the creator's incarnation
+    (`recover/tests.rs:139-147`, `:7057-7101`). So their tags agree, and the one cross-incarnation expectation of
+    `Reuse::Verified` (`:12793-12809`) is in process.
+  - Five child coordinators derive their managers with `RESUMER` (`:4400-4408` and the four sites census §6 lists). The
+    parent's resume then meets the child's instances as dead ones and removes them through the logical removal of
+    §3.3.2. Their assertions are about convergence, the log, refs and the execution root, not slot names.
+  - Reading can miss. The implementation's whole-suite run is the oracle, and a frozen test that must change makes U need
+    D4.
+
+#### 3.3.6 What U costs, and where it lives
+
+- **Code**, all non-frozen:
+  - `src/workspace_manager/naming.rs`: the instance name, its parse, and `SlotId` with a tag.
+  - `src/workspace_manager.rs`: the tag, the renderings, logical `intents()`, per-instance removal and retention, and the
+    torn-registration repair per instance.
+  - `src/engine/topology/dispatch.rs` does not change.
+  - **Siblings.** #329 edits the same file's add, scans and `remove_bound`. The hunks are adjacent in
+    `remove_worktree_proving`, and whichever merges second rebases.
+- **Kept from §2:** §2.2's Git settings on every manager Git child. They stop the engine's own Git from starting
+  maintenance, which could otherwise prune a successor's entry from a detached process. Round 2's lenses accepted them.
+- **Not needed:**
+  - the writer group, its record and wait (§2.4);
+  - the probe and the keeper (§2.5.2–§2.5.4);
+  - R29 and R30 (§2.7), and errata E-FUC-1 and E-FUC-2;
+  - the legacy commands' wait (§2.8).
+- **Instruments.** U adds no effect site, resource row, process start or governed primitive. The namespace listing uses
+  `fs::read_dir`, which the manager, an allowlisted funnel module, already uses. The implementation's census confirms
+  this; if it finds an instrument moved, the merge is the owner's under `CLAUDE.md`'s first limb, as the erratum is in
+  any case.
+- **`DESIGN.md` §15**, whose "Synced intents" contract the intent names belong to, and the manager's and naming's
+  internals notes.
+- **Tests**, added in non-frozen files:
+  - the witness's three routes against the production funnels, at today's naming (red) and U's (green);
+  - a two-incarnation reclaim: a dead instance removed, and one retained while a test-held process keeps it in use;
+  - an untagged instance from before U, reclaimed;
+  - the intent parser's grammar with tags;
+  - the two tagged-name assertions that replace the vacuous oracles;
+  - on Windows, a dead instance held open by a test-held handle, retained while recovery proceeds;
+  - the guest path budget re-measured.
+
+#### 3.3.7 Erratum E-FUC-3, revised: the text for the owner
+
+In the errata file's form: anchor, current text, amendment. It replaces §2.5.6's E-FUC-3.
+1. **`decisions.workspace_candidates.manager`.**
+   - Current, in part: "detached linked worktrees with durable synced intents (tasks/k<key>-g<gen>, merge/s<seq>)".
+   - Amended: "detached linked worktrees with durable synced intents (tasks/k<key>-g<gen>_<tag>, merge/s<seq>_<tag>,
+     snapshots/<name>_<tag>, where <tag> renders the creating coordinator incarnation's id; a worktree is used only by
+     the incarnation that created it, and every other incarnation's instance of the slot is residue)".
+2. **`decisions.workspace_candidates.cleanup`.** Append: "every reclaim of a slot removes every incarnation's instance of
+   it, through that instance's intent or, once the intent has gone, its directory; an earlier incarnation's instance that
+   is still in use is retained, keeps its intent, and is reclaimed by a later reclaim".
+3. **`resource_accounting.rows[R9]`.**
+   - `granularity`: "per generation" becomes "per generation and creating incarnation".
+   - `lifecycle.OpenNoAttempt`, current: "resumably_open during a live run (reused only after Worktree.Verify; otherwise
+     recreated with force); closed at run end".
+   - Amended: "resumably_open during a live run (reused by the incarnation that created it only after Worktree.Verify,
+     otherwise recreated with force; a fresh-process recovery creates the generation's worktree under its own
+     incarnation, and earlier incarnations' instances are reclaimed as residue); closed at run end".
+   - `lifecycle.RetainedIdle`: "retried only after Worktree.Verify" becomes "retried by the incarnation that created it
+     only after Worktree.Verify".
+4. **`resource_accounting.rows[R10]` and `[R24]`.** Each `granularity` gains "and creating incarnation". Each
+   `at_run_end` cell that says "pruned" gains "(an earlier incarnation's instance still in use is retained as residue and
+   reclaimed later)".
+5. **`transaction_fault_matrix[T-DISPATCH]`.**
+   - `durable_state`: "worktree path" becomes "worktree path (the creating incarnation's instance)".
+   - `resume_action`, current, in part: "verify the worktree at the recorded base with Worktree.Verify (linked worktree at
+     the recorded path, …) or remove it with force and recreate it (intent then add)".
+   - Amended: "in the incarnation that created it, verify the worktree at the recorded base with Worktree.Verify (linked
+     worktree at its path, …) or remove it with force and recreate it (intent then add); in a fresh process, reclaim
+     every earlier incarnation's instance and create the worktree under the current incarnation (intent then add)".
+6. **`transaction_fault_matrix[T-REPAIR-DISPATCH]`.** `resume_action`: "Worktree.Verify the recorded worktree" becomes
+   "in the incarnation that created it, Worktree.Verify the recorded worktree … ; in a fresh process, recreate it under
+   the current incarnation".
+
+The packet's test names in those rows still describe the behavior: `kill_after_dispatch_recreates_worktree_without_spend`
+recreates, and so does every resume now.
+
+### 3.4 R-G: the legacy engine's maintenance, and the change follow-up D's unfreeze must carry
+
+**§2.2's prerequisite was false** (FUC-D2-RG, all three lenses). §2.2 said a legacy maintenance prune deletes a
+registration "only if its `gitdir` file is older than" `gc.worktreePruneExpire`. Git's eligibility check says otherwise
+(`should_prune_worktree`, `worktree.c:719-785` at 2.43.0, `:929-1018` at 2.55.0; `c3/git-src/git-src-citations.txt`):
+- a `locked` file keeps the entry;
+- **a missing `gitdir` prunes it, with no expiry at all** (`:734-737` at 2.43.0);
+- an unreadable, short or empty `gitdir` prunes it too;
+- when the checkout `gitdir` names is gone, a **missing** `index` prunes it, and otherwise the **index's** age against
+  the expiry decides (`:772-777`).
+
+So the default `3.months.ago` protects nothing in the interval that matters.
+
+**The interval.** `git worktree add` makes the registration's directory (`builtin/worktree.c:458-465` at 2.43.0) before
+it writes `locked` (`:479-483`) and `gitdir` (`:492-494`). A prune decides each entry and deletes it in the same loop
+iteration (`:203-217`). Deletion is by name (`delete_git_dir`, `:142-155`), with no second look. That allows two
+variants:
+- **R-G1, name reuse** (the design lens's sequence). A prune decides on an old entry, for instance a torn one, and is
+  paused. Recovery removes that entry and recreates the slot under the same name. The prune resumes and deletes the
+  replacement. **U closes it:** the replacement's name is new.
+- **R-G2, in the window** (the concurrency and regression lenses' sequence). A prune reads the new entry between its
+  `mkdir` and its `locked`, decides "gitdir file does not exist", and deletes it.
+  - If it deletes before `locked`, the add fails: "could not open … locked for writing", executed by #329's round 3
+    (`d3/witness/prune-in-flight/witness.log:4`). #329's tolerant access then attempts the add again, because its
+    destination is untouched (#329 record §5.3–§5.5 at `ed3a97d9`).
+  - If the prune is descheduled between its decision and its deletion until after the add has finished, a completed
+    registration is deleted under a slot in use.
+  - **U does not close R-G2, and neither does Q.**
+
+**How a legacy command starts that prune.**
+- `Workspace::commit` runs `git commit -q -m …` (`src/workspace.rs:1019-1023`) through `git_command` (`:43-51`).
+- `git commit` runs automatic maintenance (`builtin/commit.c:1871` at 2.43.0, `:1965` at 2.55.0).
+- When `gc --auto`'s thresholds are met, that runs `git worktree prune --expire 3.months.ago` after the repack
+  (`builtin/gc.c:64`, `:612`, `:734-742` at 2.43.0), detached by default.
+- At 2.55.0, a repository configured with the `geometric` maintenance strategy also runs the `worktree-prune` task
+  whenever any entry is prunable (`builtin/gc.c:379-428`, `:1845-1925`).
+- None of it is in a writer group or a keeper's job, and the legacy engine is PR5-frozen.
+
+**Grading.** P1, as the triage records from all three lenses.
+- G6: Q1, a topology registration deleted under a slot in use.
+- **It blocks G6 until closed or explicitly excluded by the owner.** It is not this change's to close: both of its
+  starters are outside the topology engine.
+
+**The requirement for follow-up D's unfreeze (decision B), stated for the orchestrator to carry.**
+- `git_command` (`src/workspace.rs:43-51`) is the one builder of every legacy Git child, as the frozen legacy test pins
+  (`:3745-3751`). Its callers are `:163`, `:188`, `:231`, `:289`, `:380`, `:419`, `:460`, `:879`, `:911`, `:1039`,
+  `:1096`, `:1131`, `:1557` and `:1607`.
+- **It adds:** `-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c maintenance.autoDetach=false`. These are
+  the four `-c` values §2.2 gives the topology builder.
+- They reach every Git process the legacy child starts, through `GIT_CONFIG_PARAMETERS` (§2.2's version table).
+- Under them, `git commit` starts no maintenance at 2.43, 2.50.1, the Windows tag or 2.55. Round 2 executed that for the
+  manager's commands at 2.43 and 2.55 (`c2/witness/gc/`).
+- The pin counts `Command::new(` and checks the replacement-object environment, so adding arguments leaves it passing.
+  Any legacy test that pins the exact argument list is D's to measure.
+- With that change, R-G1 and R-G2 are closed for maintenance a legacy command starts. U closes R-G1 independently;
+  Q closes neither.
+
+**What neither change reaches.** Maintenance, or a prune, started by a process the engine did not start: the user's own
+`git commit` or `git fetch` in any checkout of the repository, or an IDE's. §1.13 puts it out of this finding's scope.
+- An agent's own prune is `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` (P2, guarded by PR12), narrowed by #329 to the
+  agent's own commands.
+- The user's is filed nowhere. The orchestrator may want it named in decision B's question, since R-G2 is the same
+  mechanism whoever starts the prune.
+
+### 3.5 The quiescence path Q, repaired where no new layer is needed
+
+Q is §2's design: the Unix writer group and, for Windows, the keeper (D2b′). This subsection answers each of round 2's
+findings against it. Under U none of it is built.
+
+**FUC-D2-PGIDREUSE: Q cannot close it without a new layer.**
+- **The lens's sequence.** A Git child of the dead coordinator is created but has not yet joined `P`. The coordinator
+  dies, the sentinel leaves, the successor reads `ESRCH`, and `P` is later reused for a group in the same session. The
+  late child's join then succeeds, and it runs against the reused slot.
+- **What was weighed:**
+  - *The coordinator itself in `P`, so that children are born in it.* That leaves the terminal's foreground group, so
+    `^C` no longer reaches the coordinator and a terminal read stops it. A process group is per process, not per
+    thread, so every pipeline's children, agents included, would join `P`.
+  - *A spawner process inside `P` that starts every Git child.* That is a new process layer.
+  - *A `pre_exec` closure that checks its parent after joining and exits if the parent is gone.* That takes `std` off
+    `posix_spawn`, and #329's round 3 measured the suite at about three times slower (`d3/census/probe-iii/SUMMARY-D1.txt`,
+    which §1.4 cites).
+  - *A sentinel that stays until no half-created child remains.* It cannot see one without `/proc`, which the finding's
+    second requirement excludes.
+- **It remains under Q:** P1 as triaged, reasoned and not executed, and it blocks G6 under Q. Under U it does not arise
+  (§3.3.3).
+
+**FUC-D2-XMACHINE: fixed.** §2.4.3's two advisory refusals, and D2b′'s refusal in §2.5.4, now name the only sufficient
+conditions:
+- **Another PID namespace:** remove the record "once no process of group `P` remains in the recorded namespace, which
+  `kill -0 -- -P` run there answers with no such process, or once that namespace's machine has restarted".
+- **Another boot, or another platform on a shared filesystem:** remove the record "once the machine that wrote it has
+  restarted since the recorded boot, or once `kill -0 -- -P` on that machine answers no such process".
+- **Windows, the keeper gone with no marker:** remove the record "once the machine has restarted, or once no process the
+  coordinator started after its first engine Git child remains".
+- None of them says "once the coordinator is gone": the coordinator's death is the condition that does not establish
+  quiescence.
+
+**The P2s, each fixed by changing §2's protocol rather than adding to it:**
+
+| Id | Round 2's defect | The repair |
+|---|---|---|
+| FUC-D2-SENTINELKILL | Release's `SIGKILL` can leave the sentinel a zombie in `P` if the coordinator dies before reaping it. | Release sends `SIGTERM`, then `SIGCONT`. The sentinel's `SIGTERM` handler calls `setsid()` and then `_exit(0)`, both async-signal-safe. `SIGKILL` follows only after the one-second bound. A sentinel stopped by `SIGSTOP` is continued, and leaves `P` before it dies. The crash table gains the row "inside release, after the signal and before the reap": `P` holds no sentinel; the next command waits for `ESRCH`. |
+| FUC-D2-PUBORDER | The record could be published before the sentinel had installed its dispositions. | The sentinel writes one byte on a pipe once its dispositions are installed and its other descriptors closed, then closes the pipe. The coordinator publishes the record only after reading that byte, bounded at one second. Otherwise it kills and reaps the sentinel and the leader, both bounded, publishes nothing, and fails the Git command resumably. |
+| FUC-D2-WINOPEN | The keeper's acknowledgement had no channel and no bound. Unix's reap of `X` had no bound either. | The keeper acknowledges on its standard output, a pipe to the coordinator, within one second. End of file is the keeper's death. On either failure the coordinator closes `N`, publishes nothing, and fails the Git command resumably. Unix reaps `X` with the same one-second bound. |
+| FUC-D2-KEEPERREF | The keeper's own handle to the coordinator kept `ActiveProcesses` from reaching 0. | The keeper closes its coordinator handle as soon as the handle is signaled, before its drain loop. The count falls only once all references are released (`c2/docs/ms-jobobject-basic-accounting-information.txt:89`). |
+| FUC-D2-ACCOUNTSTATE | The joint ledger rule rejected "R29 present, R30 released", the drained record release keeps for the next command. | The ended-outcome clauses admit three states: both released; both held (a surviving member); and R29 retained for reclamation with R30 released (a drained record). `ledger.rs`'s `equation` and `check` take the same three. |
+| FUC-D2-FROZENTESTS | New fields in `PhysicalInventory` and `ProcessLocal` would break the frozen recovery tests' struct literals (`recover/tests.rs:24323`, `:24472`, `:24482`), and default "absent" values would leave R29 and R30 unproved there. | Neither struct gains a field. `ledger::observe` reads R29 and R30 itself, from the lease side's process-local writer table (§1.4): the record path and group of the checkout this process last held. So the frozen tests' unchanged calls observe both rows for real, and a fixture that never held a lease reads both absent, which is then true. New non-frozen tests (T5, T6, T10, TW1, TW4) assert the held and drained states. The preservation proof states the split. |
+| FUC-D2-T6 | T6 expected the record kept after a stopped group, but the orphaned-group hang-up can empty `P` (both lenses executed it). | T6's oracle follows the observed group: `ESRCH` at release means unlinked, members mean kept. A second case uses a helper that ignores `SIGHUP` and must keep the record. |
+
+**What stays residual under Q, said plainly:**
+- PGIDREUSE (P1, blocks G6);
+- R-1 and R-1W (P1 as the finding is written, P3 under D3(a));
+- R-G (P1, follow-up D's);
+- under D2a or D2d, R-W (P1, blocks G6);
+- the liveness residuals R-Z, R-L, R-T, R-2, R-3, R-K and R-NS (§2.6).
+
+### 3.6 Round 2's findings, and where each is answered
+
+| Id | Sev | Lens | Round 2's defect | Round 3 |
+|---|---|---|---|---|
+| FUC-D2-RG | P1 | all three | R-G was graded P3 on a false prerequisite: no `gitdir` prunes with no expiry. | §3.4: the prerequisite corrected, P1, two variants. U closes R-G1. Both close with the legacy change stated for follow-up D's unfreeze. |
+| FUC-D2-PGIDREUSE | P1 | concurrency | A late child joins a reused group after the successor read `ESRCH`. | §3.5: Q cannot close it without a new layer, which is said plainly. U does not have it (§3.3.3). |
+| FUC-D2-XMACHINE | P1 | design | The refusals advised removing the record once the coordinator was gone. | §3.5: each refusal names a sufficient condition. |
+| FUC-D2-D2CEPOCH | P1 | design | D2c's epoch, counted from durable starts, repeats when recovery dies before `RunResumed`. | §3.3.1: U's tag comes from the per-process incarnation id, drawn before any lock, and counts nothing durable. |
+| FUC-D2-SENTINELKILL | P2 | design | Release's `SIGKILL` reintroduced the unreaped sentinel. | §3.5. |
+| FUC-D2-ACCOUNTSTATE | P2 | design, regression | The joint rule rejected a drained record awaiting reclamation. | §3.5. |
+| FUC-D2-FROZENTESTS | P2 | regression | New ledger fields needed changes in a frozen test child. | §3.5: no field; the rows are observed through the lease side's table. |
+| FUC-D2-PUBORDER | P2 | concurrency | The record was published before the sentinel's dispositions. | §3.5. |
+| FUC-D2-WINOPEN | P2 | concurrency | The keeper's opening had no channel and no bound. | §3.5. |
+| FUC-D2-KEEPERREF | P2 | concurrency | The keeper's own handle kept the job's count up. | §3.5. |
+| FUC-D2-T6 | P2 | regression (P2), concurrency (P3) | T6 expected the record kept when the hang-up had emptied the group. | §3.5. |
+
+### 3.7 The residuals, in one table
+
+"U" is §3.3 with #329's targeted removal, "Q" is §3.5's repaired group with D2b′, and "today" is master. G6's pass rule
+fails on an open critical or high finding. Applicability names the three items the orchestrator asked about: Q1's "reclaimed or
+repaired … before any slot reset, admission, or resource reuse", ST-18's crash-and-resume class (with ST-16), and
+INV-22's resource accounting.
+
+| Residual | What | Severity and evidence | G6: Q1 / ST-18 / INV-22 | Blocks G6? | Closed by |
+|---|---|---|---|---|---|
+| **DESC**, the filed finding | A dead coordinator's Git writers act on a slot its successor recreated or kept. | **P1.** Executed at base by #329. Executed again here, today's naming: three routes, both Gits, edits lost or registration deleted (§3.3.3). | Q1 yes / ST-18 yes / INV-22 yes | **Yes**, until a closure is implemented, reviewed and accepted | **U** (executed, without observing a process), with #329; or **Q** with D2b′ |
+| **R-1** | Unix: a configured program detaches deliberately and later writes a slot path or registration it kept. | P1 as the finding is written; P3 under D3(a). Executed: `c1/witness/pg/witness-pg-setsid.log`, and this round's helper route. | Q1 yes / ST-18 yes / INV-22 yes, for its cleanup claims | Under **U: no**, closed for slot paths and registrations (helper, unique: B intact). Under **Q: yes**, unless D3(a). | U; or D3(a)'s boundary under Q |
+| **R-1W** | Windows: the same, through a process started outside the job. | As R-1. Reasoned. | Q1 yes / ST-18 yes / INV-22 yes | Under U: no. Under Q: yes unless D3(a). | U; or D3(a) |
+| **R-W** | Windows: I/O pending at termination completes after the successor moved on. | **P1** (§2.5.1). Reasoned from Microsoft's documentation, not executable without a driver. | Q1 yes / ST-18 yes / INV-22 yes | Under **U: no**: it lands in a dead instance, which is retained while open. Under **Q-D2b′: no** once implemented. Under **D2a or D2d: yes**. | U; or D2b′ |
+| **R-G1** | Legacy-started maintenance: a paused prune deletes a recreated registration that reused the old name. | **P1** (triage, all three lenses). Reasoned from `worktree.c` and `builtin/worktree.c` (§3.4). | Q1 yes / ST-18 and INV-22 for the registration's cleanup and accounting | **Yes**, until U or the legacy change | **U**, for topology names; or follow-up D's legacy change (§3.4) |
+| **R-G2** | Legacy-started maintenance: a prune reads the new entry before `locked`, and deletes it after the add completed. | **P1** (triage). Reasoned. Needs the prune descheduled between its decision and its deletion. | Q1 yes / ST-18 and INV-22 as R-G1 | **Yes**, until the legacy change, or the owner excludes it | **Follow-up D's legacy change only** (§3.4). Neither U nor Q. |
+| **PGIDREUSE** | Unix, Q only: a late child joins a reused group after the successor read `ESRCH`. | **P1** (triage). Reasoned, not executed. | Q1 yes / ST-18 yes / INV-22 yes | Under **Q: yes**. Under **U: does not arise**. | U only (§3.5) |
+| **R-P** | The dead coordinator's own `git worktree prune` (`workspace_manager.rs:3061`, `:3100`, `:3123`) reads the successor's new entry before `locked`. | R-G2's mechanism, with the engine as the starter; P1 by the same grading. Reasoned. | Q1 yes / ST-18 yes / INV-22 yes | **Yes**, until #329 lands, which G6 requires for #329's own finding | **#329's targeted removal** (no engine prune at all). Under Q, also the group's wait. |
+| **R-REF** | Windows: a terminated `update-ref`'s ref write lands after the successor reclaimed its lock. | P3, liveness. Reasoned: every engine ref write is a compare-and-swap (`--no-deref <ref> <new> <old>`), so a late landing makes the successor's next write refuse. The basis is `design/26_design_merge_queue_protocol.md:398`'s kill-on-close clause, as master states it. | Q1 yes / ST-18 no / INV-22 no | No | Q-D2b′ would order it after completion. U leaves it as today. |
+| **R-UR** | U only: a dead instance retained while still in use, or recreated by a program writing by absolute path after its removal. | P3: disk and liveness, never a shared slot. The witness shows Git's own late writes cannot recreate a removed instance (§3.3.4). | Q1 yes: its intent can outlive the next admission, which E-FUC-3's item 2 makes the registry's rule for a dead instance (no dead instance is ever reused). INV-22 yes, admitted by items 3 and 4. | No, with E-FUC-3. Without item 2, Q1's literal order needs §3.3.2's refusing variant. | The next walk removes it; after finalization, the operator |
+| **R-Z, R-L, R-T, R-2, R-3, R-K, R-NS** | Q only: liveness refusals (§2.6). | P3, or stated. | Q1's refusal path only | No | Under U none of them exists. A hung writer holds only its own dead instance. |
+| **XMACHINE** | Q only: the cross-machine refusal's advice. | Was P1. | — | No | Fixed (§3.5) |
+| **Two vacuous frozen oracles** | U only: `finalize.rs:421-422` and `:456` match untagged names. | P3, test coverage. Read, not executed. | INV-22's finalization evidence | No | New non-frozen assertions; in place only under D4 |
+| **R-GU** | Maintenance or a prune started by a process the engine did not start: the user's own Git, an IDE. | Outside this finding (§1.13). R-G2's mechanism. An agent's own prune is `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` (P2, guarded by PR12). | — | Not this change's | Not this change's; for the orchestrator, beside decision B |
+
+**What G6 then meets, under the recommended choices.**
+- With U, #329 and follow-up D's legacy change implemented and accepted, nothing in this table is an open high.
+- Under Q instead, PGIDREUSE stays open and blocks G6, and so do R-1 and R-1W unless D3(a).
+- Without the legacy change, R-G2 stays open and blocks G6 under either, unless the owner excludes it.
+
+### 3.8 The owner's decisions
+
+The orchestrator puts one consolidated question to the owner after this round's review. These are its parts.
+
+| | Decision | Options | Recommendation | What each leaves open |
+|---|---|---|---|---|
+| **D2** | **How the finding closes.** It is the central choice, and D1 and D3 follow from it. | **U**: a slot instance per incarnation (§3.3), with erratum E-FUC-3 revised (§3.3.7); a dead instance still in use is either retained (E-FUC-3's item 2) or refused on, as §3.3.2 sets out. **Q-D2b′**: the repaired writer group and keeper (§3.5), with E-FUC-1 and E-FUC-2. **Q-D2a**: the group with the coordinator wait on Windows. **D2d**: no Windows change. | **U**, retaining | **U:** R-G2 (follow-up D's), R-REF (as today), R-UR (P3), two vacuous oracles (replaced). It needs #329's targeted removal. **Q-D2b′:** PGIDREUSE (P1, blocks G6), R-1 and R-1W (D3), R-G1 and R-G2, and seven liveness residuals. **Q-D2a:** the same plus R-W (P1, blocks G6). **D2d:** the finding's Windows half (P1, blocks G6). |
+| **D1** | **Accounting.** | Under U: E-FUC-3's items 3 and 4. No new row; R9, R10 and R24 are counted per creating incarnation. Under Q: D1a, E-FUC-1 with R29 and R30 as §3.5 amends them; or D1b. | **Follows D2:** E-FUC-3 under U, D1a under Q. | Declining under U: the code would reclaim instances the packet's rows do not name. Declining under Q: the group and record go unaccounted, as §2.12 said. |
+| **D3** | **R-1 and R-1W's scope** | (a) extend `DESIGN.md` §15's and INV-18's boundary for deliberately daemonizing code to the programs the engine's Git commands run, and file R-1 at P3; (b) close it with U; (c) keep it at P1. | **Moot under U**, which closes it for slot paths and registrations, executed. Under Q it is the owner's scope call; round 2's evidence (§2.6) stands. | Under Q with (c): R-1 blocks G6, and no in-lane remedy exists but U. |
+| **D4** | **A frozen file** (new, conditional). It is a ruling on G6's "fold, queue, merge, repair, and recovery modules byte-identical to the G5 range", and PR11's two-tier reading of it (R-D, `reviews/2026-09-30-pr11-record.md`). | Neither U nor Q, as specified here, changes a frozen file. D4 arises only if (i) the owner wants `finalize.rs:421-422` and `:456` restored in place under U; or (ii) the implementation's whole-suite run finds a frozen test that must change: under U, a multi-incarnation recovery test; under Q, one that the observation route of §3.5 does not cover. The options are then (a) permit that named test-only change, proved with PR11's two tiers; or (b) refuse, and the implementation finds another form or the option is dropped. | **Not needed**: replace the two oracles with non-frozen assertions. | If (ii) occurs and (b) is chosen, the chosen closure needs a form that leaves the test as it is. |
+
+**For decision B, which the orchestrator carries:** follow-up D's unfreeze includes §3.4's change to `git_command`
+(`src/workspace.rs:43-51`): `-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c maintenance.autoDetach=false`
+on every legacy Git child. It closes R-G1 and R-G2 for legacy-started maintenance, and R-G2 has no other closure.
+
+### 3.9 What round 3's review should test hardest
+
+- §3.2's trace. Does any frozen path read a recorded worktree path, or render a slot into a path or name by itself?
+- §3.3.2's per-instance removal and retention, against every frozen walk of `intents()`, with `intents()` returning
+  logical slots.
+- §3.3.5's claim that no frozen test must change, and the two oracles it says go vacuous.
+- The tag's uniqueness argument, and the Windows budget it spends.
+- E-FUC-3's text, item by item, against `c3/packet/packet-extract.txt`.
+- §3.4's two R-G variants, and whether the legacy change closes both.
+- §3.5's argument that Q cannot close PGIDREUSE without a new layer.
+
+### 3.10 What §3 replaces
+
+| Earlier text | Replaced by |
+|---|---|
+| §0's status line | §0, updated |
+| §2.2: the legacy maintenance prune deletes "only if its `gitdir` file is older than" the expiry | §3.4 |
+| §2.4.1: release kills the sentinel; the record is published after `setpgid` alone | §3.5, FUC-D2-SENTINELKILL and FUC-D2-PUBORDER (Q only) |
+| §2.4.3: "remove it once that machine's or virtual machine's coordinator is known to be gone", and the namespace refusal's advice | §3.5, FUC-D2-XMACHINE |
+| §2.4.4 and §2.4.6: the release and its crash rows | §3.5 |
+| §2.5.4: the opening handshake and the keeper's loop | §3.5, FUC-D2-WINOPEN and FUC-D2-KEEPERREF |
+| §2.5.6: D2c, its epoch and E-FUC-3 | §3.3 and §3.3.7 |
+| §2.6: R-G at P3; R-1, R-1W and R-W's G6 rows | §3.4 and §3.7 |
+| §2.7.2: the joint rule, and the observations in `PhysicalInventory` and `ProcessLocal` | §3.5, FUC-D2-ACCOUNTSTATE and FUC-D2-FROZENTESTS |
+| §2.9: the placement | §3.3.6 under U; unchanged under Q |
+| §2.10: T6's oracle | §3.5, FUC-D2-T6 |
+| §2.11 and §2.12 | §3.7 and §3.8 |
