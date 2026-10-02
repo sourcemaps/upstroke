@@ -3186,6 +3186,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_start_cover_starts_only_the_container_it_was_minted_for() {
     let fixture = Fixture::new("start-cover-binding", false);
