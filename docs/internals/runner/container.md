@@ -472,6 +472,16 @@ re-export, a function value, a macro's expansion — and the census
 inside the tree. Private (`fn`) would say the same to the compiler, but the effects census
 classifies by the visibility a fn declares, and these two are funnels reached from another file.
 
+**Inside the tree too, since implementation review round 2 (`FUA-I2-MACRO-WS`), it takes a
+proof.** `delegate ! (plan.start_container, …)` — whitespace before the `!` — hid a call of
+this tree's own funnel from the census, which reads text. Each funnel now takes by value the
+proof only `exec`'s `Reaping::cover` mints (`exec::CoveredCreate` here, `exec::CoveredStart`
+for the start), and passes it on to the runtime, whose `create` and `start` take it too; so a
+call with no cover does not compile in any module, however it is spelled, and the census is a
+backstop (`exec.md`, `mod cover`). **The create is made from the proof's spec**, the one the
+cover validated against the reaper's scope; there is no `spec` parameter left to pass a
+different container through.
+
 INV-23: "every container of every epoch is created from the recorded image
 id". [`CreateSpec`] carries no reference at all, so creating from one is not
 expressible. The returned [`CreatedContainer::reported_image_id`] is the
@@ -510,7 +520,7 @@ runtime did not say" is not "the volume is there".
 ### Errors
 
 [`UpstrokeError::Refused`] when `site` does not name this operation, when
-`intent` does not name `spec.name`, when a named volume the spec mounts is
+`intent` does not name the covered spec's name, when a named volume the spec mounts is
 absent or cannot be inspected, or when the runtime refuses.
 
 ## `fn expect_mounted_volumes_present(`
@@ -543,6 +553,11 @@ impossible by construction"; with a `&ContainerName` parameter that
 sentence was true only of the sequences somebody had happened to write, and
 a `start_existing(name)` added later compiled. With [`IntentWritten`] there
 is no argument to pass that is not evidence.
+
+Since implementation review round 2 it also takes the cover's start proof (`FUA-I2-MACRO-WS`),
+which names the container its cover validated; an intent for any other name is refused before
+the runtime is asked (`attempted: false`), with the intent clause's own message, and the
+runtime starts `covered.name()`.
 
 ### Errors
 
@@ -668,7 +683,16 @@ changed. The module sits before `mod fake;`, so the file's first test-only cut i
 
 The ordering `side_effect_vs_event_ordering` states, in one place. Test-only (`mod uncovered`
 above): production's launch is `ContainerRunner::launch`, which keeps this order and adds the
-cover.
+cover. It mints its funnels' proofs with the test-only `without_a_reaper`
+(`FUA-I2-MACRO-WS`), so its signature, and every test that calls it, the frozen
+`recover/tests.rs` among them, is unchanged.
+
+## `pub(crate) use exec::cover::{CoveredCreate, CoveredStart};`
+
+Test-only: the cover's proofs named crate-wide, so the runtime doubles outside this tree
+(`engine::topology::{create, prelock, startup}::tests`) can implement `ContainerRuntime`'s
+`create` and `start`, and tests can call `without_a_reaper`. A production build has neither
+the re-export nor the constructor.
 
 > intent synced before docker create; container created from the recorded id
 > and verified before start; view mounted before start
@@ -1474,7 +1498,7 @@ Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
 (measured, docker 29.7.2) — see [`Self::exec_streams`].
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
 
 `expected_failures_refusals[5]`. Measured against `docker`
 29.7.2: without it `sh -c 'printf owned >/outside-role-mount'`
@@ -1483,11 +1507,16 @@ so a gate's write outside every declared mount succeeds and only
 the weaker "the host is unharmed" holds. With it the same command
 answers `Read-only file system` and exits non-zero.
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
 
 The **image id**, never a reference (INV-23).
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `let reported = self`
+`spec` is `covered.spec()`: the runtime creates the container the cover validated
+(`FUA-I2-MACRO-WS`). `DockerCli` is where a start is implemented rather than called, so the
+proof governs every call of this method, and the domination census pins every
+`RuntimeOp::Create` to it and every `RuntimeOp::Start` to `start`.
+
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `let reported = self`
 
 The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the

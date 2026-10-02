@@ -1186,8 +1186,12 @@ the type system cannot say on its own:
    "an intent was written" cannot stand in for "this container's intent
    was written".
 
-The third leg is a compile error and has no test: `start_container` has
-no parameter that names a container other than the proof.
+The third leg was a compile error with no test: `start_container` had no
+parameter that names a container other than the proof. Since
+`FUA-I2-MACRO-WS` it also takes the cover's start proof, which names one
+too; the two must agree, and
+`a_start_cover_starts_only_the_container_it_was_minted_for` holds that a
+disagreement is refused before the runtime is asked.
 
 ## `fn a_container_is_created_and_started_only_under_its_own_in…` › `let fixture = Fixture::new("intent-capability", false);`
 
@@ -1218,6 +1222,14 @@ record and not about `certify` never succeeding.
 
 The control: the same call with the matching proof creates, so the
 refusal above is about the name and not about the spec.
+
+## `fn a_start_cover_starts_only_the_container_it_was_minted_for() {`
+
+`FUA-I2-MACRO-WS`'s binding of the start proof: a container created under its own intent, then a
+start handed a proof minted for another worker's container — refused with `attempted: false`, the
+intent clause's message naming the other container, nothing reaching the runtime, the container
+still `Exited`; the proof minted for it then starts it. With the check removed (`r2-b1`) the
+runtime is asked to start the other name and the refusal is an attempted one.
 
 ## `fn a_launch_that_fails_at_any_step_releases_everything_it_reached() {`
 
@@ -1968,6 +1980,18 @@ stronger guard where it can be had: the free `launch` is test-only (`mod uncover
 no spelling of either compiles. The census is the guard where the compiler cannot be: inside the
 module tree, and in test builds, where the free `launch` exists.
 
+**It is not the guard any more, and it never was a proof** (`FUA-I2-MACRO-WS`, implementation
+review round 2). This reader requires an identifier byte immediately before `!`; rustfmt keeps
+`delegate ! (plan.start_container, …)` as written inside a nested macro definition, the reader
+missed the invocation, passed `.start_container` over as a field access, and the expansion
+called `super::start_container` with no cover — every test green, the container running with no
+reaper. Round 1 had repaired the reader for one spelling and round 2 found the next; a reading of
+text has spellings it cannot see. Since round 2 every start primitive takes a proof only
+`Reaping::cover` mints (`exec.md`, `mod cover`), so a start with no cover is a compile error
+whatever spells it — that reviewer's mutation fails with `error[E0308]` and `error[E0061]` in
+production and test builds alike — and this census is a lexical backstop: it is not made to see
+`name ! (…)`, and nothing depends on it doing so.
+
 ## `fn enclosing_fn(code: &str, at: usize) -> Option<String> {`
 
 The innermost `fn` whose body's braces contain `at`, read in blanked code, where every brace is
@@ -2012,20 +2036,31 @@ does), five checks:
    the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!` and the
    like); and `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
    `create` and `start`;
-4. in `exec.rs`, `fn launch(`'s signature names `Covered`, `self.launch(` occurs once, in
-   `contain`, after `contain`'s one `.cover(`, and `Covered {` is constructed once, in `cover`;
+4. in `exec.rs`, `fn launch(`'s signature names both proofs, `CoveredCreate<` and
+   `CoveredStart<`; `self.launch(` occurs once, in `contain`, after `contain`'s one `.cover(`;
+   `Covered {`, `CoveredCreate {` and `CoveredStart {` are each constructed once, in `cover`;
+   and the module `cover` declares no module of its own in production, since a child module
+   sees its private fields (`FUA-I2-MACRO-WS`);
 5. the control: the only region naming `start_container` is `exec.rs` (`container.rs` named it
    only inside the free `launch`), and the walk read more than 40 files and 750,000
    non-whitespace bytes.
+
+Since review round 2 it also holds the type-level guarantee's shape, so the guarantee cannot be
+taken away in silence: `create_container`, `start_container` and `ContainerRuntime`'s `create`
+and `start` each name their proof in their signature, and no production region names
+`without_a_reaper`, the test-only mint — in a test build it exists, and the reviewer's macro
+handed that mint compiles there (`r2-c4`; a production build refuses it, `r2-p3`). These, too,
+read text; what they guard is that the types keep doing the work.
 
 In every other production module the lint is denied or forbidden outside tests, so a path to the
 primitives there — a call or a function value — is a clippy error, measured in a forbidding module
 (`fua-p1-clippy-refuses-a-function-value-of-the-start-primitive`); and a call planted in a module
 that allows the lint, where clippy says nothing, fails check 3 (`fua-c8`).
 
-## `fn reaper_labels(private_root: &Path, incarnation: &str) -> BTreeMap<String, String> {`
+## `fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {`
 
-The two labels a reaper's scope lists by, as `ContainerIntent::labels` writes them.
+A spec carrying the two labels a reaper's scope lists by, as `ContainerIntent::labels` writes
+them: `Reaping::cover` takes the spec it validates, since the create proof it mints carries it.
 
 ## `fn armed_for(private_root: &Path, incarnation: &str) -> bool {`
 

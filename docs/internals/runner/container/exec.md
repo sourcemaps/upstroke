@@ -478,16 +478,66 @@ The scope is kept beside the reaper so every later cover compares its container'
 with the scope the reaper actually lists. On Windows there is no reaper (ST-16 (e); the
 `os_matrix`): the scope alone is kept, and the label check runs the same way.
 
-## `struct Covered<'a> {`
+## `pub(super) mod cover {`
 
-The cover's proof value. Its one constructor is inside `Reaping::cover`, and
-`ContainerRunner::launch` takes it as a parameter, so within this file no container can be
-launched without a cover; the census makes the same true of the tree. `fate` is what
-`contain` established for the invocation, recorded by `settle`; the drop reads it.
+**Where the guarantee lives** (`FUA-I2-MACRO-WS`, implementation review round 2). Every
+primitive that starts a container — the funnels `create_container` and `start_container`
+and the runtime's own `ContainerRuntime::create` and `::start` — takes a proof by value,
+`CoveredCreate` or `CoveredStart`, and nothing but `Reaping::cover` can make one. That is a
+fact about types, so it holds whatever spells the call: a macro, an alias, a function value,
+whitespace before a `!`. The domination census (`tests::every_container_start_in_production_is_reached_only_through_a_covered_launch`)
+was the guard before this round and was evaded twice by spelling — a macro's `launch:`
+argument in round 1, `delegate ! (plan.start_container, …)` in round 2 — because it reads
+source text. It stays, as a lexical backstop; it is not a proof, and nothing here depends on
+it seeing every spelling.
 
-## `impl Reaping` › `fn cover(`
+**Why a module of its own, at the end of the file.** Rust privacy is by module: a field
+private to a module is visible in that module and in its descendants, nowhere else. The
+proofs' fields are private to `cover`, so neither the rest of this file nor any sibling or
+parent of `exec` — `container.rs`, `census.rs`, the fake — can construct one; `clippy.toml`'s
+note above its container-runtime denials says a token "would all be reachable from a
+sibling", which is true of a token defined in `runner::container` and is why this one is
+defined in a leaf instead. `Covered`, the in-flight guard, moved in with them, so its one
+constructor is `cover`'s too. The module sits after every production item of `exec.rs`
+because its `#[cfg(test)] mod without_a_reaper` is the file's first `#[cfg(test)]`, and
+`effects::production_region` cuts a file there: the cut must be a module
+(`effects::tests::every_production_region_that_stops_early_stops_at_a_module`) and must not
+hide production code below it.
 
-The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+**What the compiler does not cover**, and so what the census still reads: code inside
+`cover` itself (it can mint), and the runtime's implementation — `DockerCli`'s `create` and
+`start` and the private `DockerCli::exec` they share, in `container.rs`, which runs whatever
+`docker` argv it is handed. A new production module inside `cover`, a second construction of
+a proof, or the test-only mint named in production turns the census red; `docker` and
+`DockerCli` stay confined to `container.rs` by `effects`' denylist census, and `RuntimeOp::Create`
+and `::Start` to `DockerCli`'s own two methods by this census's check 3.
+
+## `mod cover` › `pub(in crate::runner::container::exec) struct Covered<'a> {`
+
+The in-flight guard `cover` returns beside the two proofs. `fate` is what `contain`
+established for the invocation, recorded by `settle`; the drop reads it.
+
+## `mod cover` › `pub struct CoveredCreate<'a> {`
+
+The proof that one container's create is covered: it carries **the spec `cover` validated**,
+borrowed, and the create is made from that spec — `create_container` and every
+`ContainerRuntime::create` read `covered.spec()` and take no spec of their own — so a proof
+minted for one container cannot create another. Its lifetime is the cover's single `'a`,
+the borrow of the runner's `Reaping` and of the spec at once, so it cannot outlive the runner
+whose reaper covers it (a mutation returning one as `'static` is refused,
+`lifetime may not live long enough`). Not `Clone`: consumed by the call.
+
+## `mod cover` › `pub struct CoveredStart<'a> {`
+
+The start's proof: the validated spec's name, borrowed. `start_container` refuses an intent
+for any other name before the runtime is asked (`expect_intent_for`, attempted `false`;
+`tests::a_start_cover_starts_only_the_container_it_was_minted_for`), and the runtime's
+`start` starts `covered.name()`.
+
+## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
+
+Validates, arms on the first cover, counts the invocation, and mints the three values:
+`Covered`, and the two proofs over `spec`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
 runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
 built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
 with the container's two label values **first**, and a difference refuses the launch before
@@ -506,18 +556,41 @@ for an already-armed foreign scope,
 `upstroke.incarnation` labels are exactly the two filter values the reaper's `docker ps`
 lists by. The refusal names both labels and the reaper's listing argv.
 
-## `impl Covered<'_>` › `fn settle(mut self, fate: ProcessFate) {`
+## `mod cover` › `pub(in crate::runner::container::exec) fn settle(mut self, fate: ProcessFate) {`
 
 Records the fate `contain` established and ends the cover (its drop runs as `settle`
 returns). Every return path of `contain` after the cover settles exactly once: the launch's
 error with that error's fate, or the release's fate.
 
-## `impl Drop for Covered<'_> {`
+## `mod cover` › `impl Drop for Covered<'_> {`
 
 Counts the invocation down and, unless its fate was established `Gone` or `NeverStarted`,
 marks the runner unsettled. A cover dropped without a settle is an invocation that unwound
 — a panic inside `contain` — whose container may run: unsettled too
 (`tests::a_panic_inside_contain_leaves_the_reaper_armed`).
+
+## `mod cover` › `impl<'a> CoveredCreate<'a>` › `pub fn spec(&self) -> &'a CreateSpec {`
+
+The validated spec, with the proof's own lifetime rather than the borrow of the proof, so a
+funnel can read it and still move the proof into the runtime's `create`.
+
+## `mod cover` › `mod without_a_reaper {`
+
+`CoveredCreate::without_a_reaper` and `CoveredStart::without_a_reaper`: proofs minted with no
+reaper armed, for tests that drive a primitive directly — the test-only free
+`container::launch` (so the frozen `recover/tests.rs` that calls it compiles unchanged) and
+the container suites' direct calls of the funnels and of a runtime's `create` and `start`.
+`#[cfg(test)]`: no production build has them (`r2-p3`, `error[E0599]`), and the census refuses
+a production region that names them in a test build.
+
+## `pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};`
+
+The proofs' names inside the container module tree, which `container.rs`'s funnels and
+`DockerCli`, `runtime.rs`'s trait and the fake need. Outside the tree a production build
+cannot name either (`r2-p5`, `error[E0603]`). Both types are declared `pub` in a private
+module, so naming them in the public `ContainerRuntime` trait raises no `private_interfaces`
+lint. Test doubles outside the tree name them through `container.rs`'s test-only
+`pub(crate)` re-export, which no production build has.
 
 ## `impl Armed` › `fn kept_until_the_process_exits(self) {`
 
@@ -743,9 +816,12 @@ today.
 
 ## `impl ContainerRunner` › `fn launch(`
 
-**It takes the cover** (`_covered: &Covered<'_>`), which only `Reaping::cover` makes, so
-the reaper that will outlive a dead coordinator is armed before this function's first effect.
-The value is read by nothing; its type is the guard.
+**It takes the cover's two proofs** (`to_create`, `to_start`), which only `Reaping::cover`
+makes, and passes each through to its funnel, which passes it on to the runtime; so the
+reaper that will outlive a dead coordinator is armed before this function's first effect, and
+the two calls that start a container cannot be written without them. Until review round 2 it
+took `&Covered` and read nothing from it, so only this function was bound and the funnels
+below it were not.
 
 The four sites `side_effect_vs_event_ordering` puts before the
 invocation, in the order it states and in the order a container runtime
@@ -1059,13 +1135,14 @@ instead of a silent regression.
 `effects::tests::the_view_directory_has_one_definition_in_the_tree` guards
 against a second one being written.
 
-## `fn contain(` › `let covered = self`
+## `fn contain(` › `let (covered, to_create, to_start) = self`
 
 The cover, after the plan (which only reads) and before the launch's first effect: it
 refuses a container its reaper would not select, arms the runner's reaper on the first
-cover, and counts the invocation. A refusal is `NeverStarted`, with nothing written.
+cover, counts the invocation, and mints the two proofs over `plan.launch.spec`. A refusal is
+`NeverStarted`, with nothing written.
 
-## `fn contain(` › `let launched: Launched = match self.launch(hooks, &plan.launch, &covered) {`
+## `fn contain(` › `let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {`
 
 WriteIntent -> MountGitView -> Create (+ verify the reported image
 id) -> Start, in that order and in one place. A launch that fails settles the cover with

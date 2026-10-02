@@ -490,18 +490,27 @@ The container's exit status and captured output.
 [`RuntimeError`] when the runtime cannot be reached or the collection
 fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError>;`
+## `use super::exec::{CoveredCreate, CoveredStart};`
 
-Create a container **from an image id**, and report the id the runtime
-used.
+The cover's two proofs, minted only by `exec`'s `Reaping::cover` (`FUA-I2-MACRO-WS`).
+`create` and `start` take them by value, so this trait's two start primitives cannot be
+called without a cover from any module, whatever spells the call: `clippy.toml`'s
+`disallowed_methods` denial of both still holds, and no longer has to be the guard in the
+twenty-seven modules that allow that lint.
+
+## `pub trait ContainerRuntime: Send + Sync` › `fn create(&self, covered: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError>;`
+
+Create the container `covered.spec()` describes — the one the cover validated — **from an
+image id**, and report the id the runtime used. An implementation takes the proof and reads
+the spec from it; there is no other spec to create from.
 
 ### Errors
 
 [`RuntimeError`] when the runtime cannot be reached or creation fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, name: &str) -> Result<(), RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn start(&self, covered: CoveredStart<'_>) -> Result<(), RuntimeError>;`
 
-Start it.
+Start `covered.name()`.
 
 ### Errors
 
