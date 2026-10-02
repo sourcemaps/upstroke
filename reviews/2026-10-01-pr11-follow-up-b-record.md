@@ -28,9 +28,11 @@ review round 2 and the looping signal it raised (§2); its figures are under
 `~/orch-pr11/logs/pr11_fub_design3/`, cited as `d3/…`. **Design round 4** is `pr11_fub_design4`'s
 (`claude-opus-5-5`, `max`), spawned on `8dd2214c` to carry out the orchestrator's decision on design
 review round 3: narrow this change to the registry race and split the dead coordinator's Git writers
-out (§3); its figures are under `~/orch-pr11/logs/pr11_fub_design4/`, cited as `d4/…`. Every figure
-below is in a saved file the sentence names. A fresh implementer writes the code after the design
-review, and its sections follow §3.
+out (§3); its figures are under `~/orch-pr11/logs/pr11_fub_design4/`, cited as `d4/…`. **Design round 5** is
+`pr11_fub_design5`'s (`claude-opus-5-5`, `max`), spawned on `a6135a66` to answer design review round 4 (§4); its
+figures are under `~/orch-pr11/logs/pr11_fub_design5/`, cited as `d5/…`. Every figure below is in a saved file the
+sentence names. A fresh implementer writes the code after the design
+review, and its sections follow §4.
 
 ## 0. Status
 
@@ -38,8 +40,9 @@ review, and its sections follow §3.
 |---|---|
 | Design rounds 1 and 2 (§1) | **Superseded by §2.** Round 1's lock handed to the Git child, and round 2's engine-only lock with a process record and quiescence waits, are withdrawn, with E-FUB-1, R29, Class C and round 2's unfreeze text. §1 is kept as the history the review rounds cite. |
 | Design round 3 (§2) | **Superseded by §3 where §2's banner says.** Design review round 3 (three `gpt-6-astra` lenses at `max` on `8dd2214c`, the design lens refused on [cyber] grounds and recast) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d3-triage.md`). Its P1s in round 3's lease raised the looping signal a third time. |
-| Design round 4 (§3) | **PROPOSED, narrowed.** The registry race only: tolerant registry access (the parse inside the attempt, an exact classifier, one deadline per access, R-X shared by adds and held alone by the torn plan) and targeted removal, all executed on a scratch shape. The dead coordinator's Git writers (DESC) are filed as `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, P1, for follow-up C before G6. The legacy race is re-graded P1. **Decision B is the owner's** (ESCALATION item 7): §3.10 prepares B1′ and keeps B2′. This head changes no production code; it adds the DESC finding and renames the legacy one (§3.9, §3.10). |
-| Implementation | not started. It waits on design review round 4 and, for the legacy wrap only, on decision B. It does not depend on #328 or follow-up C (§3.12). |
+| Design round 4 (§3) | **Superseded by §4 where §3's banner says.** Design review round 4 (three `gpt-6-astra` lenses at `max` on `a6135a66`: design as a conformance reading, concurrency, regression) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d4-triage.md`): two P1s executed (the own-entry exception; B1′'s retry predicate), three P2s and one P3. The P1 in round 4's own exception raised the looping signal a fourth time. |
+| Design round 5 (§4) | **PROPOSED.** The registry race: round 4's tolerant access with its own-entry exception removed, after retrying everything was evaluated first and rejected with evidence (§4.2), all executed on a scratch shape. **Decision B is the owner's** (ESCALATION item 7), in two parts with exact unfreeze texts: corrected B1′ (§4.4) and B-PRESERVE (§4.5). This head changes no production code; it updates the legacy finding's guard and G6 reading. |
+| Implementation | not started. It waits on design review round 5 and, for the legacy changes only, on decision B. It does not depend on #328 or follow-up C (§3.12). |
 
 ## 1. Design
 
@@ -2416,12 +2419,25 @@ name its holders could adopt this sentence. **It is optional, and nothing depend
 
 ## 3. Round 4 design (narrowed)
 
-> **PROPOSED — for design review round 4.** This section supersedes §2 where it says so (the banner at §2's head
-> lists where). It is narrowed: #329 repairs the registry race and nothing else. The topology closure needs no owner
-> decision. It adds no resource row, effect site or fault row, edits no frozen module and moves no instrument (§3.6).
-> **Decision B is the owner's** (`~/orch-pr11/ESCALATION.md` item 7). §3.10 prepares B1′, wrapping the four legacy
-> registry enumerators, as the proposal, and keeps B2′, the filing, as the fallback. Neither is implemented. Nothing in
-> §3 is in force until the implementation lands.
+> **SUPERSEDED by §4 (design round 5) where this banner says; the rest of §3 stands as §4 cites it.**
+> - **Withdrawn:** §3.3's own-entry exception (its paragraph "The add's own entry", the `Own entry only` verdict and
+>   the own-entry branch of "Why it is exact"); §3.7's claim 4 ("after exactly one more attempt"); §3.10's B1′ text,
+>   its unfreeze text and its four legacy enumerators; §3.7's and §3.10's G6 reading of the legacy finding ("the lenses
+>   split"; "if … B1′ is not taken"); and §3.6's and §3.10's statement that B1′'s instrument edits make it the owner's
+>   to merge (§4.6).
+> - **Replaced:** §3.3's C3 and verdict table by §4.3; the refusal's type in §3.3 and §3.4 by
+>   `UpstrokeError::RegistryRefused` (§4.3); §3.7's claims, rows R6, R7 and R9 and its G6 tables by §4.7; §3.8's T4 and
+>   T12 by §4.8; §3.10's B1′ and "What B1′ does not close" by §4.4 and §4.5.
+> - **Stands:** §3.1, §3.2, §3.3 otherwise (the attempt, TORNOK, the two reads, C1, C2, the parse inside the list,
+>   where it applies), §3.4 otherwise, §3.5, §3.6's measurements, §3.8's other tests, §3.9, §3.11 as history, and
+>   §3.12 with §4.10's additions.
+>
+> *Round 4's banner:* **PROPOSED — for design review round 4.** This section supersedes §2 where it says so (the banner
+> at §2's head lists where). It is narrowed: #329 repairs the registry race and nothing else. The topology closure needs
+> no owner decision. It adds no resource row, effect site or fault row, edits no frozen module and moves no instrument
+> (§3.6). **Decision B is the owner's** (`~/orch-pr11/ESCALATION.md` item 7). §3.10 prepares B1′, wrapping the four
+> legacy registry enumerators, as the proposal, and keeps B2′, the filing, as the fallback. Neither is implemented.
+> Nothing in §3 is in force until the implementation lands.
 
 Design round 4 is `pr11_fub_design4`'s (`claude-opus-5-5`, `max`), spawned on `8dd2214c` to carry out the
 orchestrator's decision on design review round 3 (`~/orch-pr11/reviews/review-329-d3-triage.md`). Its figures are under
@@ -3024,3 +3040,627 @@ add then succeeds on a later attempt, and nothing is discarded.
 - `RESIDUE-UNBINDABLE-TASK-REGISTRATION-HAS-NO-DESIGN-SENTENCE`'s policy question: round 3's suggestion that the lease
   could license `WriterProof::NoWriterAlive` goes with the lease.
 - Foreign Git's own commands (R2, R3).
+
+## 4. Round 5 design
+
+> **PROPOSED — for design review round 5.** This section supersedes §3 where §3's banner says. The topology closure
+> needs no owner decision: it is round 4's tolerant access with its own-entry exception removed (§4.2, §4.3), in the
+> non-frozen `src/workspace_manager.rs` and `src/error.rs`, and it moves no instrument. **Decision B is the owner's**
+> (`~/orch-pr11/ESCALATION.md` item 7) and has two parts, each a PROPOSAL with its exact unfreeze text: corrected B1′
+> (§4.4) and B-PRESERVE (§4.5). Nothing in §4 is in force until the implementation lands.
+
+Design round 5 is `pr11_fub_design5`'s (`claude-opus-5-5`, `max`), spawned on `a6135a66` to answer design review round 4
+(`~/orch-pr11/reviews/review-329-d4-triage.md`). Its figures are under `~/orch-pr11/logs/pr11_fub_design5/`, cited as
+`d5/…`. The probe's index is `d5/census/probe-v/SUMMARY.txt`: scratch `git archive` copies of `a6135a66`, whose `src/`
+is master's, with each shape applied; nothing of it is on the branch.
+
+### 4.1 The looping signal again, and why this round converges
+
+**The signal appeared again.** Design review round 4 found a P1 in round 4's own machinery: the own-entry exception,
+which round 4 added to answer FUB-D3-PERM (FUB-D4-OWNENTRY, executed by the design and concurrency lenses). That is
+MAINTAINING's second signal, "A pass finds a P1 in machinery an earlier round of this pull request added", a fourth time
+on this pull request (§2.1 counted the first two, §3.1 the third).
+
+**What the defect in the repair was.** Round 4 trusted a second attempt to tell an add's own permanent failure from
+contention. Nothing a second attempt sees can tell them apart: another process's registration with the add's own name
+can appear and vanish between the reads on every attempt, and the store and Git's text are the same both times
+(§4.2). The fix removes the exception; it is not a refinement of it.
+
+**Why this round converges.** What remains are a removed exception, two legacy predicates, and the preservation scope
+the reviewers specified, each with a planned witness:
+- **The removed exception** (§4.2, §4.3) leaves round 4's classifier as every lens reviewed it, minus the part that
+  failed. FUB-D3-PERM offered two remedies, "Either distinguish these failures or withdraw the unconditional
+  quiet-store claim". Round 4 took the first, and FUB-D4-OWNENTRY broke it; this round takes the second. An unwritable
+  store now refuses at the deadline instead of failing at once, and §4.2 gives the reasons and the measurements.
+- **The two legacy predicates** (§4.4) are the retry and success conditions the lenses specified for corrected B1′:
+  FUB-D4-B1PREDICATE's owned, unchanged, empty destination, and FUB-D4-B1REMOVE's success decision inside the attempt.
+  Both sit inside calls B1′ already named.
+- **B-PRESERVE** (§4.5) is the scope all three lenses gave: `src/engine/coordinator.rs:544-548`,
+  `src/engine/resume.rs:562-569`, their `effects/allowlist.toml` entries and legacy regression tests. It uses only
+  primitives the legacy engine already calls.
+- **Each was executed on a scratch shape** this round, through the engine where the lenses executed at the Git level
+  (§4.2–§4.5), and each becomes a planned test with a mutation that turns it red (§4.8).
+- **Nothing this round adds is a process, a lock, a file, an event or a packet row.** The one new type is an error
+  variant, which lets a caller tell a registry refusal from others.
+
+### 4.2 FUB-D4-OWNENTRY: retrying everything, weighed against the classifier with no exception
+
+**The defect, executed through the engine's add.**
+- The witness is the lenses' sequence, run through `WorkspaceManager::add_worktree` with a probe seam at the two points
+  of each attempt. Another process's registration carrying the add's own administrative name appears after the read
+  that precedes an attempt, with `gitdir` written and `commondir` empty. The add's sibling scan dies on it, and it is
+  gone before the read that follows. Two windows.
+- On round 4's shape the add fails as Git state after its two attempts, in 2 ms: "fatal: failed to read
+  .git/worktrees/kbeta-g1/commondir: Success". A third attempt succeeds (`d5/census/probe-v/witness-runs/TABLE.txt`,
+  `own_entry_two`, three rounds).
+
+**The simplest form, evaluated first: no classifier at all ("retry everything").**
+- Every failed attempt of every registry access is attempted again until the one deadline. An add is attempted again
+  only while its slot condition holds. At the deadline the access refuses, carrying the last failure's text.
+- That form makes no exactness claim and has no own-entry rule. It was built on round 4's shape (`patch-v-ra.py`) and
+  measured beside the chosen form (`patch-v-ne.py`, §4.3), three rounds each (`witness-runs/TABLE.txt`). The suites are
+  `ra-suite/suite-1.log` and `ne-suite/suite-3.log`.
+
+| Witness | Retry everything | No exception (chosen) |
+|---|---|---|
+| The lenses' interleaving, two windows | Ok, third add attempt, 7 ms | Ok, third add attempt, 7–8 ms |
+| The same, on every attempt | refused at 500 ms, 15 attempts | `RegistryRefused` at 500 ms, 15 attempts |
+| FUB-D3-PERM's construction (store not writable) | refused at 500 ms | `RegistryRefused` at 500 ms |
+| A whole registration whose `HEAD` names nothing (list) | refused at 500 ms | Git at 0 ms |
+| A snapshot whose checkout cannot be made (a 300-byte name) | refused at 504 ms, 15 attempts | Git at 6 ms, 1 attempt |
+| TORNOK, static / transient | refused at 500 ms / Ok at 169 ms | `RegistryRefused` at 500 ms / Ok at 169 ms |
+| A verification whose snapshot the checkout cannot make (engine) | `Err(Refused)`; no `merge_verification_unavailable`; the log ends at `merge_verification_started` | Complete; one `merge_verification_unavailable`, as on the unpatched tree |
+| The whole suite | 2,998 passed, 2 failed | 2,998 passed, 2 failed |
+
+What each form costs:
+1. **A genuine permanent failure.**
+   - Retrying everything makes every one a resumable refusal after the bound: 10 s in production, plus one attempt's
+     runtime. That covers an unwritable store, a corrupt registration nothing is writing, an add whose checkout cannot
+     be made, and an invalid reference.
+   - The add's are the worst: each retry runs the whole checkout again. The test deadline allowed 15 (`TABLE.txt`,
+     `checkout_cannot_be_made`), and production's deadline is twenty times longer.
+   - The chosen form returns a failure that names nothing of the registry across a quiet, whole store at once, as it
+     was. Only a failure about an entry the reads did not see whole and readable is retried into a refusal; FUB-D3-PERM's
+     own new entry is one.
+2. **The diagnostics.**
+   - Retrying everything can say only that every attempt failed, and quote the last failure. It cannot say whether
+     anything was writing the store.
+   - The chosen form says what the store showed: an entry in progress, a change between the reads, an entry that
+     existed only during the attempt, or a named entry no read could read. It adds the attempt count and the last
+     failure's text. A quiet failure comes back as the Git error it is.
+3. **The verification semantics.** Retrying everything guarantees that no registry access reaches `run::verified`'s
+   Git arm (`src/engine/topology/run.rs:279`), so nothing durable is ever appended for a registry failure. It does
+   that for failures that are not the registry's too.
+   - The add is the registry access whose command also checks the snapshot out.
+   - The packet's `decisions.repairs.not_repairs` keeps defer and park semantics for "foreign Git state": "at
+     integration these terminate in merge_verification_unavailable with outcome Deferred or Parked".
+   - The verification's notes count "a snapshot the checkout could not make" as such state
+     (`docs/internals/engine/topology/run.md:469-473`).
+   - Executed at the engine level (`TABLE.txt`, `verification_snapshot`): under retry-everything the verification ends
+     `Err(Refused)`, with its transaction open and nothing appended.
+   - The next resume then settles it `merge_verification_interrupted` (`src/engine/topology/recover.rs:1129-1141`).
+     That event only releases the transaction (`src/topology/fold/apply.rs:39-41`), and the candidate verifies again
+     under a new sequence.
+   - So a cause that persists repeats on every resume and never reaches the defer and park limit. That is the class PR8's
+     triage C3 recorded (`pr8-triage.md`, quoted at `run.md:450-453`).
+   - The chosen form defers once and completes, as the unpatched tree does.
+4. **The suite does not tell the two apart.** Each fails only the two non-frozen tests round 4 also moved (§3.6): no
+   existing test pins what a quiet failure through a registry access becomes. T15 is planned to pin it (§4.8).
+
+**The choice: no exception.**
+- Retrying everything is rejected because its simplicity reclassifies failures that are not the registry's. Its third
+  cost changes how a packet decision is applied, which this lane cannot do without the owner.
+- The chosen form keeps every part of round 4's classifier that survived review, and removes the part that did not.
+
+**What the chosen form claims.**
+- **Contention is never returned as Git state.** The entry Git or a scan failed on was in progress at a read (C1),
+  changed between the reads (C2), or existed only during the attempt or could not be read whole. In the last two cases
+  the failure names it (C3), whatever its name; the add's own name is no exception (§4.3).
+- **"The failure names it" rests on an audit** of Git 2.43.0, 2.50.1 and 2.55.0, the versions on this box and CI
+  (`d3/git-src/`).
+  - `add_worktree` scans its siblings (`get_worktrees` and `check_candidate_path`, v2.43.0 `builtin/worktree.c:429-430`;
+    v2.50.1 `:444-445`; v2.55.0 `:478-479`).
+  - It then creates its entry and that entry's `locked` file, and only after those takes the destination over
+    (`junk_work_tree`, `:489`, `:504`, `:538`).
+  - Every die in the scan's reads prints a path ending `worktrees/<name>/<file>`: `setup.c:325`, `:335` and `:332` for
+    `commondir` ("failed to read %s"); `worktree.c:242`, `:295` and `:315` for `locked`. So does every die in creating
+    the entry and its `locked` file, which name `worktrees/<name>` ("could not create directory of", "could not create
+    leading directories of", "could not open … for writing").
+  - The scan's other failures name the destination (`check_candidate_path`) or the reference (`invalid reference`),
+    which are not contention. "Missing linked worktree name" (`worktree.c:84`) cannot arise for an entry read from the
+    directory.
+- **A failure that names no registry entry across a quiet, whole store is returned unchanged, at once.** That covers
+  the add's checkout, its reference, its destination, and a whole registration that is corrupt.
+- **What remains:** a Git version whose registry-phase failure names no entry and leaves no trace at either read. None
+  of the three audited has one. §4.3 closes R9's two Windows halves by reasoning; Windows is not executed.
+
+**What a genuine permanent failure becomes under the chosen form.**
+- **Quiet, and naming nothing of the registry:** the Git error, at once, as at master. In a verification that is
+  `not_repairs`' terminal, as at master.
+- **Naming an entry no read saw whole and readable** (FUB-D3-PERM: the store cannot be written, so the add's own new
+  entry exists only during the attempt; or a registry file no read can read): it is retried until the deadline. It then
+  refuses as `RegistryRefused`, naming the store, what it showed, the attempt count and Git's text. The refusal is
+  resumable and never a durable deferral.
+- **This is FUB-D3-PERM's second remedy.** The design-recast lens wrote: "Either distinguish these failures or
+  withdraw the unconditional quiet-store claim" (`~/orch-pr11/reviews/review-329-d3-design-recast-8dd2214c.review.md`).
+  Round 4 distinguished them, and FUB-D4-OWNENTRY showed the distinction unsound. Round 5 withdraws the claim:
+  "returned unchanged" now covers only a failure that names nothing of the registry. The finding is fixed that way,
+  for two reasons.
+  - **Nothing tells an add's own permanent failure from another process's same-named entry made and unmade within the
+    attempt.**
+    - The store does not: round 4's was byte-identical before and after (`d4/witness/git-level.log`, PERM).
+    - A second attempt does not: this round's interleaving gave identical reads and identical text twice.
+    - Nor does the path in Git's text. FUB-D3-PERM's failure names the entry's directory itself ("could not create
+      directory of '.git/worktrees/new'"). So does a sibling that vanishes mid-scan: "Invalid path
+      '<store>/wt-B4-331': No such file or directory" (`d3/measure/race-none-prune-run1.log`).
+    - Only the message and `strerror` text differ, and the manager's Git children run in the user's locale.
+    - So no rule can return the first as Git state without returning the second.
+  - **A store that cannot be written fails every add**, attempts' included, and an attempt's failed add already ends
+    the command. The refusal costs the deadline and changes the error's type; it costs nothing durable. On the legacy
+    path it is a registry refusal, so B-PRESERVE keeps the attempt's output (§4.5), where master discards it.
+
+**The witness the brief asks for is planned as T14** (§4.8): the lenses' interleaving through the production add, two
+windows and every attempt, with an own-entry exception as the mutation that turns it red. It is executed on the scratch
+shapes:
+
+| | Round 4's shape | Round 5's shape |
+|---|---|---|
+| Two windows | Git after two add attempts | Ok after three |
+| Every attempt | Git after two add attempts | `RegistryRefused` at the deadline |
+
+### 4.3 The access as round 5 specifies it
+
+These are the deltas against §3.3 and §3.4; everything else in them stands.
+
+**C3 has no exception.** §3.3's "The add's own entry" paragraph and its `Own entry only` verdict are withdrawn. C3 now
+holds when the failure names an entry that neither read holds, or one that a read holds with a file it could not read.
+"Names" keeps its three forms: the text, a refused parse's checkout, a scan's refusal by name.
+
+**C3 matches any spelling of the store.**
+- The text names an entry when it contains the common git dir's final component, then `/worktrees/`, then the entry's
+  name, up to a separator, a quote, a colon or whitespace. `\` is read as `/`.
+- Whatever precedes it does not matter: the store relative to the directory Git ran in (`.git/worktrees/…`, as Git
+  prints it in the main checkout), canonical, through a link, or through an 8.3 alias. The hosted Windows lane's
+  `TEMP` is one such alias. Round 4 matched two spellings of the whole store path (R9's first half).
+- Only C3 sees an entry made and unmade between the reads, so the own-entry interleaving depends on this match.
+- A tree never holds a `.git` path component, so a checkout's failure cannot name `.git/worktrees/…`. A common git
+  dir with another final component, such as a bare repository's, could collide with a candidate path in a failed
+  checkout; that failure would then refuse at the deadline. This is stated and not measured.
+
+**C3 counts a named entry a read could not read.**
+- Windows reports a file being deleted, or held open without read sharing, as unreadable. Held so across both reads,
+  round 4 called the store quiet (R9's second half).
+- A registry file that stays unreadable is a registry fault, and refusing it at the deadline is right.
+
+**The verdicts** (replace §3.3's table):
+
+| Verdict | Then |
+|---|---|
+| Not contended | Returned at once, unchanged. |
+| Contended | Another attempt after a backoff (1 ms doubling to 50 ms), while the deadline allows. For an add, also only while its caller's condition holds and no entry of the read after the failure registers its destination; otherwise the failure is returned as it is. At the deadline, `UpstrokeError::RegistryRefused`, never `UpstrokeError::Git`. |
+
+**The refusal's type.**
+- The deadline's refusal is a new variant, `UpstrokeError::RegistryRefused { message }` in `src/error.rs`, displayed
+  as its message like `Refused`. So is a wait for R-X that reaches the deadline.
+- On the topology path it propagates exactly as round 4's `Refused` did: `run::verified` maps only `UpstrokeError::Git`
+  (`src/engine/topology/run.rs:279-289`).
+- It lets a caller tell a registry refusal by its type; B-PRESERVE (§4.5) is the caller that needs it.
+
+**An add's destination.**
+- An add names its destination, and is attempted again only while no registration in the read after the failure names
+  it. "Names" means its `gitdir`, which Git writes as a real path, compared with the destination's canonical path.
+- Git writes that `gitdir` only after it has taken the destination over, so a registration naming the destination
+  means Git got that far.
+- The caller's own condition still applies: the topology's "nothing at the slot", or B1′'s (§4.4).
+
+**Where it applies:** §3.3's table, unchanged. The legacy module calls one `pub(crate)` entry point,
+`tolerant_registry_access`, over a common git dir, a flag for R-X shared, an add's destination, a retry condition and
+the attempt. Only B1′ needs it.
+
+**Measured on the shape with B1′ and B-PRESERVE** (`patch-v-ne.py`, `patch-v-legacy.py`):
+- Clippy `-D warnings` over all targets: rc 0 (`ne-suite/clippy-2-run.txt`).
+- Two whole suites: 2,997 passed with 3 failed, and 2,998 passed with 2 failed (`ne-suite/suite-2.log`, `suite-3.log`).
+- The two failures in both are the non-frozen tests round 4 also moved (§3.6).
+- Suite 2's third failure is a frozen recovery test: `engine::topology::recover::tests::`
+  `an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges`,
+  "and no process holds the run". It passed alone three times on the same tree (`ne-suite/alone-recover-{1,2,3}.log`).
+  It is a single observation of the run's lease (`recover/tests.rs:7120-7122`), the class
+  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` names (§4.10).
+- Every frozen module's tests pass in suite 3 (`frozen-census.txt`): recover 226, integrate 20, repair 5, finalize 5,
+  fold 192, `events::log` 47. So do the legacy engine's 188 and `src/workspace.rs`'s 47, and every instrument census.
+
+### 4.4 Corrected B1′: PROPOSAL (decision B, first part)
+
+**What corrects it.**
+- **FUB-D4-B1PREDICATE** (P1, executed by all three lenses). The legacy snapshot's destination exists before the add
+  (`src/workspace.rs:1377`), so §3.3's "nothing at the slot" was false after every failure and nothing was retried. The
+  retry predicate is now explicit.
+- **FUB-D4-B1REMOVE** (P2, executed). The removal's success decision moves inside its attempt.
+- **Round 4's open note** on the removal: `worktree_is_registered`'s list is no longer a separate access. It is the
+  removal's success decision.
+
+**The exact text, `src/workspace.rs`:** three call sites and one private helper. Nothing else in the module moves.
+
+1. **`switch_branch`** (`:450-457`). The `git switch -q --no-recurse-submodules -- <name>` child (`:455-456`) is the
+   attempt. It has no destination, and it is attempted again while the store shows contention.
+   - Git refuses a branch checked out in another worktree by scanning the registry before it changes anything
+     (`die_if_checked_out`), so a contended failure has changed nothing.
+   - Executed (`d5/witness/git-level-v.log`, S): rc 128 naming the torn entry, with `HEAD` and the status unchanged;
+     rc 0 once the sibling finishes.
+2. **`add_gate_worktree`** (`:871-906`). The `git worktree add -q --detach --force <path> <commit>` child
+   (`:879-896`) and its exit check (`:897-904`) are the attempt. It holds R-X shared, and its destination is `path`,
+   canonical.
+   - **The legacy retry predicate.** Before the first attempt the add records the destination's identity. It is
+     attempted again only while the destination is still that directory: present, a directory and not a link or
+     reparse point, empty, and on Unix with the same device and inode. No registration may name it.
+   - **Why the predicate is exact.** Git takes a destination over (`junk_work_tree`) only after its sibling scan, its
+     new entry and that entry's `locked` file (v2.43.0 `builtin/worktree.c:429-489`, v2.50.1 `:444-504`, v2.55.0
+     `:478-538`). On any later failure it removes the destination with its junk.
+   - So a destination still empty and unchanged means Git stopped before taking it over, and the next attempt is the
+     same attempt. A destination that is gone means the failure came later, at the checkout or the registration's own
+     files, and the failure is returned as it is.
+   - **Executed at the Git level** (`git-level-v.log`). P1: rc 128, identity unchanged, no entries, no registration
+     naming it, then rc 0 once the sibling finishes. P2: a checkout that cannot be made leaves the destination absent.
+   - **Executed through real legacy snapshot construction** (`TABLE.txt`). `legacy_add_transient`: Ok after two
+     attempts, the destination present and empty after the first failure. `legacy_checkout_cannot_be_made`: Git after
+     one attempt.
+   - On Windows, std exposes no stable file identity, so the predicate there is the rest of it. That suffices: the
+     destination is under the run's private root, and nothing but this access and Git touches it.
+3. **`cleanup_gate_workspace`** (`:1549-1600`). The removal's attempt is the removal and its success decision together:
+   `git worktree remove --force <path>` (`:1557-1571`), then `worktree_is_registered`'s list and parse (`:1572`,
+   `:1602-1635`).
+   - The attempt succeeds when that list does not register the path, whatever the removal's exit status. That is the
+     existing treatment, which counts an already-unregistered destination ("is not a working tree") as reclaimed.
+   - It fails with the removal's words (`:1573-1579`) while the list registers the path, and with the list's own error
+     when the list fails.
+   - It is attempted again while the store shows contention. A second removal of a registration already gone fails
+     "is not a working tree", and the list then decides.
+   - Everything after the attempt (`:1581-1599`) is unchanged.
+   - **Executed.** At the Git level (`git-level-v.log`, R): the removal exits 128, the sibling finishes, the list
+     exits 0 and still lists the target, and the same removal again exits 0. Through the engine
+     (`legacy_removal_transient`): two removal attempts, the snapshot unregistered, its directory gone.
+4. **One private helper** resolves the canonical common git dir in the two steps `recorded_objects_scope` takes
+   (`:97-101`). It runs `git rev-parse --path-format=absolute --git-common-dir` through `git_path`, so through
+   `git_command`, as the module's census requires (`:3681`), then calls `fs::canonicalize`.
+
+What stays as it is:
+- `worktree_is_registered` keeps its body and is called only inside the removal's attempt.
+- `discard_uncommitted`, the snapshot lifecycle (`PendingGateWorkspace`, `:1304-1433`), `recorded_objects_scope` and
+  every other function are unchanged.
+
+One consequence is stated:
+- A snapshot's drop (`:1419-1433`, `:1673-1685`) now waits up to the deadline under contention, where it failed at
+  once and left residue for the resume.
+- Static residue makes the pending snapshot's drop refuse as well: `legacy_add_static` refused at 1,004 ms and left one
+  intent, which the resume's reclaim takes up.
+
+**Instruments (B1′ only).**
+- **`effects/wrappers.toml`:** `tolerant_registry_access` joins `src/workspace_manager.rs`'s `effect_free` list
+  (`:134-180`). Measured: the classification census fails without it (`firstform-suite-1.log`) and passes with it.
+- **`effects/allowlist.toml`:** `src/workspace.rs`'s `legacy_effect` text (`:898-924`), as below. Its `path`, its
+  `allows` and `FROZEN_LEGACY_ALLOWLIST` (`src/effects.rs:1306`) do not move.
+- **No `clippy.toml` change:** an `effect_free` function is not denied.
+
+**The unfreeze text.** In the entry for `src/workspace.rs`, "AMENDED ONCE" becomes "AMENDED TWICE". The last sentence,
+"The schema-4 equivalents live behind funnels in `crate::workspace_manager` and nothing here calls them: the constant
+is read, and no funnel is called.", is replaced by:
+
+> The second amendment, to close `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` on the
+> owner's decision to unfreeze the module for this one change, is one thing and no more: the three Git children that
+> enumerate the repository's worktree registry — `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree
+> add`, and `cleanup_gate_workspace`'s `git worktree remove` together with the `git worktree list` that decides whether
+> it took the registration — each run as an attempt of `crate::workspace_manager`'s tolerant registry access, which
+> attempts one again while the repository's worktree store shows another process's work and refuses one still
+> contended at its deadline as a registry refusal, never as Git state. The add is attempted again only while its
+> destination is still the empty directory this module made for it and no registration names it. One private helper
+> resolves the canonical common git dir as `recorded_objects_scope` does. Every other behaviour of the module stays
+> frozen. The schema-4 equivalents live behind funnels in `crate::workspace_manager`, and nothing here calls a funnel:
+> the constant is read, and the tolerant access is called, which takes no site.
+
+**What corrected B1′ closes.**
+- It closes every write in flight that finishes within the deadline, from any writer, at the three legacy accesses.
+  That is (e1) and (e2): the race the finding names and its mixed case.
+- It does not close a registration that stays torn until the deadline (R1′). That access refuses, as
+  `RegistryRefused` and never as Git state, and the frozen coordinator discards on it as on any error. Closing that is
+  B-PRESERVE's (§4.5).
+
+### 4.5 B-PRESERVE: PROPOSAL (decision B, second part)
+
+**What it closes.**
+- **(e2′):** a topology writer's static residue (a killed writer's torn registration), or contention that outlasts the
+  deadline, makes a legacy access refuse, and the frozen coordinator then discards the paid output.
+- **(e1′):** the same from a legacy writer.
+- All three lenses hold that (e2′) blocks G6 even after B1′ (§4.7).
+- It needs B1′. Without B1′ the legacy add fails as Git state at once, which this change does not touch.
+
+**The design in one line.** The coordinator keeps a registry-refused attempt's output, in the checkout and pinned in
+the repository under the run's private ref namespace. The resume keeps the pin, discards the checkout's copy as it does
+today so the attempt runs again from a clean tree, and names the pin.
+
+**`src/engine/coordinator.rs`, exactly.**
+- **`:544-550`.** The error arm of `match run_attempt(…)` splits in two.
+  - `Err(UpstrokeError::RegistryRefused { message })`: **nothing is discarded.**
+    - The attempt's captured candidate is the index `capture_candidate` staged (`git add -A`,
+      `src/workspace.rs:500`) before any snapshot was attempted (`src/engine/attempt.rs:129`, `:154`, `:178`).
+    - It is pinned through `Workspace::prepare_commit_from_candidate` (`src/workspace.rs:946-1017`), which the
+      coordinator already calls to settle (`:668`). The branch is `Workspace::current_branch_ref()`, the parent
+      `head_sha_full()`, the tree `staged_tree_oid()`, and the subject `[upstroke] kept: <task> attempt <n>`.
+    - The pin is the attempt's `prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`.
+    - The arm returns `UpstrokeError::RegistryRefused` with the refusal's message followed by "; the worker's output
+      for attempt <n> of `<task>` is kept in this checkout and pinned at `<pin>`". When pinning fails it says instead
+      "… is kept in this checkout, and pinning it at `<pin>` failed: <error>".
+  - `Err(error)`: discarded as today, and the error is returned.
+- **`:281-283`.** Beside `prepared_pin_ref`: `pub(super) const KEPT_PIN_SUFFIX: &str = "-kept";`.
+  - It is a constant, not a function, so the `effects/wrappers.toml` census of reachable functions does not move.
+  - No prepared-commit path names it: the resume's orphan-pin removal (`src/engine/resume.rs:552-554`) and the schema-3
+    settlement check (`src/events/mod.rs:1332-1339`) both name `prepared_pin_ref` exactly.
+- **Nothing else in the module moves,** and it calls nothing it did not already call.
+
+**`src/engine/resume.rs`, exactly: the recovery policy.**
+- **`:26`:** it also imports `KEPT_PIN_SUFFIX`.
+- **`:543-560`:** for each interrupted attempt, after the orphan pin's removal, the loop also asks `prepared_pin_target`
+  (`src/workspace.rs:1122-1143`) whether that attempt's kept pin exists, and collects the ones that do.
+- **`:562-570`:** the uncommitted paths are discarded exactly as before (the warning, `discard_uncommitted()`,
+  `RunResumed.discarded`), so the interrupted attempt runs again from a clean tree.
+  - When any kept pin was found, one more warning names each one and how to use it: "the worker output of the
+    interrupted attempt(s) a worktree-registry refusal stopped is kept at `<pins>`: `git checkout <ref> -- .`
+    restores it into a checkout, `git update-ref -d <ref>` removes it".
+- **No resume removes a kept pin;** it is the operator's.
+- **Why recovery and not refusal.** The pin already keeps the output on every later invocation. A refusal would stop
+  the run for an operator's action without keeping anything more.
+
+**Executed on the prototype** (`TABLE.txt`, `preserve_*`, through the real legacy engine). The run is a legacy run with
+one gate, and a static tear is planted right after the candidate is captured.
+- **The unpatched tree.**
+  - The run fails as Git state: "failed to read .git/worktrees/d5-static-residue/commondir: Success".
+  - The checkout is clean: the paid output was discarded.
+  - The resume, with the residue still there, fails as Git state.
+  - After the repair, the resume completes, paying again.
+- **The prototype.**
+  - The run fails `RegistryRefused` and the checkout still holds "A  agent-output.txt".
+  - The kept pin `refs/upstroke/prepared/<run>/0-1-kept` names a commit whose tree is the index's.
+  - The resume, with the residue still there, refuses (`RegistryRefused`, from the reclaim) and changes nothing.
+  - After the repair it completes. Its warnings say it discarded the checkout's copy and name the kept pin, and the pin
+    remains.
+
+**The first form, rejected with evidence.**
+- The first form needed no marker. Its resume refused whenever the leftovers were a captured candidate: every path
+  staged, nothing unstaged or untracked.
+- It failed three frozen legacy tests (`firstform-suite-1.log`). `engine::tests::`
+  `resume_removes_a_pin_whose_successful_settlement_never_landed` (`src/engine/tests.rs:6873`) and the two parked-question
+  kill tests (`:9646`, `:9654`) each resume over a staged candidate and expect it discarded.
+- A marker by whether an attempt is in flight fails the last two the same way: their logs end at a parking settlement
+  with the candidate staged.
+- The kept pin is a marker that only a registry refusal writes.
+
+**`src/error.rs`:** the `RegistryRefused` variant (§4.3). It belongs to the topology change and is not frozen.
+
+**`effects/allowlist.toml` (`:834-853`, `:855-867`): the exact amendments.** Each entry's `path` and `allows`, and the
+frozen list, stay as they are. Each `legacy_effect` text gains one paragraph.
+- For `src/engine/coordinator.rs`:
+
+  > AMENDED ONCE, on the owner's decision to close the static and deadline residue of
+  > `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: when an attempt ends in a
+  > worktree-registry refusal (`UpstrokeError::RegistryRefused`), the coordinator does not discard the checkout; it
+  > pins the attempt's captured candidate through `Workspace::prepare_commit_from_candidate` at the attempt's
+  > prepared-pin name followed by `KEPT_PIN_SUFFIX`, and the refusal it returns names the pin, or the pin's failure.
+  > Every other attempt error discards the checkout as before. It calls nothing it did not already call, and nothing
+  > else in the module moves.
+
+- For `src/engine/resume.rs`:
+
+  > AMENDED ONCE, on the owner's decision to close the same finding's static and deadline residue: for each
+  > interrupted attempt the resume also asks whether the coordinator kept that attempt's captured candidate at its
+  > kept pin, which no resume removes; it discards the checkout's uncommitted paths as before, so the attempt runs
+  > again from a clean tree, and its warning names every kept pin and how to restore it. It calls nothing it did not
+  > already call, and nothing else in the module moves.
+
+- For `src/engine/tests.rs` (`:1138-1150`): the text is unchanged. The file gains the regression tests below, and no
+  existing test changes.
+
+**Legacy regression tests:** T-P1 to T-P5 (§4.8).
+- `src/engine/tests.rs` is frozen, and it holds the only legacy engine harness: its fake adapters and run fixtures are
+  private to it. So the tests are appended there, which the unfreeze names, and no existing test changes.
+- Measured on the prototype: all 188 of the file's tests pass in each of two suites (`frozen-census.txt`).
+
+**The packet invariants it touches.**
+- **PR5's `slice_contract.invariants_preserved[0]`:** "existing Workspace and legacy engine behavior untouched
+  (moves are behavior-neutral; legacy tests unchanged; …)".
+  - Corrected B1′ changes `src/workspace.rs`'s behaviour: a contended registry access is retried, then refused, never
+    returned as Git state.
+  - B-PRESERVE changes the legacy coordinator's error path and the legacy resume's warning.
+  - No existing legacy test changes. B-PRESERVE adds tests to the frozen test file.
+- **PR12's `slice_contract.invariants_preserved[0]`:** "… legacy resume unchanged …".
+  - The resume's control flow is unchanged: it still discards and runs the attempt again. It reads one more ref per
+    interrupted attempt, and warns.
+  - B1′ also changes the resume's own registry accesses: `reclaim_gate_workspaces` reaches the removal
+    (`src/engine/resume.rs:426`), and `switch_branch` is called at `:454`. A contended one is retried or refused, never
+    a Git error.
+- Both invariants are the owner's to amend. Neither is a packet row this lane can change.
+
+**What stays open if the owner declines.**
+- **B-PRESERVE declined, B1′ taken:** (e2′) remains an applicable P1 and blocks G6, unless the owner rules otherwise.
+  (e1′) remains a P1 that does not apply to G6. The finding stays open, narrowed to the residue.
+- **Both declined:** (e2) and (e2′) remain applicable P1s and block G6, unless the owner rules otherwise. (e1) and
+  (e1′) remain P1s. The finding stays as filed.
+- **B-PRESERVE without B1′:** not possible. B-PRESERVE reads the registry refusal that B1′ produces.
+- **The ruling ESCALATION item 7 already offers:** that the mixed residue case does not block G6, with the P1 kept
+  filed. Without such a ruling no waiver is inferred.
+
+**Residuals, stated.**
+- If the pin write fails (the ref store cannot be written at the moment the registry refused), the output is only in
+  the checkout. The refusal says so, and a resume then discards it as today. That takes two independent faults.
+- The attempt that runs again pays again; the kept output is the operator's to use. Adopting it into the run would
+  need the worker's outcome, which the legacy log does not record before settlement (`src/engine/attempt.rs:110-128`).
+  That is out of scope.
+- A crash after capture, which is not a refusal, still discards on resume, as today. It is pre-existing and not this
+  finding.
+
+### 4.6 Decision B, as the owner now meets it (FUB-D4-OWNERREASON)
+
+**The reason the owner is needed is the PR5 unfreeze, not CLAUDE.md's first limb.**
+- §3.6 and §3.10 said that B1′'s two instrument edits made a B1′ implementation the owner's to merge. Under this lane's
+  direction, instrument edits do not reserve the merge: the owner's merge bar of 2026-09-27/28 reads "three clauses and
+  nothing else … limb-1 instrument reasoning no longer gates" (`~/orch-pr11/ESCALATION.md`, log, 2026-09-30T00:15Z).
+- What needs the owner is that corrected B1′ and B-PRESERVE change PR5-frozen legacy behaviour, against PR5's and
+  PR12's invariants (§4.5). The frozen files are `src/workspace.rs`, `src/engine/coordinator.rs` and
+  `src/engine/resume.rs`, and `src/engine/tests.rs` for the tests.
+- The instrument edits are disclosed in the body.
+
+**The shape of the decision.**
+- It has two parts, B1′ (§4.4) and B-PRESERVE (§4.5), and B-PRESERVE needs B1′.
+- The topology closure (§4.2, §4.3) needs no owner decision.
+
+### 4.7 What is closed, what remains, and what G6 meets (FUB-D4-G6TABLE)
+
+**The claims, once implemented.** These are §3.7's, with two corrected:
+1. No manager registry access returns `UpstrokeError::Git` for a failure another process's registry work caused,
+   whatever the name of the entry the failure names, the add's own included (§4.2). So, for (b), no registry
+   contention reaches `run::verified`'s Git arm.
+2. (a), as §3.7.
+3. (d), as §3.7.
+4. A failure that names no registry entry across a quiet, whole store is returned as it was, at once. A failure naming
+   an entry no read saw whole and readable refuses at the deadline, as FUB-D3-PERM's construction does. §3.7's "after
+   exactly one more attempt" is withdrawn.
+5. and 6., as §3.7.
+
+**What remains** (replaces §3.7's rows R6, R7 and R9):
+
+| | What | Consequence now | Finding |
+|---|---|---|---|
+| R6 | The legacy engine's registry readers | §4.4 and §4.5 | `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` (P1; guard: corrected B1′ plus B-PRESERVE) |
+| R7 | A Git version whose registry-phase failure names no entry and leaves no trace at either read | none of 2.43.0, 2.50.1 or 2.55.0 has one (§4.2) | stated |
+| R9 | Windows | the alias spelling and the file held unreadable across both reads are now C3's (§4.3); reasoned, not executed | stated |
+
+**The cases.** This is the three lenses' consensus, with B-PRESERVE:
+
+| Case | Closed by | Severity | Applies to G6 | Blocks G6 |
+|---|---|---|---|---|
+| (a) An attempt's pipeline error | §4.2 and §4.3, non-frozen `src/workspace_manager.rs` and `src/error.rs` | P1 | yes: R17, the shared registry, Q6 | until implemented and validated |
+| (b) A durable verification deferral or park | §4.2 and §4.3 | P1 | yes: Q6 and durable verification | until implemented and validated |
+| (c) DESC | filed, follow-up C | P1 | yes: Q1, INV-22, ST-16, ST-18 | yes; filing is no waiver |
+| (d) A legacy writer tears a topology reader | §4.3 | P1 class | yes | until implemented and validated |
+| (e1) Legacy against legacy, write in flight | corrected B1′ (PROPOSAL) | P1 | no | no; it remains a P1 until taken |
+| (e1′) Legacy against legacy, static or deadline residue | B-PRESERVE (PROPOSAL), with B1′ | P1 | no | no; it remains a P1 until taken |
+| (e2) A topology writer tears a legacy reader, write in flight | corrected B1′ | P1 | yes: Q6, across the shared registry and R17 | **yes, until corrected B1′ is implemented and validated** |
+| (e2′) A topology writer's static or deadline residue makes a legacy reader refuse, then discard paid output | B-PRESERVE only, which needs B1′ | P1 | yes: Q6; a crash producer engages Q1; distinct from DESC because no surviving writer is needed | **yes, even after B1′**, until B-PRESERVE is implemented and validated, unless the owner rules otherwise |
+
+**The findings** (replaces §3.7's table where it differs):
+
+| Item | Severity | Here | Applies to G6 | Blocks G6 |
+|---|---|---|---|---|
+| `PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: (a), (b), (d) | P1 | repaired by §4.2–§4.3 once implemented; its file is deleted then | yes | only until this change merges |
+| `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`: (c) | P1 | filed; follow-up C | yes | yes, until follow-up C merges |
+| `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: (e) | P1 | filed; guard: corrected B1′ plus B-PRESERVE, pending decision B | (e2) and (e2′) yes; (e1) and (e1′) no | yes, through (e2) until corrected B1′ lands, and through (e2′) until B-PRESERVE lands, unless the owner rules otherwise; filing is no waiver |
+
+The other rows of §3.7's table stand.
+
+### 4.8 Regression tests
+
+§3.8's T1, T2, T2′, T3, T5, T6, T9, T10, T11 and T13 are carried unchanged, and so is its proof. The tests below are
+revised or new. Each waits on a handshake or a seam, with time only as a watchdog. Each mutation runs on a scratch tree
+whose Compiling line names it.
+
+**Revised.**
+- **T4, the classifier, as unit tests over stores built by hand** (replaces §3.8's).
+  - C1 for each of `gitdir`, `commondir` and `HEAD`, absent and empty.
+  - C2 for a change of bytes at equal length within one clock tick.
+  - C3 for an entry neither read holds, the add's own name included, in four spellings: relative, canonical, through
+    a link, and with backslashes.
+  - C3 for a held entry with a file a read could not read.
+  - C3 for a refused output's checkout.
+  - The quiet verdict.
+  - Mutations: each clause removed in turn, against the case only it catches; and an own-entry exception restored.
+- **T12, FUB-D3-PERM** (replaces §3.8's). One complete registration, and the store made unwritable, then an add. It
+  refuses as `RegistryRefused` after the deadline, carrying Git's "Permission denied", never `Git`, and leaves nothing
+  at the slot.
+
+**New: the topology.**
+- **T14, FUB-D4-OWNENTRY: the lenses' interleaving through the production add.** A test-only seam at the two points of
+  an add's attempt, the shape of `note_contended`, makes a registration with the add's own name appear and vanish.
+  - Two windows: Ok on the third attempt.
+  - Every attempt: `RegistryRefused` at the deadline.
+  - Mutation: an own-entry exception of one confirming attempt turns it red, Git after two attempts.
+  - Executed on the scratch shapes (§4.2).
+- **T15, `not_repairs` through a registry access.** A verification whose snapshot the checkout cannot make, on a quiet
+  registry, terminates `merge_verification_unavailable` (Deferred) and the run completes. A manager unit test adds
+  that a snapshot of a tree holding a name past `NAME_MAX` returns Git after one attempt.
+  - Mutation: retry-everything turns it red, ending `RegistryRefused` with no terminal.
+  - Executed (`verification_snapshot`, `checkout_cannot_be_made`).
+
+**New: corrected B1′,** in `src/workspace.rs`'s inline test module, under its unfreeze.
+- **T-L1:** the legacy snapshot add beside a transient tear succeeds on a later attempt, with the pre-created
+  destination intact and empty after the first failure. Mutation: round 4's "nothing at the slot" condition turns it
+  red (Git after one attempt), which is FUB-D4-B1PREDICATE.
+- **T-L2:** beside a static tear the add refuses as `RegistryRefused` at the deadline, never Git.
+- **T-L3:** a snapshot the checkout cannot make is Git after exactly one attempt.
+- **T-L4:** the removal beside a transient tear that finishes between the removal and its list leaves the snapshot
+  unregistered and removed, after two removal attempts. Mutation: the success decision outside the attempt turns it
+  red, which is FUB-D4-B1REMOVE.
+- **T-L5:** `switch_branch` beside a transient tear switches, and `HEAD` is unchanged after the failed attempt.
+- **T-L6:** T10 with the roles swapped: the legacy engine in a linked checkout beside the topology manager's cycle,
+  with no legacy failures. The two lenses' round-3 sequences, with A released within B's deadline, end in a successful
+  add and nothing discarded.
+- T-L1 to T-L4 were executed on the prototype (§4.4).
+
+**New: B-PRESERVE,** appended to `src/engine/tests.rs` under its unfreeze. No existing test changes.
+- **T-P1:** a legacy attempt a static tear refuses ends the run `RegistryRefused`, naming the kept pin. The checkout
+  still holds the captured candidate, and the pin's tree is its tree. Mutation: the coordinator discarding on every
+  error turns it red, with a clean checkout.
+- **T-P2:** a resume while the residue stays refuses as `RegistryRefused` (from the reclaim) and discards nothing.
+- **T-P3:** a resume after the repair completes; its warning names the pin, and the pin remains. Mutation: a resume
+  that removes kept pins turns it red.
+- **T-P4, (e2′) itself:** T-P1 to T-P3 with the residue a topology slot's torn registration, made by the manager's own
+  torn-registration shape.
+- **T-P5:** an attempt error that is not a registry refusal (the capture hook returning an error) still discards, as
+  today.
+- T-P1 to T-P3 were executed on the prototype (§4.5).
+
+**The proof the implementer owes:** §3.8's, with the frozen census extended to the legacy engine's tests and
+`src/workspace.rs`'s, which pass 188 and 47 on the prototype (`frozen-census.txt`).
+
+### 4.9 Design review round 4, answered
+
+**Design review round 4** ran three `gpt-6-astra` lenses at `max` on `a6135a66`: design as a conformance reading,
+concurrency, and regression. They are logged in the `run-lens` logs, and all three returned CHANGES_REQUIRED. The texts
+are `~/orch-pr11/reviews/review-329-d4-{design,concurrency,regression}-a6135a66.review.md`, with their hashes in
+`SHA256SUMS-329-d4`. The witnesses are in `329-d4-witnesses/`, and the triage is `review-329-d4-triage.md`.
+
+| Finding | Sev | Kind | Round 5 | Where | Evidence |
+|---|---|---|---|---|---|
+| FUB-D4-OWNENTRY | P1 | executed | **Fixed (design), witnessed on the shape.** The own-entry exception is removed: a failure naming an entry neither read holds is contention whatever its name. Retry-everything was evaluated first and rejected with evidence. | §4.2, §4.3 | `d5/census/probe-v/witness-runs/TABLE.txt`: `own_entry_two`, `own_entry_every`, `verification_snapshot`, `checkout_cannot_be_made`; planned T14 and T15 |
+| FUB-D4-B1PREDICATE | P1 | executed | **Fixed (design), witnessed.** The legacy add is attempted again only while its pre-created destination is the owned, unchanged, empty directory and no registration names it. | §4.4 | `d5/witness/git-level-v.log` P1 and P2; `legacy_add_transient`; planned T-L1 |
+| FUB-D4-B1REMOVE | P2 | executed | **Fixed (design), witnessed.** The removal and its success decision are one attempt; an already-unregistered destination still succeeds. | §4.4 | `git-level-v.log` R; `legacy_removal_transient`; planned T-L4 |
+| FUB-D4-G6TABLE | P2 | reasoned | **Fixed (design).** (e2) is closed by corrected B1′; (e2′) only by B-PRESERVE, and it blocks G6 even after B1′. The finding's guard names both. | §4.7 | the legacy finding file |
+| FUB-D4-RESUME | P2 | reasoned | **Fixed (design), witnessed.** B-PRESERVE covers `coordinator.rs:544-548` and `resume.rs:562-569` with their allowlist entries; the kept pin survives every resume. | §4.5 | `preserve_*` in `TABLE.txt`; `frozen-census.txt` (legacy 188 of 188) |
+| FUB-D4-OWNERREASON | P3 | reasoned | **Fixed.** The owner is needed for the PR5 unfreeze, not CLAUDE.md's first limb. | §4.6 | — |
+
+**FUB-D3-PERM**, design review round 3's P2, is re-answered. Round 4 fixed it with its first remedy, distinguishing the
+failures, and that fix is withdrawn with the exception. Round 5 fixes it with its second remedy, withdrawing the
+unconditional quiet-store claim (§4.2). Its ledger row says so.
+
+### 4.10 Risks, sequencing, and what is out of scope
+
+These are §3.12's, with the following added.
+
+**Risks.**
+- **FUB-D3-PERM's outcome returns.** An unwritable store, or a registry file nobody may read, refuses at the deadline
+  (10 s) instead of failing at once. It costs nothing durable (§4.2).
+- **A legacy snapshot's drop waits up to the deadline under contention** (§4.4).
+- **Kept pins accumulate,** one per refused legacy attempt, until the operator removes them (§4.5).
+- **`UpstrokeError` gains a public variant,** `RegistryRefused`.
+- **The lease flake.** The frozen recovery test that reddened suite 2 asserts, in one observation, that no process
+  holds the run after a resume (`src/engine/topology/recover/tests.rs:7120-7122`). A sibling test's fork inheriting the
+  run's lease descriptor answers it held for about a millisecond: the class
+  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` names
+  (`findings/P2_correctness_202609131202_a-cancelled-job-hides-which-assertion-failed.md`). It passed alone three
+  times (§4.3), and this change touches no lease.
+
+**Sequencing.**
+- Corrected B1′ and B-PRESERVE land in #329's implementation only if the owner takes them before it; otherwise in a
+  later change, under the legacy finding's guard.
+- The topology closure does not wait for them.
+
+**Out of scope, and said so.**
+- Adopting a kept candidate into the legacy run (§4.5).
+- A crash after capture (§4.5).
