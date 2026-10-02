@@ -63,16 +63,20 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
-**A registry another process is writing.** *PROPOSED — the sixth design round of
-`reviews/2026-10-01-pr11-follow-up-b-record.md` (§5), narrowed to the topology's registry race; nothing in
-this paragraph is in force until it is implemented. It needs no packet change. The frozen legacy engine's
-accesses are a separate change, follow-up D, and the owner's decision.*
+**A registry another process is writing.** *PROPOSED — the seventh design round of
+`reviews/2026-10-01-pr11-follow-up-b-record.md` (§6, over §5), narrowed to the topology's registry race;
+nothing in this paragraph is in force until it is implemented. It needs no packet change. The frozen
+legacy engine's accesses are a separate change, follow-up D, and the owner's decision.*
 
 **The defect.** Every checkout of a repository registers its linked worktrees in one shared store,
 `<common git dir>/worktrees/`, and Git writes a registration one file at a time.
 - Every enumeration of the store dies on an entry half written, or prints a record for it that no
   reader can use: `git worktree list`, the sibling scan inside `git worktree add`, the engine's own
-  scans. `git worktree prune` deletes an entry caught before its `locked` file exists.
+  scans.
+- `git worktree prune` decides to delete an entry it finds before the entry's `locked` file exists, and
+  deletes it later without looking again, even after the add has locked it and gone on. `git gc` runs
+  that prune, and so does Git's automatic maintenance after a commit, a fetch or a merge in any
+  checkout: through gc when gc is due, and on Git 2.55 whenever an entry looks prunable.
 - The worktree lock excludes a second engine only from the same checkout, so two runs in two linked
   checkouts of one repository raced in the store
   (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`). In an attempt the lost race ended the
@@ -84,18 +88,24 @@ one attempt: a list together with the parse of its output, an add, or one of the
 - A failed attempt is attempted again, after a short backoff, until the access's deadline. Nothing
   reads the store, Git's message or a file's timestamps to decide why it failed.
 - An add first makes its destination as an empty directory. Git takes a destination over only after
-  its own registry steps, and removes it with its junk on any later failure. So a failed add whose
-  destination is still that directory is attempted again. One whose destination Git took over failed
-  in its own checkout or its own registration's files, and is returned at once as Git state: a
-  snapshot the checkout cannot make stays foreign Git state a verification defers or parks on. A
-  destination that cannot be made is that failure too.
+  its own registry steps, and on any later failure removes it with its junk. So a failed add whose
+  destination is still an empty directory the access can remove never got that far, and is attempted
+  again.
+- Otherwise the add's checkout is made once more at the destination, by a Git command that reads no
+  registry. If that checkout cannot be made, the add could not have succeeded: its failure is returned
+  as Git state, so a snapshot the checkout cannot make stays foreign Git state a verification defers or
+  parks on. If it can, the failure came from the registry, another process's write or a prune that
+  deleted the add's own registration, and the add is attempted again. A destination that cannot be
+  made is the add's own failure too.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
   left torn, and any other fault of the store, such as a store nothing can write or a registration
-  Git cannot list.
-- The deadline covers the access's waits, its retries and the start of every attempt. It does not
-  bound one Git command already running, which a filter, a large checkout or a slow filesystem can
-  extend.
+  Git cannot list. A failure the access cannot decide, such as a destination holding something the
+  add did not leave, refuses at once.
+- The deadline covers the access's waits, its retries and the start of every attempt; an attempt the
+  deadline cut short is made once more, at the deadline. It does not bound the last Git command
+  already running, nor the decision after it, which can be a second checkout. A filter, a large
+  checkout or a slow filesystem can extend either.
 
 **Within one process.** The registry lock no longer serialises registry access: retrying makes each
 access safe against another's half-done work, whichever process or thread does it. The lock is held
@@ -113,9 +123,12 @@ what a coordinator killed after making an add's destination leaves.
   `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, a separate finding
   with its own change before G6, and this access does not address it.
 - An agent's own Git on the host runner and the user's Git in any checkout are attempted past as
-  writers, and their own commands are theirs.
-- A writer that died mid-write leaves an entry that stays torn. The access that meets it refuses
-  resumably until its own run's resume repairs it.
+  writers, and their own commands are theirs. A prune that deletes an add's registration after the
+  add has returned leaves a checkout with no registration; that is Git's own, and no access can see it.
+- A writer that died mid-write leaves an entry that stays torn, and the access that meets it refuses
+  resumably. Its own run's resume repairs it when Git can still list the store. When Git's listing
+  dies on that entry, the resume refuses before any repair. The operator then removes that
+  registration directory and the checkout it names, once no Git process is writing it, and resumes.
 - The frozen legacy engine's registry accesses do not take this access, and its coordinator discards
   an attempt's output on any error. Both are follow-up D's
   (`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), a separate change

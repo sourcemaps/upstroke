@@ -107,9 +107,13 @@ calls PR #329's `tolerant_registry_access`, whose contract is PR #329's record �
 - `src/workspace.rs`'s three registry Git children each run as one attempt of PR #329's `tolerant_registry_access`:
   `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
   `git worktree remove` together with the `git worktree list` that decides its success.
-- The add is attempted again only while its destination is still the empty directory `PendingGateWorkspace` made for
-  it and no registration names it: the caller's veto the contract provides. Git takes the destination over only after
-  its sibling scan, so an untouched destination means the failure came first.
+- The add is attempted again unless its failure is its own: the caller's veto the contract provides. PR #329's design
+  round 7 (its record §6.3, with the dated change in §5.5) corrected that veto for both adds. A destination still an
+  empty directory the access can remove was never taken over by Git; otherwise a checkout of the commit at the
+  destination that reads no registry decides, so a `git worktree prune` that deletes the registration after the
+  takeover is attempted past rather than returned. The round-5 and round-6 veto (the destination unchanged and empty)
+  read a prune's failure after the takeover as the add's own, and a takeover whose junk removal failed as untouched
+  (#329's FUB-D6-PRUNE and FUB-D6-INODE).
 - The removal's success decision is inside its attempt, so a removal a torn sibling fails is attempted again; an
   already-unregistered destination still counts as reclaimed.
 - One private helper resolves the canonical common git dir as `recorded_objects_scope` does; nothing else in the
