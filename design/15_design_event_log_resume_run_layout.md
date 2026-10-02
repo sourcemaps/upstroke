@@ -63,8 +63,8 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
-**A registry another process is writing.** *PROPOSED — the seventh design round of
-`reviews/2026-10-01-pr11-follow-up-b-record.md` (§6, over §5), narrowed to the topology's registry race;
+**A registry another process is writing.** *PROPOSED — the eighth design round of
+`reviews/2026-10-01-pr11-follow-up-b-record.md` (§7, over §6 and §5), narrowed to the topology's registry race;
 nothing in this paragraph is in force until it is implemented. It needs no packet change. The frozen
 legacy engine's accesses are a separate change, follow-up D, and the owner's decision.*
 
@@ -91,12 +91,13 @@ one attempt: a list together with the parse of its output, an add, or one of the
   its own registry steps, and on any later failure removes it with its junk. So a failed add whose
   destination is still an empty directory the access can remove never got that far, and is attempted
   again.
-- Otherwise the add's checkout is made once more at the destination, by a Git command that reads no
-  registry. If that checkout cannot be made, the add could not have succeeded: its failure is returned
-  as Git state, so a snapshot the checkout cannot make stays foreign Git state a verification defers or
-  parks on. If it can, the failure came from the registry, another process's write or a prune that
-  deleted the add's own registration, and the add is attempted again. A destination that cannot be
-  made is the add's own failure too.
+- Otherwise Git may have taken the destination over, and nothing outside Git can tell a checkout that
+  cannot be made from a prune that deleted the add's own registration: the end states are the same.
+  The access refuses at once, resumably, as a registry refusal, and never returns that failure as Git
+  state. So a verification whose snapshot cannot be made, for a path, a filter or a missing object,
+  stops resumably and spends no deferral, and the run stops at it again until the cause is repaired.
+- A destination that cannot be made, or that was not empty when the access began, is the add's own
+  failure, returned as Git state as before.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
   left torn, and any other fault of the store, such as a store nothing can write or a registration
@@ -104,8 +105,8 @@ one attempt: a list together with the parse of its output, an add, or one of the
   add did not leave, refuses at once.
 - The deadline covers the access's waits, its retries and the start of every attempt; an attempt the
   deadline cut short is made once more, at the deadline. It does not bound the last Git command
-  already running, nor the decision after it, which can be a second checkout. A filter, a large
-  checkout or a slow filesystem can extend either.
+  already running, which a filter, a large checkout or a slow filesystem can extend, nor the short
+  decision after it.
 
 **Within one process.** The registry lock no longer serialises registry access: retrying makes each
 access safe against another's half-done work, whichever process or thread does it. The lock is held
@@ -123,8 +124,17 @@ what a coordinator killed after making an add's destination leaves.
   `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES`, a separate finding
   with its own change before G6, and this access does not address it.
 - An agent's own Git on the host runner and the user's Git in any checkout are attempted past as
-  writers, and their own commands are theirs. A prune that deletes an add's registration after the
-  add has returned leaves a checkout with no registration; that is Git's own, and no access can see it.
+  writers, and their own commands are theirs.
+- A prune that no engine process starts deletes an add's registration in one of two ways. Such a prune
+  is a host agent's, the user's or an IDE's, or Git's automatic maintenance after a commit, a fetch or a
+  merge in any checkout.
+  - During the add, after Git took its destination over: the access refuses that, resumably.
+  - After the add returned: no access can see that. The checkout is left with no registration, every
+    Git command in it fails, and a verification, a gate or a recovery there can reach a durable
+    outcome that is wrong for valid work.
+
+  That is `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, a separate finding that
+  blocks G6 until it is closed or the owner rules on its scope.
 - A writer that died mid-write leaves an entry that stays torn, and the access that meets it refuses
   resumably. Its own run's resume repairs it when Git can still list the store. When Git's listing
   dies on that entry, the resume refuses before any repair. The operator then removes that

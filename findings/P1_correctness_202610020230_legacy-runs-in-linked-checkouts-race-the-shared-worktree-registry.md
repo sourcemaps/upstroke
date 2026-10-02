@@ -107,13 +107,22 @@ calls PR #329's `tolerant_registry_access`, whose contract is PR #329's record �
 - `src/workspace.rs`'s three registry Git children each run as one attempt of PR #329's `tolerant_registry_access`:
   `switch_branch`'s `git switch`, `add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
   `git worktree remove` together with the `git worktree list` that decides its success.
-- The add is attempted again unless its failure is its own: the caller's veto the contract provides. PR #329's design
-  round 7 (its record §6.3, with the dated change in §5.5) corrected that veto for both adds. A destination still an
-  empty directory the access can remove was never taken over by Git; otherwise a checkout of the commit at the
-  destination that reads no registry decides, so a `git worktree prune` that deletes the registration after the
-  takeover is attempted past rather than returned. The round-5 and round-6 veto (the destination unchanged and empty)
-  read a prune's failure after the takeover as the add's own, and a takeover whose junk removal failed as untouched
-  (#329's FUB-D6-PRUNE and FUB-D6-INODE).
+- The add is attempted again only while its destination is provably untouched: the caller's veto the contract
+  provides. PR #329's design round 8 (its record §7.2 and §7.3, with the dated changes in §5.5) sets that veto for
+  both adds:
+  - **Untouched.** A destination still an empty directory the access can remove was never taken over by Git; it is
+    made again and the add is attempted again.
+  - **Possibly taken over.** A destination that is absent, or an empty directory the access cannot remove, answers
+    `Undecidable`. The access refuses at once as a registry refusal, so a `git worktree prune` that deletes the
+    registration after the takeover is refused and the candidate kept, never returned as Git state and discarded.
+  - **Anything else** also answers `Undecidable`.
+  - **The probe withdrawn.** Round 7's registry-free checkout probe is withdrawn (#329's FUB-D7-SPLITINDEX and
+    FUB-D7-CONFIG), and D adopts no probe.
+  - **What round 8 corrects.** The round-5 and round-6 veto (the destination unchanged and empty) read a prune's failure
+    after the takeover as the add's own, and a takeover whose junk removal failed as untouched (#329's FUB-D6-PRUNE and
+    FUB-D6-INODE).
+  - **What D keeps.** A deletion that lands after the add returned is
+    `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`'s, which D refers to as R-D9.
 - The removal's success decision is inside its attempt, so a removal a torn sibling fails is attempted again; an
   already-unregistered destination still counts as reclaimed.
 - One private helper resolves the canonical common git dir as `recorded_objects_scope` does; nothing else in the

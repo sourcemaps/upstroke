@@ -63,3 +63,21 @@ it reaches a judgement. The last must cover the verification's branch too: a tor
 that reaches `run::verified` spends a deferral, so retrying the attempt's pipeline error alone is not
 enough. Whichever it is, measure it with an agent-side prune loop against the engine's adds, as the
 memo's race scripts measured the engine against itself, with a verification among them.
+
+## Reconciliation (2026-10-02, PR #329's design round 8)
+
+`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`
+(`findings/P1_correctness_202610021308_an-external-prune-deletes-an-engine-worktrees-registration.md`, P1) is the one
+finding for a prune no engine process starts. It covers every starter, this agent's included, and both faces. It
+carries their grading and their G6 disposition: it blocks G6 absent a closure or the owner's ruling. This file no longer
+grades either face.
+- **The branch "finishes over a registration that is gone"** is that finding's face 2 (PR #329's R13). Its
+  consequences reach a valid candidate's `MergeRejected`, a durable deferral or park, recovery deleting unpinned
+  edits, and a finalization that does not converge.
+- **The branch "the engine's add fails"** is that finding's face 1. Once PR #329 is implemented, a failure after Git
+  took the add's destination over refuses at once as a resumable registry refusal, never as Git state. The
+  verification's deferral or park no longer follows from it, and the resumable end that remains is face 1's.
+
+**What this file keeps** is a host agent's Git reaching the shared registry at all, and its remedies under its PR12
+guard: refuse `max_parallel > 1` with the host runner, or give the agent a Git view that cannot reach the registry, as
+the container runner does. Either one also removes this starter from the P1.
