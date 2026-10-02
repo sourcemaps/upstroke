@@ -9179,6 +9179,7 @@ mod termination {
                 waited_within(pid, 0, ISOLATED_CHILD_COLLECTION_BOUND).is_some(),
                 "the killed reaper {pid} was collected"
             );
+            report("the killed reaper was collected");
             drop(reaper);
             wait_out_a_fail_closed_termination();
         }
@@ -9202,6 +9203,11 @@ mod termination {
                     .contains("signal monitor installed by arming: true"),
                 "arming the container reaper is what installed the monitor: {ended}"
             );
+            assert!(
+                ended.stdout.contains("the killed reaper was collected"),
+                "the isolated caller collected the reaper it killed before it dropped the guard: \
+                 {ended}"
+            );
         }
 
         #[test]
@@ -9212,7 +9218,6 @@ mod termination {
             );
             let reaper = arm_in_a_fresh_process(&program);
             let pid = armed_pid(&reaper);
-            report(&format!("stopped reaper {pid}"));
             #[cfg(target_os = "linux")]
             answer_a_wait_by_number_that_would_block_with(seccomp_refuse_with(libc::EPERM));
             // SAFETY: `pid` is this isolated process's own unreaped reaper.
@@ -9222,6 +9227,7 @@ mod termination {
                 stopped.is_some_and(|status| libc::WIFSTOPPED(status)),
                 "the reaper {pid} stopped: {stopped:?}"
             );
+            report(&format!("stopped reaper {pid}"));
             drop(reaper);
             wait_out_a_fail_closed_termination();
         }

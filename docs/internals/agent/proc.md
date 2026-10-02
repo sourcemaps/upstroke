@@ -2958,7 +2958,12 @@ than through a blocking `waitpid` (`FUA-I1-WATCHDOG`'s sweep), so a signal that 
 effect fails the child's assertion instead of holding the child until its parent's deadline. On
 Linux each of the three children first refuses every blocking `wait4` on its thread
 (`answer_a_wait_by_number_that_would_block_with`), so a wait there that went back to blocking
-fails the child at once rather than passing whenever its signal happens to land.
+fails the child at once rather than passing whenever its signal happens to land. And each reports
+only after its wait — the killed reaper collected, the reaper or stand-in stopped — and its parent
+requires the report. A failed assertion in a child that holds a container reaper unwinds through
+the reaper's drop, whose missed acknowledgement ends the child by `SIGTERM`, the very status two
+of the parents expect; without the report the first campaign of PR #328's review round 1 saw a
+blocking wait in `container_reaper_stopped_before_its_cancellation_child` pass that way.
 
 ## `mod tests` › `fn answer_a_wait_by_number_that_would_block_with(action: u32) {`
 
@@ -2982,12 +2987,14 @@ installed the signal monitor yet, and arming reports that it did — then kills 
 reaper and drops the guard: the CANCEL is not acknowledged, `cancel_unleased` arms
 fail-closed termination, and the monitor ends the caller with `SIGTERM`. Without
 `shared_state()` in `arm_container_reaper` (`fua-m8`) the caller waits out ten seconds and
-exits 0.
+exits 0. The caller also reports that it collected the reaper it killed, within a bound, before it
+dropped the guard; the parent requires that report (`waited_within` above says why).
 
 ## `mod tests` › `fn a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it() {`
 
 `R6-D1`'s other half: the reaper is stopped before the drop, so the CANCEL is not
-acknowledged within its two seconds and the caller ends by `SIGTERM`. The reaper's program is
+acknowledged within its two seconds and the caller ends by `SIGTERM`. The caller names its
+stopped reaper only once it has observed the stop, within a bound. The reaper's program is
 the fake runtime's relay stub; once the caller is gone the kernel continues the orphaned
 stopped group (or, after five seconds, this test continues it, only if `process_is_stopped`
 still says it is stopped), and the reaper, finding its parent gone, lists by its scope — the
