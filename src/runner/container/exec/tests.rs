@@ -236,37 +236,103 @@ struct Fixture {
     runtime: Runtime,
 }
 
-impl Fixture {
-    fn new(tag: &str, exit_on_start: bool) -> Self {
-        let tree = repo::scratch(tag);
-        let root = tree.path().to_path_buf();
-        let repo_dir = root.join("repo");
-        let (head, _) = repo::repository(&repo_dir);
+struct Layout {
+    repo: PathBuf,
+    private_root: PathBuf,
+    paths: RunPaths,
+    task_a: PathBuf,
+    task_b: PathBuf,
+    merge: PathBuf,
+}
+
+impl Layout {
+    fn of(root: &std::path::Path) -> Self {
+        let repo = root.join("repo");
         let private_root = root.join("private");
-        let paths = RunPaths::with_private_root(&repo_dir, RUN_ID, &private_root);
-        paths.create().expect("the run's two halves");
-        std::fs::write(paths.events(), format!("{EVENT_LOG_MARKER}\n")).expect("the public log");
+        let paths = RunPaths::with_private_root(&repo, RUN_ID, &private_root);
+        let execution_root =
+            crate::workspace_manager::execution_root_of(&private_root, repo_key(), RUN_ID);
+        Self {
+            task_a: execution_root.join("tasks").join("kalpha-g0"),
+            task_b: execution_root.join("tasks").join("kbeta-g0"),
+            merge: execution_root.join("merge").join("s0"),
+            repo,
+            private_root,
+            paths,
+        }
+    }
+
+    fn build(&self) {
+        let (head, _) = repo::repository(&self.repo);
+        self.paths.create().expect("the run's two halves");
+        std::fs::write(self.paths.events(), format!("{EVENT_LOG_MARKER}\n"))
+            .expect("the public log");
         std::fs::write(
-            paths.transcripts().join("k0-a1.md"),
+            self.paths.transcripts().join("k0-a1.md"),
             "PRIVATE-TRANSCRIPT-a5f2\n",
         )
         .expect("a private artifact");
         std::fs::create_dir_all(crate::runner::container::intent::containers_dir(
-            &private_root,
+            &self.private_root,
         ))
         .expect("the container namespace");
-
-        let execution_root =
-            crate::workspace_manager::execution_root_of(&private_root, repo_key(), RUN_ID);
-        let task_a = execution_root.join("tasks").join("kalpha-g0");
-        let task_b = execution_root.join("tasks").join("kbeta-g0");
-        let merge = execution_root.join("merge").join("s0");
-        for at in [&task_a, &task_b, &merge] {
-            repo::worktree(&repo_dir, at, &head);
+        for at in [&self.task_a, &self.task_b, &self.merge] {
+            repo::worktree(&self.repo, at, &head);
         }
-        std::fs::write(task_b.join("sibling.txt"), "SIBLING-WORKTREE-a5f2\n")
+        std::fs::write(self.task_b.join("sibling.txt"), "SIBLING-WORKTREE-a5f2\n")
             .expect("a sibling file");
+    }
+}
 
+#[cfg(unix)]
+const FIXTURE_ROOT: &str = "UPSTROKE_TEST_EXEC_FIXTURE_ROOT";
+
+#[cfg(unix)]
+const FIXTURE_CHILD_BOUND: Duration = Duration::from_secs(120);
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated builder of Fixture::built_in_a_bounded_child"]
+fn fixture_tree_child() {
+    let root = PathBuf::from(std::env::var_os(FIXTURE_ROOT).expect("the parent names the root"));
+    Layout::of(&root).build();
+}
+
+impl Fixture {
+    fn new(tag: &str, exit_on_start: bool) -> Self {
+        let tree = repo::scratch(tag);
+        Layout::of(tree.path()).build();
+        Self::over(tree, exit_on_start)
+    }
+
+    #[cfg(unix)]
+    fn built_in_a_bounded_child(tag: &str, exit_on_start: bool) -> Self {
+        let tree = repo::scratch(tag);
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::exec::tests::fixture_tree_child",
+            &[(FIXTURE_ROOT, tree.path().as_os_str())],
+            FIXTURE_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "an isolated child of this test binary built the fixture's repository and \
+             worktrees under {} within {FIXTURE_CHILD_BOUND:?}: {ended}",
+            tree.path().display()
+        );
+        Self::over(tree, exit_on_start)
+    }
+
+    fn over(tree: ScratchTree, exit_on_start: bool) -> Self {
+        let root = tree.path().to_path_buf();
+        let Layout {
+            repo: repo_dir,
+            private_root,
+            paths,
+            task_a,
+            task_b,
+            merge,
+        } = Layout::of(&root);
         let trace = ContainerTrace::recording();
         Self {
             identity: RunIdentity {
@@ -3189,7 +3255,7 @@ fn a_container_is_created_and_started_only_under_its_own_intent_record() {
 #[cfg(unix)]
 #[test]
 fn a_start_cover_starts_only_the_container_it_was_minted_for() {
-    let fixture = Fixture::new("start-cover-binding", false);
+    let fixture = Fixture::built_in_a_bounded_child("start-cover-binding", false);
     let mut hooks = RecordingHooks::new(fixture.trace.clone());
     let plan = fixture
         .runner()
@@ -5892,7 +5958,7 @@ fn armed_for(private_root: &Path, incarnation: &str) -> bool {
 #[cfg(unix)]
 #[test]
 fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {
-    let fixture = Fixture::new("reaper-scope-refused", true);
+    let fixture = Fixture::built_in_a_bounded_child("reaper-scope-refused", true);
     let reaping = Reaping::default();
     let foreign = reaper_spec(&fixture.private_root, INCARNATION_2);
 
@@ -5936,7 +6002,7 @@ fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_
 #[cfg(unix)]
 #[test]
 fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent() {
-    let fixture = Fixture::new("reaper-scope-armed-foreign", true);
+    let fixture = Fixture::built_in_a_bounded_child("reaper-scope-armed-foreign", true);
     let runner = fixture.runner();
     let foreign = RunIdentity {
         incarnation: INCARNATION_2.to_owned(),
@@ -5989,7 +6055,7 @@ fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_in
 #[cfg(unix)]
 #[test]
 fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop() {
-    let fixture = Fixture::new("reaper-unresolved-kept", false);
+    let fixture = Fixture::built_in_a_bounded_child("reaper-unresolved-kept", false);
     for op in [RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove] {
         fixture.runtime.fake().set_unreachable(op);
     }
@@ -6016,7 +6082,7 @@ fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop()
 #[cfg(unix)]
 #[test]
 fn a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop() {
-    let fixture = Fixture::new("reaper-ended-disarmed", true);
+    let fixture = Fixture::built_in_a_bounded_child("reaper-ended-disarmed", true);
     let runner = fixture.runner();
     let completed = gate_request(
         ShellKind::Sh.spec("exit 0"),
@@ -6064,7 +6130,7 @@ fn a_panic_inside_contain_leaves_the_reaper_armed() {
         }
     }
 
-    let fixture = Fixture::new("reaper-panic-kept", false);
+    let fixture = Fixture::built_in_a_bounded_child("reaper-panic-kept", false);
     let runner = fixture.runner().with_hooks(Box::new(PanicsAfterStart));
     let request = gate_request(
         ShellKind::Sh.spec("exit 0"),

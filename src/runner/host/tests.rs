@@ -4732,20 +4732,18 @@ mod inherited_writer {
 
     #[test]
     fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {
-        let mut helper = Command::new(std::env::current_exe().expect("the test executable"));
-        helper.args([
+        let ended = proc::test_support::run_test_isolated(
             "runner::host::tests::inherited_writer::reaper_relay_writer_helper",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
-        let output = proc::test_support::run_with_timeout(helper, "", Duration::from_secs(180))
-            .expect("supervise the isolated inherited-writer witness");
-        assert_eq!(output.code, Some(0), "{output:?}");
+            &[],
+            Duration::from_secs(180),
+        );
         assert!(
-            output.stdout.contains("1 passed"),
-            "the helper must run one test: {output:?}"
+            ended.status.is_some_and(|status| status.success()),
+            "the isolated inherited-writer witness ended within its bound: {ended}"
+        );
+        assert!(
+            ended.stdout.contains("1 passed"),
+            "the helper must run one test: {ended}"
         );
     }
 

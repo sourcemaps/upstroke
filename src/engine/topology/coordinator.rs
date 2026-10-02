@@ -13757,9 +13757,9 @@ mod tests {
         let host = crate::engine::topology::scaffold::container_host();
         let logs = crate::engine::topology::scaffold::kill_dir(tag);
         let relay = logs.path().join("relay");
-        let program = host.install_reaper_relay(&relay);
-        let checked = crate::runner::container::run_program_in_its_own_process(
-            &program,
+        host.install_reaper_relay(&relay);
+        let checked = FakeRuntime::run_reaper_relay(
+            &relay,
             &["ps", "--filter", "label=upstroke.relay=bound"],
         );
         assert_eq!(
@@ -13772,8 +13772,8 @@ mod tests {
                     "label=upstroke.relay=bound".to_owned()
                 ]]
             ),
-            "the relay is bound in this process: its program, run by its path, records its call \
-             where this test reads"
+            "the relay is bound: its program, run by its path in a bounded child of this test \
+             binary, records its call where this test reads"
         );
         for op in unreachable {
             host.set_unreachable(*op);

@@ -729,14 +729,65 @@ exit 0
 }
 
 #[cfg(unix)]
+const REAPER_RELAY_DIR: &str = "UPSTROKE_TEST_REAPER_RELAY_DIR";
+
+#[cfg(unix)]
+const REAPER_RELAY_ARGS: &str = "UPSTROKE_TEST_REAPER_RELAY_ARGS";
+
+#[cfg(unix)]
+const REAPER_RELAY_EXITED: &str = "UPSTROKE_TEST_REAPER_RELAY_EXITED";
+
+#[cfg(unix)]
+const REAPER_RELAY_CHILD_BOUND: Duration = Duration::from_secs(120);
+
+#[cfg(unix)]
 impl FakeRuntime {
     pub(crate) fn install_reaper_relay(&self, relay: &Path) -> PathBuf {
-        crate::workspace_manager::fixture::create_dir(relay);
-        crate::workspace_manager::fixture::write_file(&relay.join("listing"), b"");
         let program = relay.join("docker");
-        super::write_program_in_its_own_process(&program, &reaper_stub());
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::fake::reaper_relay_install_child",
+            &[(REAPER_RELAY_DIR, relay.as_os_str())],
+            REAPER_RELAY_CHILD_BOUND,
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && program.is_file(),
+            "an isolated child of this test binary installed the reaper relay at {} within \
+             {REAPER_RELAY_CHILD_BOUND:?}: {ended}",
+            relay.display()
+        );
         self.state().reaper_program = Some(program.clone());
         program
+    }
+
+    pub(crate) fn run_reaper_relay(relay: &Path, args: &[&str]) -> Option<i32> {
+        let parent = std::env::temp_dir();
+        let scratch = crate::rundir::scratch_tree::acquire(&parent, "reaper-relay-run")
+            .unwrap_or_else(|refusal| {
+                panic!("a scratch tree under {}: {refusal:?}", parent.display())
+            });
+        let exited = scratch.path().join("exited");
+        let joined = args.join("\n");
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::fake::reaper_relay_run_child",
+            &[
+                (REAPER_RELAY_DIR, relay.as_os_str()),
+                (REAPER_RELAY_ARGS, std::ffi::OsStr::new(&joined)),
+                (REAPER_RELAY_EXITED, exited.as_os_str()),
+            ],
+            REAPER_RELAY_CHILD_BOUND,
+        );
+        let code = std::fs::read_to_string(&exited);
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed")
+                && code.is_ok(),
+            "an isolated child of this test binary ran the reaper relay at {} within \
+             {REAPER_RELAY_CHILD_BOUND:?} and recorded how it exited ({code:?}): {ended}",
+            relay.display()
+        );
+        code.ok().and_then(|code| code.parse::<i32>().ok())
     }
 
     pub(crate) fn publish_for_reaper(&self, relay: &Path) -> Vec<(String, String, String)> {
@@ -793,6 +844,36 @@ impl FakeRuntime {
         }
         delivered
     }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated writer of FakeRuntime::install_reaper_relay"]
+fn reaper_relay_install_child() {
+    let relay =
+        PathBuf::from(std::env::var_os(REAPER_RELAY_DIR).expect("the parent names the relay"));
+    crate::workspace_manager::fixture::create_dir(&relay);
+    crate::workspace_manager::fixture::write_file(&relay.join("listing"), b"");
+    super::write_program_in_its_own_process(&relay.join("docker"), &reaper_stub());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated runner of FakeRuntime::run_reaper_relay"]
+fn reaper_relay_run_child() {
+    let relay =
+        PathBuf::from(std::env::var_os(REAPER_RELAY_DIR).expect("the parent names the relay"));
+    let joined = std::env::var(REAPER_RELAY_ARGS).expect("the parent names the relay's arguments");
+    let exited = PathBuf::from(
+        std::env::var_os(REAPER_RELAY_EXITED).expect("the parent names where the exit goes"),
+    );
+    let args: Vec<&str> = joined.split('\n').filter(|arg| !arg.is_empty()).collect();
+    let code = super::run_program_in_its_own_process(&relay.join("docker"), &args);
+    crate::workspace_manager::fixture::write_file(
+        &exited,
+        code.map_or_else(|| "no code".to_owned(), |code| code.to_string())
+            .as_bytes(),
+    );
 }
 
 pub(crate) const RUNTIME_REQUEST: &str = "UPSTROKE-RUNTIME-REQUEST ";

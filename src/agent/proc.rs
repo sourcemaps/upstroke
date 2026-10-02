@@ -5176,6 +5176,7 @@ mod termination {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::agent::proc::test_support::{ISOLATED_CHILD_COLLECTION_BOUND, Isolated};
         use std::process::{Command, Stdio};
         use std::time::Instant;
 
@@ -9030,100 +9031,20 @@ mod termination {
 
         const CONTAINER_REAPER_CHILD_BOUND: Duration = Duration::from_secs(120);
 
-        const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
-
         const CONTAINER_REAPER_PROGRAM: &str = "UPSTROKE_TEST_CONTAINER_REAPER_PROGRAM";
 
         const CONTAINER_REAPER_RUN_DIR: &str = "UPSTROKE_TEST_CONTAINER_REAPER_RUN_DIR";
-
-        struct Isolated {
-            status: Option<std::process::ExitStatus>,
-            stdout: String,
-            stderr: String,
-        }
-
-        impl std::fmt::Display for Isolated {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(
-                    f,
-                    "status {:?}\nstdout:\n{}\nstderr:\n{}",
-                    self.status, self.stdout, self.stderr
-                )
-            }
-        }
 
         fn run_isolated(
             child: &str,
             vars: &[(&str, &std::ffi::OsStr)],
             bound: Duration,
         ) -> Isolated {
-            use std::os::unix::process::CommandExt;
-
-            let parent = std::env::temp_dir();
-            let tree = crate::rundir::scratch_tree::acquire(&parent, "container-reaper-child")
-                .unwrap_or_else(|refusal| {
-                    panic!("a scratch tree under {}: {refusal:?}", parent.display())
-                });
-            let stdout_path = tree.path().join("stdout");
-            let stderr_path = tree.path().join("stderr");
-            let mut command = Command::new(std::env::current_exe().expect("the test executable"));
-            command.args([
+            crate::agent::proc::test_support::run_test_isolated(
                 &format!("agent::proc::termination::tests::{child}"),
-                "--exact",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ]);
-            for (name, value) in vars {
-                command.env(name, value);
-            }
-            let mut process = command
-                .process_group(0)
-                .stdin(Stdio::null())
-                .stdout(std::fs::File::create(&stdout_path).expect("the child's stdout file"))
-                .stderr(std::fs::File::create(&stderr_path).expect("the child's stderr file"))
-                .spawn()
-                .unwrap_or_else(|error| panic!("start the isolated {child}: {error}"));
-            let group = i32::try_from(process.id()).expect("the child's process-group id");
-            let deadline = Instant::now() + bound;
-            let mut killed: Option<(Instant, String)> = None;
-            let status = loop {
-                match process.try_wait() {
-                    Ok(Some(status)) => break killed.is_none().then_some(status),
-                    Ok(None) => {}
-                    Err(error) => panic!("poll the isolated {child}: {error}"),
-                }
-                let now = Instant::now();
-                match &killed {
-                    None if now >= deadline => {
-                        // SAFETY: the child is this test's own unreaped process-group
-                        // leader, isolated by `process_group(0)`, so this reaches it
-                        // and the members of its group and nothing else.
-                        let sent = unsafe { libc::kill(-group, libc::SIGKILL) };
-                        let how = if sent == 0 {
-                            "delivered".to_owned()
-                        } else {
-                            std::io::Error::last_os_error().to_string()
-                        };
-                        killed = Some((now, how));
-                    }
-                    Some((at, how)) if now >= *at + ISOLATED_CHILD_COLLECTION_BOUND => panic!(
-                        "the isolated {child} outlived its {bound:?} deadline, and \
-                         {ISOLATED_CHILD_COLLECTION_BOUND:?} after the SIGKILL to its process \
-                         group ({how}) it was still not collectable: this test fails rather than \
-                         wait for it, and leaves it to this process's exit\nstdout:\n{}\nstderr:\n{}",
-                        std::fs::read_to_string(&stdout_path).unwrap_or_default(),
-                        std::fs::read_to_string(&stderr_path).unwrap_or_default()
-                    ),
-                    _ => {}
-                }
-                rest_once(Duration::from_millis(10));
-            };
-            Isolated {
-                status,
-                stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
-                stderr: std::fs::read_to_string(&stderr_path).unwrap_or_default(),
-            }
+                vars,
+                bound,
+            )
         }
 
         fn waited_within(
@@ -9742,6 +9663,101 @@ pub(crate) mod test_support {
             timeout,
             &mut NoHooks,
         )
+    }
+
+    #[cfg(unix)]
+    pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
+
+    #[cfg(unix)]
+    pub(crate) struct Isolated {
+        pub(crate) status: Option<std::process::ExitStatus>,
+        pub(crate) stdout: String,
+        pub(crate) stderr: String,
+    }
+
+    #[cfg(unix)]
+    impl std::fmt::Display for Isolated {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "status {:?}\nstdout:\n{}\nstderr:\n{}",
+                self.status, self.stdout, self.stderr
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn run_test_isolated(
+        test: &str,
+        vars: &[(&str, &std::ffi::OsStr)],
+        bound: Duration,
+    ) -> Isolated {
+        use std::os::unix::process::CommandExt;
+
+        let parent = std::env::temp_dir();
+        let tree = crate::rundir::scratch_tree::acquire(&parent, "isolated-child").unwrap_or_else(
+            |refusal| panic!("a scratch tree under {}: {refusal:?}", parent.display()),
+        );
+        let stdout_path = tree.path().join("stdout");
+        let stderr_path = tree.path().join("stderr");
+        let mut command = Command::new(std::env::current_exe().expect("the test executable"));
+        command.args([
+            test,
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        for (name, value) in vars {
+            command.env(name, value);
+        }
+        let mut process = command
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&stdout_path).expect("the child's stdout file"))
+            .stderr(std::fs::File::create(&stderr_path).expect("the child's stderr file"))
+            .spawn()
+            .unwrap_or_else(|error| panic!("start the isolated {test}: {error}"));
+        let group = i32::try_from(process.id()).expect("the child's process-group id");
+        let deadline = Instant::now() + bound;
+        let mut killed: Option<(Instant, String)> = None;
+        let status = loop {
+            match process.try_wait() {
+                Ok(Some(status)) => break killed.is_none().then_some(status),
+                Ok(None) => {}
+                Err(error) => panic!("poll the isolated {test}: {error}"),
+            }
+            let now = Instant::now();
+            match &killed {
+                None if now >= deadline => {
+                    // SAFETY: the child is this test's own unreaped process-group
+                    // leader, isolated by `process_group(0)`, so this reaches it
+                    // and the members of its group and nothing else.
+                    let sent = unsafe { libc::kill(-group, libc::SIGKILL) };
+                    let how = if sent == 0 {
+                        "delivered".to_owned()
+                    } else {
+                        std::io::Error::last_os_error().to_string()
+                    };
+                    killed = Some((now, how));
+                }
+                Some((at, how)) if now >= *at + ISOLATED_CHILD_COLLECTION_BOUND => panic!(
+                    "the isolated {test} outlived its {bound:?} deadline, and \
+                     {ISOLATED_CHILD_COLLECTION_BOUND:?} after the SIGKILL to its process \
+                     group ({how}) it was still not collectable: this test fails rather than \
+                     wait for it, and leaves it to this process's exit\nstdout:\n{}\nstderr:\n{}",
+                    std::fs::read_to_string(&stdout_path).unwrap_or_default(),
+                    std::fs::read_to_string(&stderr_path).unwrap_or_default()
+                ),
+                _ => {}
+            }
+            crate::workspace_manager::fixture::rest(Duration::from_millis(10));
+        };
+        Isolated {
+            status,
+            stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
+            stderr: std::fs::read_to_string(&stderr_path).unwrap_or_default(),
+        }
     }
 
     pub(crate) mod readiness;
