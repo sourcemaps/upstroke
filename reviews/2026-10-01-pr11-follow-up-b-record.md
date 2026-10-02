@@ -22,23 +22,33 @@ not reclassified, and G6 is not waived. The orchestrator's brief is
 session `orch_pr11` spawned on master `92c4ca81`; its figures are under
 `~/orch-pr11/logs/pr11_fub_design/`, cited by paths relative to that directory. **Design round 2**
 is `pr11_fub_design2`'s (`claude-opus-5-5`, `max`), spawned on `dfd69410` to answer design review
-round 1 (§1.11); its figures are under `~/orch-pr11/logs/pr11_fub_design2/`, cited as `d2/…`. Every
-figure below is in a saved file the sentence names. A fresh implementer writes the code after the
-design review, and its sections follow §1.
+round 1 (§1.11); its figures are under `~/orch-pr11/logs/pr11_fub_design2/`, cited as `d2/…`. **Design
+round 3** is `pr11_fub_design3`'s (`claude-opus-5-5`, `max`), spawned on `0874bcf3` to answer design
+review round 2 and the looping signal it raised (§2); its figures are under
+`~/orch-pr11/logs/pr11_fub_design3/`, cited as `d3/…`. Every figure below is in a saved file the
+sentence names. A fresh implementer writes the code after the design review, and its sections follow
+§2.
 
 ## 0. Status
 
 | Phase | State |
 |---|---|
-| Design (§1) | **revised in round 2, PROPOSED.** Design review round 1 (three `gpt-6-astra` lenses at `max` on `dfd69410`) returned CHANGES_REQUIRED: two P1s and eight P2s (`~/orch-pr11/reviews/review-329-d1-triage.md`). §1.11 answers each, and every paragraph round 2 changed or added carries the mark **[R2]** with the findings it answers. The design still waits on two owner decisions, now in their round-2 texts: erratum E-FUB-1 with Class C (§1.8) and the one-change unfreeze of `src/workspace.rs` (§1.9). Round 1's E-FUB-1 is superseded and is not to be adopted. This head changes no production code. |
-| Implementation | not started. It waits on design review round 2 and the owner's decisions, and it is sequenced after #328 (§1.7). |
+| Design rounds 1 and 2 (§1) | **Superseded by §2.** Round 1's lock handed to the Git child, and round 2's engine-only lock with a process record and quiescence waits, are withdrawn, with E-FUB-1, R29, Class C and round 2's unfreeze text. §1 is kept as the history the review rounds cite. |
+| Design round 3 (§2) | **PROPOSED.** Design review round 2 (three `gpt-6-astra` lenses at `max` on `0874bcf3`) returned CHANGES_REQUIRED: three P1s and four P2s, the P1s in round 2's own machinery, which raised MAINTAINING's looping signal (`~/orch-pr11/reviews/review-329-d2-triage.md`). §2 steps back: tolerant registry access and targeted removal for the race, and the run's existing cleanup lease handed to the manager's Git writers for the corruption a dead coordinator's Git children cause. **No owner decision is needed to proceed**: A needs no erratum (§2.12); B is optional, and its two texts are §2.10. This head changes no production code; it adds one finding file (§2.10). |
+| Implementation | not started. It waits on design review round 3, and it is sequenced after #328 only where §2.13 says. |
 
 ## 1. Design
 
-> **PROPOSED — pending the owner's decisions on erratum E-FUB-1 (with Class C for the vocabulary)
-> and the one-change unfreeze of `src/workspace.rs`.** Everything in §1 assumes A1 + B1 in their
-> round-2 texts (§1.8, §1.9) and cites neither as adopted. §1.10 says what each alternative changes,
-> so a different decision revises one subsection, not the design.
+> **SUPERSEDED by §2 (design round 3).** §1 is rounds 1 and 2: a cross-process lock on the registry,
+> first handed to the Git child and then held by the engine alone with a record of its children. Its
+> facts about Git and the engine (§1.1, §1.2's census, the strace attribution) are still cited by §2;
+> its remedy, its erratum E-FUB-1 and its unfreeze text are withdrawn and are not to be adopted. The
+> banner it carried is kept below as history.
+>
+> *Round 2's banner:* **PROPOSED — pending the owner's decisions on erratum E-FUB-1 (with Class C for
+> the vocabulary) and the one-change unfreeze of `src/workspace.rs`.** Everything in §1 assumes A1 +
+> B1 in their round-2 texts (§1.8, §1.9) and cites neither as adopted. §1.10 says what each
+> alternative changes, so a different decision revises one subsection, not the design.
 
 ### 1.1 The defect, and what closing it means
 
@@ -1602,3 +1612,788 @@ change.
 
 **What round 2 did not change.** The census (§1.2), the choice of remedy 1 (§1.3.1), the file's path,
 the 600 s bound, the verification's durable-arm analysis (§1.3.5), T1, T3, T7(a)–(b), T8 and T9.
+
+## 2. Round 3 design
+
+> **PROPOSED — for design review round 3.** No owner decision is needed before this design is
+> implemented. It adds no resource row, effect site or fault row, so it needs no erratum (§2.12), and
+> it edits no frozen module. Decision B is the owner's and optional: whether the frozen legacy
+> `src/workspace.rs` takes the same tolerance. The topology closure does not depend on it, and §2.10
+> gives both texts. Nothing in §2 is in force until the implementation lands.
+
+### 2.1 Why round 3 steps back, and why it converges
+
+**The signal.** MAINTAINING's second looping signal is raised: "A pass finds a P1 in machinery an
+earlier round of this pull request added" (`~/orch-pr11/reviews/review-329-d2-triage.md`).
+- Round 1's remedy was a lock handed to the Git child. Its review found a P1 in it: on Windows the
+  lock's release is not ordered after the child's termination (FUB-D1-WIN).
+- Round 2 replaced it with machinery of its own:
+  - an engine-only lock;
+  - a record of the holder and of each child, by pid and start identity;
+  - acquirers that wait until every recorded process has terminated.
+- Round 2's review found three P1s in that machinery:
+  - the record's update protocol (FUB-D2-RECORD);
+  - its termination oracle (FUB-D2-ENOENT);
+  - Git's own subprocesses, which the record never names (FUB-D2-DESC).
+
+  Its P2s point the same way: a helper holding the output pipe (PIPE), and a fork copy of the lock
+  (ERRATUM).
+
+**What the defect in the repair was.** Both rounds tried to establish, from outside, which processes
+might still write the registry, so that exclusion could last until they stopped. Each review then
+found a process the construction could not see:
+- a child whose termination is asynchronous (WIN);
+- a filter's helper (FILTER, PIPE);
+- a fork copy (ERRATUM);
+- a process `/proc` hides (ENOENT);
+- a subprocess the record never named (DESC);
+- a record line the holder could not finish (RECORD).
+
+A third round of that machinery would meet the same kind of finding. A per-access process group or
+job would need a recorded group id, and each step of it carries a process-tracking claim of its own:
+- a member that calls `setsid` leaves the group;
+- Darwin answers `kill(-pgid, 0)` on a zombie-only group with `EPERM` (measured by PR136's sampler
+  work, commit `84c21e01` on the unmerged `fix/sampler-kill-and-inspection`);
+- a reused group id answers as alive;
+- a Windows job dies with its last handle, so a successor cannot wait on a dead holder's job unless
+  the holder named it, and naming it keeps it alive.
+
+**What round 3 does instead.** It drops that machinery. Each consequence is closed by a property that
+does not depend on knowing which processes exist.
+- **(a) and (b), the race, by the reader** (§2.4).
+  - A registry access that fails is retried while the store shows it is being changed, or holds an
+    entry no reader can read, or Git's error names an entry in it.
+  - A failure across a quiet, whole store is returned unchanged.
+  - A contention that outlasts a bound becomes a refusal, never Git state.
+  - The reader needs no lock and knows nothing of the writer. So the tolerance holds whoever writes
+    (another coordinator, a legacy run, an agent's Git, the user's) and whatever becomes of the
+    writer's descendants.
+- **The engine never deletes another process's entry** (§2.5). Its removals stop running
+  `git worktree prune`, which deletes an add caught between its `mkdir` and its `locked`.
+- **(c), the corruption a dead coordinator's Git children cause, by the kernel** (§2.6). The machinery
+  is one that has survived every pass since PR7: the run's cleanup lease (R28).
+  - A resume's lock acquisitions already probe the lease, and every engine `git update-ref` already
+    holds it (#275).
+  - It is now also handed to every Git child the manager starts to write a worktree or its
+    registration, as that child's standard input.
+  - So a resume cannot begin while any of them is alive, or any descendant that keeps its standard
+    input. Git's own `update-ref` and `reset` under `worktree add` keep it.
+  - A shared `flock` is released only when the last descriptor of its open file description closes.
+    Nothing is recorded, enumerated or queried.
+
+**Why this converges where rounds 1 and 2 did not.**
+- **Its claims are about the store and the kernel, not about a list of processes.** "The store changed,
+  holds an entry no reader can read, or is named in the error"; "a shared `flock` is held until the
+  last descriptor closes". Every finding of both rounds was a process the list missed. Round 3 keeps no
+  list.
+- **Its residuals are bounded and stated** (§2.8):
+  - a writer stalled inside its registration write for longer than the bound, which ends the command
+    resumably and never durably;
+  - the Windows side of (c), which is INV-18's ambient job, exactly as for `git update-ref` today.
+- **What it reuses has survived review**: R-X and the funnels (PR11); the run's cleanup lease and its
+  two observation sites (PR7, and PR10's #275).
+- **What holds it** (§2.9), all executed on this box:
+  - the finding's own witnesses. Review round 7's two-process witness is red 10 of 10 unpatched and
+    green 10 of 10 under the shape. Review round 8's verification witness appends deferrals unpatched
+    and none under it.
+  - (c)'s witness with the coordinator's real locks, which loses the paid edits unpatched and keeps them
+    under the shape.
+
+### 2.2 The consequences to close, and what the evidence says of each
+
+- **(a) A pipeline error that ends the command.** An attempt's registry access fails on another
+  process's half-written entry. The coordinator cancels its other pipelines and ends the command
+  resumably (`src/engine/topology/coordinator.rs:1413`).
+- **(b) A verification's durable deferral or park.** The same failure inside a verification is
+  `UpstrokeError::Git`.
+  - `run::verified` maps exactly that variant to `Verified::Unavailable`
+    (`src/engine/topology/run.rs:279`), and every other error to `Err` (`:289`).
+  - The frozen `integrate.rs` then appends `merge_verification_unavailable`: a deferral spent, or the
+    candidate parked at `max_defers`.
+- **(c) Corruption by a dead coordinator's Git child.** Executed in round 3 with **one** coordinator and
+  its own resume, through the production `WorkspaceManager` funnels. The tool is an out-of-tree probe
+  built from this branch's `0874bcf3` (`d3/witness/probe/`), on Git 2.43.0.
+  - **The sequence.**
+    - A coordinator is `SIGKILL`ed inside `git worktree add` (G).
+    - G survives on Unix: nothing kills a coordinator's Git children.
+    - The resume's `verify_worktree` reads Git's in-progress marker, `locked: initializing`, as
+      `VerifyFailure::Unpopulated` (`src/workspace_manager.rs:2771-2772`).
+    - So `dispatch::verify_or_recreate` removes the slot and adds it again at the same path
+      (`src/engine/topology/dispatch.rs:248-253`).
+    - Git names a registration after its path's basename, so the new one has the same administrative
+      directory.
+  - **Mechanism 1, the late `reset`** (`d3/witness/c-single/witness-exec.log`).
+    - G's `reset --hard` child is held before it executes Git.
+    - After the resume it runs with `GIT_DIR=<slot>/.git`, which now names the new registration.
+    - It resets the recreated checkout, and the worker's edit goes back to `base`.
+    - `git status` is clean, so nothing records the loss.
+  - **Mechanism 2, the orphaned add's junk removal** (`witness-filter.log`; traced in
+    `witness-filter-strace.log` and `run-filter-strace/strace-A-tree.txt`).
+    - G's `reset` is held mid-checkout in a smudge filter, and resumes after the resume has recreated
+      the slot.
+    - Its next write fails in its deleted working directory. Its error write meets the dead
+      coordinator's closed pipe (`EPIPE`, then `SIGPIPE`).
+    - G sees its child fail and runs `remove_junk`. That function is in `builtin/worktree.c` in every
+      version from 2.43 to 2.55 (`d3/git-src/`).
+    - `remove_junk` deletes the administrative directory and the checkout **by path**: the recreated
+      registration and the recreated checkout, the worker's edits with it.
+  - **Cross-run too.** A dead run's freed administrative name can be taken by another run's add with
+    the same basename, and `k1-g1` is every run's first task. Round 2's concurrency lens executed an
+    orphaned `update-ref` rewriting such a replacement's `HEAD`.
+  - **The class is known, with only its liveness face recorded:**
+    `PR136-REMOVE-WORKTREE-VS-A-GIT-CHILD-NOTHING-KILLED` (P2).
+    - It was filed on `fix/sampler-kill-and-inspection`, whose PR #145 closed unmerged.
+    - Its sequence: "The engine dies … while `WorkspaceManager::add_worktree` has a `git worktree add`
+      in flight. Nothing kills that child … Its descendants … keep writing into the new worktree".
+    - Master cites it only from
+      `findings/P3_docs-contract_202609050648_unbindable-task-registration-has-no-design-sentence.md`.
+    - It is the same class: a dead coordinator's Git child, which nothing kills, against recovery that
+      reuses its paths. DESC and round 3's witnesses add the class's corruption face.
+  - **Severity and G6.**
+    - P1. Paid work is lost, and so is a registration the resume made. In mechanism 1 the loss is
+      silent, and it breaks `DESIGN.md` §4's "ground truth is the diff": the judged diff is no longer
+      the agent's.
+    - It applies to G6: Q1's "reclaimed or repaired … before any slot reset, admission, or resource
+      reuse", and ST-16's and ST-18's crash classes.
+    - Under G6's rule an applicable open high finding fails the gate. So this change closes it (§2.6)
+      rather than filing it.
+
+### 2.3 The remedy classes, evaluated
+
+| Class | Closes | Leaves | Packet change | Unfreeze | Instruments |
+|---|---|---|---|---|---|
+| (i) exclusion plus quiescence (rounds 1–2, or a process-group or job variant) | (a), (b) between engine processes, as long as every writer is accounted for | every writer the construction cannot see. Rounds 1–2's findings are that list, and the group or job variant adds its own (§2.1). | a lock resource and a lock site pair: erratum and Class C (§1.8) | `src/workspace.rs`, for the legacy holders | the vocabulary census of §1.4 |
+| (ii) never reuse a checkout path or administrative name | (c) | (a), (b) | yes (below) | none (`dispatch.rs` and `naming.rs` are not frozen: PR11 record R-D) | not measured |
+| (iii) tolerant readers plus targeted removal | (a), (b): measured (§2.4) | (c) | none | none for the topology path; `src/workspace.rs` only for the legacy path's own race (B, §2.10) | none (the shape probe, §2.7) |
+| **(iv) chosen: (iii), plus the run's cleanup lease handed to the manager's Git writers** | (a), (b), (c) | the residuals of §2.8 | none, by #275's precedent (§2.6, §2.12) | none (B optional) | `effects/wrappers.toml` (one callable); `src/runner/contract.rs` (two rows): measured (§2.7) |
+
+**Why (ii) needs the packet.** It must not reuse the **checkout path** as well as the administrative
+name, and the packet fixes the path:
+- The slot paths are literal in `decisions.workspace_candidates.manager`: "detached linked worktrees
+  with durable synced intents (tasks/k<key>-g<gen>, merge/s<seq>)".
+- `task_dispatched{key, generation, base_sha, worktree_path, …}` is "written before worktree creation".
+- The T-DISPATCH resume action is "verify the worktree at the recorded base with Worktree.Verify (linked
+  worktree at the recorded path, …) or remove it with force and recreate it (intent then add)" (packet
+  v17, `transaction_fault_matrix[1].resume_action`).
+
+A new path per incarnation therefore changes three things: what the recorded path means, an event
+field's value, and the frozen `recover.rs`'s reading of it. Unique administrative names alone do not
+close (c):
+- mechanism 1 reaches the new registration through `<slot>/.git`;
+- mechanism 2 deletes `<slot>` by path;
+- Git 2.43 to 2.55 cannot be told the administrative name at all: `add_worktree` takes the path's
+  basename, with a counter on a collision (`d3/git-src/v*/builtin/worktree.c`).
+
+So (ii) is a packet change, and not chosen.
+
+**Why (i) is not chosen.** Its condition, from the brief, was to account for **all** Git descendants
+without per-PID records. Its group and job forms meet the findings §2.1 lists. Its one sound element
+is "establish the descendants' death before reuse", and §2.6 gets that from the kernel's `flock`,
+through a lease that already exists, without a group, a job or a record.
+
+### 2.4 (a) and (b): tolerant registry access
+
+**The rule.** Every registry access the manager makes runs as a series of attempts.
+1. **Read the store.** That is: whether `<common git dir>/worktrees/` is present; each entry's name;
+   and, for each entry, its `gitdir`, `commondir` and `locked`. Each of those three is recorded as
+   absent, unreadable, or present with its length and modification time.
+2. **Attempt.** Take R-X, run the Git command or the Rust scan, and release R-X.
+3. **On success,** return.
+4. **On failure,** read the store again. The failure is **contended** when any of these holds:
+   1. the store holds an **incomplete entry**: `locked` with no `gitdir`; an empty `gitdir`; a
+      non-empty `gitdir` beside an empty `commondir`; or a file the read could not read;
+   2. the store **changed** between the two reads: an entry appeared or went, or one of its three
+      files changed;
+   3. the failure's text **names a path inside the store**. Git prints the entry it failed on (for
+      example `failed to read <store>/<name>/commondir`, `could not open '<store>/<name>/locked' for
+      writing`, `Invalid path '<store>/<name>'`), either absolutely or as `.git/worktrees/<name>/…`.
+      The manager's own scan names the administrative directory it refused.
+5. **Not contended:** return the failure unchanged. It is what it was before this change, Git state
+   where it was Git state.
+6. **Contended, and the bound not reached:** sleep (1 ms, doubling to 50 ms) outside R-X, and attempt
+   again.
+7. **Contended at the bound:** return `UpstrokeError::Refused`, naming the store, its incomplete
+   entries and the bound, and carrying the last failure's text. **It is never `UpstrokeError::Git`.**
+
+**The bound.** `REGISTRY_CONTENTION_BOUND` is 10 s in production. Tests run with a short value (the
+probe used 500 ms), so that a test meeting a torn entry it planted does not wait out the production
+bound. The bound is per access and fixed at its first attempt.
+- A writer's registration is torn only for the few file writes between its `mkdir` and its
+  `commondir`: microseconds (`d2/measure/subprocess-writes-2.43.0.txt`).
+- A removal's is torn for the recursive deletion of one directory.
+- 10 s is four orders of magnitude over both.
+
+**Where it applies** (`src/workspace_manager.rs` at `0874bcf3`):
+
+| Access | Its attempt | Reached from |
+|---|---|---|
+| `worktree_records` (`:5051`) | `git worktree list --porcelain -z` | every `revalidate()`, `quiescence`, `assert_publishable`, `derive` |
+| `add_worktree` (`:2649`) | `git worktree add --detach --quiet` (`:2708`), inside its funnel | `Worktree.Add`, `.AddStaging`, and `Snapshot.Add` (through `add_snapshot`, `:3200`) |
+| `remove_worktree_proving`'s scan (`:2988`) | `revalidate_removal_proving` (`:5119`) | every removal |
+| `slots_with_torn_registrations` (`:5345`) | the torn plan's scan | `remove_intent`, `verify_worktree` |
+
+- **The add is attempted again only when its failed attempt left nothing at the slot.** Git's own
+  failure paths remove their junk (`remove_junk`), so a race leaves nothing behind. An add killed from
+  outside, as by the PR136 kill samplers, leaves its residue, and that failure is returned as it is.
+- **Not wrapped:**
+  - `remove_bound`'s mutation: once it stops pruning it enumerates nothing (§2.5);
+  - `git fsck` on the refusing path (table B);
+  - `read_only_git`'s reads, which enumerate no registry.
+
+**Why a race is never returned as Git state.** Take a torn entry that Git failed on. One of three
+things is true of it:
+- it is still incomplete at the second read (clause 1);
+- it changed between the two reads (clause 2);
+- it was made and unmade entirely inside the attempt, for example another engine's add that failed and
+  removed its junk. Then Git's error names it (clause 3).
+
+File-time granularity can hide a write that falls inside one tick from clause 2 alone. Clauses 1 and 3
+do not depend on it. So the only failure returned unchanged is one across a store that read quiet and
+whole at both ends, with an error that names no entry of it.
+
+**What a genuine failure costs.**
+- **When the store is quiet: nothing.** It is returned at once, unchanged.
+- **Under other processes' churn,** it is retried until an attempt meets a quiet store. Measured with 80
+  genuine failures (an add of a missing ref) among eight churning loops: every one was returned as
+  genuine, after at most 1.085 s (median 0.010 s; `d3/measure/race-tolerant-targeted-genuine.log`).
+- **Under churn that never quiets for the bound,** it is returned as the refusal, which is not durable.
+  That is a conservative misreading, and the next attempt, on a resume, reads it again.
+
+**Static tears.** Two cases keep the store contended without changing it: a dead writer's torn residue
+(R1), and a writer stopped inside its registration write.
+- The access refuses at the bound, never as Git state.
+- So R1 no longer spends a deferral or parks a candidate. A verification that meets it ends the
+  command resumably, naming the entry.
+- This narrows `PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION`'s verification
+  consequence. Its precondition is unchanged (§2.5).
+
+**R-X stays as PR11 made it.** It is taken around one attempt at a time. The sleeps are outside it, so
+no thread waits on another thread's retries. The bound covers the retries; R-X's wait for another
+thread's single Git command is PR11's.
+
+**Measured at the Git level** (`d3/measure/tolerance-race.py`, `SUMMARY.txt`; Git 2.43.0). Two
+checkouts, four loops in each; each loop runs list, add, the removal's scan as the manager reads it,
+and the removal; 16,000 commands a run.
+- **Untolerant:**
+  - 102 and 174 failures with Git's prune;
+  - 225 and 210 with targeted removal;
+  - at 16 loops, 276 and 400 in 32,000.
+- **Tolerant:**
+  - **0** in ten runs with targeted removal (118 to 174 retries a run);
+  - **0** in ten runs with prune (64 to 126 retries);
+  - **0** in 32,000 at 16 loops (397 retries).
+- **The failure kinds, untolerant,** are the finding's and round 1's: the scan's "is locked and has no
+  gitdir"; the add's and the list's "failed to read …/commondir: Success"; "failed to read '…/locked'";
+  "Invalid path"; and, under prune, "could not open '…/gitdir' for writing"
+  (`race-none-prune-run1.log`).
+
+**Measured at the engine level, with the finding's own witnesses** (`d3/census/witness-r7r8/`).
+Review round 7's and round 8's patches were applied unchanged to scratch `git archive` copies of
+`0874bcf3`: one unpatched, one with (iii) alone (`patch-iii.py`), and one with the designed shape of
+§2.7.
+- **R7.** Two `LinkedChild` processes, one in the main checkout and one in a linked checkout. Each holds
+  its own worktree and run locks and runs 500 snapshot add-and-remove cycles through the production
+  funnels.
+  - Unpatched: **red 10 of 10, 68 failed operations in 20,000**.
+  - (iii) alone: **green 10 of 10, 0 in 20,000** (`r7-summary.txt`).
+  - The designed shape: green 5 of 5, 0 in 10,000 (`r7-design-summary.txt`).
+- **R8 as its reviewer wrote it:** a torn foreign registration held until the verification's terminal.
+  - Unpatched, 3 of 3 runs: Complete after one Deferred, and Parked after two. That is the finding.
+  - (iii) alone, 3 of 3 runs, and the designed shape, 2 of 2: the command ends with `Refused`, and
+    nothing durable is appended (`r8-summary.txt`, `r8-design-summary.txt`, `r8static-*-*.log`).
+- **R8 transient:** the same tear, finished 200 ms later, as a live writer finishes.
+  - Unpatched: one and two `merge_verification_unavailable` (Complete, Parked).
+  - (iii) alone, 3 of 3 runs, and the designed shape, 2 of 2: **none; Complete both times**
+    (`r8-summary.txt`, `r8-design-summary.txt`).
+
+### 2.5 Targeted removal
+
+**What changes.** `remove_bound` (`src/workspace_manager.rs:3020`) runs no `git worktree prune`. Today
+it prunes at `:3059`, `:3098` and `:3121`. Instead:
+- **A bound registration that still names the slot is removed directly:** `locked` unlinked, then the
+  directory. That is the removal the empty-`commondir` branch already makes (`:3096-3119`).
+- **Then the store itself, `<common git dir>/worktrees`, if that left it empty,** as
+  `git worktree prune` removed it.
+  - The frozen `finalize.rs` test `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store`
+    (`src/engine/topology/finalize.rs:486`, assertion `:502-505`) pins exactly this.
+  - Without it, the shape probe failed that test (`d3/census/probe-iii/suite-p1.log`); with it, the test
+    passes (`suite-p1b.log`).
+- **A registration whose `gitdir` has gone** converges with nothing removed, as `reviews/FINDINGS.md`
+  §24's owner-authorized rule says: "without inferring or deleting an administration directory".
+- **When no registration is bound,** nothing is removed from the store.
+
+**Why the prune goes.**
+- `git worktree prune` removes any entry with neither `locked` nor `gitdir`, with no expiry check
+  (`should_prune_worktree`, `d3/git-src/v2.43.0/worktree.c:719-737`, the same at 2.55).
+- `git worktree add` makes its directory before it writes `locked`
+  (`d3/git-src/v2.43.0/builtin/worktree.c:458-483`).
+- So an engine's prune can delete another process's add in flight. **Executed**
+  (`d3/witness/prune-in-flight/witness.log`):
+  - an add is held between its `mkdir` and its `locked` (strace's syscall delay);
+  - a bare `git worktree prune` reports "Removing worktrees/vict: gitdir file does not exist";
+  - the add fails: "could not open '…/worktrees/vict/locked' for writing";
+  - the store reads the same before and after the victim's attempt.
+- Clause 3 would catch that victim, because its error names its entry. Removal should not depend on the
+  victim's reading, though: no engine process deletes another process's entry at all.
+
+**The store's own removal cannot race another engine process.** Two engine processes on one repository
+are in two checkouts, because R17 refuses a second coordinator in one checkout. So while both run, a
+linked checkout's registration is in the store, and the store is never empty. Within one process the
+removal runs under R-X.
+
+**What it changes for two filed findings.** The implementation updates both findings' texts.
+- **`PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE`.** Its state needs a prune to delete a
+  `gitdir`-less entry and then the emptied store. No engine prune does that now, and the store is
+  removed only when it is empty, so the engine no longer produces the state (a user's prune still can).
+  This is the finding's own second shape: "no forced removal prunes an entry whose checkout may stand".
+  Neither of §24's two rules gives way.
+- **`PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION`.** Another run's torn registration,
+  which Git's prune would have deleted, is no longer deleted by this run's removals. It stays until its
+  own run's resume repairs it, or until an operator runs `git worktree prune`. Its verification
+  consequence narrows (§2.4: a refusal, not a deferral).
+
+### 2.6 (c): the dead coordinator's Git writers hold the run's cleanup lease
+
+**The rule.** Every Git child the manager starts with a **writer subcommand** is handed the run's
+cleanup lease as its standard input. The writer subcommands are `worktree add`, `add`, `rm`, `clean`,
+`write-tree`, `cherry-pick` and `read-tree`. `git update-ref` gets the lease the same way: today it
+gets it through `pre_exec` (`src/workspace_manager.rs:3553-3570`), and that moves to this form. A
+read never gets the lease, wherever it runs.
+- **How.** The parent opens `<run's public dir>/cleanup.lock` and takes `flock(LOCK_SH)` on it. It
+  passes the file as the child's stdin, spawns, and drops its own copy at once.
+- **Why the hold lasts.** The child's descriptor 0 shares the open file description. So the shared hold
+  lasts as long as the child, or any descendant that keeps its stdin, is alive.
+- **Platforms.** Unix only, as `hold_cleanup_lease_for_child` is (`src/rundir.rs:2193-2247`). On Windows,
+  INV-18's ambient kill-on-close job ends the children with the coordinator, as `src/rundir.rs:2238-2240`
+  already says for `update-ref`.
+
+**Why that closes (c).**
+- A resume, or any coordinator of the checkout, observes R28 at its worktree-lease acquisition and
+  refuses while the lease is held (`observe_cleanup_hold`, `src/rundir.rs:1947-1975`, `:2140`).
+- It probes the lease exclusively at its run-lock acquisition (`:2075-2079`).
+- So no resume begins while a dead coordinator's Git writer, or a descendant of it, can still act on a
+  slot's paths, and nothing rebinds a path under a live orphan.
+- On Unix this is a fact the kernel keeps, not a record: a `flock` is released only when the last
+  descriptor of its open file description closes.
+
+**Which descendants hold it.**
+- Git's `run_command` gives a child its own standard input unless told otherwise. `add_worktree` tells
+  neither its `update-ref` child (2.43) nor its `reset` child otherwise: there is no `no_stdin` in
+  `builtin/worktree.c` at 2.43, 2.50 or 2.55 (`d3/git-src/`).
+- **Measured:** G and its held `reset` both have descriptor 0 on the lease file
+  (`d3/witness/lease-stdin/probe-fd0.log`).
+- **A filter Git feeds through a pipe does not inherit the lease.** So a filter's background helper
+  never holds it, and FUB-D1-FILTER's and PIPE's class does not arise. The filter writes no slot path
+  itself either: Git does.
+- Hooks are disabled through `core.hooksPath` (`src/workspace_manager.rs:4994-5010`).
+
+**Why stdin and not `pre_exec`.** Four variants were measured, each on top of (iii) in a scratch copy
+(`d3/census/probe-iii/SUMMARY-D1.txt`). The (iii)-only control's suite took 103 to 126 s.
+
+| Variant | Suite time | Frozen failures in the full suite |
+|---|---|---|
+| D1: the lease through `pre_exec`, for every builder-run child | 339 s | four `recover/tests.rs` tests, each passing alone |
+| D1 + m1: the same, the parent's copy dropped at spawn | 349 s | two |
+| D1s: stdin, for every builder-run child | 82 to 110 s | `kill_after_report_before_each_cleanup_step` in 3 of 3 suites, passing alone |
+| D1n: stdin, for the children run in a slot, plus `worktree add` and `update-ref` | 78 to 119 s | none, in 4 suites |
+| **D1w, the designed rule: stdin, for the writer subcommands only, with (iii)** | **97 to 105 s** | **none, in 2 suites** (`d3/census/rate-design/`) |
+
+- **D1's time.** A `pre_exec` closure takes `std` off `posix_spawn` and onto `fork()` of the large
+  multithreaded process, for every Git child.
+- **D1's frozen failures.** They are the parallel suite's sibling forks inheriting the parent's copy of
+  the lease. That is PR10's reason for withdrawing exactly this attempt
+  (`reviews/2026-09-12-pr10-record.md:431-436`).
+- **Reading the lease file** gives end of file, as `/dev/null` does. No command the manager runs reads
+  its stdin, and one that could would read the same nothing.
+
+**Executed with the coordinator's real locks** (`d3/witness/c-single/witness-locks.py`). Each probe takes
+the worktree lock and then the run lock first, as a write command does.
+
+| Build and mechanism | Resume 1 | Then | `a.txt` at the end |
+|---|---|---|---|
+| unpatched, mechanism 1 (`witness-locks-exec-base.log`) | proceeds: `Unpopulated`, removed, recreated | the late `reset` runs | `base`: **paid edits lost** |
+| unpatched, mechanism 2 (`witness-locks-filter-base.log`) | proceeds the same way | the orphaned add's `remove_junk` runs | the slot is gone: **lost** |
+| designed shape, mechanism 1 (`witness-locks-exec-design.log`) | **refused at the worktree lock**: "run … still has a process of its own alive …" | the held child is released and exits; resume 2 reads `verified (reused)` | **paid edits intact** |
+| designed shape, mechanism 2 (`witness-locks-filter-design.log`) | refused the same way | resume 2 reads `verified (reused)` | **intact** |
+
+**The resume's experience.**
+- It refuses while the dead run's Git writers live: usually milliseconds, at most the add's checkout.
+- The message that refuses it already names the run and the lease (`src/rundir.rs:1970`). It gains the
+  worktree writers among the processes it lists.
+- A Git writer that never exits holds the lease until an operator ends it, as a stuck reaper does today.
+
+**What it does not cover.**
+- A descendant that closes or replaces its stdin and then writes a slot. No Git writer measured does.
+- Foreign processes.
+- The legacy engine's Git children, which are frozen (§2.10).
+- On Windows, the ambient job's termination is asynchronous. That is the position `update-ref` and every
+  agent hold today (INV-18), reasoned and not executed here.
+
+**Packet: none.**
+- R28's row names "a surviving Unix cleanup reaper's shared cleanup.lock hold".
+- PR #275 added `git update-ref` children as a second holder. It argued from the mechanism: what
+  acquires the hold, what releases it, what observes it, and what reclaims it after a crash
+  ("nobody"). It read the change as "the row's description catching up with its membership", and both
+  of its review lenses accepted that.
+- The manager's writers are a third holder class by the same argument: the same file; the same shared
+  take, by a process the coordinator started; released by the kernel at the last close; observed by the
+  same two sites; never reclaimed.
+- §2.12 gives the one sentence an owner who wants the row to name its holders could adopt. Nothing
+  depends on it.
+
+### 2.7 Effect governance, instruments and the frozen set
+
+**The shape probe.**
+- The designed shape is `d3/census/probe-iii/patch-iii-c3.py` plus `patch-d1w.py`. It was applied to a
+  scratch `git archive` of `0874bcf3`, and the whole suite was run twice through `upstroke-build`
+  (`d3/census/rate-design/probe-design-{1,2}.log`).
+- Clippy `-D warnings` is clean (`d3/census/probe-design/clippy.log`).
+- Nothing of it is on the branch.
+- The library suite: 2,993 passed, 7 failed, 113 ignored, in both runs. The control, (iii) without the
+  lease, gives 2,998, 2 and 113.
+- **One difference from §2.4.** The probe attempted every contended add again. The design's condition,
+  that an add is attempted again only when its failed attempt left nothing at the slot, is the
+  implementation's to add, and T6 tests it.
+
+**The seven tests that move, each the implementation's to move with the code:**
+1. `effects::tests::every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified`: the new
+   `rundir` callable (the probe's `take_cleanup_lease_shared`) needs its `effects/wrappers.toml` row.
+2. `effects::tests::every_name_more_than_one_callable_bears_is_pinned_by_its_count`: the callable's two
+   `cfg` twins need their count pinned.
+3. `runner::contract::tests::every_production_process_start_is_classified`
+   (`src/runner/contract.rs:1632`): the `src/workspace_manager.rs` row goes from `(2, 0, 0)` to
+   `(2, 1, 0)`, for one `.spawn()` (spawn, drop the parent's copy, collect).
+4. `runner::contract::tests::every_production_command_spec_payload_is_classified` (`:2422`): the
+   `src/workspace_manager.rs` row goes from `(2, 8, 0)` to `(3, 8, 0)`.
+5. `workspace_manager::tests::the_one_update_ref_spawn_gives_its_child_the_cleanup_lease`
+   (`src/workspace_manager/tests.rs:14806`), not frozen: rewritten for the writers.
+6. `workspace_manager::tests::a_removal_records_the_one_attempt_the_unix_arm_makes` (`:1432`), not
+   frozen: the direct removal of the administrative directory is a second observed tree removal. The
+   removal either goes unobserved or the test counts both.
+7. `workspace_manager::tests::an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup`
+   (`:6675`), not frozen. It is `RESIDUE-UNBINDABLE…`'s guard test. Its refusal is now `Refused`, after
+   the bound, carrying the same Git text.
+
+Items 1 to 4 are instruments in the sense of CLAUDE.md's first limb, so the implementation's merge is
+the owner's, not standing delegation's.
+
+**No vocabulary moves.**
+- No resource row, effect site, fault row, coverage claim or sequential-registry entry.
+- `effect_sites.json`, `effects/funnel-modules.json`, `effects/sequential-registry.json` and every pin
+  under `src/topology/**` stay as they are.
+- `effects/allowlist.toml` stays: the manager already allows the governed methods, and already sleeps
+  (`src/workspace_manager.rs:1507`, `:5890`).
+- R28's doc comments in `src/topology/effects/{sites,vocab,residue_authority}.rs` gain the third holder
+  class. That is doc text only, as #275's change was.
+
+**The frozen set.** Nothing in it is edited, and its tests pass under the shape in both runs, none
+failing: `recover` 226, `integrate` 20, `repair` 5, `finalize` 5, `fold` 192, `events::log` 47
+(`d3/census/probe-iii/frozen-modules-design.txt`). The one frozen test that needed care is
+`finalize.rs`'s (§2.5).
+
+**Documentation the implementation moves.**
+- **`DESIGN.md` §15.** The sentence that names `git update-ref` as the lease's Git holder names the
+  writers too, and the PROPOSED paragraph (`design/15`) becomes §2's.
+- **`docs/internals/engine/topology/run.md:479-490`** and its pin,
+  `the_verification_notes_say_a_registry_another_process_is_writing_spends_a_deferral_or_parks`
+  (`src/engine/topology/run/tests.rs:535`). The paragraph now says that a registry another process is
+  writing never reaches this arm, because it is retried or refused. The mapping, which is the pin's
+  second half, is unchanged.
+- **`src/rundir.rs`:** `hold_cleanup_lease_for_child`'s doc, and the text of the worktree lock's
+  refusal (`:1970`).
+- **The notes of `src/workspace_manager.rs`,** for the wrapper, the removal and the lease.
+- **The findings.** The repaired finding is deleted. `PR5-RD-003…`, `PR308-R3…`,
+  `RESIDUE-UNBINDABLE…` and `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` have their texts updated
+  (§2.8).
+
+### 2.8 What is closed, what remains, and what G6 meets
+
+**The claims.**
+1. **No engine registry access returns `UpstrokeError::Git` for a failure another process's registry
+   write caused** (§2.4). So, for (b): no registry race reaches `run::verified`'s Git arm, no deferral
+   is spent on one, and no candidate is parked on one.
+2. **(a):** an attempt's registry access passes another process's write. It ends the command only if
+   the store stays contended for the bound, and then resumably.
+3. **No engine process deletes another process's registration** (§2.5).
+4. **(c):** on Unix, no resume and no other coordinator of the checkout begins while a dead
+   coordinator's Git writer is alive, or a descendant of it that keeps its stdin (§2.6). So recovery
+   never rebinds a path under one.
+
+**What remains.**
+
+| | What | Consequence now | Finding |
+|---|---|---|---|
+| R1′ | A writer stalled inside its registration write for the whole bound; a dead writer's torn residue | the access refuses resumably, naming the entry; never Git state, never durable | `PR308-R3-…`: consequence narrowed, precondition unchanged |
+| R2 | A host agent's own Git | its torn entries are tolerated (clauses 1–3); its prune of an engine add in flight makes the add fail with an error naming its entry, so the add is attempted again (clause 3); the agent's own prune still deletes the entry | `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`: narrowed to the agent's own commands; stays filed for them |
+| R3 | The user's Git in any checkout | tolerated the same way | none |
+| R4 | `fsck` on the refusing path (table B) | unchanged: a refusal either way | none |
+| R5 | (c) on Windows | INV-18's ambient job ends the children, asynchronously | the existing position, as for `update-ref` and agents |
+| R6 | The legacy engine | §2.10 | `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` (B2′), or closed (B1′) |
+| R7 | File times coarser than one attempt | clause 2 can miss a write within one tick; clauses 1 and 3 do not | stated |
+
+**What G6 meets.** This is the classification the orchestrator's addendum asks for
+(`~/orch-pr11/answers/pr11_fub_design3-0.md`), each line with its evidence above.
+
+| Item | Severity | Here | Applies to G6 | Blocks G6 |
+|---|---|---|---|---|
+| `PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: (a), (b) | P1 | closed by §2.4 and §2.5 once implemented; the finding file is deleted then | yes: R17 and the registry under concurrency, ST-16 | only until this change merges |
+| (c), a dead coordinator's Git children: FUB-D2-DESC, and `PR329-A-RESUME-REBINDS-A-SLOT-ITS-DEAD-COORDINATORS-GIT-CHILD-STILL-WRITES` in the ledger | P1 | closed by §2.6 once implemented | yes: Q1, ST-16, ST-18 | only until this change merges |
+| `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` | P2 | filed at this head (B2′), or closed under B1′ (§2.10) | no: G6 certifies the topology engine and claims nothing of the legacy engine frozen at PR5 | no |
+| `PR308-R3-SKIPPED-PRUNE-KEEPS-ANOTHER-RUNS-TORN-REGISTRATION` | P2 | consequence narrowed | — | no |
+| `PR5-RD-003-A-PRUNE-STRANDS-A-CHECKOUT-WHOSE-GITDIR-IS-GONE` | P2 | no longer produced by an engine's removal | — | no |
+| `PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD` | P2 | narrowed (R2) | — | no |
+
+### 2.9 Regression tests
+
+Each test below is the implementation's, and its name is the implementer's to choose. Its first-bad
+shape is given, and each is "fixed (design); witnessed in the implementation phase" in the ledger.
+Every one lives outside the frozen modules and their test children. Each waits on a handshake or a
+seam; time is only a watchdog.
+
+- **T1, two processes in linked checkouts, at least 1,000 cycles, 0 failures.** This is review round 7's
+  witness, kept (`~/orch-pr11/reviews/r7-witnesses/conc/witness.patch`).
+  - First-bad: unpatched it is red 10 of 10, with 68 failures in 20,000 operations
+    (`d3/census/witness-r7r8/r7-summary.txt`).
+  - Mutation m1: the wrapper returns its first failure. Red.
+  - Windows runs bounded cycles, gated by `cfg` and said in the test's doc.
+- **T2, the verification beside a transient foreign tear: no deferral.** This is round 8's witness,
+  inverted.
+  - A foreign `LinkedChild` tears an entry and keeps it torn until the reader's attempt has met it. A
+    test-only notice in the wrapper ("an attempt was contended") is the handshake. Then the foreign
+    process finishes the entry.
+  - Pass: no `merge_verification_unavailable`, the outcome Complete, invocations balanced, and replay
+    equal to live.
+  - First-bad: unpatched, one and two deferrals (Complete, then Parked) (`r8-summary.txt`).
+- **T2′, the verification beside a static tear (round 8's witness as written).**
+  - Pass: the command ends with `Refused`, naming the entry; nothing durable is appended; the next
+    resume completes once the entry is gone.
+  - First-bad: unpatched, Deferred and Parked (`r8static-base-*.log`).
+  - Mutation m2: the bound's error typed `UpstrokeError::Git`. Red: the verification defers.
+- **T3, three processes:** T1's shape with three `LinkedChild` processes.
+- **T4, the classifier, as unit tests with the store built by hand.**
+  - Each clause makes a constructed failure contended: an incomplete entry; a change between the reads;
+    an error naming `<store>/<name>`, absolute and relative.
+  - A quiet, whole failure is returned unchanged and at once.
+  - Contended at the bound is `Refused`, never `Git`.
+  - Mutations: each clause removed in turn, with the case that only that clause catches.
+- **T5, no engine prune.**
+  - A census: `worktree` with `prune` appears in no production argv of `src/workspace_manager.rs`.
+  - The store is removed only when empty: a removal beside another registration leaves the store.
+  - The frozen `finalize.rs` test stays green.
+- **T6, an add whose entry another process prunes.** A seam holds the manager's add between its
+  `mkdir` and its `locked`, the way `d3/witness/prune-in-flight/` does with strace, while a foreign
+  `git worktree prune` runs.
+  - Pass: the add is attempted again and succeeds.
+  - First-bad: unpatched, the add fails with Git state.
+- **T7, (c) with one coordinator** (Unix). A coordinator child is killed inside `worktree add`, its
+  `reset` held by a `GIT_EXEC_PATH` wrapper or by a smudge filter.
+  - Pass: the resume is refused while the held process lives. After it exits, the resume reuses the
+    slot, and the worker's edit survives.
+  - First-bad: unpatched, the edit is lost in both mechanisms (`d3/witness/c-single/witness-locks-*-base.log`).
+  - Mutation m3: the lease not handed (stdin `/dev/null`). Red.
+- **T8, the lease's holders** (Unix).
+  - Descriptor 0 of `worktree add` and of its `reset` is the lease.
+  - A filter's background helper does not hold it.
+  - A read the manager runs in a slot (`rev-parse`) holds nothing: `Worktree.Verify` takes no R28 hold
+    (FUB-D2-VERIFY).
+- **T9, the bound.** Four threads meet a static torn entry with a 1 s test bound. Each returns `Refused`
+  within the bound plus one backoff and one attempt. No thread's wait is a multiple of the bound, since
+  the sleeps hold nothing.
+- **T10, the legacy writer.** A legacy `Workspace` gate snapshot add and its drop, in a linked checkout,
+  run beside the manager in the main checkout. The manager has 0 failures. That is the engine-level form
+  of `d3/measure/race-mixed-run*.log`.
+
+**The budget.** The Windows guest's harness ran 468.44 s at `78f99c70`
+(`~/orch-pr11/logs/pr11_repair_r8/ci/ci-read-36861160153.txt`). The Unix-only tests (T7, T8 and the
+lease) cost the Windows legs nothing. T1 and T3 run bounded cycles there.
+
+**The proof the implementer owes.**
+- Each mutation, on a scratch tree whose Compiling line names it.
+- The witnesses red unpatched.
+- The frozen children unchanged.
+- The ten gates, and CI on every leg.
+- **At least five full suites, with every frozen test's failures counted against the same number of
+  suites at the base.** The lease's sibling-fork exposure is what PR10 withdrew it for; here it is
+  measured clean in 2 suites of the designed rule and 4 of D1n.
+
+### 2.10 The legacy path: decision B
+
+**(i) Do tolerant topology readers close R7-CONC-1's consequences against a legacy writer in a linked
+checkout? Yes. Measured** in five mixed runs (`d3/measure/race-mixed-run{1..5}.log`):
+- The main checkout ran the legacy engine's own argv, untolerant, as the frozen `src/workspace.rs` runs
+  them: `add -q --detach --force`, `list --porcelain -z`, `remove --force`.
+- The linked checkout ran the shape's cycle.
+- **The topology side failed 0 times in 40,000 commands.** The legacy side failed 13, 10, 14, 5 and 13
+  times in 6,000 a run.
+- So after PR12, a legacy run cannot tear a topology verification or pipeline. Tolerance does not care
+  who the writer is.
+
+**(ii) The legacy engine against itself, in production today.**
+- **The sequence.**
+  - Two legacy runs work in linked checkouts of one repository.
+  - One run's gate-snapshot add, list or remove, or its resume's `switch`, dies on the other's
+    half-written entry (§1.2, table C).
+  - `?` reaches `discard_uncommitted()` (`src/engine/coordinator.rs:544-548`): the worker's uncommitted
+    edits are discarded and the command ends.
+  - The resume runs the attempt again.
+- **Measured at the Git level** by round 1 (`~/orch-pr11/logs/pr11_fub_design/measure/legacy-race-SUMMARY.txt`):
+  12 and 16 failed commands in 7,200 with four loops per checkout, and 0 in 5,400 with one loop per
+  checkout, the shape one legacy coordinator per checkout gives.
+- **Severity: P2.**
+  - The cost is one attempt's paid work and a resumable end.
+  - Nothing durable is spent: the legacy path has no deferral or park, and its log stays consistent.
+  - The realistic rate is low.
+- **G6: it does not apply.** G6 certifies the topology engine's scheduling layer and R17 under
+  concurrency, and claims nothing of the legacy engine, frozen at PR5. As a P2 it would not block G6
+  anyway.
+
+**B1′, if the owner unfreezes `src/workspace.rs` for this change.** The text below would replace round
+2's §1.9 text, which is withdrawn.
+- **Scope, one file:**
+  - the four registry children (`add_gate_worktree` `:871`, `cleanup_gate_workspace` `:1549`,
+    `worktree_is_registered` `:1602`, `switch_branch` `:450`) each run through the manager's tolerant
+    registry access, exposed `pub(crate)` for the purpose;
+  - one private helper resolves the canonical common git dir, the two steps `recorded_objects_scope`
+    already takes (`:97-101`);
+  - nothing else of the module moves, and no legacy engine module moves;
+  - no lock file and no new prerequisite, so round 2's `ensure_execution_prerequisites` change is gone
+    with the lock.
+- **The recorded form** is the `effects/allowlist.toml` row's `legacy_effect` text, extended. Its
+  `path` and `allows`, and `FROZEN_LEGACY_ALLOWLIST` (`src/effects.rs:1306`), do not move.
+
+  > … **AMENDED TWICE: to close
+  > `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`, on the owner's decision
+  > to unfreeze the module for this one change. The second amendment is one thing and no more: the four
+  > Git children that enumerate the repository's worktree registry — `add_gate_worktree`'s `worktree
+  > add`, `cleanup_gate_workspace`'s `worktree remove`, `worktree_is_registered`'s `worktree list` and
+  > `switch_branch`'s `switch` — run through the workspace manager's tolerant registry access, which
+  > retries a failure the store shows contended and refuses one that stays contended past its bound,
+  > never as Git state; with one private helper resolving the canonical common git dir as
+  > `recorded_objects_scope` does. Nothing else in the module moves, and no other legacy module
+  > moves.** Every other behaviour of the module stays frozen.
+
+- **What it closes:** the legacy-side race; the finding is deleted.
+- **What it leaves for G6:** nothing of this race.
+- **Its test:** T10 with the roles swapped, the legacy side measured.
+
+**B2′, if the module stays frozen: the filing.** This head adds
+`findings/P2_correctness_202610020230_legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry.md`
+(`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`, P2, `deferred`,
+`pre_existing`). Its guard is the change that routes the four calls through the tolerant access under
+the owner's unfreeze, which is B1′ in this pull request or a later change.
+- **What it leaves for G6:** one open P2 that does not apply to G6 and does not block it.
+
+**Recommendation: B2′.**
+- The topology closure does not depend on the legacy path.
+- The owner's direction was "narrow and split out work".
+- The race is P2 and outside G6.
+- B1′ stays available as a one-file change whenever the owner wants it. If the owner takes B1′ in this
+  pull request, the implementation deletes the finding file, and its ledger row becomes `fixed`.
+- **Not established by this round:** whether a dead legacy coordinator's Git children can corrupt what
+  its own resume does (§2.13). The legacy engine's Git children hold no lease.
+
+### 2.11 Review rounds 1 and 2, answered
+
+**Design review round 2** ran three `gpt-6-astra` lenses at `max` on `0874bcf3`, 23:42–23:58Z on
+2026-10-01. All three returned CHANGES_REQUIRED. The texts are
+`~/orch-pr11/reviews/review-329-d2-{design,concurrency,regression}-0874bcf3.review.md`, with their
+hashes in `SHA256SUMS-329-d2`; the triage is `review-329-d2-triage.md`.
+
+| Finding | Sev | Kind | What it found | Round 3's answer | Where | Evidence |
+|---|---|---|---|---|---|---|
+| FUB-D2-DESC | P1 | executed | Git's unrecorded `update-ref` and `reset` descendants outlive their killed parent and overwrite a recreated workspace or a replacement registration's `HEAD` | Re-executed with **one** coordinator, in two mechanisms; the class is PR136's. Closed by the kernel: the run's cleanup lease is handed to every Git writer as stdin, and the descendants inherit it, so no resume begins while any lives. No quiescence claim is made. | §2.2, §2.6 | `d3/witness/c-single/`, `witness-locks-*-{base,design}.log`, `d3/witness/lease-stdin/probe-fd0.log` |
+| FUB-D2-RECORD | P1 | executed model | updating a PID-only record line is not crash-safe | No record exists. | §2.1 | — |
+| FUB-D2-ENOENT | P1 | reasoned | under `hidepid`, `/proc` reports a hidden live process absent | No process is queried. The lease is kernel lock state, which every user sees through `flock`. | §2.6 | — |
+| FUB-D2-PIPE | P2 | executed | a filter helper holds the captured output pipe, so the lock is never released | No cross-process lock is held across output collection. A helper holding Git's output pipe delays that one call, and R-X's other in-process users behind it, exactly as at `92c4ca81`; no other process waits on it. The lease is not on the helper's descriptors (a filter's stdin is a pipe), so it is released when Git exits even while the helper lives. | §2.6 | `probe-fd0.log` |
+| FUB-D2-ERRATUM | P2 | executed | an inherited `flock` survives fork-before-exec, contradicting R17's "released at process exit" | No new lock and no erratum: R17 is untouched. The cleanup lease's fork copies are R28's known, measured window (PR281, #320), and this design keeps it to the spawn: the parent drops its copy at once, and reads take none. | §2.6, §2.12 | `d3/census/probe-iii/SUMMARY-D1.txt` |
+| FUB-D2-WINAPI | P2 | reasoned | exposing the raw Windows `resume_only_thread` needs a classification and a denial | Nothing in `agent::proc` is exposed; Windows takes no lease. | §2.6 | — |
+| FUB-D2-VERIFY | P2 | reasoned | `Worktree.Verify` becomes effectful while it is classified read-only | The tolerant read only reads, and only writers take the lease: Verify's `rev-parse` and list take nothing, and the site stays read-only. | §2.4, §2.6, T8 | `patch-d1w.py` (the writer rule) |
+
+**Design review round 1's findings, under round 3.** Rounds 1 and 2 answered them for a lock; round 3
+withdraws the lock.
+
+| Finding | Sev | Status under round 3 |
+|---|---|---|
+| FUB-D1-WIN | P1 | No lock, so no release order is needed. (a) and (b) are read-side. (c)'s Windows side is INV-18's ambient job, the existing position, reasoned (§2.8, R5). |
+| FUB-D1-PERM | P1 | No new file. The lease file is created by `RunLock::acquire` at the command's start, before any spend, as today. The legacy path is untouched (B2′). |
+| FUB-D1-HOOKS | P2 | No new hooks or sites. The add's checks inside its funnel are unchanged. |
+| FUB-D1-DEADLINE | P2 | R-X is unchanged from PR11 and claimed bounded nowhere. The retries have one bound per access, and their sleeps hold nothing, so threads do not multiply it (T9). |
+| FUB-D1-FILTER | P2 | Nothing is handed to Git's children but the lease on stdin, which filters do not inherit (§2.6). Round 2's answer was incomplete for pipes (PIPE); round 3 holds nothing across output collection. |
+| FUB-D1-ERRATUM | P2 | No erratum (§2.12). Round 2's answer left the fork copy unaccounted (D2-ERRATUM). Round 3 adds no lock. |
+| FUB-D1-DELETE | P2 | No new file. The lease file is R21's run-directory file, as today. |
+| FUB-D1-T2 | P2 | The principle is kept: T2 waits on a seam showing the reader's contended attempt, and time is a watchdog (§2.9). |
+| FUB-D1-FROZEN | P2 | `derive` keeps its `revalidate()`. Its tolerant list takes no lock, creates no file and starts no writer, so the frozen refusals precede every effect as before, and the frozen tests pass under the shape (§2.7). Round 2's narrowing of `derive` is withdrawn. |
+| FUB-D1-PIN | P2 | The instrument census is measured on the designed shape by a whole-suite probe (§2.7). Nothing in `src/topology/**` moves except R28's doc text. |
+
+**Round 2's three open items** (`~/orch-pr11/handovers/pr11_fub_design2.md`):
+1. **The truncation remedy's condition** (§1.3.9). Withdrawn with the record.
+2. **One host and one PID namespace.** No PID or `boot_id` exists in round 3. Tolerance reads the store,
+   so it holds across hosts and namespaces. The lease is R28's `flock`, whose reach is the existing one:
+   a network filesystem without `flock` refuses, as the run and worktree locks already do there.
+3. **The unwinding `Drop` rule.** No record exists. The parent's copy of the lease is a `File` dropped
+   when the child is spawned, or on unwinding. The child's copy is the kernel's to release.
+
+### 2.12 Decision A: none is needed
+
+No packet text is required:
+- no resource row (R29 is withdrawn);
+- no effect site (the two Lock sites are withdrawn);
+- no fault row (T-REGISTRY is withdrawn);
+- no change to R17;
+- no Class C.
+
+The packet's `tasks/k<key>-g<gen>`, `merge/s<seq>` and `task_dispatched.worktree_path` are untouched
+(§2.3).
+
+R28 gains holders by PR #275's precedent, without an amendment (§2.6). An owner who prefers R28's row to
+name its holders could adopt this sentence. **It is optional, and nothing depends on it:**
+
+> *`decisions.resource_accounting.rows[R28].resource`:* "a surviving Unix cleanup reaper's shared
+> cleanup.lock hold (one per reaper; a reaper may outlive the coordinator while it settles its process
+> groups), **and the same shared hold of each Git child the coordinator started to write a ref, a
+> worktree or a worktree's registration, held through a descriptor that child and its descendants
+> inherit, for as long as one of them keeps it**"; *`granularity`:* "per reaper process **or Git
+> child**".
+
+### 2.13 Risks, sequencing, and what is out of scope
+
+**Sequencing.** The implementation does not depend on #328.
+- #328 does not touch `src/workspace_manager.rs`, `src/rundir.rs` or `src/runner/contract.rs`.
+- The two changes meet only in `effects/wrappers.toml` (different module rows) and in `design/15`
+  (different paragraphs).
+- Round 2's dependency was on `src/agent/proc.rs`, which round 3 does not need.
+
+**Risks.**
+- **The lease's sibling-fork exposure in the parallel suite.** The suite hosts many runs in one process,
+  so a sibling test's fork can inherit a copy of the parent's lease for the length of a spawn. That is
+  what PR10 withdrew the add's lease for. The designed rule was measured clean in 2 full suites, and D1n
+  in 4. The implementation owes the comparison in §2.9.
+- **Liveness of a resume.** It waits for a dead run's Git writers. A hung writer holds the lease until
+  it is killed, as a stuck reaper does today. The refusal names the run and the lease.
+- **Genuine failures under sustained churn** wait up to the bound (10 s) and are then returned as a
+  non-durable refusal (§2.4).
+- **Lost healing.** Another run's torn registration is no longer deleted by this run's removals: it
+  waits for its own run or an operator (`PR308-R3-…`, §2.5).
+- **Windows (c)** rests on INV-18's ambient job, asynchronously (R5).
+- **File times coarser than one attempt** weaken clause 2 alone (R7).
+- **Git versions.** This box has 2.43.0. CI has 2.50.1 on the Windows guest and 2.55.0 elsewhere,
+  including the hosted Windows legs (from round 2's CI logs).
+  - From 2.43 to 2.55, `add_worktree` writes `locked` first, then `gitdir` and `commondir`.
+    `remove_junk` deletes by path, and the sibling scan comes before the `mkdir`.
+  - From 2.50 on, `add_worktree` writes `HEAD` in-process, with no `update-ref` child, and its `reset`
+    child still inherits stdin (`d3/git-src/`).
+  - Git for Windows runs the same `builtin/worktree.c`. Its torn states are the same; Windows sharing
+    violations on a read count as contention (clause 1's unreadable file).
+- **`hold_cleanup_lease_for_child` loses its production caller.** It is kept for the fixtures that use
+  it (`src/workspace_manager/fixture.rs:761`) or moved to them; the implementation decides.
+
+**Out of scope, and said so.**
+- **A dead legacy coordinator's Git children against its own resume.** The legacy engine's Git
+  children hold no lease, and this round did not measure whether the legacy resume reuses a path one
+  of them can still write. It is not filed: no failure sequence is established.
+- **`RESIDUE-UNBINDABLE-TASK-REGISTRATION-HAS-NO-DESIGN-SENTENCE`'s policy.** With the lease, a resume's
+  run lock proves on Unix that no Git writer of its run is alive. That could license
+  `WriterProof::NoWriterAlive` at a resume's reclaims, but this change does not use it. The finding's
+  premise sentence is updated, and its policy question stays open.
+- **Foreign Git (R2, R3)** is tolerated by the reader, but its own commands are not the engine's to
+  exclude.
