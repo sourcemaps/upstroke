@@ -161,9 +161,11 @@ worktree registry with every other checkout's runs. Its three Git children that
 enumerate the registry — a gate or review snapshot's `git worktree add`, a snapshot's removal together with the
 `git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry
 access: a failed attempt is attempted again until the access's deadline, and what outlasts it refuses as a
-registry refusal, never as Git state. The snapshot add is attempted again only while its destination is still
-the empty directory the engine made for it, because Git takes a destination over only after its own registry
-steps; a failure after that is the add's own and comes back as it was. When a snapshot's registry access
+registry refusal, never as Git state. After a failed snapshot add, an empty destination the engine can remove
+was never taken over, and the add is attempted again; otherwise a checkout of the add's commit into the
+destination that reads no registration decides: the failure is the add's own, and comes back as Git state, only
+when that checkout cannot be made either, and anything else at the destination refuses as a registry refusal.
+When a snapshot's registry access
 refuses after the worker's output was captured, the coordinator does not discard the checkout: it pins the
 captured candidate — the branch, parent and tree captured before the refusal, never the index as it stands
 then — as a commit at the attempt's prepared pin followed by `-kept`, and its refusal names that pin. Of the
