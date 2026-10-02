@@ -8966,6 +8966,8 @@ mod termination {
 
         const CONTAINER_REAPER_CHILD_BOUND: Duration = Duration::from_secs(120);
 
+        const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);
+
         const CONTAINER_REAPER_PROGRAM: &str = "UPSTROKE_TEST_CONTAINER_REAPER_PROGRAM";
 
         const CONTAINER_REAPER_RUN_DIR: &str = "UPSTROKE_TEST_CONTAINER_REAPER_RUN_DIR";
@@ -9020,19 +9022,36 @@ mod termination {
                 .unwrap_or_else(|error| panic!("start the isolated {child}: {error}"));
             let group = i32::try_from(process.id()).expect("the child's process-group id");
             let deadline = Instant::now() + bound;
+            let mut killed: Option<(Instant, String)> = None;
             let status = loop {
                 match process.try_wait() {
-                    Ok(Some(status)) => break Some(status),
+                    Ok(Some(status)) => break killed.is_none().then_some(status),
                     Ok(None) => {}
                     Err(error) => panic!("poll the isolated {child}: {error}"),
                 }
-                if Instant::now() >= deadline {
-                    // SAFETY: the child is this test's own unreaped process-group
-                    // leader, isolated by `process_group(0)`, so this reaches it
-                    // and the members of its group and nothing else.
-                    let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
-                    let _ = process.wait();
-                    break None;
+                let now = Instant::now();
+                match &killed {
+                    None if now >= deadline => {
+                        // SAFETY: the child is this test's own unreaped process-group
+                        // leader, isolated by `process_group(0)`, so this reaches it
+                        // and the members of its group and nothing else.
+                        let sent = unsafe { libc::kill(-group, libc::SIGKILL) };
+                        let how = if sent == 0 {
+                            "delivered".to_owned()
+                        } else {
+                            std::io::Error::last_os_error().to_string()
+                        };
+                        killed = Some((now, how));
+                    }
+                    Some((at, how)) if now >= *at + ISOLATED_CHILD_COLLECTION_BOUND => panic!(
+                        "the isolated {child} outlived its {bound:?} deadline, and \
+                         {ISOLATED_CHILD_COLLECTION_BOUND:?} after the SIGKILL to its process \
+                         group ({how}) it was still not collectable: this test fails rather than \
+                         wait for it, and leaves it to this process's exit\nstdout:\n{}\nstderr:\n{}",
+                        std::fs::read_to_string(&stdout_path).unwrap_or_default(),
+                        std::fs::read_to_string(&stderr_path).unwrap_or_default()
+                    ),
+                    _ => {}
                 }
                 thread::sleep(Duration::from_millis(10));
             };
@@ -9040,6 +9059,27 @@ mod termination {
                 status,
                 stdout: std::fs::read_to_string(&stdout_path).unwrap_or_default(),
                 stderr: std::fs::read_to_string(&stderr_path).unwrap_or_default(),
+            }
+        }
+
+        fn waited_within(
+            pid: libc::pid_t,
+            options: libc::c_int,
+            bound: Duration,
+        ) -> Option<libc::c_int> {
+            let deadline = Instant::now() + bound;
+            loop {
+                let mut status = 0;
+                // SAFETY: `pid` is this process's own unreaped child and `status`
+                // is writable for the call; `WNOHANG` blocks on nothing.
+                let waited = unsafe { libc::waitpid(pid, &mut status, options | libc::WNOHANG) };
+                if waited == pid {
+                    return Some(status);
+                }
+                if (waited < 0 && !last_errno_is_interrupted()) || Instant::now() >= deadline {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(10));
             }
         }
 
@@ -9113,9 +9153,10 @@ mod termination {
             let pid = armed_pid(&reaper);
             // SAFETY: `pid` is this isolated process's own unreaped reaper.
             assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
-            let mut status = 0;
-            // SAFETY: the same direct child; `status` is writable.
-            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            assert!(
+                waited_within(pid, 0, ISOLATED_CHILD_COLLECTION_BOUND).is_some(),
+                "the killed reaper {pid} was collected"
+            );
             drop(reaper);
             wait_out_a_fail_closed_termination();
         }
@@ -9152,14 +9193,11 @@ mod termination {
             report(&format!("stopped reaper {pid}"));
             // SAFETY: `pid` is this isolated process's own unreaped reaper.
             assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
-            let mut status = 0;
-            // SAFETY: the same direct child; `status` is writable; this waits
-            // for its stop only.
-            assert_eq!(
-                unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
-                pid
+            let stopped = waited_within(pid, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);
+            assert!(
+                stopped.is_some_and(|status| libc::WIFSTOPPED(status)),
+                "the reaper {pid} stopped: {stopped:?}"
             );
-            assert!(libc::WIFSTOPPED(status));
             drop(reaper);
             wait_out_a_fail_closed_termination();
         }
@@ -9331,14 +9369,11 @@ mod termination {
             let (stand_in, lifetime) = spawn_sigchld_target();
             // SAFETY: `stand_in` is this isolated process's own unreaped child.
             assert_eq!(unsafe { libc::kill(stand_in, libc::SIGSTOP) }, 0);
-            let mut status = 0;
-            // SAFETY: the same direct child; `status` is writable; this waits
-            // for its stop only.
-            assert_eq!(
-                unsafe { libc::waitpid(stand_in, &mut status, libc::WUNTRACED) },
-                stand_in
+            let stopped = waited_within(stand_in, libc::WUNTRACED, ISOLATED_CHILD_COLLECTION_BOUND);
+            assert!(
+                stopped.is_some_and(|status| libc::WIFSTOPPED(status)),
+                "the stand-in {stand_in} stopped: {stopped:?}"
             );
-            assert!(libc::WIFSTOPPED(status));
             let reaper = a_container_reaper_that_acknowledges(stand_in);
             let started = Instant::now();
             drop(reaper);
@@ -9373,6 +9408,80 @@ mod termination {
                         .contains("the stopped stand-in was collected: true"),
                 "a container reaper stopped between its CANCEL acknowledgement and its exit held \
                  its caller's drop: {ended}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        const CHILD_THAT_OUTLIVES_ITS_KILL_LIFE: Duration = Duration::from_secs(60);
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "isolated child of watchdog_whose_kill_is_refused_child"]
+        fn child_that_outlives_its_kill_child() {
+            // SAFETY: `getppid` takes no argument and cannot fail.
+            let parent = unsafe { libc::getppid() };
+            let deadline = Instant::now() + CHILD_THAT_OUTLIVES_ITS_KILL_LIFE;
+            // SAFETY: as above.
+            while Instant::now() < deadline && unsafe { libc::getppid() } == parent {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "isolated caller of the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end"]
+        fn watchdog_whose_kill_is_refused_child() {
+            answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::EPERM));
+            let started = Instant::now();
+            let ended = std::panic::catch_unwind(|| {
+                run_isolated(
+                    "child_that_outlives_its_kill_child",
+                    &[],
+                    Duration::from_secs(2),
+                )
+            });
+            let took = started.elapsed();
+            let how = match ended {
+                Ok(ended) => format!("returned {ended}"),
+                Err(panic) => format!(
+                    "failed its test: {}",
+                    panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("a panic without a message")
+                ),
+            };
+            report(&format!(
+                "the watchdog ended its run after {} ms and {how}",
+                took.as_millis()
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end() {
+            let ended = run_isolated(
+                "watchdog_whose_kill_is_refused_child",
+                &[],
+                CONTAINER_REAPER_CHILD_BOUND,
+            );
+            let took = ended
+                .stdout
+                .split("the watchdog ended its run after ")
+                .nth(1)
+                .and_then(|rest| rest.split(" ms").next())
+                .and_then(|ms| ms.parse::<u64>().ok())
+                .map(Duration::from_millis);
+            assert!(
+                ended.status.is_some_and(|status| status.success()) && took.is_some(),
+                "the isolated caller ended and said when its watchdog did: {ended}"
+            );
+            assert!(
+                took.is_some_and(|took| took < CHILD_THAT_OUTLIVES_ITS_KILL_LIFE / 2)
+                    && ended.stdout.contains("still not collectable"),
+                "a watchdog whose SIGKILL did not end its child waited for the child to end by \
+                 itself instead of failing its test once its collection bound had passed: {ended}"
             );
         }
     }

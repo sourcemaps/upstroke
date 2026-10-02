@@ -2929,6 +2929,34 @@ process group at the deadline so a mutation that wedges the child fails the test
 the run. The container reaper's isolated children use it: each needs a process whose signal
 monitor, cleanup scope or reaper state no other test shares.
 
+The kill is not the end of the watchdog: the child is still collected by `try_wait` polls,
+and those stop at `ISOLATED_CHILD_COLLECTION_BOUND` after the kill (`FUA-I1-WATCHDOG`). Until
+PR #328's first implementation review the kill was followed by `process.wait()`, which has no
+bound, so a child the `SIGKILL` did not make collectable held the harness after its own
+deadline: the regression lens held the isolated child of
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` at
+`PTRACE_EVENT_EXIT` and found the harness blocked in `wait4(child, …, 0)` 68 s into its
+60-second deadline. A child that ends after the kill is reported as before, `status: None`; one
+still not collectable at the bound fails the test with a message saying so, the kill's result
+(`delivered`, or the errno) and the child's output, and is left to this process's exit, as
+`UnleasedExit` leaves a reaper it could not collect.
+
+## `mod tests` › `const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);`
+
+How long the watchdog waits, after its `SIGKILL`, for the child to become collectable. A
+killed child is collectable within milliseconds unless something holds it — a tracer at its
+exit stop, an uninterruptible sleep, a kill that did not reach it — and then this bound, not
+the child, ends the wait. Ten seconds is long against a kill's reap even on a loaded CI leg and
+short against the deadlines it follows. The sweep's bounded waits take it too.
+
+## `mod tests` › `fn waited_within(`
+
+`waitpid(pid, options | WNOHANG)` polled until it reports `pid` or `bound` passes: the bounded
+form of a wait for the change a signal this test sent should make. The isolated children that
+`SIGKILL` their reaper or `SIGSTOP` a reaper or stand-in wait for that change through it rather
+than through a blocking `waitpid` (`FUA-I1-WATCHDOG`'s sweep), so a signal that did not take
+effect fails the child's assertion instead of holding the child until its parent's deadline.
+
 ## `mod tests` › `fn a_container_reaper_is_armed_only_at_the_terminate_site() {`
 
 `arm_container_reaper` refuses `ProcessSite::Spawn` before rendering or forking anything.
@@ -2973,6 +3001,38 @@ a `ContainerReaper` whose CANCEL is acknowledged, and drops it: the drop returns
 `HELPER_END_BUDGET`s with the stand-in killed and collected. With the exit wait made
 `AcknowledgedExit` again (`fua-m15`) the drop never returns and the child is killed at its
 60-second deadline.
+
+## `mod tests` › `const CHILD_THAT_OUTLIVES_ITS_KILL_LIFE: Duration = Duration::from_secs(60);`
+
+How long the watchdog witness's child lives when nothing ends it: well past the witness's
+2-second deadline and the collection bound after it, so a watchdog that waits for the child
+without a bound is still waiting at half this life.
+
+## `mod tests` › `fn child_that_outlives_its_kill_child() {`
+
+The child the watchdog cannot end: it polls `getppid` every 10 ms and returns once its parent
+is gone or its life is over. Its parent's exit, not a kill, ends it, so a watchdog that gave up
+on it leaves no process behind once the isolated caller exits.
+
+## `mod tests` › `fn watchdog_whose_kill_is_refused_child() {`
+
+The isolated caller of `FUA-I1-WATCHDOG`'s witness. It refuses `kill` on its own thread with the
+module's seccomp policy (`answer_call_with`, `EPERM`), so `run_isolated`'s `SIGKILL` at the
+child's 2-second deadline cannot end the child, and reports how long the watchdog took to end
+its run and how: returned, or failed its test with its message. In its own process because the
+refusal is permanent for the thread that installs it and because the child it leaves running
+must not outlive a process the rest of the suite shares.
+
+## `mod tests` › `fn the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end() {`
+
+`FUA-I1-WATCHDOG`'s witness. A watchdog whose kill did not make its child collectable must end
+its run within its collection bound and say the child is still not collectable: the isolated
+caller reports the watchdog ending its run before half the child's 60-second life, through the
+failure message. At `17d7c605`, where the kill was followed by an unbounded `process.wait()`,
+the watchdog ended its run only when the child ended itself, 60,009 ms in, and returned
+`status None`. Linux only: the refusal is a seccomp policy. The regression lens's own sequence,
+a child held at `PTRACE_EVENT_EXIT` by a tracer, needs `ptrace`, which this crate does not name;
+it was reproduced out of tree for PR #328's record (§3).
 
 ## `pub(crate) mod test_support` › `pub(crate) fn run_with_timeout(`
 
