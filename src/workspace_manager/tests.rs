@@ -15190,6 +15190,16 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
     }
 }
 
+/// `path` as Git writes it into a registration's `gitdir` and a checkout's
+/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
+/// with `.git` still on (the path's own bytes elsewhere).
+fn as_git_writes_it(path: &Path) -> String {
+    String::from_utf8(
+        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
+    )
+    .expect("a fixture's path is UTF-8")
+}
+
 /// A foreign registration half written, as the design-recast lens of design
 /// review round 3 built it (FUB-D3-TORNOK): `gitdir` written, `locked` holding
 /// `initializing`, `HEAD` opened and empty, no `commondir` (Git 2.43's add
@@ -15208,12 +15218,12 @@ fn plant_half_written_registration(fixture: &Fixture, name: &str) -> PathBuf {
     fs::write(admin.join("locked"), "initializing\n").expect("its locked");
     fs::write(
         admin.join("gitdir"),
-        format!("{}\n", checkout.join(".git").display()),
+        format!("{}\n", as_git_writes_it(&checkout.join(".git"))),
     )
     .expect("its gitdir");
     fs::write(
         checkout.join(".git"),
-        format!("gitdir: {}\n", admin.display()),
+        format!("gitdir: {}\n", as_git_writes_it(&admin)),
     )
     .expect("its checkout's .git");
     fs::write(admin.join("HEAD"), b"").expect("its HEAD, opened and not written");
@@ -15517,7 +15527,11 @@ fn an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_pas
         let gitdir = fixture.root.join("foreign-same-name").join(".git");
         let mut hooks = AtBefore::new(beta.add_site(), || {
             fs::create_dir_all(&admin).expect("the foreign registration");
-            fs::write(admin.join("gitdir"), format!("{}\n", gitdir.display())).expect("its gitdir");
+            fs::write(
+                admin.join("gitdir"),
+                format!("{}\n", as_git_writes_it(&gitdir)),
+            )
+            .expect("its gitdir");
             fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not written");
         });
         let common = fixture.manager.common_git_dir().to_path_buf();
@@ -16524,12 +16538,12 @@ fn registry_writer_child() {
     fs::create_dir_all(&checkout).expect("its checkout");
     fs::write(
         admin.join("gitdir"),
-        format!("{}\n", checkout.join(".git").display()),
+        format!("{}\n", as_git_writes_it(&checkout.join(".git"))),
     )
     .expect("its gitdir");
     fs::write(
         checkout.join(".git"),
-        format!("gitdir: {}\n", admin.display()),
+        format!("gitdir: {}\n", as_git_writes_it(&admin)),
     )
     .expect("the checkout's .git");
     fs::write(admin.join("HEAD"), format!("{head}\n")).expect("its HEAD");
@@ -16813,7 +16827,11 @@ fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry
     let gitdir = root.join("foreign-same-name").join(".git");
     let mut hooks = AtBefore::new(beta.add_site(), || {
         fs::create_dir_all(&admin).expect("the foreign registration");
-        fs::write(admin.join("gitdir"), format!("{}\n", gitdir.display())).expect("its gitdir");
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", as_git_writes_it(&gitdir)),
+        )
+        .expect("its gitdir");
         fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not written");
     });
     let common = manager.common_git_dir().to_path_buf();
