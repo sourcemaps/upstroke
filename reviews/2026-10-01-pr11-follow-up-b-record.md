@@ -50,6 +50,9 @@ there; its figures are under `~/orch-pr11/logs/pr11_fub_impl2/`, cited as `impl2
 figures are under `~/orch-pr11/logs/pr11_fub_impl3/`, cited as `impl3/…`. **Its repair round 4** (§9.14) is
 `pr11_fub_impl4`'s (`claude-opus-5-5`, `max`), spawned on `f9c88fdb` after #331's `test (winguest)` failed in this
 change's shared manager code; its figures are under `~/orch-pr11/logs/pr11_fub_impl4/`, cited as `impl4/…`.
+**Its repair round 5** (§9.15) is `pr11_fub_impl5`'s (`claude-opus-5-5`, `max`), spawned on `c8aab155` after
+`test (winguest)` failed round 3's R-T census on the guest's CRLF line endings, at `f9c88fdb` and again at `c8aab155`;
+its figures are under `~/orch-pr11/logs/pr11_fub_impl5/`, cited as `impl5/…`.
 
 ## 0. Status
 
@@ -63,7 +66,7 @@ change's shared manager code; its figures are under `~/orch-pr11/logs/pr11_fub_i
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. |
 
 ## 1. Design
 
@@ -6348,6 +6351,7 @@ heading. §0's last row, the authors' paragraph, and this section.
 | R1 | the 34 witnesses of §9.13.1 (`a_pipeline_is_granted_while_…` and `a_pipeline_is_served_while_…`), one or more per census access and per routing point; the controls `the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping` and `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T) | CO `:4562-5210`, `:5298`; `src/engine/topology/run/tests.rs` `:255` | all |
 | R3 | `a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so`, `a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed` (§9.13.3) | CO `:4205`, `:4221` | all |
 | R7 | `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add`, `a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io`, `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification`, and the control `a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once` (§9.14.4); the CI-failing `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`, unchanged | WM `:7407-7527`, `:7237` | Unix; all |
+| R8 | `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T), its sources read with their line endings normalised (§9.15) | `src/engine/topology/run/tests.rs` `:255` | all, on a CRLF checkout too |
 
 **How they wait.** Each waits on a handshake or a seam, with time only as a watchdog.
 - A tear an access must fail on first is finished only after `contended_attempts` has moved. An add's own tear is
@@ -7166,3 +7170,123 @@ alone, job 111281445901: 2,880 passed, 1 failed and 87 ignored. The policy run p
 
 **Not verified here:** anything on Windows or macOS beyond those lint and type checks, which includes the
 CI-failing test on the guest and the four witnesses on macOS, and CI's stable 1.99.0. CI is the truth for them.
+
+### 9.15 Repair round 5: R8, the R-T census's Windows line endings
+
+**Who and why.** `pr11_fub_impl5` (`claude-opus-5-5`, `max`), spawned by `orch_pr11` on `c8aab155` after
+`test (winguest)` failed round 3's R-T census at `f9c88fdb` and again at `c8aab155`. Its brief is
+`~/orch-pr11/briefs/pr11_fub_impl5.md`, and R8, with any census that fails the same way, is its whole scope. Its
+figures are under `~/orch-pr11/logs/pr11_fub_impl5/`, cited as `impl5/…`. It adopts no owner decision, and H1 and H2
+stay as round 3 committed them, proposed and not adopted (§9.15.5).
+
+**The commits, on `c8aab155`:**
+- `9aa1998b`: the census reads its sources with their line endings normalised, and the notes say why;
+- then this text, §9.4's R8 row, the header's and §0's sentences, and the body.
+
+#### 9.15.1 What failed, and why
+
+**CI.** At `f9c88fdb`, "CI" run 37149933777, job 111281445901 (§9.14.5), and at `c8aab155`, run 37154037190, job
+111293902494 (`impl5/ci/ATTRIBUTION-c8aab155.txt`), `test (winguest)` passed 2,880 tests, failed 1 and ignored 87,
+and every other leg passed. Both times the failure is
+`run::tests::both_drivers_run_each_transition_through_the_one_generic_function`, panicking at
+`src\engine\topology\run\tests.rs:273:9`: "the width-1 `step` runs `begin_dispatch` through its `Stepping`
+operator". At `c8aab155` R7's CI-failing test, `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`,
+passed on the guest.
+
+**The cause.** The census reads `run.rs` and `coordinator.rs` from disk and blanks them with
+`crate::effects::production_code`, which keeps every byte, `\r` included, so that an offset into its output is an
+offset into the source. rustfmt splits the width-1 `step`'s call of `begin_dispatch` after its parenthesis
+(`run.rs:1095-1096`), so the census's needle for that call is `begin_dispatch(`, a line feed and twenty spaces. The
+guest checks the tree out with CRLF endings, where the source reads `begin_dispatch(\r\n`, and the needle cannot
+match. Every other needle of the census is on one line. The defect is in round 3's test alone: the product, and what
+the census asserts about it, are untouched.
+
+**Reproduced on Linux, over the whole suite** (`impl5/crlf/start/`). Two clones of `c8aab155`, one with
+`core.autocrlf=true`, which gives 874 of the 878 tracked files CRLF endings (`.gitattributes` keeps the three SVGs
+LF), and one without, each built from its own tree (`impl5/tools/crlf-clones.sh`, `crlf-suite.sh`):
+- the LF clone passes everything: the library 3,111 passed and 130 ignored, the binary 10 (`run-lf.txt`);
+- the CRLF clone fails this one test, at the same line with the guest's message, and nothing else: the library 3,110
+  passed, 1 failed and 130 ignored, the binary 10 (`run-crlf-nff.txt`);
+- compared test by test, one verdict differs (`VERDICT-DIFF.txt`, `impl5/tools/verdict-diff.py`).
+
+Two runs are void and kept with their reason: one reused the other clone's binary, and one log was overwritten
+(`void-binary-reuse/`, `superseded/`).
+
+#### 9.15.2 The repair
+
+`9aa1998b`. The census's `read` closure (`src/engine/topology/run/tests.rs:257-263`) replaces `\r\n` with `\n` before
+it blanks the source, as this crate's other source censuses that match across a line break do:
+`the_one_update_ref_spawn_gives_its_child_the_cleanup_lease`, `no_sampled_funnel_builds_its_argv_from_a_literal` and
+`main.rs`'s `the_cli_wires_the_real_containment_step_into_dispatch`.
+- **What it keeps.** The four assertions, their needles and their messages are round 3's. On an LF checkout the census
+  reads the bytes it read before, and on a CRLF checkout it now reads the same text. Every transition is still shown to
+  be one function, generic over its operator, run by the width-1 `step` through its `Stepping` and by the coordinator
+  with itself, with no second implementation called by either.
+- **Where.** At the read, not in `production_code`, whose contract is to keep every byte offset of its source: other
+  censuses index the source with offsets they take from it. A token-level match would also have served, but it
+  accepts layouts this census does not accept today. Normalising changes nothing but the line endings.
+- **The notes.** `run/tests.rs` has a notes file, so the reason is in `docs/internals/engine/topology/run/tests.md`, in
+  two new sections for the test and its `read`, and not in the source (§13 of the standards).
+
+#### 9.15.3 Witnesses and mutations
+
+**The matrix** (`impl5/r8/9aa1998b/VERDICTS.txt`, `impl5/tools/r8-matrix.py`). Each row is `git archive 9aa1998b`
+with the row's change, built from its own tree under each ending. Each runs the census and the width-1 control,
+`the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`. The CRLF arm gives every text file
+CRLF endings as `core.autocrlf=true` does, so 874 files hold a CR, as in the clone. All ten cells came out as
+expected:
+
+| Row | Change | LF | CRLF |
+|---|---|---|---|
+| control | none | both pass | both pass |
+| unfixed | the `read` without the normalisation, `c8aab155`'s text | both pass | **the census fails with the guest's message**; the control passes |
+| m1 | the width-1 `step`'s dispatch runs `begin_dispatch` through a `Stepping` that carries `NoTopologyHooks`, not its own operator | both fail; the census names `begin_dispatch` | the same |
+| m2 | the same for its retry's `begin_retry` | the census fails, naming `begin_retry`; the control passes | the same |
+| m3 | the same for both its settlements' `settle_judged` | the census fails, naming `settle_judged`; the control passes | the same |
+
+- **The unfixed row is R8 brought back:** red on CRLF only, at the guest's message.
+- **m1 is the break R-T exists for,** at the call whose needle spans the line break: the dispatch runs through an
+  operator whose registry hooks are not the run's. The behavioural control fails under it too, under both endings,
+  because the tear its test plants through the run's own hooks is never planted. So the census still sees the width-1
+  operator path broken under either ending.
+- **m3 changes both settlements.** The census asks that some call of each transition runs through `Stepping`; a bypass
+  at only one of the two settlement calls is outside what it checks. That is a reasoned limit of round 3's census, not
+  R8's, and it was not executed here.
+
+#### 9.15.4 Every other source census, checked the same way
+
+The brief asked that every other source-text census in the crate that matches a multi-line pattern be checked for
+R8's defect. The whole audit is `impl5/audit/AUDIT.md`.
+- **By running them.** §9.15.1's comparison runs every test this crate compiles for Linux on a CRLF checkout. No
+  function that reads repository text is gated to Windows (`impl5/audit/start/windows-only-readers.txt`), so the guest
+  runs no source census that comparison did not, and only R8's changed its verdict. That covers every census whose
+  positive assertion depends on line endings.
+- **By reading them.** A negative assertion would pass on CRLF without having looked, which no run can show. So every
+  function that reads repository text was listed (`impl5/tools/census-scan.py`, `impl5/audit/start/scan.txt`): 235
+  functions, 175 of them tests. 88 hold a literal with a line feed after its first character, 464 literals in all.
+  Every one of them used as a pattern or compared, 30, and every census helper that matches such a pattern against
+  text a census hands it, was read: each reads normalised text, matches its own fixture, or is R8's (`AUDIT.md` §2).
+  The literals that are fixtures or messages, and the patterns built by `join` or `concat!`, were read too.
+- **The shared machinery** reads `\r` as rustc whitespace (`RUSTC_WHITESPACE`), and three of the lint-level censuses
+  already run their readers over a CRLF form of the text on purpose.
+- **Result:** R8's census is the only source census in the crate whose verdict depends on the checkout's line
+  endings. No sibling has its defect, so nothing else is changed.
+
+#### 9.15.5 The frozen proof, and what else ran
+
+**The frozen proof** (`impl5/frozen/frozen-proof-9aa1998b.txt`, `impl5/tools/frozen-proof-r5.sh`):
+- **This round's own frozen change** (`c8aab155..9aa1998b`) is none: 34 of 34 files are byte-identical.
+- **H1 and H2** are byte for byte as `e369b251` committed them.
+- **Parts 1 and 2** are round 4's, line for line (`impl5/frozen/parts12-vs-round4-9aa1998b.diff`, empty with the commit
+  ids masked). Part 1 against master is `integrate.rs`, +33/−7, and nothing else. Part 2 against `d724fb16` is 5
+  files, +274/−81. H1 and H2 stay proposed and not adopted.
+
+**What else ran:**
+- at `9aa1998b` the Windows target was linted, and type-checked on 1.85 with `-D warnings`, the macOS target was
+  linted, and the Linux target was type-checked on 1.85 with `-D warnings`: all four passed
+  (`impl5/platform/code-9aa1998b/`);
+- §9.4 gains an R8 row, and no cite moves: the census's `fn` line is still `:255`;
+- at this round's head, the whole suite on a CRLF and an LF checkout, and the ten gates; the body records them.
+
+**Not verified here:** the census on the guest itself, the macOS leg, and CI's stable 1.99.0. CI is the truth for
+them.
