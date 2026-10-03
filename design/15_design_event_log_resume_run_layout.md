@@ -63,10 +63,10 @@ The execution root is created only when the managed base is a real directory, th
 
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. A container invocation is contained on Unix by the container runner's own cleanup reaper, armed before that runner's first container starts and holding no cleanup lease: if the conductor is killed it kills and removes every container the runner started, and it is cancelled only once each of them is established gone; Windows has no such reaper, and a killed conductor's containers are reclaimed by the next write command's startup census. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
-**A registry another process is writing.** *PROPOSED — the ninth design round of
-`reviews/2026-10-01-pr11-follow-up-b-record.md` (§8, over §7, §6 and §5), narrowed to the topology's registry race;
-nothing in this paragraph is in force until it is implemented. It needs no packet change. The frozen
-legacy engine's accesses are a separate change, follow-up D, and the owner's decision.*
+**A registry another process is writing.** *In force for the topology's registry accesses, as
+`reviews/2026-10-01-pr11-follow-up-b-record.md` designs them (§8, over §7, §6 and §5) and its implementation section
+records. It needs no packet change. The frozen legacy engine's accesses are a separate change, follow-up D, and the
+owner's decision.*
 
 **The defect.** Every checkout of a repository registers its linked worktrees in one shared store,
 `<common git dir>/worktrees/`, and Git writes a registration one file at a time.
@@ -89,7 +89,7 @@ one attempt: a list together with the parse of its output, an add, or one of the
   reads the store, Git's message or a file's timestamps to decide why it failed.
 - An add first makes its destination as an empty directory. Git takes a destination over only after
   its own registry steps, and on any later failure removes it with its junk. So a failed add whose
-  destination is still an empty directory the access can remove never got that far, and is attempted
+  destination is still an empty directory the access can remove holds nothing to lose, and is attempted
   again.
 - Otherwise Git may have taken the destination over, and nothing outside Git can tell a checkout that
   cannot be made from a prune that deleted the add's own registration: the end states are the same.
@@ -104,10 +104,10 @@ one attempt: a list together with the parse of its output, an add, or one of the
   left torn, and any other fault of the store, such as a store nothing can write or a registration
   Git cannot list. A failure the access cannot decide, such as a destination holding something the
   add did not leave, refuses at once.
-- The deadline covers the access's waits, its retries and the start of every attempt; an attempt the
-  deadline cut short is made once more, at the deadline. It does not bound the last Git command
-  already running, which a filter, a large checkout or a slow filesystem can extend, nor the short
-  decision after it.
+- The deadline covers the access's waits, its retries and the start of every attempt; the attempt
+  after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
+  the last Git command already running, which a filter, a large checkout or a slow filesystem can
+  extend, nor the short decision after it.
 
 **Within one process.** The registry lock no longer serialises registry access: retrying makes each
 access safe against another's half-done work, whichever process or thread does it. The lock is held

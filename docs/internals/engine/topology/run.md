@@ -468,26 +468,49 @@ two fates and propagates the third.
 
 Foreign Git state observed by the verification — a corrupt staging index
 under the review-input reader, a proposal whose object cannot be read, a
-snapshot the checkout could not make — is among the failures
-`decisions.repairs.not_repairs` says "at integration terminate in
-merge_verification_unavailable with outcome Deferred or Parked". Every
-Git command the verification issues runs before or between its processes,
-never beside one, so the terminal is safe to settle. R24 at `916852c9`
-excluded these and the `?` propagated them as an interruption
-(`pr8-triage.md` §5, record F3).
+snapshot whose destination could not be made or was not an empty
+directory — is among the failures `decisions.repairs.not_repairs` says "at
+integration terminate in merge_verification_unavailable with outcome
+Deferred or Parked". Every Git command the verification issues runs before
+or between its processes, never beside one, so the terminal is safe to
+settle. R24 at `916852c9` excluded these and the `?` propagated them as an
+interruption (`pr8-triage.md` §5, record F3).
 
-A registry another process is half-way through writing is foreign Git
-state here too: a coordinator in a linked checkout of the same repository
-(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), or a host
-agent's own prune (`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`), which the
-process-local registry lock does not exclude. The state is transient and
-the terminal is durable: it spends one of the candidate's deferrals, the
-one that reaches `max_defers` parks the candidate with an unblock
-question, and the other process finishing undoes none of it. An attempt's
+A snapshot whose checkout Git could not make no longer reaches this arm.
+Since #329 a failure after Git took the snapshot's destination over
+refuses at once, resumably, as `UpstrokeError::RegistryRefused`, because a
+prune deleting the snapshot's registration after the takeover leaves the
+same end state, and that is registry state
+(`reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.3). That narrows
+`not_repairs`' defer-then-park for a genuine checkout failure to a
+resumable stop: `PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`
+(P2), which needs the owner's disposition before G6.
+
+A registry another process is half-way through writing never reaches this
+arm either. Every manager access that enumerates or writes the registry is
+a tolerant registry access (`workspace_manager::tolerant_registry_access`):
+it is attempted again until its deadline, and a registration still in the
+way then — another process's write that has not finished, a write a dead
+process left torn, a registration nobody is writing — refuses as
+`UpstrokeError::RegistryRefused`, which the last arm passes on, so the
+command ends resumably, with the transaction open and nothing appended, and
+a resume settles the verification interrupted and verifies the candidate
+again under a new sequence. A coordinator in a linked checkout of the same
+repository was the process this mattered for
+(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`): before #329 its
+write in flight was foreign Git state here, the terminal spent one of the
+candidate's deferrals, the one that reached `max_defers` parked the
+candidate with an unblock question, and the other process finishing undid
+none of it (the PR11 record's §13, round R8, `R8-CONC-1`). An attempt's
 judgement meeting the same state is not mapped here: its Git error is the
-pipeline's, and the command ends resumably. So the race costs a
-verification more than an attempt (the PR11 record's §13, round R8,
-`R8-CONC-1`).
+pipeline's, and the command ends resumably.
+
+What still reaches this arm from the registry's side is the second face of
+`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` (P1,
+open): a prune no engine process starts deletes a registration after the
+add that made it returned, and every Git command in that checkout then
+fails, `candidate_diff`'s included. A host agent's own prune is one starter
+of it (`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`).
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 

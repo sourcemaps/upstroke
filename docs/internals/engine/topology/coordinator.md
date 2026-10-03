@@ -1505,3 +1505,79 @@ The design property, in-process, through a resume's pre-flight (`resume_over` wi
 `step`: every container start was covered by an armed reaper whose scope selects its labels, and
 every container created was observed starting.
 
+
+## `mod tests` › `struct TearsAForeignRegistration {`
+
+PR11 review round 8's witness (`R8-CONC-1`), the verification face of
+`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: a review-input policy that, at the
+verification of a candidate (the staging worktree under `merge/`), plants another process's
+registration half written in the shared store — `HEAD` and `gitdir` written, `commondir` opened
+and empty, the state `git worktree add` passes through and leaves when it is killed there. Once:
+the first verification only. With `finishes`, a thread plays the other process finishing its
+write, but only after a registry access of this run has failed on it at least once — the
+`CONTENDED_ATTEMPTS` handshake of `workspace_manager::tolerant_registry_access`'s contract
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §6.4) — so the witness measures a retry and
+never a store that happened to be whole. Through the fixture's primitives: a topology module
+may name no `std::fs` write.
+
+## `mod tests` › `fn registry_drive(`
+
+`run_concurrently` with the review-input policy replaced, and the first-released scheduler.
+
+## `mod tests` › `fn tearing(`
+
+The policy and the administrative directory it plants, named `name` in the run's own store.
+
+## `mod tests` › `fn a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral() {`
+
+The record's T2: a registration another process finishes writing never reaches the verification
+as Git state. The verification's registry access fails on the write in flight, is attempted
+again, and passes once the writer finishes; nothing is deferred and both candidates merge.
+Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
+or a park at `max_defers` (round 3's measurement of the round 8 witness).
+
+## `mod tests` › `fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()`
+
+The record's T2′: a registration that stays torn — nobody finishes it — ends the command at the
+access's deadline as `UpstrokeError::RegistryRefused`, naming the entry's `commondir`, with
+nothing durable after `merge_verification_started`: no `merge_verification_unavailable`, no
+question, no `run_finished`. The operator's remedy (remove the registration) and a resume settle
+the open verification interrupted and verify the candidate again under a new sequence, and the
+run completes with nothing deferred. Mutation m2 (the deadline's refusal typed `Git`) makes the
+verification defer here.
+
+## `mod tests` › `struct RequiresAFailingFilter {`
+
+A review-input policy that, at the first verification, makes every checkout of the repository
+run a required smudge filter that fails (`info/attributes` and the repository's configuration,
+through the fixture's `git`): a snapshot's checkout then fails after Git took its destination
+over, as a checkout that cannot be made does.
+
+## `mod tests` › `fn a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies()`
+
+The record's T15, verification face, and R14
+(`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`): the judge's snapshot add fails
+after the takeover, which nothing outside Git tells from a prune deleting the snapshot's
+registration, so it refuses at once, resumably, and nothing durable is appended. With the
+environment repaired, a resume settles the verification interrupted and verifies again; the run
+completes. Before #329 the same failure was Git state, and the verification deferred and then
+parked at `max_defers`; R14 is that narrowing, which needs the owner's disposition before G6.
+Two tasks, because a single candidate already on the integration head merges with no
+verification.
+
+## `mod tests` › `struct DeniesTheSnapshots {`
+
+Round 5's construction: at the first verification, the execution root's `snapshots/` is made
+unwritable, so the judge's snapshot destination cannot be made.
+
+## `mod tests` › `struct RestoresTheSnapshots {`
+
+Restores `snapshots/` once the verification's terminal is durable, so the next verification
+proceeds.
+
+## `mod tests` › `fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {`
+
+The control beside T15: a destination that cannot be made is Git state at once, with no Git run
+(`workspace_manager`'s destination step), so `decisions.repairs.not_repairs` applies as it did:
+one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
+merged. Green before #329 too, where Git's own add failed to make the destination.
