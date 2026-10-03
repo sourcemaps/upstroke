@@ -281,6 +281,16 @@ pub(crate) fn tear_registration(manager: &WorkspaceManager, worktree: &Path) -> 
     admin
 }
 
+/// `path` as Git writes it into a registration's `gitdir` and a checkout's
+/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
+/// with `.git` still on (the path's own bytes elsewhere).
+pub(crate) fn as_git_writes_it(path: &Path) -> String {
+    String::from_utf8(
+        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
+    )
+    .expect("a fixture's path is UTF-8")
+}
+
 /// A real repository, a real private root, and a manager over both.
 /// The fixture's run id: a canonical ULID, as `derive` requires
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.
@@ -3306,7 +3316,7 @@ impl Drop for LinkedChild {
 
 /// Say `line` on this process's stderr: through [`say_on_stderr`] on Unix,
 /// and one unretried write on Windows, where this file names no print macro.
-fn say(line: &str) {
+pub(crate) fn say(line: &str) {
     #[cfg(unix)]
     say_on_stderr(&format!("{line}\n"));
     #[cfg(windows)]

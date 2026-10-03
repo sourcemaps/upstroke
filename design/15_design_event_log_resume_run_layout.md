@@ -96,9 +96,11 @@ one attempt: a list together with the parse of its output, an add, or one of the
   The access refuses at once, resumably, as a registry refusal, and never returns that failure as Git
   state. So a verification whose snapshot cannot be made, for a path, a filter or a missing object,
   stops resumably and spends no deferral, and the run stops at it again until the cause is repaired.
-- A destination that cannot be made, or that is not an empty directory when the access begins, is the
-  add's own failure. It is returned as Git state at once and no Git command runs, so the registry's
-  state cannot reach that answer.
+- After a successful prevalidation — the add's gate, whose list of the registry is an access of its
+  own — a destination that cannot be made, or that is not an empty directory when the add's access
+  begins, is the add's own failure. It is returned as Git state at once, before `git worktree add`
+  runs, so the registry's state cannot reach that answer. A store the gate's list fails on refuses as
+  the registry's first, whatever is at the destination.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
   left torn, and any other fault of the store, such as a store nothing can write or a registration

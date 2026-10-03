@@ -3596,12 +3596,135 @@ mod tests {
         replay_equals_live(&resumed);
     }
 
+    // Protocol (standards §10): the policy owns its writer. The verification
+    // that plants the tear stores it once; `finish`, or the drop when a test
+    // unwinds first, cancels it through its channel and joins it, so nothing it
+    // does lands after the fixture is reclaimed. The lock (§6) guards only that
+    // handle, stored once and taken once: `problem` takes `&self` on a
+    // pipeline's thread.
     struct TearsAForeignRegistration {
         admin: PathBuf,
         head: String,
         common: PathBuf,
         finishes: bool,
+        watchdog: Duration,
         remaining: std::sync::atomic::AtomicUsize,
+        writer: std::sync::Mutex<Option<ForeignWriter>>,
+    }
+
+    struct ForeignWriter {
+        cancel: std::sync::mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<Result<(), String>>,
+    }
+
+    impl TearsAForeignRegistration {
+        fn new(
+            admin: PathBuf,
+            head: String,
+            common: PathBuf,
+            finishes: bool,
+            watchdog: Duration,
+        ) -> Self {
+            Self {
+                admin,
+                head,
+                common,
+                finishes,
+                watchdog,
+                remaining: std::sync::atomic::AtomicUsize::new(1),
+                writer: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn finish(&self) -> Result<(), String> {
+            self.settle(true)
+        }
+
+        fn settle(&self, cancel: bool) -> Result<(), String> {
+            let writer = self
+                .writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let Some(ForeignWriter {
+                cancel: canceller,
+                handle,
+            }) = writer
+            else {
+                return Err(format!(
+                    "no writer was started for the registration at {}: no verification planted \
+                     the tear, or it was planted with `finishes` false",
+                    self.admin.display()
+                ));
+            };
+            if cancel {
+                let _ = canceller.send(());
+            }
+            handle.join().unwrap_or_else(|_| {
+                Err(format!(
+                    "the writer of the registration at {} panicked",
+                    self.admin.display()
+                ))
+            })
+        }
+
+        fn start_writer(&self) -> ForeignWriter {
+            let before = crate::workspace_manager::contended_attempts(&self.common);
+            let (admin, common, watchdog) =
+                (self.admin.clone(), self.common.clone(), self.watchdog);
+            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + watchdog;
+                loop {
+                    if crate::workspace_manager::contended_attempts(&common) > before {
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("commondir"),
+                            b"../..\n",
+                        );
+                        return Ok(());
+                    }
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(format!(
+                            "no registry access failed on the registration planted at {} within \
+                             {watchdog:?}, so its writer wrote nothing",
+                            admin.display()
+                        ));
+                    }
+                    match cancelled.recv_timeout(left.min(Duration::from_millis(1))) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(format!(
+                                "the writer of the registration planted at {} was cancelled \
+                                 before any registry access failed on it, and wrote nothing",
+                                admin.display()
+                            ));
+                        }
+                    }
+                }
+            });
+            ForeignWriter { cancel, handle }
+        }
+    }
+
+    impl Drop for TearsAForeignRegistration {
+        fn drop(&mut self) {
+            let held = self
+                .writer
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            if !held {
+                return;
+            }
+            if let Err(why) = self.settle(true) {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
     }
 
     impl ReviewInputPolicy for TearsAForeignRegistration {
@@ -3630,24 +3753,19 @@ mod tests {
                 );
                 crate::workspace_manager::fixture::write_file(
                     &self.admin.join("gitdir"),
-                    format!("{}\n", checkout.display()).as_bytes(),
+                    format!(
+                        "{}\n",
+                        crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                    )
+                    .as_bytes(),
                 );
                 crate::workspace_manager::fixture::write_file(&self.admin.join("commondir"), b"");
                 if self.finishes {
-                    let before = crate::workspace_manager::contended_attempts(&self.common);
-                    let (admin, common) = (self.admin.clone(), self.common.clone());
-                    std::thread::spawn(move || {
-                        let deadline = std::time::Instant::now() + BOUND;
-                        while crate::workspace_manager::contended_attempts(&common) <= before
-                            && std::time::Instant::now() < deadline
-                        {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        crate::workspace_manager::fixture::write_file(
-                            &admin.join("commondir"),
-                            b"../..\n",
-                        );
-                    });
+                    let writer = self.start_writer();
+                    *self
+                        .writer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(writer);
                 }
             }
             Ok(None)
@@ -3678,13 +3796,13 @@ mod tests {
     ) -> (Arc<TearsAForeignRegistration>, PathBuf) {
         let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
         let admin = common.join("worktrees").join(name);
-        let policy = Arc::new(TearsAForeignRegistration {
-            admin: admin.clone(),
-            head: wide.env.fixture.head.clone(),
+        let policy = Arc::new(TearsAForeignRegistration::new(
+            admin.clone(),
+            wide.env.fixture.head.clone(),
             common,
             finishes,
-            remaining: std::sync::atomic::AtomicUsize::new(1),
-        });
+            BOUND,
+        ));
         (policy, admin)
     }
 
@@ -3704,8 +3822,11 @@ mod tests {
         let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
         let before = crate::workspace_manager::contended_attempts(&common);
         let (policy, _admin) = tearing(&wide, "foreign-in-flight", true);
-        let progress = registry_drive(&mut wide, policy)
+        let progress = registry_drive(&mut wide, Arc::<TearsAForeignRegistration>::clone(&policy))
             .expect("a registration another process finishes writing ends nothing");
+        policy
+            .finish()
+            .expect("an access failed on the tear, and only then did its writer finish it");
         assert_eq!(outcome_of(&progress), RunOutcome::Complete);
         let events = wide.run.events();
         assert_eq!(
@@ -3806,6 +3927,78 @@ mod tests {
             "the interrupted verification verified again under a new sequence: {kinds:?}"
         );
         replay_equals_live(&resumed);
+    }
+
+    fn planted_alone(
+        tag: &str,
+        watchdog: Duration,
+    ) -> (
+        crate::rundir::scratch_tree::ScratchTree,
+        TearsAForeignRegistration,
+        PathBuf,
+        PathBuf,
+    ) {
+        let tree = crate::workspace_manager::fixture::scratch(tag);
+        let common = tree.path().join("common");
+        let admin = common.join("worktrees").join("foreign");
+        let policy = TearsAForeignRegistration::new(
+            admin.clone(),
+            "a".repeat(40),
+            common.clone(),
+            true,
+            watchdog,
+        );
+        policy
+            .problem(&tree.path().join("merge").join("s1"), "")
+            .expect("the verification plants the tear");
+        (tree, policy, admin, common)
+    }
+
+    #[test]
+    fn a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so() {
+        let (_tree, policy, admin, _common) =
+            planted_alone("foreign-writer-unmet", Duration::from_millis(20));
+        let ended = policy.settle(false);
+        assert!(
+            matches!(&ended, Err(why) if why.contains("within 20ms") && why.contains("wrote nothing")),
+            "the writer reports its watchdog: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "a writer whose handshake never came leaves the tear as planted"
+        );
+    }
+
+    #[test]
+    fn a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed() {
+        let (tree, policy, admin, common) = planted_alone("foreign-writer-joined", BOUND);
+        let root = tree.path().to_path_buf();
+        let ended = policy.finish();
+        assert!(
+            matches!(&ended, Err(why) if why.contains("cancelled") && why.contains("wrote nothing")),
+            "the writer was cancelled and joined, and says so: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "the cancelled writer wrote nothing"
+        );
+        drop(policy);
+        drop(tree);
+        assert!(!root.exists(), "the fixture's guard reclaimed its root");
+        {
+            let mut table = crate::workspace_manager::CONTENDED_ATTEMPTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = table.entry(common).or_default();
+            *count = count.saturating_add(1);
+        }
+        assert!(
+            !root.exists(),
+            "nothing recreated the reclaimed fixture at {}",
+            root.display()
+        );
     }
 
     #[cfg(unix)]

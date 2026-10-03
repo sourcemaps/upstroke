@@ -1520,6 +1520,27 @@ write, but only after a registry access of this run has failed on it at least on
 never a store that happened to be whole. Through the fixture's primitives: a topology module
 may name no `std::fs` write.
 
+The planted `gitdir` spells its path as Git writes it (`workspace_manager::fixture::as_git_writes_it`,
+the host runner's Git-for-Windows form with `/` separators, and the path's own bytes elsewhere), as
+every registration #329's tests plant does (repair round 3, the record's §9.13, R6).
+
+The policy owns its writer (repair round 3, R3). The verification that plants the tear stores a
+`ForeignWriter` once. `finish` cancels it and joins it, and
+hands back what it returned: `Ok` only when it finished the registration after an access failed on
+it. `settle(false)` joins it without a cancel, so the join waits for the handshake or the writer's
+watchdog. The writer looks for the handshake every millisecond until its `watchdog` (`BOUND`, as
+`tearing` makes the policy); when the handshake never arrives it writes nothing and returns why.
+The drop cancels and joins a writer no test finished, and fails with what that writer returned,
+saying it on stderr instead when the thread already unwinds, so nothing the writer does lands
+after the fixture is reclaimed. Before, the writer's handle was discarded: it wrote `commondir`
+when its watchdog expired whatever had happened, and a writer that outlived its test recreated a
+directory its fixture had already reclaimed.
+
+## `mod tests` › `struct ForeignWriter {`
+
+`TearsAForeignRegistration`'s writer: the sender that cancels it, and the handle `finish`, or the
+policy's drop, joins.
+
 ## `mod tests` › `fn registry_drive(`
 
 `run_concurrently` with the review-input policy replaced, and the first-released scheduler.
@@ -1532,7 +1553,9 @@ The policy and the administrative directory it plants, named `name` in the run's
 
 The record's T2: a registration another process finishes writing never reaches the verification
 as Git state. The verification's registry access fails on the write in flight, is attempted
-again, and passes once the writer finishes; nothing is deferred and both candidates merge.
+again, and passes once the writer finishes; nothing is deferred and both candidates merge. The
+policy's `finish` returns `Ok`: an access failed on the tear, and only then did the writer finish
+it.
 Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
 or a park at `max_defers` (round 3's measurement of the round 8 witness).
 
@@ -1545,6 +1568,27 @@ question, no `run_finished`. The operator's remedy (remove the registration) and
 the open verification interrupted and verify the candidate again under a new sequence, and the
 run completes with nothing deferred. Mutation m2 (the deadline's refusal typed `Git`) makes the
 verification defer here.
+
+## `mod tests` › `fn planted_alone(`
+
+The tear as `TearsAForeignRegistration` plants it, with no run: a scratch tree of its own, the
+registration's directory at `<root>/common/worktrees/foreign`, planted through `problem` at a
+worktree path whose parent is `merge`, as a verification's snapshot is.
+
+## `mod tests` › `fn a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so() {`
+
+Repair round 3's R3, the shape of the regular lens's watchdog witness: no access meets the tear,
+so the writer's 20 ms watchdog expires. Joined without a cancel, it reports the watchdog, and
+`commondir` is still the empty file planted. Before the repair the writer wrote `commondir` at
+its watchdog anyway.
+
+## `mod tests` › `fn a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed() {`
+
+R3, the shape of the regression lens's witness: `finish` cancels and joins the writer before the
+fixture goes, and says it was cancelled, and the cancelled writer wrote nothing. The fixture is
+then reclaimed, and the wake the writer waited for arrives late (`CONTENDED_ATTEMPTS` moved by
+hand, as a late access would move it): nothing recreates the root. Before the repair the writer's
+handle was discarded, and that late wake recreated the reclaimed directory.
 
 ## `mod tests` › `struct RequiresAFailingFilter {`
 
@@ -1577,7 +1621,7 @@ proceeds.
 
 ## `mod tests` › `fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {`
 
-The control beside T15: a destination that cannot be made is Git state at once, with no Git run
-(`workspace_manager`'s destination step), so `decisions.repairs.not_repairs` applies as it did:
+The control beside T15: a destination that cannot be made is Git state at once, before `git worktree add`
+runs (`workspace_manager`'s destination step, after the add's gate), so `decisions.repairs.not_repairs` applies as it did:
 one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
 merged. Green before #329 too, where Git's own add failed to make the destination.

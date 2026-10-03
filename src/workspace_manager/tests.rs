@@ -33,10 +33,10 @@ use std::collections::BTreeSet;
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
     Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
-    ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
-    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git, git_os,
-    git_out, replacement_liveness, run_kill_child, run_kill_child_within,
-    run_replacement_witness_child, scratch, tear_registration,
+    ambient_replacement_controls, as_git_writes_it, assert_replacement_controls_pinned, create_dir,
+    died_by_abort, died_by_kill, environment_without_ambient_replacement_controls,
+    fan_out_directory, git, git_os, git_out, replacement_liveness, run_kill_child,
+    run_kill_child_within, run_replacement_witness_child, scratch, tear_registration,
     without_ambient_replacement_controls, write_file, write_include_path,
 };
 
@@ -15190,16 +15190,6 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
     }
 }
 
-/// `path` as Git writes it into a registration's `gitdir` and a checkout's
-/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
-/// with `.git` still on (the path's own bytes elsewhere).
-fn as_git_writes_it(path: &Path) -> String {
-    String::from_utf8(
-        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
-    )
-    .expect("a fixture's path is UTF-8")
-}
-
 /// A foreign registration half written, as the design-recast lens of design
 /// review round 3 built it (FUB-D3-TORNOK): `gitdir` written, `locked` holding
 /// `initializing`, `HEAD` opened and empty, no `commondir` (Git 2.43's add
@@ -15794,14 +15784,18 @@ fn an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is
     assert!(message.contains("commondir"), "{message}");
 }
 
-/// T16 (§8.2, FUB-D8-POPULATED): a destination that is not an empty directory
-/// when the access begins is Git state at once, and no Git command runs. The
-/// reviewers' construction: beside it, a sibling torn so that Git's sibling
-/// scan, which runs before Git checks the destination, dies on it. The answer
-/// names the destination, never the sibling's `commondir`; the store and what
-/// was at the destination are untouched.
+/// T16 (§8.2, FUB-D8-POPULATED): after the add's gate has passed, a
+/// destination that is not an empty directory when the access begins is Git
+/// state at once, before `git worktree add` runs. The reviewers' construction:
+/// beside it, a sibling torn — after the gate's list, at the add's `Before`
+/// hook — so that Git's sibling scan, which runs before Git checks the
+/// destination, would die on it. The answer names the destination, never the
+/// sibling's `commondir`; the store and what was at the destination are
+/// untouched. A sibling already torn when the gate lists the registry is met
+/// by the gate first
+/// (`a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first`).
 #[test]
-fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_run() {
+fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add() {
     for (label, file) in [("directory-holding-entries", false), ("file", true)] {
         let fixture = Fixture::created(&format!("registry-populated-{label}"));
         let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
@@ -15838,7 +15832,7 @@ fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_r
             UpstrokeError::Git { message } => {
                 assert!(
                     message.contains(&slot.display().to_string())
-                        && message.contains("no Git command ran")
+                        && message.contains("`git worktree add` did not run")
                         && !message.contains("commondir"),
                     "{label}: names the destination, not the sibling: {message}"
                 );
@@ -15863,9 +15857,52 @@ fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_r
     }
 }
 
+/// T16, the order (the record's §9.13, R4): the add's gate lists the registry
+/// before the destination is read. So a destination already populated beside
+/// a sibling already torn meets the sibling first: the gate's list is attempted
+/// again to its deadline and refuses as the registry's, naming the sibling's
+/// `commondir`, never Git state naming the destination, and what is at the
+/// destination stays. The populated answer of
+/// `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add`
+/// holds after a gate that passed.
+#[test]
+fn a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first() {
+    let fixture = Fixture::created("registry-populated-gate-first");
+    let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    fs::create_dir_all(&slot).expect("the destination");
+    fs::write(slot.join("paid-output"), b"keep\n").expect("an entry in it");
+    tear_registration(&fixture.manager, &fixture.manager.slot_path(&foreign));
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let result = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    let message = registry_refusal(result, "a populated destination beside a torn sibling");
+    assert!(
+        message.contains("commondir") && !message.contains(&slot.display().to_string()),
+        "the gate's list names the sibling, never the destination: {message}"
+    );
+    assert!(
+        contended_attempts(&common) > before,
+        "the gate's list was attempted again"
+    );
+    assert_eq!(
+        fs::read(slot.join("paid-output")).expect("the destination's entry"),
+        b"keep\n",
+        "what was at the destination stays"
+    );
+}
+
 /// T16, the link case (§8.2): Git's own check follows a link to an empty
-/// directory and checks out through it, and the access refuses it with no Git
-/// run. Through the funnel a link at the slot is refused first by the
+/// directory and checks out through it, and the destination step refuses it
+/// before `git worktree add` runs. Through the funnel a link at the slot is
+/// refused first by the
 /// acted-through walk (`SlotCheckoutEntry`), so the destination step is
 /// witnessed directly; the walk's refusal is witnessed beside it.
 #[cfg(unix)]
@@ -15884,7 +15921,8 @@ fn a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git() {
     std::os::unix::fs::symlink(&target, &slot).expect("a link at the slot");
     match Destination::prepare(&slot) {
         Err(UpstrokeError::Git { message }) => assert!(
-            message.contains("a link or reparse point") && message.contains("no Git command ran"),
+            message.contains("a link or reparse point")
+                && message.contains("`git worktree add` did not run"),
             "{message}"
         ),
         Err(other) => panic!("Git state, not {other:?}"),
@@ -15909,8 +15947,8 @@ fn a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git() {
 }
 
 /// T16: a destination that cannot be made is Git state at once, naming the
-/// path and the OS error, with no Git command run: where Git's own add would
-/// have failed to make it, so a verification defers on it as before.
+/// path and the OS error, before `git worktree add` runs: where Git's own add
+/// would have failed to make it, so a verification defers on it as before.
 #[cfg(unix)]
 #[test]
 fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
@@ -15933,7 +15971,7 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
         Err(UpstrokeError::Git { message }) => assert!(
             message.contains(&slot.display().to_string())
                 && message.contains("could not be made")
-                && message.contains("no Git command ran"),
+                && message.contains("`git worktree add` did not run"),
             "{message}"
         ),
         other => panic!("Git state at once, not {other:?}"),
@@ -15946,7 +15984,10 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
 /// hand first with a mode no `mkdir` here gives, a torn sibling fails the
 /// first attempt, and once the access has answered `Attempt` the destination
 /// is read: an empty directory with the ordinary mode, which only its removal
-/// and making again explain. Then the sibling is repaired and the add passes.
+/// and making again explain. The access is held at that answer until the
+/// destination has been read ([`hold_next_contended`]), so no second attempt
+/// and veto can remove it under the read. Then the sibling is repaired, the
+/// access released, and the add passes.
 #[cfg(unix)]
 #[test]
 fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
@@ -15965,6 +16006,7 @@ fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
     fs::set_permissions(&slot, fs::Permissions::from_mode(0o711)).expect("a mark on it");
     let common = fixture.manager.common_git_dir().to_path_buf();
     let before = contended_attempts(&common);
+    let release = hold_next_contended(&common);
     let observer = {
         let (common, slot, foreign_admin) = (common.clone(), slot.clone(), foreign_admin.clone());
         std::thread::spawn(move || {
@@ -15975,6 +16017,7 @@ fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
             let empty = matches!(AtDestination::read(&slot), AtDestination::EmptyDirectory);
             fs::write(foreign_admin.join("commondir"), "../..\n").expect("repair the sibling");
             fs::remove_file(foreign_admin.join("locked")).expect("and unlock it");
+            drop(release);
             (mode, empty)
         })
     };

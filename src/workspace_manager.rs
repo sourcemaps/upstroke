@@ -1891,8 +1891,8 @@ impl AtDestination {
     }
 }
 
-/// An add's destination, which the access makes before Git runs and reads
-/// after each failed attempt (the record's §5.3, §7.2 and §8.2).
+/// An add's destination, which the access makes before Git's add runs and
+/// reads after each failed attempt (the record's §5.3, §7.2 and §8.2).
 ///
 /// **Why it is made first.** Git's add scans its siblings, makes its entry and
 /// that entry's `locked`, and only then takes the destination over
@@ -1914,8 +1914,11 @@ impl AtDestination {
 /// Git's add runs its sibling scan before it checks its destination
 /// (`get_worktrees`, then `check_candidate_path`), so attempting such an add
 /// returned a torn sibling's registry error as Git state; and its check follows
-/// a link to an empty directory and checks out through it (§8.2). No Git
-/// command runs for it.
+/// a link to an empty directory and checks out through it (§8.2). It is
+/// answered before `git worktree add` runs, and only after the add's gate
+/// passed: the gate's list ([`WorkspaceManager::revalidate`]) is an access of
+/// its own, so a store that list fails on refuses as the registry's first,
+/// whatever is at the destination (the record's §9.13, R4).
 struct Destination<'p> {
     path: &'p Path,
     /// Whether this access made the directory at `path`, rather than finding
@@ -1926,8 +1929,8 @@ struct Destination<'p> {
 impl<'p> Destination<'p> {
     /// Before the first attempt: make the destination as an empty directory,
     /// or take the empty directory already there. Anything else at the path,
-    /// and a destination that cannot be made or read, is Git state, with no
-    /// Git command run.
+    /// and a destination that cannot be made or read, is Git state, before
+    /// `git worktree add` runs.
     ///
     /// # Errors
     ///
@@ -1936,7 +1939,7 @@ impl<'p> Destination<'p> {
     fn prepare(path: &'p Path) -> Result<Self, UpstrokeError> {
         let refused = |what: String| UpstrokeError::Git {
             message: format!(
-                "the worktree destination {} {what}; no Git command ran",
+                "the worktree destination {} {what}; `git worktree add` did not run",
                 path.display()
             ),
         };
@@ -3054,15 +3057,17 @@ impl WorkspaceManager {
     /// obligation is checked here — see [`Refusal::AddWithoutIntent`].
     ///
     /// **The add is a tolerant registry access** ([`tolerant_registry_access`],
-    /// R-X shared). Its destination is made as an empty directory before Git
-    /// runs ([`Destination::prepare`]), and a destination that is anything but
-    /// an empty directory is Git state at once with no Git command run. After a
-    /// failed `git worktree add`, the destination answers whether another
-    /// attempt is safe ([`Destination::untouched`]): an empty directory the
-    /// access can remove holds nothing to lose — Git's junk removal would have
-    /// removed it after a failure of Git's own past its takeover — so it is
-    /// made again and the add attempted again; anything else refuses at once,
-    /// resumably, as
+    /// R-X shared). After the add's gate has listed the registry, its
+    /// destination is made as an empty directory before Git's add runs
+    /// ([`Destination::prepare`]), and a destination that is anything but an
+    /// empty directory is Git state at once, before `git worktree add` runs. A
+    /// store the gate's list fails on refuses as the registry's first,
+    /// whatever is at the destination. After a failed `git worktree add`, the
+    /// destination answers whether another attempt is safe
+    /// ([`Destination::untouched`]): an empty directory the access can remove
+    /// holds nothing to lose — Git's junk removal would have removed it after a
+    /// failure of Git's own past its takeover — so it is made again and the add
+    /// attempted again; anything else refuses at once, resumably, as
     /// [`UpstrokeError::RegistryRefused`]. So this funnel returns Git state only
     /// for a destination that could not be made or was not an empty directory
     /// when it began, and neither depends on the registry
@@ -6865,13 +6870,50 @@ pub(crate) fn contended_attempts(common_git_dir: &Path) -> usize {
 /// The `#[cfg(test)]` half of the contended-attempt seam: one more `Attempt`
 /// answer for `common_git_dir`, counted before the deadline check and the
 /// sleep. See the `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+///
+/// When a test holds the next such answer for `common_git_dir`
+/// ([`hold_next_contended`]), the access waits here, after counting it and
+/// before its deadline check and its sleep, until the holder releases it: so a
+/// test that samples what the failed attempt and its veto left reads it
+/// before the next attempt and the next veto can change it. The hold is taken
+/// by the first answer and serves only it.
 #[cfg(test)]
 fn note_contended(common_git_dir: &Path) {
-    let mut table = CONTENDED_ATTEMPTS
+    {
+        let mut table = CONTENDED_ATTEMPTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = table.entry(common_git_dir.to_path_buf()).or_default();
+        *count = count.saturating_add(1);
+    }
+    let held = CONTENDED_HOLDS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let count = table.entry(common_git_dir.to_path_buf()).or_default();
-    *count = count.saturating_add(1);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(common_git_dir);
+    if let Some(released) = held {
+        // Bounded: a holder that never releases is a wedged test, and the
+        // access then goes on to its deadline as if nothing held it.
+        let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+    }
+}
+
+/// The holds tests have placed on the next `Attempt` answer of an access, per
+/// common git dir exactly as the caller passed it ([`note_contended`]).
+#[cfg(test)]
+static CONTENDED_HOLDS: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::mpsc::Receiver<()>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Hold the next `Attempt` answer of an access over `common_git_dir` until the
+/// returned sender sends or is dropped ([`note_contended`]).
+#[cfg(test)]
+pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sender<()> {
+    let (release, released) = std::sync::mpsc::channel();
+    CONTENDED_HOLDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(common_git_dir.to_path_buf(), released);
+    release
 }
 
 /// The registry access deadline under test: short, so that a test meeting a
