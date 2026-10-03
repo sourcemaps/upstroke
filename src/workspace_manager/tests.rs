@@ -7292,6 +7292,267 @@ fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
     );
 }
 
+/// R7 (#329's record, §9.14): a sibling snapshot whose checkout cannot be read,
+/// as a Windows checkout whose deletion is pending cannot. On `test (winguest)`
+/// the test above failed once, "adding k3-g0-a16-gates: failed to read
+/// …\snapshots\k1-g0-a16-gates: Access is denied. (os error 5)": the add's
+/// gate resolved every path the worktree list named after the list's access
+/// had returned, and Windows answers `ERROR_ACCESS_DENIED` to an open of a
+/// directory another removal has deleted while a handle on it is still open.
+/// Here a real snapshot is added and its checkout exchanged for a link to
+/// itself, so its registration still names the path and resolving the path
+/// fails with `ELOOP` where Windows answers `ERROR_ACCESS_DENIED`: the same
+/// call, `canonical_prefix(record.path())`, failing the same way, with another
+/// error. Unix, where such a link needs no privilege. Returns the sibling's
+/// checkout path.
+#[cfg(unix)]
+fn plant_a_sibling_whose_checkout_cannot_be_read(fixture: &Fixture, key: u32) -> PathBuf {
+    let path = a_sibling_snapshot(fixture, key);
+    fs::remove_dir_all(&path).expect("take the sibling's checkout away");
+    leave_a_link_to_itself(&path);
+    // The plant must bite: the registry still names the sibling, and its path
+    // fails to resolve with something other than absence.
+    let name = path.file_name().expect("a checkout name").to_owned();
+    assert!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("the registry lists")
+            .iter()
+            .any(|record| record.path().ends_with(&name)),
+        "prerequisite not met: the registry no longer names the sibling"
+    );
+    assert!(
+        matches!(
+            canonical_prefix(&path),
+            Err(UpstrokeError::Io { ref source, .. })
+                if source.kind() != std::io::ErrorKind::NotFound
+        ),
+        "prerequisite not met: the sibling's path resolves, so nothing here fails to read it"
+    );
+    path
+}
+
+/// A snapshot of task `key` beside the one a witness adds, through the
+/// production funnels: its checkout path.
+#[cfg(unix)]
+fn a_sibling_snapshot(fixture: &Fixture, key: u32) -> PathBuf {
+    fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(key, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect("the sibling snapshot")
+        .path()
+        .to_path_buf()
+}
+
+/// A link at `path` naming `path` itself: resolving it fails with `ELOOP`.
+#[cfg(unix)]
+fn leave_a_link_to_itself(path: &Path) {
+    std::os::unix::fs::symlink(path, path).expect("leave a link to itself");
+}
+
+/// R7's observer: every wait of a registry access the call makes ends the
+/// sibling's removal the witness left in flight, as the last handle on a
+/// Windows checkout whose deletion is pending closing ends it — the link
+/// standing in for that checkout is removed, and the path is absent from then
+/// on — and is counted. With `plant_at`, the link is planted at that site's
+/// `Before` hook rather than before the call.
+#[cfg(unix)]
+struct EndsTheSiblingsRemovalAtAPause {
+    link: PathBuf,
+    plant_at: Option<EffectSiteId>,
+    pauses: usize,
+}
+
+#[cfg(unix)]
+impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if phase == HookPhase::Before && self.plant_at == Some(site) {
+            fs::remove_dir_all(&self.link).expect("take the sibling's checkout away");
+            leave_a_link_to_itself(&self.link);
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+
+    fn registry_pause(&mut self, _pause: std::time::Duration) {
+        self.pauses += 1;
+        match fs::remove_file(&self.link) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "end the sibling's removal at {}: {error}",
+                self.link.display()
+            ),
+        }
+    }
+}
+
+/// R7, the add: a sibling whose checkout cannot be read while its removal is
+/// in flight does not fail an add. The gate's list and the resolution of every
+/// path it names are one registry access, so the read that failed is attempted
+/// again, after a wait made through the call's own hooks — R1's guarantee that
+/// the coordinator answers its messages for the length of every wait — and the
+/// attempt after it reads the sibling as absent. At `f9c88fdb` the gate
+/// returned the failed read at once, as `UpstrokeError::Io`, and no wait ran.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add() {
+    let fixture = Fixture::created("r7-sibling-read-add");
+    let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
+    let attempted_again = contended_attempts(fixture.manager.common_git_dir());
+    let mut hooks = EndsTheSiblingsRemovalAtAPause {
+        link: sibling,
+        plant_at: None,
+        pauses: 0,
+    };
+
+    let snapshot = fixture
+        .manager
+        .add_snapshot(
+            &mut hooks,
+            &SnapshotName::gates(3, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect("a sibling's removal in flight does not fail the add");
+
+    assert!(
+        hooks.pauses >= 1,
+        "the read that failed waited through the call's hooks before it was attempted again"
+    );
+    assert!(
+        contended_attempts(fixture.manager.common_git_dir()) > attempted_again,
+        "the registry access answered that it would attempt again"
+    );
+    assert!(
+        fs::symlink_metadata(&hooks.link).is_err(),
+        "the sibling's removal ended at the wait"
+    );
+    assert!(
+        snapshot.path().join(".git").is_file(),
+        "and the add made its checkout"
+    );
+}
+
+/// R7, the bound: a sibling whose checkout stays unreadable refuses the add
+/// resumably, at the registry access's deadline, as
+/// `UpstrokeError::RegistryRefused` carrying the read's own error — never as
+/// the raw I/O error, which `f9c88fdb` returned at once. The gate refuses
+/// before the add's intent is written, so nothing of the add is left.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io() {
+    let fixture = Fixture::created("r7-sibling-read-refused");
+    let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
+    let sibling = sibling
+        .file_name()
+        .expect("a checkout name")
+        .to_string_lossy();
+    let name = SnapshotName::gates(3, 0, 1);
+
+    let error = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &name,
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect_err("a sibling that stays unreadable refuses the add");
+
+    let UpstrokeError::RegistryRefused { message } = &error else {
+        panic!("the refusal is the registry's, typed and resumable, not {error:?}");
+    };
+    assert!(
+        message.contains(&format!("{sibling}: ")) && message.contains("failed to read"),
+        "it carries the read that failed: {message}"
+    );
+    let slot = Slot::Snapshot { name };
+    assert!(
+        !fixture.manager.intent_path(&slot).exists() && !fixture.manager.slot_path(&slot).exists(),
+        "the gate refused before the add wrote its intent or made its destination"
+    );
+}
+
+/// R7, the verification's lookup: the same read in `worktree_record`, where a
+/// verification looks its slot up among the paths the list names. The sibling's
+/// checkout is made unreadable at the verification's `Before` hook, after its
+/// gate has passed, and its removal ends at the lookup's first wait: the lookup
+/// attempts again and answers for the slot, which is not registered. At
+/// `f9c88fdb` the lookup returned the failed read at once, as
+/// `UpstrokeError::Io`.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification()
+ {
+    let fixture = Fixture::created("r7-sibling-read-verify");
+    let sibling = a_sibling_snapshot(&fixture, 1);
+    let slot = fixture.task("alpha", 1);
+    let mut hooks = EndsTheSiblingsRemovalAtAPause {
+        link: sibling,
+        plant_at: Some(EffectSiteId::Worktree(WorktreeSite::Verify)),
+        pauses: 0,
+    };
+
+    let verified = fixture
+        .manager
+        .verify_worktree(&mut hooks, &slot, &Quiescence::AtBase(fixture.head.clone()))
+        .expect("a sibling's removal in flight does not fail the verification");
+
+    assert_eq!(verified, Err(VerifyFailure::NotRegistered));
+    assert!(
+        hooks.pauses >= 1,
+        "the lookup's read that failed waited through the call's hooks"
+    );
+    assert!(
+        fs::symlink_metadata(&hooks.link).is_err(),
+        "the sibling's removal ended at the wait"
+    );
+}
+
+/// R7, what the resolution reads and refuses: a sibling whose checkout is a
+/// link to nothing is not a path that failed to read. Resolving it reads the
+/// link, and the refusal it makes is the gate's answer at once, as it was
+/// before the resolution joined the registry access: no attempt is made again
+/// and no deadline is waited out, so the refusal is never retyped as the
+/// registry's.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once() {
+    let fixture = Fixture::created("r7-sibling-link-refused");
+    let sibling = a_sibling_snapshot(&fixture, 1);
+    fs::remove_dir_all(&sibling).expect("take the sibling's checkout away");
+    std::os::unix::fs::symlink(fixture.root.join("nothing-here"), &sibling)
+        .expect("leave a link to nothing in its place");
+    let attempted_again = contended_attempts(fixture.manager.common_git_dir());
+
+    let error = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(3, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect_err("a link on a listed path refuses the add");
+
+    assert!(
+        matches!(&error, UpstrokeError::Refused { message }
+            if message.contains("is a symlink or reparse point")),
+        "the refusal is the link's, as the resolution made it: {error:?}"
+    );
+    assert_eq!(
+        contended_attempts(fixture.manager.common_git_dir()),
+        attempted_again,
+        "and the registry access never answered that it would attempt again"
+    );
+}
+
 /// The early review's `R1-REG-1` (the PR11 record, §13, round R1): the removal
 /// held the registry lock across the whole funnel, `Before` and `After` hooks
 /// included, and `worktree_records` takes the same lock, so an observer that

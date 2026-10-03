@@ -2051,9 +2051,12 @@ impl WorkspaceManager {
     /// [`Refusal::RunId`], [`Refusal::BaseIsNotADirectory`],
     /// [`Refusal::RootOutsidePrivateRoot`], [`Refusal::ReparsePointOnChain`],
     /// [`Refusal::RootInsideRepositoryWorktree`] and
-    /// [`Refusal::WorktreeInsideRoot`]; [`UpstrokeError::Io`] when the base,
-    /// the private root or a registered worktree cannot be read or resolved;
-    /// and a Git error when the base is not a repository.
+    /// [`Refusal::WorktreeInsideRoot`]; [`UpstrokeError::Io`] when the base or
+    /// the private root cannot be read or resolved;
+    /// [`UpstrokeError::RegistryRefused`] when the worktree list, or a
+    /// registered worktree's path, cannot be read by the registry access's
+    /// deadline ([`Self::revalidate`]); and a Git error when the base is not a
+    /// repository.
     pub fn derive(
         base: &Path,
         private_root: &Path,
@@ -2144,9 +2147,17 @@ impl WorkspaceManager {
     /// `<root>/{tasks,merge,snapshots}/<component>`; anything else inside the
     /// root is foreign and refuses.
     ///
+    /// The worktree list and the resolution of each path it names are one
+    /// registry access ([`Self::visit_resolved_records`]), so a sibling whose
+    /// checkout another removal is deleting while this reads it does not fail
+    /// the gate (the record's §9.14, R7).
+    ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git error reading the worktree list.
+    /// The containment refusals, a refusal of a link on a listed path, an I/O
+    /// error resolving the execution root, or
+    /// [`UpstrokeError::RegistryRefused`] when the list, or a path it names,
+    /// could not be read by the access's deadline.
     pub fn revalidate(&self) -> Result<(), UpstrokeError> {
         self.revalidate_with(&mut std::thread::sleep)
     }
@@ -2169,24 +2180,25 @@ impl WorkspaceManager {
     ) -> Result<(), UpstrokeError> {
         self.revalidate_chain(&self.execution_root)?;
         let root = canonical_prefix(&self.execution_root)?;
-        for record in self.worktree_records_with(pause_for)? {
-            let worktree = canonical_prefix(record.path())?;
-            if is_at_or_inside(&worktree, &root) {
-                return Err(Refusal::RootInsideRepositoryWorktree {
-                    root,
+        // The visit runs again on every attempt, so a refusal it answers holds
+        // a copy of the root rather than the root itself; the one copy is made
+        // on the refusal (§6).
+        let refused = self.visit_resolved_records(pause_for, &|record, worktree| {
+            if is_at_or_inside(worktree, &root) {
+                return Some(Refusal::RootInsideRepositoryWorktree {
+                    root: root.clone(),
                     worktree: record.into_path(),
-                }
-                .into());
+                });
             }
-            if is_at_or_inside(&root, &worktree) && !self.is_manager_slot_path(&root, &worktree) {
-                return Err(Refusal::WorktreeInsideRoot {
-                    root,
+            if is_at_or_inside(&root, worktree) && !self.is_manager_slot_path(&root, worktree) {
+                return Some(Refusal::WorktreeInsideRoot {
+                    root: root.clone(),
                     worktree: record.into_path(),
-                }
-                .into());
+                });
             }
-        }
-        Ok(())
+            None
+        })?;
+        refused.map_or(Ok(()), |refusal| Err(refusal.into()))
     }
 
     /// The chain half of [`Self::revalidate`], re-run inside every funnel
@@ -3250,7 +3262,9 @@ impl WorkspaceManager {
     ///
     /// # Errors
     ///
-    /// A Git error.
+    /// A Git error, or [`UpstrokeError::RegistryRefused`] when the worktree
+    /// list, or a path it names, cannot be read by the registry access's
+    /// deadline ([`Self::visit_resolved_records`]).
     pub fn quiescence(
         &self,
         path: &Path,
@@ -5632,19 +5646,80 @@ impl WorkspaceManager {
             RegistryHold::Unheld,
             pause_for,
             &mut || Again::Attempt,
-            &mut || {
-                let output = self.git_ok(
-                    &self.base,
-                    &[
-                        OsString::from("worktree"),
-                        OsString::from("list"),
-                        OsString::from("--porcelain"),
-                        OsString::from("-z"),
-                    ],
-                )?;
-                parse_worktree_records(&output)
-            },
+            &mut || self.list_worktree_records(),
         )
+    }
+
+    /// One reading of the registry: `git worktree list --porcelain -z` and the
+    /// parse of its output. The whole attempt of [`Self::worktree_records`]'s
+    /// access, and the first step of [`Self::visit_resolved_records`]'s.
+    fn list_worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
+        let output = self.git_ok(
+            &self.base,
+            &[
+                OsString::from("worktree"),
+                OsString::from("list"),
+                OsString::from("--porcelain"),
+                OsString::from("-z"),
+            ],
+        )?;
+        parse_worktree_records(&output)
+    }
+
+    /// Visit the registered worktrees in the list's order, each with its path
+    /// resolved ([`canonical_prefix`]), until `visit` answers; `None` when it
+    /// answers for none.
+    ///
+    /// One tolerant registry access ([`tolerant_registry_access`], no hold),
+    /// and its attempt is the list, its parse **and the resolution of each
+    /// path the visit reaches** (the record's §9.14, R7). A path that cannot
+    /// be read fails the attempt, as a list Git could not finish does, and the
+    /// access attempts again until its deadline: nothing in the error tells a
+    /// read that met another removal's deletion in progress from any other.
+    /// On Windows a directory whose deletion is pending — a sibling's checkout
+    /// that a removal of this process, or of another, has deleted while a
+    /// handle on it is still open — answers `ERROR_ACCESS_DENIED` to the open
+    /// that resolving it makes, as a directory its access list denies does.
+    /// When the last handle closes the name is gone, and the next attempt
+    /// reads it as absent, or lists no record for it once the removal has
+    /// taken its registration. A path still unreadable at the deadline refuses
+    /// as [`UpstrokeError::RegistryRefused`], which carries the read's own
+    /// error, and never as that I/O error.
+    ///
+    /// A path the resolution read and refused — a link on it whose target is
+    /// absent — is not a failure to read: that refusal is the access's answer
+    /// at once, as it was before the resolution joined the attempt. Each
+    /// attempt visits from the list's start again, so `visit` answers from its
+    /// arguments alone.
+    ///
+    /// # Errors
+    ///
+    /// The refusal a resolution made, or [`UpstrokeError::RegistryRefused`]
+    /// when no attempt completed by the access's deadline.
+    fn visit_resolved_records<T>(
+        &self,
+        pause_for: &mut dyn FnMut(std::time::Duration),
+        visit: &dyn Fn(WorktreeRecord, &Path) -> Option<T>,
+    ) -> Result<Option<T>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            pause_for,
+            &mut || Again::Attempt,
+            &mut || {
+                for record in self.list_worktree_records()? {
+                    let resolved = match canonical_prefix(record.path()) {
+                        Ok(resolved) => resolved,
+                        Err(unread @ UpstrokeError::Io { .. }) => return Err(unread),
+                        Err(refused) => return Ok(Err(refused)),
+                    };
+                    if let Some(answer) = visit(record, &resolved) {
+                        return Ok(Ok(Some(answer)));
+                    }
+                }
+                Ok(Ok(None))
+            },
+        )?
     }
 
     fn worktree_record(
@@ -5653,12 +5728,9 @@ impl WorkspaceManager {
         pause_for: &mut dyn FnMut(std::time::Duration),
     ) -> Result<Option<WorktreeRecord>, UpstrokeError> {
         let wanted = canonical_prefix(path)?;
-        for record in self.worktree_records_with(pause_for)? {
-            if canonical_prefix(record.path())? == wanted {
-                return Ok(Some(record));
-            }
-        }
-        Ok(None)
+        self.visit_resolved_records(pause_for, &|record, resolved| {
+            (resolved == wanted.as_path()).then_some(record)
+        })
     }
 
     /// The per-worktree administrative directory of a linked worktree.

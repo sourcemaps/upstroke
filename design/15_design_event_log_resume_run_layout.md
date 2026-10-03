@@ -84,9 +84,16 @@ owner's decision.*
   deferrals, or parked the candidate at `max_defers`.
 
 **Every registry access is attempted again.** Every registry access the workspace manager makes is
-one attempt: a list together with the parse of its output, an add, or one of the manager's scans.
+one attempt: a list together with the parse of its output and, where the manager compares the
+worktrees it lists, the resolution of each path the list names; an add; or one of the manager's
+scans.
 - A failed attempt is attempted again, after a short backoff, until the access's deadline. Nothing
   reads the store, Git's message or a file's timestamps to decide why it failed.
+- A listed path that cannot be read fails its attempt, as a list Git could not finish does. On
+  Windows a checkout that another removal has deleted while some handle on it is still open answers
+  "access denied" to every open until the last such handle closes, and nothing in the error tells it
+  from a path the filesystem denies. A path the resolution reads and refuses, such as a link with
+  nothing behind it, is refused at once.
 - An add first makes its destination as an empty directory. Git takes a destination over only after
   its own registry steps, and on any later failure removes it with its junk. So a failed add whose
   destination is still an empty directory the access can remove holds nothing to lose, and is attempted
@@ -103,9 +110,9 @@ one attempt: a list together with the parse of its output, an add, or one of the
   the registry's first, whatever is at the destination.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
-  left torn, and any other fault of the store, such as a store nothing can write or a registration
-  Git cannot list. A failure the access cannot decide, such as a destination holding something the
-  add did not leave, refuses at once.
+  left torn, and any other fault of the store, such as a store nothing can write, a registration
+  Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
+  as a destination holding something the add did not leave, refuses at once.
 - The deadline covers the access's waits, its retries and the start of every attempt; the attempt
   after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
   the last Git command already running, which a filter, a large checkout or a slow filesystem can
