@@ -949,7 +949,7 @@ funnel = [
     # published half never landed. The frozen `ContainerSite` has eight
     # variants and this is that same site, not a ninth.
     "remove_staged_intent",
-    "launch",
+    # `launch` is test-only since PR11 follow-up A (`FUA-I1-MACRO`): `#[cfg(test)] mod uncovered`.
     "release",
     # `release` keeping whether the container itself was stopped and removed,
     # for the runner's process-fate classification (the reviews of `916852c9`,
@@ -1397,8 +1397,13 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
-shared = { deref = 2, drop = 5 }
+shared = { deref = 2, drop = 6 }
 funnel = [
+    # PR11 follow-up A (`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`): `arm_container_reaper` takes
+    # `ProcessSite::Terminate` by value, refuses any other site, and forks one cleanup reaper through the
+    # Terminate site's own fork, holding no cleanup lease and no process group, for a container runner's
+    # incarnation; `ContainerReaper`'s `Drop` (the sixth `drop` below) cancels it.
+    "arm_container_reaper",
     "run_with_timeout_at",
     # The same funnel keeping the process fate it established
     # (`ProcessFailure`), for the host Runner's `RunnerError`.
@@ -1451,10 +1456,11 @@ effectful_unnameable = [
     # `begin`, the funnel row above, and `prepare` is a step between it and
     # `finish`, as `pipe_io::configure` is a step of the Spawn site.
     "prepare",
-    # One name, five `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
+    # One name, six `Drop` impls: `Job`'s, `OpenHandle`'s and `Snapshot`'s
     # close a Win32 handle (a job's with KILL_ON_JOB_CLOSE, which terminates
     # whatever is still in it); `Supervisor`'s cancels the reaper or finishes
-    # the group; `GroupSnapshot`'s is test-only bookkeeping.
+    # the group; `ContainerReaper`'s cancels its container reaper, with a
+    # bounded wait for its exit; `GroupSnapshot`'s is test-only bookkeeping.
     "drop",
 ]
 effect_free = [

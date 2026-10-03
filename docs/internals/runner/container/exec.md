@@ -65,6 +65,23 @@ above is a third, independent reason: a bind mount is declared at `create`
 and cannot be added to a running container, so `T-CONTAINER`'s prose order
 is not merely non-conforming — it does not run.
 
+#### Every container this runner starts is covered by its armed reaper
+
+PR11 follow-up A (`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`): on Unix, a coordinator that
+dies leaves a reaper that kills and removes the containers its incarnation started. The
+reaper is armed **here, at the sink**, not at any entry of an incarnation: `contain` covers
+each invocation before it calls `launch`, the first cover forks the runner's container
+reaper, and `launch` takes the cover's value, so no container of this runner can be started
+without it — a fresh run's P4 probes, a resume's pre-flight, every attempt, gate, review and
+verification, and any later caller. `ContainerRunner::launch` is the only production caller
+of `create_container` and `start_container`, and
+`tests::every_container_start_in_production_is_reached_only_through_a_covered_launch` keeps
+it so by reading every naming of an unarmed launcher in the tree. The reaper's scope is the
+runner's own identity, compared with each container's labels before anything forks, and the
+runner disarms only when every container it started reached an established end. The
+follow-up's record (`reviews/2026-10-01-pr11-follow-up-a-record.md`, §1 and §2) has the
+design, the review's corrections and the witnesses.
+
 ## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]`
 
 `PR6-LANEF-004`: the Container funnel's module-level allow is an INNER
@@ -423,6 +440,15 @@ read-only inspection before the worktree lock"), and a runner that resolved
 its own policy could not be rebuilt from a record — which is what every
 later incarnation does.
 
+## `pub struct ContainerRunner` › `reaping: Reaping,`
+
+The runner's container reaper and the bookkeeping that decides when it may be disarmed.
+The runner owns it for its whole life and never hands it over: a caller that keeps one
+runner for its incarnation — PR12's to wire — has one reaper from its first probe to its
+end, and a caller that builds a second runner for the same incarnation gets a second reaper
+over the same scope, each covering its own launches. `ContainerRunner` is not `Clone`, so a
+reaper cannot be duplicated with it.
+
 ## `pub struct ContainerRunner` › `view_is_explicit: bool,`
 
 Whether [`ContainerRunner::with_view`] replaced the default projection.
@@ -433,6 +459,154 @@ its trace is the observer's — and a builder whose result depended on the
 order its setters were called in is a builder that is wrong half the
 time. So the default is rebuilt by every setter and an explicit one
 never is.
+
+## `struct Reaping {`
+
+One mutex over the reaper state. `cover` holds it across the fork on the first cover, so a
+concurrent first launch waits for the arming rather than racing past it; it is never held
+while a container runs, and `Covered`'s drop takes it only to count down.
+
+## `struct ReapingState {`
+
+`armed`: the reaper and the scope it lists, once the first cover armed it. `in_flight`: the
+covers not yet ended. `unsettled`: sticky — set once any cover ended with a fate other than
+`Gone` or `NeverStarted`, or with none at all (an invocation that unwound).
+
+## `struct Armed {`
+
+The scope is kept beside the reaper so every later cover compares its container's labels
+with the scope the reaper actually lists. On Windows there is no reaper (ST-16 (e); the
+`os_matrix`): the scope alone is kept, and the label check runs the same way.
+
+## `pub(super) mod cover {`
+
+**Where the guarantee lives** (`FUA-I2-MACRO-WS`, implementation review round 2). Every
+primitive that starts a container — the funnels `create_container` and `start_container`
+and the runtime's own `ContainerRuntime::create` and `::start` — takes a proof by value,
+`CoveredCreate` or `CoveredStart`, and nothing but `Reaping::cover` can make one. That is a
+fact about types, so it holds whatever spells the call: a macro, an alias, a function value,
+whitespace before a `!`. The domination census (`tests::every_container_start_in_production_is_reached_only_through_a_covered_launch`)
+was the guard before this round and was evaded twice by spelling — a macro's `launch:`
+argument in round 1, `delegate ! (plan.start_container, …)` in round 2 — because it reads
+source text. It stays, as a lexical backstop; it is not a proof, and nothing here depends on
+it seeing every spelling.
+
+**Why a module of its own, at the end of the file.** Rust privacy is by module: a field
+private to a module is visible in that module and in its descendants, nowhere else. The
+proofs' fields are private to `cover`, so neither the rest of this file nor any sibling or
+parent of `exec` — `container.rs`, `census.rs`, the fake — can construct one; `clippy.toml`'s
+note above its container-runtime denials says a token "would all be reachable from a
+sibling", which is true of a token defined in `runner::container` and is why this one is
+defined in a leaf instead. `Covered`, the in-flight guard, moved in with them, so its one
+constructor is `cover`'s too. The module sits after every production item of `exec.rs`
+because its `#[cfg(test)] mod without_a_reaper` is the file's first `#[cfg(test)]`, and
+`effects::production_region` cuts a file there: the cut must be a module
+(`effects::tests::every_production_region_that_stops_early_stops_at_a_module`) and must not
+hide production code below it.
+
+**What the compiler does not cover**, and so what the census still reads: code inside
+`cover` itself (it can mint), and the runtime's implementation — `DockerCli`'s `create` and
+`start` and the private `DockerCli::exec` they share, in `container.rs`, which runs whatever
+`docker` argv it is handed. A new production module inside `cover`, a second construction of
+a proof, or the test-only mint named in production turns the census red; `docker` and
+`DockerCli` stay confined to `container.rs` by `effects`' denylist census, and `RuntimeOp::Create`
+and `::Start` to `DockerCli`'s own two methods by this census's check 3.
+
+## `mod cover` › `pub(in crate::runner::container::exec) struct Covered<'a> {`
+
+The in-flight guard `cover` returns beside the two proofs. `fate` is what `contain`
+established for the invocation, recorded by `settle`; the drop reads it.
+
+## `mod cover` › `pub struct CoveredCreate<'a> {`
+
+The proof that one container's create is covered: it carries **the spec `cover` validated**,
+borrowed, and the create is made from that spec — `create_container` and every
+`ContainerRuntime::create` read `covered.spec()` and take no spec of their own — so a proof
+minted for one container cannot create another. Its lifetime is the cover's single `'a`,
+the borrow of the runner's `Reaping` and of the spec at once, so it cannot outlive the runner
+whose reaper covers it (a mutation returning one as `'static` is refused,
+`lifetime may not live long enough`). Not `Clone`: consumed by the call.
+
+## `mod cover` › `pub struct CoveredStart<'a> {`
+
+The start's proof: the validated spec's name, borrowed. `start_container` refuses an intent
+for any other name before the runtime is asked (`expect_intent_for`, attempted `false`;
+`tests::a_start_cover_starts_only_the_container_it_was_minted_for`), and the runtime's
+`start` starts `covered.name()`.
+
+## `mod cover` › `pub(in crate::runner::container::exec) fn cover<'a>(`
+
+Validates, arms on the first cover, counts the invocation, and mints the three values:
+`Covered`, and the two proofs over `spec`. The order is the point (`FUA-D1-DES-2`, the design review's correction): the scope this
+runner would hold — the armed one, or, on the arming cover, the one it is about to arm,
+built from the runtime's `reaper_program` and the runner's own `RunIdentity` — is compared
+with the container's two label values **first**, and a difference refuses the launch before
+anything forks. Only then does the first cover arm (`agent::proc::arm_container_reaper` at
+`ProcessSite::Terminate`), and a failure to arm refuses the launch, with nothing written.
+Both sides of the comparison derive from one identity, so it fires only if a later change
+makes them diverge — and then at the first launch, with nothing armed
+(`tests::a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed`;
+for an already-armed foreign scope,
+`tests::a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent`,
+`R7-D2`).
+
+## `fn refuse_unless_selected(`
+
+`ReaperContainerScope::selects`: the container's `upstroke.private_root` and
+`upstroke.incarnation` labels are exactly the two filter values the reaper's `docker ps`
+lists by. The refusal names both labels and the reaper's listing argv.
+
+## `mod cover` › `pub(in crate::runner::container::exec) fn settle(mut self, fate: ProcessFate) {`
+
+Records the fate `contain` established and ends the cover (its drop runs as `settle`
+returns). Every return path of `contain` after the cover settles exactly once: the launch's
+error with that error's fate, or the release's fate.
+
+## `mod cover` › `impl Drop for Covered<'_> {`
+
+Counts the invocation down and, unless its fate was established `Gone` or `NeverStarted`,
+marks the runner unsettled. A cover dropped without a settle is an invocation that unwound
+— a panic inside `contain` — whose container may run: unsettled too
+(`tests::a_panic_inside_contain_leaves_the_reaper_armed`).
+
+## `mod cover` › `impl<'a> CoveredCreate<'a>` › `pub fn spec(&self) -> &'a CreateSpec {`
+
+The validated spec, with the proof's own lifetime rather than the borrow of the proof, so a
+funnel can read it and still move the proof into the runtime's `create`.
+
+## `mod cover` › `mod without_a_reaper {`
+
+`CoveredCreate::without_a_reaper` and `CoveredStart::without_a_reaper`: proofs minted with no
+reaper armed, for tests that drive a primitive directly — the test-only free
+`container::launch` (so the frozen `recover/tests.rs` that calls it compiles unchanged) and
+the container suites' direct calls of the funnels and of a runtime's `create` and `start`.
+`#[cfg(test)]`: no production build has them (`r2-p3`, `error[E0599]`), and the census refuses
+a production region that names them in a test build.
+
+## `pub(in crate::runner::container) use cover::{CoveredCreate, CoveredStart};`
+
+The proofs' names inside the container module tree, which `container.rs`'s funnels and
+`DockerCli`, `runtime.rs`'s trait and the fake need. Outside the tree a production build
+cannot name either (`r2-p5`, `error[E0603]`). Both types are declared `pub` in a private
+module, so naming them in the public `ContainerRuntime` trait raises no `private_interfaces`
+lint. Test doubles outside the tree name them through `container.rs`'s test-only
+`pub(crate)` re-export, which no production build has.
+
+## `impl Armed` › `fn kept_until_the_process_exits(self) {`
+
+`mem::forget` of the reaper on Unix: its `Drop` does not run, so it is not cancelled, and
+its descriptors stay open until the process exits; the reaper then kills and removes every
+container its scope labels. On Windows there is nothing to keep.
+
+## `impl Drop for Reaping {`
+
+The disarm rule, `R6-C1`: the reaper is cancelled only when nothing is in flight and every
+cover ended with an established fate — a normal end, or an error return whose every
+container the runner established gone. Otherwise it is kept armed past the runner's last
+handle until the process exits (`tests::a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop`;
+two-process, `engine::topology::coordinator::tests::a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`).
+The fates read are the ones this runner computed for its own containers, so no caller's
+ledger can get the rule wrong.
 
 ## `impl ContainerRunner` › `pub fn new(`
 
@@ -642,6 +816,13 @@ today.
 
 ## `impl ContainerRunner` › `fn launch(`
 
+**It takes the cover's two proofs** (`to_create`, `to_start`), which only `Reaping::cover`
+makes, and passes each through to its funnel, which passes it on to the runtime; so the
+reaper that will outlive a dead coordinator is armed before this function's first effect, and
+the two calls that start a container cannot be written without them. Until review round 2 it
+took `&Covered` and read nothing from it, so only this function was bound and the funnels
+below it were not.
+
 The four sites `side_effect_vs_event_ordering` puts before the
 invocation, in the order it states and in the order a container runtime
 can execute.
@@ -839,7 +1020,7 @@ local `NoHooks`.
 ## `impl ContainerRunner` › `fn contain(`
 
 One invocation under one observer: the pre-launch cancellation check, the
-launch, supervision, collection and the release, in that order. A call
+plan, the cover, the launch, supervision, collection and the release, in that order. A call
 cancelled before anything is written is refused as
 `RunnerError::cancelled(.., NeverStarted)` with no intent, view or container
 (`a_container_call_cancelled_before_it_starts_writes_no_intent`). A call
@@ -954,10 +1135,23 @@ instead of a silent regression.
 `effects::tests::the_view_directory_has_one_definition_in_the_tree` guards
 against a second one being written.
 
-## `fn contain(` › `let launched: Launched = self.launch(hooks, &plan.launch)?;`
+## `fn contain(` › `let (covered, to_create, to_start) = self`
+
+The cover, after the plan (which only reads) and before the launch's first effect: it
+refuses a container its reaper would not select, arms the runner's reaper on the first
+cover, counts the invocation, and mints the two proofs over `plan.launch.spec`. A refusal is
+`NeverStarted`, with nothing written.
+
+## `fn contain(` › `let launched: Launched = match self.launch(hooks, &plan.launch, to_create, to_start) {`
 
 WriteIntent -> MountGitView -> Create (+ verify the reported image
-id) -> Start, in that order and in one place.
+id) -> Start, in that order and in one place. A launch that fails settles the cover with
+the fate its cancel established.
+
+## `fn contain(` › `covered.settle(fate);`
+
+The fate the release established, recorded for the disarm rule before the result is
+returned.
 
 ## `fn contain(` › `let released = self.release(`
 

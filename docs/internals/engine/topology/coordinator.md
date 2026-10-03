@@ -1423,3 +1423,85 @@ execution root); the second finds the report current, removes nothing and refuse
 appends, and planted answer files stay byte-identical. Every child's temporary directory is a guard the
 cell holds (`scaffold::child_temporary_of`, tag `tmp`, short for the Windows path budget), declared before
 the run it adopts, so the run is dropped first and the guard then reclaims what the child left.
+
+## `mod tests` › `const REAPER_BOUND: Duration = Duration::from_secs(60);`
+
+How long a witness waits for a dead coordinator's reaper to finish its calls. The reaper notices
+the death within one of its 10-millisecond polls; the bound exists so a mutation that arms nothing
+fails the test instead of hanging it.
+
+## `mod tests` › `fn reaper_finished(`
+
+Polls the relay until the reaper's calls are a listing, a kill and a removal per expected
+container, and a final listing, or the bound passes.
+
+## `mod tests` › `fn reclaimed_by_its_reaper(reclaimed: &Reclaimed<'_>) {`
+
+One reaper reclaimed exactly the expected containers: its first and last calls are the scope's
+listing argv, one `kill` and one `rm --force --volumes` per container, nothing else; delivered
+to the fake, each was stopped and removed by the actor `reaper`, none is left, and no census
+listed the runtime after the death.
+
+## `mod tests` › `fn a_resume_killed_inside_its_pre_flight_probe(`
+
+A durable run, then a resuming incarnation in a child over the parent's fake — the frozen
+recovery order with a `RunPreflight` over a `ContainerRunner` — killed while its shell probe's
+container runs. The relay is installed on the fake the child is served by, so the child's
+runner arms over it with nothing passed in the environment.
+
+## `mod tests` › `fn a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it()`
+
+`R6-C2`: the incarnation's first container — a pre-flight probe inside the frozen `recover.rs` —
+is covered; its reaper reclaims it before any census.
+
+## `mod tests` › `fn the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe() {`
+
+`R7-D2`, two-process: the reaper's first listing carries exactly the probe's
+`upstroke.private_root` and `upstroke.incarnation` labels as the daemon recorded them, and a
+container of another incarnation under the same private root, running beside it, is neither
+listed nor killed.
+
+## `mod tests` › `fn stranded_child(parent: &crate::engine::topology::scaffold::ParentSide) {`
+
+A width-three coordinator over the parent's fake that reports its error return, drops every
+handle on its runner, reports that, and then waits for a file the parent writes before it exits
+of its own accord, so the parent can observe it alive past its last handle.
+
+## `mod tests` › `fn a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits()`
+
+`R6-C1`, end to end: the runtime cannot observe, stop or remove three running containers, so the
+coordinator returns its error with their registrations held; while the child lives past its last
+handle the relay has no call; when it exits, its reaper reclaims all three.
+
+## `mod tests` › `fn a_contained_run_with_its_reaper_relayed(`
+
+An in-process width-three run over a contained runner whose reaper's program is the relay, after
+the relay's self-check (`R6-D2`): the stub, run by its path, records its call where the test
+reads, so a reaper's calls in this process would be seen.
+
+The relay is written and its self-check run by isolated children of the test binary
+(`FakeRuntime::install_reaper_relay`, `FakeRuntime::run_reaper_relay`), each under a deadline,
+so these controls make no host launch of their own (`FUA-I4-RELAY`, PR #328's implementation
+review round 4): a host launch ends in a wait for its reaper's acknowledged exit that is
+unbounded by design, and made here one stopped reaper held the test, and the suite with it. The
+relay's other users in this module, `a_resume_killed_inside_its_pre_flight_probe` and the
+stranded-runner test, install it the same way.
+
+## `mod tests` › `fn a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three() {`
+
+`R6-D2`: a run that completes, its runner dropped: the relay holds only the self-check, and every
+container was released by its own runner. Ending the reaper by end-of-file rather than `CANCEL`
+(`fua-m10`) makes it list.
+
+## `mod tests` › `fn a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called() {`
+
+`R6-C1`'s control: the observation is lost, so the pipelines fail, but every container is
+established gone; the drop disarms and the relay is never called.
+
+## `mod tests` › `fn every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope() {`
+
+The design property, in-process, through a resume's pre-flight (`resume_over` with a
+`RunPreflight` over a container runner), `run_concurrently` at width three, and the width-1
+`step`: every container start was covered by an armed reaper whose scope selects its labels, and
+every container created was observed starting.
+

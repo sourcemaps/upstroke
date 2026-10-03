@@ -53,8 +53,8 @@ use crate::rundir::{
     UnboundShape, WorktreeLock,
 };
 use crate::runner::container::runtime::{
-    ContainerExecution, ContainerRuntime, CreateSpec, CreatedContainer, DiscoveredContainer,
-    ImageInspection, Liveness, LockProbe, RuntimeError, RuntimeOp, StopMode,
+    ContainerExecution, ContainerRuntime, CreatedContainer, DiscoveredContainer, ImageInspection,
+    Liveness, LockProbe, RuntimeError, RuntimeOp, StopMode,
 };
 use crate::runner::container::{GitView, GitViewRequest};
 use crate::runner::policy::{host_policy, runner_policy_sha256};
@@ -2492,11 +2492,14 @@ impl ContainerRuntime for UnreachableRuntime {
         Err(unreachable_for(RuntimeOp::Collect))
     }
 
-    fn create(&self, _: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        _: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Create))
     }
 
-    fn start(&self, _: &str) -> Result<(), RuntimeError> {
+    fn start(&self, _: crate::runner::container::CoveredStart<'_>) -> Result<(), RuntimeError> {
         Err(unreachable_for(RuntimeOp::Start))
     }
 
@@ -2556,11 +2559,14 @@ impl ContainerRuntime for RefusingRuntime {
         Err(unreachable_for(RuntimeOp::Collect))
     }
 
-    fn create(&self, _: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        _: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Create))
     }
 
-    fn start(&self, _: &str) -> Result<(), RuntimeError> {
+    fn start(&self, _: crate::runner::container::CoveredStart<'_>) -> Result<(), RuntimeError> {
         Err(unreachable_for(RuntimeOp::Start))
     }
 

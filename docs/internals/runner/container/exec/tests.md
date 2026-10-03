@@ -126,6 +126,35 @@ for the worktrees — rather than from string literals, so a layout change
 moves the fixture with it. A hand-built layout is a fixture that keeps
 passing after the thing it describes has moved.
 
+## `struct Layout {`
+
+The fixture's paths, from the root its scratch tree holds: what `Fixture::new` builds and what a
+bounded child builds for `Fixture::built_in_a_bounded_child`, derived once so the two cannot
+disagree about where anything is.
+
+## `impl Layout` › `fn build(&self) {`
+
+The fixture's tree on disk, in the order the fixture always built it: the repository and its two
+commits, the run's two halves, the public log and a private artifact, the container namespace,
+the three worktrees, the sibling's file. The repository and the worktrees are Git through the
+view fixture, which runs it through `HostRunner`: host launches.
+
+## `#[cfg(unix)]` › `fn fixture_tree_child() {`
+
+The isolated builder `Fixture::built_in_a_bounded_child` runs: `Layout::build` over the root its
+parent names. Ignored, so libtest never runs it in its own process.
+
+## `impl Fixture` › `fn built_in_a_bounded_child(tag: &str, exit_on_start: bool) -> Self {`
+
+`Fixture::new` with the tree built by `fixture_tree_child` under `run_test_isolated` and
+`FIXTURE_CHILD_BOUND`, the scratch tree acquired and kept here. It requires the child's success
+and libtest's `1 passed`. The six reaper tests this follow-up adds build their fixture this way
+(`FUA-I4-RELAY`, PR #328's implementation review round 4): the fixture's Git is ten host
+launches, each ending in a wait for its reaper's acknowledged exit that is unbounded by design,
+and made in the test's own process one stopped reaper held the test, and the suite, for as long
+as it stayed stopped. In the child it holds only the child, which the deadline kills. The suite's
+other users of `Fixture::new` predate this follow-up and are unchanged.
+
 ## `impl Fixture` › `fn confinement(&self) -> Confinement {`
 
 Everything this run withholds.
@@ -1186,8 +1215,12 @@ the type system cannot say on its own:
    "an intent was written" cannot stand in for "this container's intent
    was written".
 
-The third leg is a compile error and has no test: `start_container` has
-no parameter that names a container other than the proof.
+The third leg was a compile error with no test: `start_container` had no
+parameter that names a container other than the proof. Since
+`FUA-I2-MACRO-WS` it also takes the cover's start proof, which names one
+too; the two must agree, and
+`a_start_cover_starts_only_the_container_it_was_minted_for` holds that a
+disagreement is refused before the runtime is asked.
 
 ## `fn a_container_is_created_and_started_only_under_its_own_in…` › `let fixture = Fixture::new("intent-capability", false);`
 
@@ -1218,6 +1251,14 @@ record and not about `certify` never succeeding.
 
 The control: the same call with the matching proof creates, so the
 refusal above is about the name and not about the spec.
+
+## `fn a_start_cover_starts_only_the_container_it_was_minted_for() {`
+
+`FUA-I2-MACRO-WS`'s binding of the start proof: a container created under its own intent, then a
+start handed a proof minted for another worker's container — refused with `attempted: false`, the
+intent clause's message naming the other container, nothing reaching the runtime, the container
+still `Exited`; the proof minted for it then starts it. With the check removed (`r2-b1`) the
+runtime is asked to start the other name and the refusal is an attempted one.
 
 ## `fn a_launch_that_fails_at_any_step_releases_everything_it_reached() {`
 
@@ -1916,3 +1957,225 @@ cause.
 
 A call cancelled before it starts reaches nothing: no intent, no view, no container, an empty trace,
 and the report is `NeverStarted`.
+
+## `impl ContainerRuntime for Runtime` › `fn reaper_program(&self) -> PathBuf {`
+
+The scripted double delegates to its fake, so its runners arm their reapers over the fake's
+no-op program (or its relay) and never over a real `docker` (PR11 follow-up A).
+
+## `const UNARMED_LAUNCHERS: &[&str] = &["launch", "create_container", "start_container"];`
+
+The funnel entries that start a container without a cover: the free `launch` and the two
+funnels it and `ContainerRunner::launch` call. The runtime's own `create` and `start` are the
+primitives below them, read separately.
+
+## `fn macro_arguments(code: &str) -> Vec<(usize, usize)> {`
+
+The span of every macro invocation's argument in blanked code: an identifier immediately
+followed by `!`, then, after any whitespace, `(`, `[` or `{`, to its matching delimiter, every
+kind of bracket counted. `x != (y)` opens nothing — the `!` follows a space — and neither does
+`macro_rules! name {`, whose body is read as ordinary code: a launcher it names there is named
+by the ordinary rules. A macro invocation's argument is a token tree the macro can splice
+anywhere, which is why `namings` treats it apart (`FUA-I1-MACRO`).
+
+## `fn inside_a_macro_argument(spans: &[(usize, usize)], at: usize) -> bool {`
+
+Whether `at` falls strictly inside one of those spans — nested invocations included.
+
+## `fn namings(code: &str, name: &str) -> Vec<(Naming, usize)> {`
+
+Every naming of `name` in blanked code (`FUA-D1-DES-1`, made conservative by `FUA-I1-MACRO`).
+Inside a macro's argument every occurrence is a naming, `MacroArgument`, whatever precedes or
+follows it: the macro decides what the tokens become, so `uncovered_delegate!(launch: hooks, …)`
+expanding to `super::launch(hooks, …)` — the implementation review's mutation, which every check
+passed while the census skipped `launch:` as a field initializer — is named. Outside one, an
+occurrence that is its definition (`fn launch(`) or a method call or field access (`.launch`) is
+not a naming; every other is, classified as a call, a function value, an import, an alias, a
+re-export or a field. Inside a `use` declaration it is an import, an alias when `as` follows it, a
+re-export when the `use` is `pub` or `pub(…)`; elsewhere a call when `(` follows, a field when a
+single `:` does — a field's declaration or initializer, a struct pattern's field or a typed
+binding, none of which names the function outside a macro, but each is pinned rather than
+skipped, so no colon is passed over unread — and a value otherwise. Every alias, function value
+and re-export names the original identifier somewhere, so counting namings rather than calls
+closes the gap the design review found: `use super::launch as start_uncovered;` and a call of
+`start_uncovered(` passed the census as designed.
+
+What no reading of source text can see: an identifier a procedural macro builds from pieces, a
+path inside a string an attribute hands a derive (`#[serde(with = "…")]`; strings are blanked),
+and a file `include!`d from outside `src/**/*.rs`. That is why the compiler's refusal is the
+stronger guard where it can be had: the free `launch` is test-only (`mod uncovered` in
+`container.rs`), so no production build can name it at all, and `create_container` and
+`start_container` are `pub(in crate::runner::container)`, so outside the container module tree
+no spelling of either compiles. The census is the guard where the compiler cannot be: inside the
+module tree, and in test builds, where the free `launch` exists.
+
+**It is not the guard any more, and it never was a proof** (`FUA-I2-MACRO-WS`, implementation
+review round 2). This reader requires an identifier byte immediately before `!`; rustfmt keeps
+`delegate ! (plan.start_container, …)` as written inside a nested macro definition, the reader
+missed the invocation, passed `.start_container` over as a field access, and the expansion
+called `super::start_container` with no cover — every test green, the container running with no
+reaper. Round 1 had repaired the reader for one spelling and round 2 found the next; a reading of
+text has spellings it cannot see. Since round 2 every start primitive takes a proof only
+`Reaping::cover` mints (`exec.md`, `mod cover`), so a start with no cover is a compile error
+whatever spells it — that reviewer's mutation fails with `error[E0308]` and `error[E0061]` in
+production and test builds alike — and this census is a lexical backstop: it is not made to see
+`name ! (…)`, and nothing depends on it doing so.
+
+## `fn enclosing_fn(code: &str, at: usize) -> Option<String> {`
+
+The innermost `fn` whose body's braces contain `at`, read in blanked code, where every brace is
+code. A `fn(` pointer type has no name and is skipped.
+
+## `fn the_naming_reader_names_an_alias_a_function_value_and_a_re_export_of_an_unarmed_launcher() {`
+
+The reader over written snippets: an alias, two re-exports (`pub use … as`, `pub(crate) use`),
+an import, a function value, a call by bare name after a glob import, a call by path and a field
+initializer are named; a definition, a method call and a field access are not.
+
+## `fn the_naming_reader_names_a_launcher_inside_a_macro_argument_whatever_follows_it() {`
+
+`FUA-I1-MACRO`'s census witness, red on the census as reviewed at `17d7c605`, which read none of
+these occurrences: the implementation review's macro verbatim and its invocation
+`uncovered_delegate!(launch: hooks, runtime, view, plan)`, the same with braces and
+`start_container:`, a field access `plan.launch` inside `spliced![…]`, all named as macro
+arguments, and a struct field `launch: LaunchPlan` named as a field; `a != (b)` opens no macro.
+The primitives' reader over a second snippet names `start:` inside a macro argument and a field
+`start: usize`, and still passes over `OpenOptions::new().create(true)`.
+
+## `fn every_container_start_in_production_is_reached_only_through_a_covered_launch() {`
+
+The domination census (§1.4 of the follow-up's record), over every production region of
+`src/` (`effects::production_code`, skipping the whole-file test modules, as the fold census
+does), five checks:
+
+1. the namings of `create_container` and `start_container` are exactly `exec.rs`'s import and
+   its two calls inside `ContainerRunner::launch` — `container.rs`'s two calls inside the free
+   `launch` left the production region when it became test-only (`FUA-I1-MACRO`);
+2. the free `launch` has no production naming at all but the two `launch:` fields of `exec.rs`'s
+   `InvocationPlan`, its declaration and its initializer in `plan`, pinned as fields; any
+   occurrence inside a macro's argument is a naming, whatever follows it. The free `launch`
+   itself is test-only now, so in a production build a naming does not compile; this check is
+   the guard in test builds, where it exists;
+3. in every production module whose effective `clippy::disallowed_methods` level is `allow` —
+   stated in its header or inherited from a parent that states it, twenty-seven modules today —
+   where clippy therefore cannot refuse `ContainerRuntime::create` or `::start`, each call, path,
+   field or macro-argument occurrence of `create` or `start` is one of twenty-one pinned namings:
+   `runtime.create(` and `runtime.start(` inside the two funnels, and nineteen others none of
+   which is a container runtime's (`File::create(`, `Drain::start(`, `PrivateHooksDir::create(`,
+   the parameters `create:` and `start:`, `util::tail`'s local `start` inside `format!` and the
+   like); and `RuntimeOp::Create`/`RuntimeOp::Start` occur only inside the real runtime's own
+   `create` and `start`;
+4. in `exec.rs`, `fn launch(`'s signature names both proofs, `CoveredCreate<` and
+   `CoveredStart<`; `self.launch(` occurs once, in `contain`, after `contain`'s one `.cover(`;
+   `Covered {`, `CoveredCreate {` and `CoveredStart {` are each constructed once, in `cover`;
+   and the module `cover` declares no module of its own in production, since a child module
+   sees its private fields (`FUA-I2-MACRO-WS`);
+5. the control: the only region naming `start_container` is `exec.rs` (`container.rs` named it
+   only inside the free `launch`), and the walk read more than 40 files and 750,000
+   non-whitespace bytes.
+
+Since review round 2 it also holds the type-level guarantee's shape, so the guarantee cannot be
+taken away in silence: `create_container`, `start_container` and `ContainerRuntime`'s `create`
+and `start` each name their proof in their signature, and no production region names
+`without_a_reaper`, the test-only mint — in a test build it exists, and the reviewer's macro
+handed that mint compiles there (`r2-c4`; a production build refuses it, `r2-p3`). These, too,
+read text; what they guard is that the types keep doing the work.
+
+In every other production module the lint is denied or forbidden outside tests, so a path to the
+primitives there — a call or a function value — is a clippy error, measured in a forbidding module
+(`fua-p1-clippy-refuses-a-function-value-of-the-start-primitive`); and a call planted in a module
+that allows the lint, where clippy says nothing, fails check 3 (`fua-c8`).
+
+## `fn reaper_spec(private_root: &Path, incarnation: &str) -> CreateSpec {`
+
+A spec carrying the two labels a reaper's scope lists by, as `ContainerIntent::labels` writes
+them: `Reaping::cover` takes the spec it validates, since the create proof it mints carries it.
+
+## `fn armed_for(private_root: &Path, incarnation: &str) -> bool {`
+
+Whether a container reaper this process armed, and has not cancelled, lists that scope.
+
+## `fn a_scope_that_does_not_select_its_containers_labels_is_refused_with_no_reaper_armed() {`
+
+`FUA-D1-DES-2`: an unarmed runner's cover is handed another incarnation's labels and refuses —
+and no reaper exists for either scope, in the runner's own state or the process's observation.
+The control arms on its own labels, and its established end disarms at the drop. With the
+comparison moved after the arming (`fua-m14`) a reaper is armed before the refusal.
+
+## `fn a_container_whose_labels_differ_from_the_armed_scope_is_refused_before_its_intent() {`
+
+`R7-D2`'s per-launch half: a runner whose reaper was armed for another incarnation — as a
+caller-built reaper was in round R6 — refuses its own container before its intent is written:
+`NeverStarted`, no intent, nothing created, and no second reaper.
+
+## `fn a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop() {`
+
+`R6-C1` at the runner: the runtime cannot observe, stop or remove the container, so the
+invocation ends `Unresolved`, and the reaper is still armed after the runner is dropped.
+
+## `fn a_runner_whose_containers_all_ended_disarms_its_reaper_at_its_drop() {`
+
+The control: one invocation completes, one ends `Gone` with its observation lost; the drop
+disarms.
+
+## `fn a_panic_inside_contain_leaves_the_reaper_armed() {`
+
+An observer panics after the start; the cover is dropped by the unwinding without a settle, and
+the reaper is still armed after the runner's drop (`fua-m7`).
+
+## `const REAPER_TESTS: &[(&str, &[&str])] = &[`
+
+The functions of this follow-up's reaper tests, by file. `no_reaper_test_reads_a_hold_as_released_once`
+reads each, so a renamed one fails the census rather than leaving it.
+
+## `fn negated_hold_reads_outside_a_bounded_wait(body: &str) -> Vec<String> {`
+
+Every `!…observe_cleanup_hold(` or `!…is_running(` not inside a `loop` or `while` whose block
+mentions a `deadline` or an `elapsed()`.
+
+## `fn no_reaper_test_reads_a_hold_as_released_once() {`
+
+Requirement 8 of `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED` (round R6's CI flake): a sibling
+test thread's fork holds an inherited cleanup-lease descriptor for a moment
+(`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), so a "not held" read must poll
+within a bound. A positive read is safe and is not refused: a fork can make a released lease
+look held, never a held one look released. `fua-m12` adds one one-shot read to the lease test's
+child and turns this census red.
+
+## `fn primitive_namings(code: &str, name: &str) -> Vec<(String, usize)> {`
+
+The namings of a primitive's name that could reach it: a call by any receiver, a path, a naming
+inside a `use`, a field or typed binding (`start:`), and every occurrence inside a macro's
+argument, whatever surrounds it (`FUA-I1-MACRO`: a macro can splice `start` after any receiver);
+outside a macro, not a definition, a module path segment (`create::`), or a local variable used
+as a value — a trait method is reachable there only by a call or a path. A call whose only
+argument is a `bool` literal is skipped outside a macro: neither
+`ContainerRuntime::create(&CreateSpec)` nor `::start(&str)` takes one, and
+`OpenOptions::create(true)` is the common case. Each is spelled with its receiver or path segment
+and the character after it, and `in a macro argument` after that when it is one, so the pinned
+list is readable.
+
+## `fn stated_disallowed_methods(source: &str) -> Option<bool> {`
+
+A module's own statement of `clippy::disallowed_methods` in production: its leading inner
+attributes, comments blanked, read in order. An `allow` that holds outside tests — unconditional,
+under `cfg_attr(not(test), …)`, or under any other `cfg_attr` predicate, conservatively — makes the
+module unguarded; a `deny`, `forbid` or `warn` that holds in production guards it; `cfg_attr(test,
+…)` is ignored; nothing stated is `None`.
+
+## `fn parent_module(src: &Path, module: &Path) -> Option<PathBuf> {`
+
+The file of a module's parent, by the path: `a/b/c.rs` and `a/b/c/mod.rs` are children of `a/b.rs`
+or `a/b/mod.rs`, a top-level module is a child of `lib.rs`, and the crate roots have none. A parent
+that is neither file fails the census rather than being guessed.
+
+## `fn clippy_refuses_the_primitives_in(src: &Path, file: &Path) -> bool {`
+
+The nearest stated level up the parents; with none stated anywhere, the lint's default `warn`,
+which the gates' `-D warnings` makes an error.
+
+## `fn the_lint_level_walk_reads_a_stated_or_inherited_allowance_and_a_production_forbid() {`
+
+The walk over a written tree: a stated allowance, a silent child that inherits it, a production
+forbid beneath it, and an allowance that holds in tests alone.
+

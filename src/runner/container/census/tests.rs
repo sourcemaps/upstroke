@@ -265,14 +265,17 @@ impl ContainerRuntime for WedgedRuntime {
     }
     fn create(
         &self,
-        _spec: &crate::runner::container::runtime::CreateSpec,
+        _covered: crate::runner::container::CoveredCreate<'_>,
     ) -> Result<
         crate::runner::container::runtime::CreatedContainer,
         crate::runner::container::runtime::RuntimeError,
     > {
         unreachable!("a census creates nothing")
     }
-    fn start(&self, _name: &str) -> Result<(), crate::runner::container::runtime::RuntimeError> {
+    fn start(
+        &self,
+        _covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), crate::runner::container::runtime::RuntimeError> {
         unreachable!("a census starts nothing")
     }
     fn stop(

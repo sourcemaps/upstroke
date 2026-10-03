@@ -907,16 +907,26 @@ filters cost nothing.
 This type is a **value**, deliberately: the reaper is a `fork`-only child in
 a multithreaded process and may call nothing that allocates, so every string
 it will ever need is rendered here, on the parent side, before the fork.
-[`crate::agent::proc::set_container_reclaim_scope`] is where it is handed
-over.
+It is handed over by value, to [`crate::agent::proc::arm_container_reaper`],
+by the container runner's cover (`exec::Reaping::cover`); the process-wide
+[`crate::agent::proc::set_container_reclaim_scope`], which host reapers read,
+has only test callers.
 
-**What a later slice must connect.** Nothing registers a scope in this
-slice: `production_effect` is "none" and no run selects a container Runner
-until PR12. PR7's `TopologyRun` registers it once run identity exists — the
-private root from `run_started.private_dir` and the incarnation from
-`run_started(4)`/`run_resumed(4)` — and must ensure a supervisor is live
-across a container invocation, or the window is closed only by the next
-write command's census.
+**What was connected, and where** (PR11 follow-up A, which repairs
+`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`). This paragraph used to say PR7's
+`TopologyRun` would register a scope once run identity exists and must keep a
+supervisor live across every container invocation; rounds R5 to R7 of PR11
+tried that at an incarnation's entries and each review found a container
+launch before the arming point. The scope is now built and armed **inside the
+launch funnel**: `ContainerRunner::contain` covers each invocation before
+`launch`, the first cover arms the runner's reaper with a scope built from the
+runner's own `RunIdentity` (the private root and incarnation every container
+it starts is labeled with), and the reaper stays armed until every container
+that runner started is established gone, or until the process exits. Nothing
+in `engine::topology` registers anything. What PR12 still connects is the
+runner itself: building one `ContainerRunner` per incarnation from the run's
+record — its recorded private root and this incarnation — and using it for the
+incarnation's every container invocation.
 
 ## `impl ReaperContainerScope` › `pub fn new(`
 
@@ -929,6 +939,15 @@ label value carries a byte that would end the argument or start another
 filter — a newline, a comma, or an `=`. The reaper cannot report a
 malformed selector: it has no error channel and no allocator, so the
 check is here.
+
+## `impl ReaperContainerScope` › `pub fn selects(&self, labels: &BTreeMap<String, String>) -> bool {`
+
+Whether a container labeled `labels` is one this scope's listing would find: its
+`upstroke.private_root` and `upstroke.incarnation` values are exactly the two filter values
+`list_argv` renders. The container runner's cover asks it of every container before its
+intent, and of the scope it is about to arm before it forks anything (`exec::Reaping::cover`,
+`R7-D2` and `FUA-D1-DES-2`), so no reaper is armed over a scope that would not list what it
+must kill.
 
 ## `impl ReaperContainerScope` › `pub fn program(&self) -> &Path {`
 
