@@ -457,9 +457,30 @@ census cannot account for.
 [`UpstrokeError::Io`] on any filesystem failure, [`UpstrokeError::Git`] when the
 record will not serialize.
 
-## `pub fn create_container(`
+## `pub(in crate::runner::container) fn create_container(`
 
 `Container.Create` (R26) — create the container **from an image id**.
+
+**Nameable only inside the container module tree** (`FUA-I1-MACRO`), as is `start_container`.
+Their one production caller is `exec.rs`'s `ContainerRunner::launch`, the covered one; the free
+`launch` that also calls them is test-only (`mod uncovered`), and every other caller is a test of
+this tree. A `pub` funnel let any module of the crate start a container no reaper covers, guarded
+only by the domination census's reading of source text, which a macro argument evaded. With this
+visibility the compiler refuses a naming from anywhere else however it is spelled — an alias, a
+re-export, a function value, a macro's expansion — and the census
+(`every_container_start_in_production_is_reached_only_through_a_covered_launch`) is the guard
+inside the tree. Private (`fn`) would say the same to the compiler, but the effects census
+classifies by the visibility a fn declares, and these two are funnels reached from another file.
+
+**Inside the tree too, since implementation review round 2 (`FUA-I2-MACRO-WS`), it takes a
+proof.** `delegate ! (plan.start_container, …)` — whitespace before the `!` — hid a call of
+this tree's own funnel from the census, which reads text. Each funnel now takes by value the
+proof only `exec`'s `Reaping::cover` mints (`exec::CoveredCreate` here, `exec::CoveredStart`
+for the start), and passes it on to the runtime, whose `create` and `start` take it too; so a
+call with no cover does not compile in any module, however it is spelled, and the census is a
+backstop (`exec.md`, `mod cover`). **The create is made from the proof's spec**, the one the
+cover validated against the reaper's scope; there is no `spec` parameter left to pass a
+different container through.
 
 INV-23: "every container of every epoch is created from the recorded image
 id". [`CreateSpec`] carries no reference at all, so creating from one is not
@@ -499,7 +520,7 @@ runtime did not say" is not "the volume is there".
 ### Errors
 
 [`UpstrokeError::Refused`] when `site` does not name this operation, when
-`intent` does not name `spec.name`, when a named volume the spec mounts is
+`intent` does not name the covered spec's name, when a named volume the spec mounts is
 absent or cannot be inspected, or when the runtime refuses.
 
 ## `fn expect_mounted_volumes_present(`
@@ -520,10 +541,11 @@ instead of consuming the outage deferral (`PR8-R4-START-NOT-ATTEMPTED`).
 The flag comes from [`funnel_reporting_attempt`], which is the only thing
 that knows on which side of the primitive the failure happened.
 
-## `pub fn start_container(`
+## `pub(in crate::runner::container) fn start_container(`
 
 `Container.Start` (R26). Its failure says whether the start was attempted
-([`StartFailure`]), because the launch's fate turns on exactly that.
+([`StartFailure`]), because the launch's fate turns on exactly that. Nameable only inside the
+container module tree, for `create_container`'s reason.
 
 **The container to start is named by the proof and by nothing else.**
 `expected_failures_refusals[6]` is "container start without an intent is
@@ -531,6 +553,11 @@ impossible by construction"; with a `&ContainerName` parameter that
 sentence was true only of the sequences somebody had happened to write, and
 a `start_existing(name)` added later compiled. With [`IntentWritten`] there
 is no argument to pass that is not evidence.
+
+Since implementation review round 2 it also takes the cover's start proof (`FUA-I2-MACRO-WS`),
+which names the container its cover validated; an intent for any other name is refused before
+the runtime is asked (`attempted: false`), with the intent clause's own message, and the
+runtime starts `covered.name()`.
 
 ### Errors
 
@@ -637,9 +664,35 @@ A container that is running, and what it took to get there.
 
 The id the runtime reported, already verified equal to the record.
 
-## `pub fn launch(`
+## `mod uncovered {`
 
-The ordering `side_effect_vs_event_ordering` states, in one place.
+The free `launch` and the two helpers only it uses (`cancel_created`, `render_residue`), compiled
+in tests alone since PR11 follow-up A's implementation review (`FUA-I1-MACRO`). The free `launch`
+starts a container with no reaper covering it, and no production path called it: every production
+container start is `ContainerRunner::launch`'s, which `contain` calls only after its cover armed
+the runner's reaper. While it was `pub` in production, any module could reach it — the review's
+`uncovered_delegate!(launch: hooks, …)` in `exec.rs` did, through a macro the domination census
+could not read — and nothing but that census stood in the way. Out of the production build, no
+spelling of it compiles there at all; the census keeps reading test builds, where it exists.
+`#[cfg(test)] pub use uncovered::launch;` keeps the path `crate::runner::container::launch` that
+the tests name — the frozen `engine/topology/recover/tests.rs` among them — so none of them
+changed. The module sits before `mod fake;`, so the file's first test-only cut is a module, as
+`effects::production_region` requires; its `funnel` row in `effects/wrappers.toml` went with it.
+
+## `mod uncovered` › `pub fn launch(`
+
+The ordering `side_effect_vs_event_ordering` states, in one place. Test-only (`mod uncovered`
+above): production's launch is `ContainerRunner::launch`, which keeps this order and adds the
+cover. It mints its funnels' proofs with the test-only `without_a_reaper`
+(`FUA-I2-MACRO-WS`), so its signature, and every test that calls it, the frozen
+`recover/tests.rs` among them, is unchanged.
+
+## `pub(crate) use exec::cover::{CoveredCreate, CoveredStart};`
+
+Test-only: the cover's proofs named crate-wide, so the runtime doubles outside this tree
+(`engine::topology::{create, prelock, startup}::tests`) can implement `ContainerRuntime`'s
+`create` and `start`, and tests can call `without_a_reaper`. A production build has neither
+the re-export nor the constructor.
 
 > intent synced before docker create; container created from the recorded id
 > and verified before start; view mounted before start
@@ -699,7 +752,7 @@ released is named in the refusal rather than swallowed.
 [`UpstrokeError::Refused`] when the reported image id differs from the record,
 or whatever a step returns.
 
-## `fn cancel_created(`
+## `mod uncovered` › `fn cancel_created(`
 
 Release everything a refused launch created, **attempting every step even
 after one fails**, and answer what could not be released.
@@ -811,7 +864,7 @@ This is the fail-**closed** direction. Removing the record is the fail-open
 one, and it reads as the tidier cleanup right up until an operator has to
 find the directory by hand.
 
-## `fn render_residue(residue: &[String]) -> String {`
+## `mod uncovered` › `fn render_residue(residue: &[String]) -> String {`
 
 What a cancel could not release, appended to the refusal that caused it.
 
@@ -924,8 +977,16 @@ census can report the window it is closing rather than infer it.
 
 ## `pub enum OrphanWindow` › `ClosedByTheUnixReaper,`
 
-`cfg(unix)`: the per-invocation cleanup reaper outlives the coordinator
-and kills its labeled containers.
+`cfg(unix)`: the cleanup reaper outlives the coordinator and kills its
+labeled containers. For a container invocation that reaper is the container
+runner's own (`exec::Reaping`, PR11 follow-up A): armed at the runner's first
+launch, before that launch's first effect, and kept until every container the
+runner started is established gone or the process exits, so a coordinator
+killed while its containers run leaves a reaper that kills and removes them
+before any census. One limit is inherited: the reaper's `docker` calls wait
+for an uncollectable CLI with no deadline after `SIGKILL`
+(`PR328-REAPER-DOCKER-WAIT-HAS-NO-DEADLINE-AFTER-SIGKILL`), and for that case
+the window reopens until the next write command's census.
 
 ## `pub enum OrphanWindow` › `UntilNextWriteCommandStart,`
 
@@ -1437,7 +1498,7 @@ Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
 (measured, docker 29.7.2) — see [`Self::exec_streams`].
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push("--read-only".to_owned());`
 
 `expected_failures_refusals[5]`. Measured against `docker`
 29.7.2: without it `sh -c 'printf owned >/outside-role-mount'`
@@ -1446,11 +1507,16 @@ so a gate's write outside every declared mount succeeds and only
 the weaker "the host is unharmed" holds. With it the same command
 answers `Read-only file system` and exits non-zero.
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `args.push(spec.image_id.clone());`
 
 The **image id**, never a reference (INV-23).
 
-## `fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {` › `let reported = self`
+`spec` is `covered.spec()`: the runtime creates the container the cover validated
+(`FUA-I2-MACRO-WS`). `DockerCli` is where a start is implemented rather than called, so the
+proof governs every call of this method, and the domination census pins every
+`RuntimeOp::Create` to it and every `RuntimeOp::Start` to `start`.
+
+## `fn create(&self, covered: exec::CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {` › `let reported = self`
 
 The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
@@ -1679,3 +1745,37 @@ census — including `exec::tests::the_container_subtree_can_only_inspect_a_volu
 which is the census that keeps production able to *inspect* a volume and
 nothing else. A test fixture is not a production capability, and this is
 where the tree draws that line.
+
+## `pub(crate) use fake::{` › `LinkedRuntime, NO_OP_REAPER_PROGRAM, RecordingHooks, Start, StartPolicy, container_name_for,`
+
+`NO_OP_REAPER_PROGRAM` is re-exported for the test doubles outside this subtree that back a
+`ContainerRunner` and must say what their runner's reaper would run (`create/tests.rs`'s
+`Inventory`): a double that kept the trait's default would arm a reaper over the real
+`docker` CLI wherever one is on `PATH`, and be refused at its first launch where none is.
+
+## `pub(crate) fn write_program_in_its_own_process(path: &Path, script: &str) {`
+
+Test-only: writes `script` to `path` through `/bin/sh` in a process of its own (the process
+funnel's `run_with_timeout`, bounded at a minute), then makes it executable by path, which
+opens nothing. A write-then-exec fixture written through this test process's own descriptor
+can be inherited by another harness thread's fork, and an `execve` of it then fails `ETXTBSY`
+for as long as that fork holds it (`R6-D3`; `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY`'s
+mechanism, which #162 repaired for the host shims the same way); a reaper that cannot exec
+its `docker` lists and kills nothing. It lives here rather than in `fake.rs` because the fake
+forbids `std::process::Command`, and this file's allowance is module-wide.
+`runner::host::tests::inherited_writer::the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`
+holds it with the host suites' FIFO oracle.
+
+Its callers are isolated children only: `fake.rs`'s `reaper_relay_install_child` and the host
+suites' `reaper_relay_writer_helper`, each started by `run_test_isolated` under a deadline. The
+funnel's end waits for its reaper's acknowledged exit without a bound, by design, so a call from
+a test's own process can hold the suite for as long as that reaper is stopped (`FUA-I4-RELAY`,
+PR #328's implementation review round 4).
+
+## `pub(crate) fn run_program_in_its_own_process(program: &Path, args: &[&str]) -> Option<i32> {`
+
+Test-only: runs a program by its path through the process funnel and returns its exit code.
+Its one caller is `fake.rs`'s `reaper_relay_run_child`, the isolated child through which the
+coordinator's reaper controls make their relay self-check (`R6-D2`); a call from a test's own
+process would make the funnel's unbounded end there (`FUA-I4-RELAY`).
+

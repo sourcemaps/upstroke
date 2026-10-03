@@ -960,7 +960,10 @@ acknowledge is; `ReaperEnding` is where both are written down.
 
 The pause between the polls inside `HELPER_END_BUDGET`. It is the
 latency of the ordinary ending, not the budget: a helper that ends when
-it is signalled is collectable within one of these.
+it is signalled is collectable within one of these. How the pause is
+taken is the ending helper's `EndingRest` (below): a container reaper's
+rest is one `nanosleep`, so an interrupted pause comes back to the
+deadline check.
 
 ## `mod termination` › `const STILL_THERE_AT_THE_BUDGET: libc::pid_t = 0;`
 
@@ -1015,6 +1018,17 @@ New launches wait outside the lock for the complete transition.
 Keep one parent-side reader open so a guard crash turns the next arm
 into an acknowledgement EOF instead of delivering SIGPIPE from an
 async signal handler that writes the command pipe.
+
+## `struct Reaper` › `rest: EndingRest,`
+
+How this reaper's bounded endings pause between their polls, fixed where it is forked
+(`fork_reaper`'s third argument) and read by every ending: `abandon`, and the bounded arms of
+`close_and_wait_reporting` — `UnacknowledgedCleanup`, `AbandonedHelper` and `UnleasedExit`.
+`spawn_reaper` forks host reapers `Resuming`, as every reaper was before `FUA-I2-EINTR`;
+`arm_container_reaper` forks container reapers `SingleAttempt`. A property of the reaper and not
+of the call, so the abandonment an arming failure takes rests as the exit wait after its CANCEL
+does, and no host path's pause changed.
+`a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before` pins both.
 
 ## `struct Reaper` › `identity: libc::c_int,`
 
@@ -1197,11 +1211,14 @@ reaper's exit is what releases the cleanup lease the caller is about to
 act on, so a budget here would release that caller while the lease was
 still held, which is a worse defect than the one the other arm fixes.
 Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` carves it out in
-those words. The other two variants take the bounded arm,
+those words. The other variants take the bounded arm,
 `wait_for_an_ended_helper` and with the identity path on
 `wait_for_an_ended_helper_through_identity`: `UnacknowledgedCleanup`,
 which `cleanup` passes when its transaction answered anything but
-`REAPER_OK`, and `AbandonedHelper`, which only `abandon` passes.
+`REAPER_OK`, `AbandonedHelper`, which only `abandon` passes, and
+`UnleasedExit`, which only `cancel_unleased` passes — the container
+reaper's acknowledged CANCEL, whose bounded wait is followed by a
+`SIGKILL` and a second bounded wait (`ReaperEnding` below).
 
 **The carve-out is the acknowledgement, not the operation.** Until the
 second round of review `cleanup` called `close_and_wait` whatever its
@@ -1268,6 +1285,31 @@ helper that will not die does not become collectable however long the
 wait is, so the unbounded form buys a wedged parent beside the wedged
 child rather than a released lease.
 
+## `enum ReaperEnding` › `UnleasedExit,`
+
+The container reaper's acknowledged CANCEL (`cancel_unleased`), PR11 follow-up A's
+`FUA-D1-CONC-1`. It acknowledged, so it is exiting, and it holds **no** cleanup lease
+(`arm_container_reaper` forks it with none), so nothing downstream depends on its exit:
+the reason `AcknowledgedExit` is unbounded does not apply. Its wait is
+`wait_for_an_ended_helper` (or, with the identity path on,
+`wait_for_an_ended_helper_through_identity`) within `HELPER_END_BUDGET`; a reaper still
+there is sent `SIGKILL` — after acknowledging CANCEL its only remaining step is its own
+`_exit`, so killing it loses nothing — and waited for once more within the same budget,
+through the identity when there is one (`end_helper_through_identity`, which closes the
+descriptor itself, so this arm returns before the shared `close_fd`). One still not
+collectable is left for the process's exit. The concurrency lens's sequence — the reaper
+writes `REAPER_OK`, is stopped before `_exit`, and the coordinator's drop then waits on it
+forever — ends here within two budgets:
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller`.
+
+**The two budgets hold only if the polls between them come back** (`FUA-I2-EINTR`). Both
+waits pause through the reaper's `EndingRest`; with `thread::sleep` there, a stream of
+interrupted rests kept the first wait from ever reaching its deadline — measured by the
+implementation review's seccomp witness at 8 s on both the number and the pidfd paths, against
+2 s uninterrupted. A container reaper rests once, so an interruption returns to the deadline
+check:
+`a_container_reaper_stopped_after_acknowledging_its_cancel_ends_its_caller_with_every_rest_refused`.
+
 ## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut leases = crate::rundir::active_cleanup_lease_paths();`
 
 The leases the reaper holds are the union of the spawning thread's scope and what
@@ -1277,7 +1319,7 @@ per lease, not two; a pipeline thread outside every scope takes the carried ones
 a caller with neither takes none, as before. Rendered before the fork, with the
 rest, because the reaper may not allocate.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
+## `fn fork_reaper(` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
 A helper that ends before it writes READY, so the failure path is
 driven with no clock in it at all: the parent's wait ends on the
@@ -1293,14 +1335,30 @@ same exit status afterwards, which is how the defect was found
 (`a_helper_that_never_acknowledged_reports_what_ending_it_answered`
 took ~4 s on macOS against ~6 ms on Linux in run 33987067020).
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let containers = container_scope_for_a_new_reaper();`
+## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `fork_reaper(leases, container_scope_for_a_new_reaper())`
 
-Rendered BEFORE the fork, like `cleanup_paths` above and for the same
-reason: the reaper may not allocate. `None` is the ordinary state of
-every run today — nothing selects a container Runner until PR12 — and
-costs the reaper nothing at all.
+A host reaper's container scope is the process-wide one, rendered BEFORE the fork, like
+`cleanup_paths` and for the same reason: the reaper may not allocate. `None` is the
+ordinary state of every run — `set_container_reclaim_scope`'s callers are tests — and
+costs the reaper nothing at all. A container runner's reaper does not read it:
+`arm_container_reaper` renders the scope it is handed and passes it to `fork_reaper`
+itself, so two runners in one process never share a scope.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let (pid, identity) = match fork_helper() {`
+## `mod termination` › `fn fork_reaper(`
+
+The fork every reaper is made by, split out of `spawn_reaper` by PR11 follow-up A so a
+host reaper and a container reaper share it: the descriptor ceiling, the two pipes, the
+fork (or `clone3` with the identity path on), the child's dispositions, group, descriptor
+scrub, lease holds and READY, and the parent's bounded READY wait, all unchanged. What
+differs is only what the caller hands in: `spawn_reaper` passes the run's lease paths
+(the thread's scope merged with the carried ones) and the process-wide container scope,
+after `verify_group_scanner`; `arm_container_reaper` passes no lease and its own scope,
+and skips the scanner check, because a container reaper registers no process group and
+never consults it. The third argument is the reaper's `EndingRest` (`FUA-I2-EINTR`):
+`Resuming` from `spawn_reaper`, `SingleAttempt` from `arm_container_reaper`, kept on the
+`Reaper` for every ending it later takes — a READY failure's `abandon` here included.
+
+## `fn fork_reaper(` › `let (pid, identity) = match fork_helper() {`
 
 The fork, and with the identity path on the name that comes with it.
 `fork_helper` answers `Err` only where no child exists — a `fork` that
@@ -1312,7 +1370,7 @@ takes the `pid == 0` arm below with `identity == NO_HELPER_IDENTITY`
 whichever way it was created, and the arm is master's. `spawn_guard`
 makes the same call and takes the same shape.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
+## `fn fork_reaper(` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
 
 A separate process group is the crucial boundary: an
 uncatchable kill of Upstroke's foreground job must not also kill
@@ -1342,12 +1400,12 @@ to be left behind, and the launch fails at the READY wait. The
 child-side call remains checked, and its failure is reported by step
 and errno.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let mut delay_left = ready_delay_ms;`
+## `fn fork_reaper(` › `let mut delay_left = ready_delay_ms;`
 
 Test subprocesses can hold READY back past the parent's deadline
 so the late-reaper path is driven deterministically.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
+## `fn fork_reaper(` › `let how = describe_ready_wait("reaper", wait, &cleanup_paths);`
 
 How the wait ended, in the message: the helper's own report of the
 step that refused, the pipe closing with no report, the budget
@@ -1356,7 +1414,7 @@ report is decoded with the lease paths this launch rendered before
 the fork, so the lease a refused `open` or `flock` names is the path,
 not a position.
 
-## `fn spawn_reaper(carried: &[PathBuf]) -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
+## `fn fork_reaper(` › `let end = describe_helper_end(reaper.abandon());`
 
 With the identity path off the teardown is master's, unchanged and in
 master's order; what it answered becomes the diagnostic. Nothing is
@@ -1692,7 +1750,7 @@ it can name, and a helper it cannot name is not what it asked for.
 drive the first and the last, and both were witnessed against a
 fallback to `fork`, which started a helper by number.
 
-## `mod termination` › `fn end_helper_through_identity(identity: libc::c_int) -> HelperEnd {`
+## `mod termination` › `fn end_helper_through_identity(identity: libc::c_int, rest: EndingRest) -> HelperEnd {`
 
 The whole of a teardown through the identity: `pidfd_send_signal` with
 `SIGKILL`, and where it answered `0`,
@@ -1958,6 +2016,33 @@ this bound and not that one: the `abort-setup` shape of
 exited `124`, its waiting thread parked in the kernel's `do_wait` with
 the stand-in alive.
 
+## `mod termination` › `enum EndingRest {`
+
+How a bounded ending pauses between two polls of a helper that is not yet collectable
+(`FUA-I2-EINTR`, PR #328's implementation review round 2). `Resuming` is `thread::sleep`,
+which makes an interrupted sleep again inside itself for what it had left, and a refused one
+again for all of it: a stream of `EINTR` — a seccomp policy refusing `clock_nanosleep`, in the
+reviewer's witness — keeps it from returning, and the loop around it never comes back to its
+deadline. The concurrency lens held `UnleasedExit`'s exit wait that way on both the number and
+the pidfd paths until its watchdog killed the caller at 8 s, against the two two-second budgets
+`FUA-D1-CONC-1` promised. `SingleAttempt` is `rest_once`: one rest, which an interruption ends
+early and nothing makes again, so the loop goes back to its deadline check and returns on time.
+Both are kept because the pause is chosen by the helper's kind: the host reapers' endings and
+the guards' keep `Resuming`, unchanged; container reapers, this follow-up's, rest once.
+
+## `mod termination` › `fn rest_between_polls(rest: EndingRest) {`
+
+The pause the two bounded polls take between answers of *not yet*: `HELPER_END_POLL_SLICE`,
+taken the way `rest` says.
+
+## `mod termination` › `fn rest_once(span: Duration) {`
+
+One `nanosleep` of `span` with a null remainder pointer, whatever it answers. A signal that
+interrupts it, or a policy that refuses it, ends the rest early; the caller's loop and the
+bound it keeps decide what happens next. The same shape as `workspace_manager::fixture::rest`
+(`PR320-R5-MAIN-006`), here in production code. This follow-up's own test harness rests the
+same way (`run_isolated`, `waited_within` and the children below).
+
 ## `mod termination` › `fn end_unready_guard(`
 
 The teardown of a guard that never became the supervisor's, and the
@@ -2020,6 +2105,13 @@ back as `STILL_THERE_AT_THE_BUDGET` and is never resolved into `pid`;
 the status is `None` beside it, because a wait that collected nothing
 filled none.
 
+**A third axis, since `FUA-I2-EINTR`: the pause between the polls.** The
+deadline is checked between polls, so it holds only if the pause between
+them returns; with `thread::sleep` a stream of interruptions kept the pause
+from returning at all. The caller passes its `EndingRest`: `Resuming` for
+`end_unready_guard`'s sites and the host reapers' endings, as before;
+`SingleAttempt` for a container reaper's.
+
 ## `mod termination` › `fn poll_for_an_ended_helper(`
 
 `wait_for_an_ended_helper`'s loop, over whatever each `ask` answered,
@@ -2055,7 +2147,8 @@ caller zeroed still zero, which is the form POSIX documents for a
 `ending_a_helper_that_will_not_die_helper`'s `identity` shape drives it
 against a stand-in whose signal is answered successfully and delivered
 to nothing, and was witnessed against the `WNOHANG` removed: `timeout
-30s`, exit `124`. Its descriptor comes from `pidfd_open` rather than
+30s`, exit `124`. Its pause is the caller's `EndingRest`, as
+`poll_for_an_ended_helper`'s is. Its descriptor comes from `pidfd_open` rather than
 `clone3`, because `end_helper_through_identity` routes on the
 descriptor alone and needs neither the syscall nor the opt-in switch to
 be reached.
@@ -2327,6 +2420,66 @@ this machine can ever start again".
 Arm or disarm the container scope. See
 [`super::set_container_reclaim_scope`].
 
+
+## `mod termination` › `pub struct ContainerReaper {`
+
+A container runner's reaper (PR11 follow-up A; `PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`).
+`runner::container::exec`'s `Reaping` arms one per runner at the first container launch
+and holds it; it is re-exported from `agent::proc` under `cfg(unix)` beside
+`arm_container_reaper`. Windows has none (ST-16 (e)). The `Option` is only so `Drop` can
+take the handle: a `ContainerReaper` without one is never built in production.
+
+## `mod termination` › `pub fn arm_container_reaper(`
+
+Takes `ProcessSite::Terminate` by value and refuses any other site, as `Supervisor::begin`
+does. Then, in this order:
+
+- **The scope is rendered before anything else** (`render_container_argv`): a program that
+  cannot be resolved to a path, or a value with an interior NUL, refuses here, before the
+  monitor or the fork.
+- **`shared_state()?` installs the signal monitor** (`R6-D1`). A process whose every
+  invocation runs in a container never reaches `Supervisor::begin`, so without this the
+  fail-closed termination a missed CANCEL acknowledgement arms (`cancel_unleased`) would
+  set `PENDING_TERMINATION` with nothing reading it.
+- **One reaper is forked through `fork_reaper` with no cleanup lease** and the rendered
+  scope. No lease, by construction, for the reasons the follow-up's record gives (§1.3):
+  a held R28 would refuse the in-process resume the frozen
+  `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`
+  requires, the census reclaims the same containers and the two converge, and "disarming
+  never leaves R28 held" becomes structural. No launch claim and no `REGISTER` either: the
+  reaper's `pgid` stays 0, so it never settles a group and never forks an anchor; when its
+  parent dies it runs only `reclaim_labeled_containers` over its scope.
+- **It rests once** (`EndingRest::SingleAttempt`, `FUA-I2-EINTR`): its exit wait after CANCEL
+  and the abandonment a READY failure takes pause with one `nanosleep` between polls, so their
+  deadlines hold under a stream of interruptions.
+
+The test build records each armed reaper's scope (`ARMED_CONTAINER_REAPERS`, below) so the
+fake runtime can say, at each container start, whether an armed reaper selects it.
+
+## `mod termination` › `impl Drop for ContainerReaper {`
+
+The disarm: `cancel_unleased`. `Reaping` drops its reaper only when every launch it covered
+reached an established end; otherwise it `mem::forget`s it, so its descriptors stay open
+until the process exits and the reaper then kills and removes what its scope labels.
+
+## `impl Reaper` › `fn cancel_unleased(self) {`
+
+`cancel` for a reaper that holds no lease: the same five-byte `REAPER_CANCEL` frame and the
+same two-second acknowledgement, and the same fail-closed arm when it does not come (the
+reaper stopped, killed, or not answering — `R6-D1`'s rule for a helper whose state cannot
+be established), with its own message naming the container reaper. What differs is the
+exit wait after an acknowledgement: `ReaperEnding::UnleasedExit`, bounded, where `cancel`'s
+is the unbounded `AcknowledgedExit` (`FUA-D1-CONC-1`).
+
+## `mod termination` › `static ARMED_CONTAINER_REAPERS: Mutex<Vec<(libc::pid_t, Vec<String>)>> = Mutex::new(Vec::new());`
+
+Test-only: the listing argv of every container reaper this test process has armed and not
+cancelled, keyed by pid. `note_armed_container_reaper` adds one after READY,
+`note_disarmed_container_reaper` removes it before the CANCEL, and a forgotten reaper stays
+— it is still armed. `armed_container_reaper_selects` answers whether one lists a private
+root label and incarnation; `fake.rs` asks it at each container start
+(`FakeRuntime::observing_covers`), which is how the design property's in-process witnesses
+see "covered by an armed reaper with its scope" at the instant a container starts.
 ## `mod termination` › `if let Some(scope) = scope {`
 
 Rendered here so a scope that cannot be turned into argv is refused
@@ -2830,9 +2983,239 @@ at once, so no scheduling outcome reaches the assertion. This is also
 the only test that drives `report_setup_failure_and_exit` in a real
 child; the frame's encoding is pinned separately without a fork.
 
+## `mod tests` › `fn run_isolated(`
+
+This module's name for `test_support::run_test_isolated` (below), with the child named relative to
+this module: one ignored child test of `termination::tests` in a process of its own under a
+deadline. The container reaper's isolated children use it: each needs a process whose signal
+monitor, cleanup scope or reaper state no other test shares. So does the rest-selection test's
+child, for another reason (`FUA-I3-HOSTCANCEL`): it cancels a real host reaper, and the wait
+after a host reaper's acknowledgement is unbounded by design, so only a process this harness can
+kill may make it. Until PR #328's implementation review round 4 the harness was this function;
+it moved to `test_support` so the other modules' tests of this follow-up can bound their own host
+launches the same way (`FUA-I4-RELAY`), and the name stayed here because the hold-read census
+(`runner/container/exec/tests.rs`, `no_reaper_test_reads_a_hold_as_released_once`) reads it by
+name.
+
+## `mod tests` › `fn waited_within(`
+
+`waitpid(pid, options | WNOHANG)` polled until it reports `pid` or `bound` passes: the bounded
+form of a wait for the change a signal this test sent should make. The isolated children that
+`SIGKILL` their reaper or `SIGSTOP` a reaper or stand-in wait for that change through it rather
+than through a blocking `waitpid` (`FUA-I1-WATCHDOG`'s sweep), so a signal that did not take
+effect fails the child's assertion instead of holding the child until its parent's deadline. On
+Linux each of the three children first refuses every blocking `wait4` on its thread
+(`answer_a_wait_by_number_that_would_block_with`), so a wait there that went back to blocking
+fails the child at once rather than passing whenever its signal happens to land. And each reports
+only after its wait — the killed reaper collected, the reaper or stand-in stopped — and its parent
+requires the report. A failed assertion in a child that holds a container reaper unwinds through
+the reaper's drop, whose missed acknowledgement ends the child by `SIGTERM`, the very status two
+of the parents expect; without the report the first campaign of PR #328's review round 1 saw a
+blocking wait in `container_reaper_stopped_before_its_cancellation_child` pass that way.
+
+## `mod tests` › `fn answer_a_wait_by_number_that_would_block_with(action: u32) {`
+
+A seccomp policy for the calling thread and whatever it starts afterwards: a `wait4` whose
+options lack `WNOHANG` — a wait that can block — is answered with `action`; every other call,
+polling waits included, is allowed. `seccomp_jump_if_set` tests the bit, so `WUNTRACED |
+WNOHANG` polls pass, where `answer_a_wait_by_number_polling_for_nothing_with` admits `WNOHANG`
+alone. The sweep's three isolated children install it after they fork what they will wait for
+— the reaper, the stand-in — and before the signal, so nothing they forked earlier inherits it;
+the only waits left on their threads are their own bounded polls and `UnleasedExit`'s, which
+poll too.
+
+## `mod tests` › `fn a_container_reaper_is_armed_only_at_the_terminate_site() {`
+
+`arm_container_reaper` refuses `ProcessSite::Spawn` before rendering or forking anything.
+
+## `mod tests` › `fn a_container_reapers_failed_cancellation_ends_its_caller_through_the_signal_monitor() {`
+
+`R6-D1`. The isolated caller arms a container reaper in a fresh process — nothing has
+installed the signal monitor yet, and arming reports that it did — then kills and reaps the
+reaper and drops the guard: the CANCEL is not acknowledged, `cancel_unleased` arms
+fail-closed termination, and the monitor ends the caller with `SIGTERM`. Without
+`shared_state()` in `arm_container_reaper` (`fua-m8`) the caller waits out ten seconds and
+exits 0. The caller also reports that it collected the reaper it killed, within a bound, before it
+dropped the guard; the parent requires that report (`waited_within` above says why).
+
+## `mod tests` › `fn a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it() {`
+
+`R6-D1`'s other half: the reaper is stopped before the drop, so the CANCEL is not
+acknowledged within its two seconds and the caller ends by `SIGTERM`. The caller names its
+stopped reaper only once it has observed the stop, within a bound. The reaper's program is
+the fake runtime's relay stub; once the caller is gone the kernel continues the orphaned
+stopped group (or, after five seconds, this test continues it, only if `process_is_stopped`
+still says it is stopped), and the reaper, finding its parent gone, lists by its scope — the
+relay's first call is exactly the scope's listing argv — and finds nothing to kill.
+
+The relay is written by an isolated child of its own (`FakeRuntime::install_reaper_relay`), so
+this process makes no host launch (`FUA-I4-RELAY`, PR #328's implementation review round 4).
+Until then it wrote the relay itself, before `run_isolated`, through the host funnel, whose end
+waits for its reaper's acknowledged exit without a bound: held at `PTRACE_EVENT_EXIT` at
+`3665cecb`, that reaper kept this test in `wait4(reaper, …, 0)` for the whole hold, and the
+experiment's child started only after the release. The child that runs the experiment could not
+write the relay itself: it must arm in a process no host launch has touched.
+
+## `mod tests` › `fn an_armed_container_reaper_holds_no_cleanup_lease() {`
+
+The design property's last clause, made structural. The isolated caller takes the run lock
+and enters its cleanup scope; a host reaper forked there holds the run's cleanup lease (the
+control: the read can see a hold), and once it is cancelled the lease is released; a
+container reaper armed in the same scope holds none. Both "not held" reads are bounded
+polls, never one read (requirement 8). With the container fork handed the thread's lease
+paths (`fua-m9`) the last read never sees the lease released.
+
+## `mod tests` › `fn a_container_reaper_that_acknowledges(pid: libc::pid_t) -> ContainerReaper {`
+
+A `ContainerReaper` over this fixture's own pipes with `REAPER_OK` already queued, for a
+stand-in pid, as `a_reaper_that_acknowledges` builds a host reaper: a real reaper exits the
+instant it acknowledges, so its exit wait cannot be observed. It rests `SingleAttempt`, as
+`arm_container_reaper` forks a container reaper.
+
+## `mod tests` › `fn a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller() {`
+
+`FUA-D1-CONC-1`. The isolated caller stops a stand-in (`spawn_sigchld_target`), wraps it in
+a `ContainerReaper` whose CANCEL is acknowledged, and drops it: the drop returns within two
+`HELPER_END_BUDGET`s with the stand-in killed and collected. With the exit wait made
+`AcknowledgedExit` again (`fua-m15`) the drop never returns and the child is killed at its
+60-second deadline.
+
+## `mod tests` › `fn container_reaper_stopped_after_its_acknowledgement_with_its_rests_refused_child() {`
+
+`FUA-I2-EINTR`'s isolated caller, through the number or, with
+`UPSTROKE_TEST_CONTAINER_REAPER_WAIT=identity`, through a pidfd it opens on the stand-in. As
+`FUA-D1-CONC-1`'s child it stops a stand-in and wraps it in a `ContainerReaper` whose CANCEL is
+acknowledged; then it refuses every rest on its own thread — `clock_nanosleep` answered `EINTR`,
+the call a sleep makes here — and first sees the refusal in force (a one-second `nanosleep`
+returns `EINTR` at once). It reports that the reaper is dropped, drops it, and reports how long
+the drop took and whether the stand-in was collected; then it waits, through the harness's own
+`waited_within`, for a second child that never exits, and reports that the wait came back. The
+report before the drop places a red run: at `8d0d8b86` both paths printed it and were killed at
+their deadline. The second child, not the stand-in, is what the harness's wait is asked about,
+because the drop has collected the stand-in by then, and a wait for a collected child returns at
+once without resting.
+
+## `mod tests` › `fn a_container_reaper_stopped_after_acknowledging_its_cancel_ends_its_caller_with_every_rest_refused()`
+
+`FUA-I2-EINTR`'s witness, Linux (seccomp): the child above through the number and through the
+pidfd, each under a 30-second watchdog, and both are run before the assertion so a red run names
+each path's end. Red at `8d0d8b86` on both — `status None` at the deadline after "the reaper is
+dropped" — and green since: the drop returns after 2000 ms, one `HELPER_END_BUDGET` of polls
+resting once, then the `SIGKILL` and the collection, and the harness's wait after 100 ms. The
+mutations: the single-attempt arm back to `thread::sleep` (`r2-e1`), `rest_once` resuming an
+interrupted rest with its remainder (`r2-e2`), and `waited_within` back to `thread::sleep`
+(`r2-e5`), each red on both paths.
+
+## `mod tests` › `fn container_and_host_reaper_rests_child() {`
+
+The isolated caller of the test below. It arms a container reaper and drops it, spawns a host
+reaper, reports both reapers' `rest`, cancels the host reaper, and reports that the cancel
+returned. The rests are reported before the cancel, so a run whose cancel never returns still
+names them.
+
+## `mod tests` › `fn a_container_reaper_rests_once_between_its_ending_polls_and_a_host_reaper_as_before() {`
+
+The witness above builds its reaper by hand, so it cannot see how `arm_container_reaper` forks
+one: this test's isolated child arms a real container reaper and spawns a real host reaper and
+reports each one's `rest` — `SingleAttempt` and `Resuming` — and this test requires both. Red
+with the container reaper forked `Resuming` (`r2-e3`), which the witness alone passes, and with
+host reapers forked `SingleAttempt` (`r2-e4`), which would change every host ending's pause.
+
+The reapers are forked and ended in the child, under `run_isolated` and
+`CONTAINER_REAPER_CHILD_BOUND`, never in this process (`FUA-I3-HOSTCANCEL`, PR #328's
+implementation review round 3). The host reaper is ended by `cancel`, whose wait after the
+acknowledgement is `ReaperEnding::AcknowledgedExit`: unbounded by design, because that reaper's
+exit is what releases the cleanup lease. Until round 3 the test made that wait itself, so a host
+reaper stopped between its acknowledgement and its exit held the test, and the suite with it, in
+`wait4(reaper, …, 0)` for as long as the reaper stayed stopped: held at `PTRACE_EVENT_EXIT` at
+`71e55dfc`, the test ended only when the reaper was released. In the child the same stop holds
+only the child, which the watchdog kills at its deadline. This test then fails with the rests the
+child reported and without its report that the cancel returned.
+
+## `mod tests` › `const CHILD_THAT_OUTLIVES_ITS_KILL_LIFE: Duration = Duration::from_secs(60);`
+
+How long the watchdog witness's child lives when nothing ends it: well past the witness's
+2-second deadline and the collection bound after it, so a watchdog that waits for the child
+without a bound is still waiting at half this life.
+
+## `mod tests` › `fn child_that_outlives_its_kill_child() {`
+
+The child the watchdog cannot end: it polls `getppid` every 10 ms and returns once its parent
+is gone or its life is over. Its parent's exit, not a kill, ends it, so a watchdog that gave up
+on it leaves no process behind once the isolated caller exits.
+
+## `mod tests` › `fn watchdog_whose_kill_is_refused_child() {`
+
+The isolated caller of `FUA-I1-WATCHDOG`'s witness. It refuses `kill` on its own thread with the
+module's seccomp policy (`answer_call_with`, `EPERM`), so `run_isolated`'s `SIGKILL` at the
+child's 2-second deadline cannot end the child, and reports how long the watchdog took to end
+its run and how: returned, or failed its test with its message. In its own process because the
+refusal is permanent for the thread that installs it and because the child it leaves running
+must not outlive a process the rest of the suite shares.
+
+## `mod tests` › `fn the_watchdog_fails_its_test_rather_than_wait_for_a_child_its_kill_did_not_end() {`
+
+`FUA-I1-WATCHDOG`'s witness. A watchdog whose kill did not make its child collectable must end
+its run within its collection bound and say the child is still not collectable: the isolated
+caller reports the watchdog ending its run before half the child's 60-second life, through the
+failure message. At `17d7c605`, where the kill was followed by an unbounded `process.wait()`,
+the watchdog ended its run only when the child ended itself, 60,009 ms in, and returned
+`status None`. Linux only: the refusal is a seccomp policy. The regression lens's own sequence,
+a child held at `PTRACE_EVENT_EXIT` by a tracer, needs `ptrace`, which this crate does not name;
+it was reproduced out of tree for PR #328's record (§3).
+
 ## `pub(crate) mod test_support` › `pub(crate) fn run_with_timeout(`
 
 Test-only convenience entry. Production passes both sites explicitly.
+
+## `pub(crate) mod test_support` › `pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);`
+
+How long the watchdog waits, after its `SIGKILL`, for the child to become collectable. A
+killed child is collectable within milliseconds unless something holds it — a tracer at its
+exit stop, an uninterruptible sleep, a kill that did not reach it — and then this bound, not
+the child, ends the wait. Ten seconds is long against a kill's reap even on a loaded CI leg and
+short against the deadlines it follows. `termination::tests`' bounded waits take it too.
+
+## `pub(crate) mod test_support` › `pub(crate) fn run_test_isolated(`
+
+Runs one ignored test of this binary, named by its full path, in a process of its own
+(`--exact`, `--ignored`, one test thread) under a deadline, its stdout and stderr in files of a
+scratch tree, and kills its process group at the deadline, so a child that wedges fails the test
+that started it instead of the run. The caller reads `Isolated`: the exit status (`None` when
+the deadline killed it), and both streams. A caller that runs a child for its effect checks the
+status and libtest's own `1 passed`, so a child named wrongly — which libtest runs as zero tests
+and exits `0` — fails instead of passing vacuously.
+
+**The harness every host launch a test of this follow-up makes runs under** (`FUA-I4-RELAY`,
+PR #328's implementation review round 4). A host launch ends in `Supervisor::finish`, whose wait
+after the reaper's acknowledged `CLEANUP` is `ReaperEnding::AcknowledgedExit`: unbounded by
+design, because that reaper's exit releases the cleanup lease. Made in the libtest process, a
+host reaper stopped between its acknowledgement and its exit holds the test, and the suite with
+it, for as long as it stays stopped; made in a child of this harness, it holds only the child,
+which the deadline kills. Its callers outside `termination`: the reaper relay's writer and
+runner (`runner/container/fake.rs`), the exec reaper tests' fixture
+(`runner/container/exec/tests.rs`, `Fixture::built_in_a_bounded_child`) and the inherited-writer
+witness of the relay's writer (`runner/host/tests.rs`).
+
+The kill is not the end of the watchdog: the child is still collected by `try_wait` polls, and
+those stop at `ISOLATED_CHILD_COLLECTION_BOUND` after the kill (`FUA-I1-WATCHDOG`). Until PR
+#328's first implementation review the kill was followed by `process.wait()`, which has no
+bound, so a child the `SIGKILL` did not make collectable held the harness after its own
+deadline: the regression lens held the isolated child of
+`a_container_reaper_stopped_after_acknowledging_its_cancel_does_not_wedge_its_caller` at
+`PTRACE_EVENT_EXIT` and found the harness blocked in `wait4(child, …, 0)` 68 s into its
+60-second deadline. A child that ends after the kill is reported as before, `status: None`; one
+still not collectable at the bound fails the test with a message saying so, the kill's result
+(`delivered`, or the errno) and the child's output, and is left to this process's exit, as
+`UnleasedExit` leaves a reaper it could not collect.
+
+Its pause between polls is one `nanosleep` (`workspace_manager::fixture::rest`, the same single
+attempt as `termination`'s `rest_once`; `FUA-I2-EINTR`'s sweep), as is every deadline loop this
+follow-up's harness added — `waited_within`, the lease child's `not_held_within`, the stopped
+reaper witness's wait for the relay, `wait_out_a_fail_closed_termination`,
+`child_that_outlives_its_kill_child`, and creation's two relay waits in
+`engine/topology/create/tests.rs` (through `workspace_manager::fixture::rest_within`): a
+`thread::sleep` there would hold a loop past its deadline on a thread whose rests are refused.
 
 ## `pub(crate) mod test_support` › `pub(crate) mod readiness;`
 

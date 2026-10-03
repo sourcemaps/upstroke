@@ -146,3 +146,11 @@ simplest sound one:
 
 Keep the change's hunks in `src/workspace_manager.rs` disjoint from #329's, which are the registry
 access wrapper and targeted removal. Whichever of the two merges second rebases.
+
+## What #329's implementation keeps for this finding's follow-up (2026-10-03)
+
+Follow-up C's U depends on #329's removal (#330's R-P). #329 runs no explicit engine `git worktree prune`, binds
+removal to the instance's own registration, and adds no global-prune fallback
+(`no_production_argv_of_the_manager_names_prune`,
+`no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`). This finding is unchanged and
+open.
