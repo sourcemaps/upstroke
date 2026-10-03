@@ -8,7 +8,7 @@ reviewed_sha: 92c4ca81f9209d218df4534ee71d3445dc2906e1
 location: src/workspace.rs:871
 provenance: pre_existing
 first_bad: predates PR11: the legacy engine's four registry Git children have run untolerant since before PR5 froze `src/workspace.rs`; measured at the Git level on master `92c4ca81`'s argv by PR #329's first design round
-guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, and (e1′) and (e2′) by B-PRESERVE conditional on the kept pin's write; this file stays open until that pull request merges, and after it for what remains, R-D1 — a refused attempt whose kept pin cannot be written, where one storage fault can fail both the snapshot's registration and the pin (FUD-D4-PINSAMEFAULT) — until a change keeps the output durable without the pin, or the owner rules on it
+guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, and (e1′) and (e2′) by B-PRESERVE conditional on the kept pin's write; this file stays open until that pull request merges, and after it for what remains, R-D1 — a refused attempt whose kept pin cannot be written, where one storage fault can fail both the snapshot's registration and the pin (FUD-D4-PINSAMEFAULT), or a HEAD moved from the captured parent refuses the pin while the resume's branch check guards the checkout only until HEAD is back at the head the event log records (#331's early review, E1) — until a faithful preserving mechanism keeps the output durable without the pin, from the design round the PR11 orchestrator commissions for it, or the owner decides it concretely
 ---
 
 ## Failure sequence
@@ -181,10 +181,13 @@ and nothing of it is in force until the owner adopts O8 and that pull request me
 it (its §1.12). It does not: its claim 2 keeps the captured output "conditional on the pin's write" (the PR11 decision
 appendix's §10.3, FUD-D4-PINSAMEFAULT), and its §1.8 closes (e1′) only "conditional on the pin being written". What
 remains is **R-D1**, inside this file's consequence, the discard of paid output after a registry refusal:
-- **`HEAD` moved after the capture:** the pin is refused, the refusal says so and nothing is discarded
-  (`a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded`); a resume then refuses on the moved branch
-  before its discard, by the resume's branch check (`src/engine/resume.rs:532-541`, read, not executed here). Nothing is
-  lost.
+- **`HEAD` moved from the captured parent:** the pin is refused, the refusal says so and nothing is discarded
+  (`a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded`). The output is then only in the checkout,
+  and the resume's branch check (`src/engine/resume.rs:533-541`) guards it **only while `HEAD` differs from the head the
+  run's event log records**: a resume whose `HEAD` is that head discards the checkout with no pin to name. Executed
+  twice, in the section below. *(Corrected by #331's repair round 2, item E1 of its early review: this bullet said a
+  resume "refuses on the moved branch before its discard" and "Nothing is lost", which holds only while `HEAD` stays
+  moved.)*
 - **The ref store cannot be written:** the output is only in the checkout, and the refusal says so; once the store is
   writable again, the next resume discards the checkout as at master. **One storage fault can do both:** a common Git
   directory that cannot be written fails the snapshot's registration and then the pin's write. Executed at the Git level
@@ -196,3 +199,31 @@ remains is **R-D1**, inside this file's consequence, the discard of paid output 
 **Grading and G6, unchanged by this note.** The file keeps P1; nothing here regrades it. (e2) and (e2′) block G6 until D
 is merged and validated, which needs O8 and PR #329 merged (O9, O14, O11). The restore lens found R-D1's one-fault case
 legacy-only, with no independent mixed blocker shown. No waiver and no acceptance is inferred.
+
+## R-D1's moved-`HEAD` case (2026-10-03, #331's early review, item E1)
+
+**Executed** by the early review's regular lens at `20e27724` (the PR11 orchestrator's
+`~/orch-pr11/reviews/331-i1-early-witnesses/review331-regular-theo4b_z/`), and reproduced at the same head by #331's
+repair round 2 from the lens's own witness source, verbatim (`~/orch-pr11/logs/pr11_fud_impl2/repro/e1e2/test.log`):
+- **`HEAD` moved before the capture and back after it** (`moved-head-roundtrip.log`). The event log records `HEAD` A.
+  Another Git client moves the run branch to B during the worker's attempt, so the capture records parent B and the
+  paid tree. The client resets the branch to A. A torn registration refuses the snapshot, and the pin is refused,
+  because `HEAD` A is not the captured parent B. The first resume compares `HEAD` with A, the head the log records,
+  passes, and discards `agent-output.txt`, with no kept pin and no warning.
+- **`HEAD` moved after the capture, and put back as the resume advises** (`delta-and-moved-head.log`, `REVIEW331_R_D1`).
+  The resume refuses on the moved branch and says to move it back to the recorded head; once it is, the next resume
+  discards the checkout, with no kept pin.
+
+**What this does not change.** Correcting the claim above closes nothing. This case is part of **R-D1**, and R-D1 stays
+inside this P1 file, open. Nothing here waives preservation, accepts the loss, or clears G6; this note does not decide
+whether the case applies to G6. **A faithful preserving mechanism is still required, or a concrete owner decision**: the
+PR11 orchestrator tracks it as a required item, a design round for R-D1's preservation commissioned after #331's
+repair, or the owner's decision. It is not an unassigned residual.
+
+**No small change within D's reviewed design keeps this output** (#331's record, §5.16). The one executed candidate
+writes the kept pin whatever `HEAD` is: in a scratch tree only, it kept the output in both sequences — the pin holds the
+captured tree, and the resume names it — and it turned D's own
+`a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded` red
+(`~/orch-pr11/logs/pr11_fud_impl2/repro/K1-SUMMARY.txt`). It changes `Workspace::prepare_commit_from_candidate`, which
+D's proposed `src/workspace.rs` text does not name and whose `HEAD` refusal D's design takes as it is (its record,
+§1.4), and it leaves the ref-store shape above as it was. It is that design round's input, not adopted.

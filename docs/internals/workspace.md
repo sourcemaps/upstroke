@@ -901,9 +901,15 @@ list then succeeds and still registers the snapshot, and the drop leaves it.
 ## `fn a_branch_switch_beside_a_tear_its_writer_finishes_switches() {`
 
 T-L5. `switch_branch` beside a tear its writer finishes after the first failed attempt
-switches; the writer reads `HEAD` and the status before it finishes the tear, and a
-failed attempt changed neither. Red at master, where the switch's Git error returns at
-once.
+switches, and a failed attempt changes neither `HEAD` nor the checkout. It runs the
+access twice. The first meets the tear unrepaired and refuses as
+`UpstrokeError::RegistryRefused`, having attempted again; `HEAD` and the status are read
+after it returns, with no access running, because the access's deadline would time any
+Git child read between two of its attempts (standards §12: a deadline bounds a wedged
+producer, it does not time a healthy one). The second access's writer finishes the tear
+on the handshake, with two file writes, and the switch succeeds. Red at master, where
+the switch's Git error returns at once, and when the tear is finished before the second
+access, which then never fails on it.
 
 ## `fn every_git_child_of_this_module_runs_with_automatic_maintenance_off() {`
 

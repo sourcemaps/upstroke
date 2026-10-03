@@ -35,7 +35,8 @@ branch. Round 2 (§2) is `pr11_fud_design2`'s; its figures are under `~/orch-pr1
 `fud2/…`. Round 3 (§3) is `pr11_fud_design3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_design3/`, cited as
 `fud3/…`. Round 4 (§4) is `pr11_fud_design4`'s; it runs no witness, and its own files are under
 `~/orch-pr11/logs/pr11_fud_design4/`, cited as `fud4/…`. The implementation (§5) is `pr11_fud_impl`'s; its figures are
-under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`.
+under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`. Its repair round 2 (§5.16) is `pr11_fud_impl2`'s; its
+figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`.
 
 ## 0. Status
 
@@ -46,6 +47,7 @@ under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`.
 | Design, round 3 (§3) | **PROPOSED, superseded by §4 where §4 says** (R-D9's boundary, C-SIDE's description and cost, the empty-destination arm's description, `design/15`'s add-veto sentence). It answers round 2's review (`b13b4857`: three lenses, CHANGES_REQUIRED, two P1s, both inherited). The probe and D's private-gitdir variant are withdrawn: after a failed add, an empty destination the access can remove is attempted again, and anything else refuses at once and keeps the output, never Git state (FUD-D2-PROBECONFIG, FUD-D2-HOOKS). R-D9's G6 classification is corrected: the mixed case applies and blocks G6, as part of #329's external-prune finding. A consequence-side closure for it is evaluated, executed on a prototype and given its exact text, and not adopted. T-L2's oracle is split (FUD-D2-TL2). R-G stays P1 for the owner. §1.2 is conformed to #329's round 8 (`f7a9256c`). One of the five exact unfreeze texts changes (§3.8). Each change was executed through the real legacy engine on Git 2.43.0, 2.50.1 and 2.55.0, with a mutation that turns it red. This head changes no code. |
 | Design, round 4 (§4) | **PROPOSED — the last design round before the owner's consolidated question,** pending the owner's decision B. It answers round 3's review (`ac18321f`: three lenses, CHANGES_REQUIRED; the concurrency lens re-run after a capacity error). It is text only: no machinery, no adopted closure, and the five exact unfreeze texts unchanged. R-D9 is divided by whether the deletion fails the add, so a deletion before a successful add returns is inside it (FUD-D3-DURINGADD). C-SIDE is restated as a partial mitigation with two P1 residuals, its stronger forms are weighed, its cost is stated as three widened `effects/allowlist.toml` texts, and it is aligned with #329's corrected closure 1 at `8df42436` (FUD-D3-CSIDEPROOF). The add veto's empty-destination arm is described by what it observes, in `design/15` too (FUD-D3-TAKEOVERWORD). This head changes no code. |
 | Implementation (§5) | **Implemented on this branch as a draft, and PROPOSED — conditional on the owner's decision O8 (decision B), and not granted.** D's reviewed proposal at `9b2262f4`, on #329's head `54a1ff14` merged in (not rebased), with design review round 4's applicable fixes (the PR11 decision appendix's §10.3 and §11 D rows). C-SIDE (O1) and ENV-1's widening (O3) are isolated and not implemented. **Not merge-ready:** it waits on O8's adoption and on #329 merged (O9, O14, O11). Every new test is red on its first-bad shape and killed by a mutation (§5.6, §5.7). The implementation is not yet reviewed. |
+| Implementation, repair round 2 (§5.16) | **The early review's E1 to E4 repaired**, on the same terms: draft, PROPOSED, conditional on O8, not merge-ready. Two lenses read `20e27724` before CI was green on every leg, so their review is early evidence and clears nothing for the merge. E1 corrects the moved-`HEAD` safety claim: the resume's branch check guards the checkout only while `HEAD` differs from the head the event log records, and the executed loss is R-D1's, which stays open at P1 for a preserving mechanism or the owner. E2 narrows R-D7 to refusals that recur after a successful reclaim. E3 rewrites T-L5 so that no Git child it observes runs inside the access's deadline. E4 recounts the Windows path budget with `ScratchTree::acquire`'s prefix. CI at `20e27724` failed only on #329's own test, routed to #329. |
 
 ## 1. Design
 
@@ -387,7 +389,11 @@ runs again from a clean tree, and names the pin with commands that take its outp
 **Residuals, stated.**
 - **A pin that cannot be written.** `HEAD` moved after capture, or the ref store cannot be written at that moment.
   The output is then only in the checkout, and the refusal says so (w6).
-  - When `HEAD` moved, a resume refuses on the moved branch before its discard (`src/engine/resume.rs:532-541`).
+  - When `HEAD` moved, a resume refuses on the moved branch before its discard (`src/engine/resume.rs:533-541`) only
+    while `HEAD` differs from the head the run's event log records. A branch moved before the capture and back after
+    it, or put back as that refusal advises, passes the check, and the resume discards the checkout with no pin.
+    *(Implementation, §5.16: E1 of the early review, executed; this replaces "a resume refuses on the moved branch
+    before its discard", which held only while `HEAD` stays moved.)*
   - When the ref store failed, a resume discards as today. One storage fault can do both: a common Git directory that
     cannot be written fails the snapshot's registration and then the pin's write, and a resume after writability
     returns discards the checkout. *(Implementation, §5.9: FUD-D4-PINSAMEFAULT, the PR11 decision appendix §10.3,
@@ -598,7 +604,7 @@ therefore depends on that helper converging in #329's review and landing as its 
 
 | | What | Consequence | Where |
 |---|---|---|---|
-| R-D1 | A pin that cannot be written (`HEAD` moved, or the ref store failed at that moment) | the output is only in the checkout, and the refusal says so; a resume on a moved `HEAD` refuses before its discard; a ref-store fault means the resume discards as today, and one storage fault can cause it (FUD-D4-PINSAMEFAULT; Implementation, §5.9) | §1.4 |
+| R-D1 | A pin that cannot be written (`HEAD` moved, or the ref store failed at that moment) | the output is only in the checkout, and the refusal says so; a resume refuses on a moved `HEAD` before its discard only while `HEAD` differs from the head the event log records, and discards with no pin once it does not (Implementation, §5.16: E1, executed); a ref-store fault means the resume discards as today, and one storage fault can cause it (FUD-D4-PINSAMEFAULT; Implementation, §5.9) | §1.4 |
 | R-D2 | A crash after capture | the resume discards, as today; pre-existing, not this finding | §1.4 |
 | R-D3 | D's own Git child killed by a signal between the takeover and its first write | attempted again until the deadline, then refused: kept, never Git state | §1.3 |
 | R-D4 | Windows: no file identity in std at MSRV | the veto reads only "an empty directory"; a takeover whose junk removal left the destination empty refuses at the deadline: kept | §1.3 |
@@ -2935,8 +2941,10 @@ assertion rather than wedging. Every planted registration is written as Git writ
 - **T-L3** runs two shapes: a tree holding a `.git/` path, which no checkout may make, on every platform, and the
   300-byte name on Unix only, as #329's T15 does. Both refuse after one attempt (the handshake's count does not move),
   naming a destination gone.
-- **T-L5** switches to a branch at a new commit, so the switch moves `HEAD`; the writer reads `HEAD` and the status
-  before it finishes the tear.
+- **T-L5** switches to a branch at a new commit, so the switch moves `HEAD`. *(Implementation, §5.16: E3.)* It runs the
+  access twice: the first meets the tear unrepaired and refuses, having attempted again; `HEAD` and the status are read
+  after it returns, with no access running; the second access's writer then finishes the tear on the handshake. It
+  first read `HEAD` and the status on the writer thread, inside the access's deadline.
 - **T-L8** adds a link to an empty directory (Unix), `Undecidable` with the link's target untouched; its read-only
   parent's case refuses to run, rather than passing vacuously, where the mode bit does not bind.
 - **T-P13**'s second tear is planted by the resumed attempt's own worker (`TearingWorker`), as §2.8 planned: no seam.
@@ -3067,10 +3075,16 @@ it changes no file under `src/` or `effects/`:
   suite on the guest; the hosted Windows lane runs only in the merge queue.
 - **What the tests do per platform.** T-L3's 300-byte name and T-L8's link and read-only-parent cases are `cfg(unix)`;
   every other case runs everywhere. Every registration a test plants is written as Git for Windows writes it (`/`).
-- **Windows `$GIT_DIR`** (`fudi/wintime/GIT_DIR.txt`): with the guest's `TEMP`
-  (`C:\Users\Administrator\AppData\Local\Temp`, read from a winguest job log), the longest `$GIT_DIR` the new tests make
-  is 140 characters of Git's 220 (`PATH_MAX - 40`); a topology slot's administrative directory is shorter, and its
-  worktree path is 138 characters before its file names.
+- **Windows paths** (`fudi2/paths/BUDGET.txt`): the paths a probe printed on Linux at `36d50d2e`
+  (`fudi2/paths/probe/test.log`), with the guest's `TEMP` (`C:\Users\Administrator\AppData\Local\Temp`, 41 characters)
+  and its scratch roots' shape, `<TEMP>\upstroke-<tag>-<10>`, both read from the winguest job log at `20e27724`. The
+  longest `$GIT_DIR` the new tests make is T-L4's snapshot registration: **149 characters** of Git's 220
+  (`PATH_MAX - 40`) with a six-digit pid, 153 with a ten-digit one. A topology slot's administrative directory is 101,
+  and its worktree path is **147 characters** before its file names; the longest snapshot checkout, an engine test's in
+  the run's gate store, is 186 (190 with a ten-digit pid) before its file names, of `MAX_PATH`'s 260. *(Implementation,
+  §5.16: E4. This bullet said 140 and 138: `fudi/wintime/GIT_DIR.txt` left out the nine-character `upstroke-` prefix that
+  `ScratchTree::acquire` gives every scratch root, and T-L5 and T-L7, which it listed among the longest, make no
+  snapshot.)*
 - **CI's toolchain** (rustc 1.99.0, where this box has 1.97.1): the production code this change adds calls no recently
   renamed or deprecated API — `Result::inspect_err` (stable since 1.76), and `std::fs`'s `symlink_metadata`, `read_dir`,
   `remove_dir` and `canonicalize`.
@@ -3088,7 +3102,8 @@ it changes no file under `src/` or `effects/`:
   with the class (CR-1). This change does not take it up: no inherited environment changes.
 - **`PR331-A-RESUME-THAT-STOPS-BEFORE-ITS-REPORT-NAMES-NO-KEPT-PIN`** (P3, R-D5 with FUD-D4-WARNDELIVERY's delivery
   gap): a resume refused at its reclaim, or failing after its lookup, names no kept pin.
-- **`PR331-KEPT-PINS-ACCUMULATE-UNTIL-THE-OPERATOR-REMOVES-THEM`** (P3, R-D7).
+- **`PR331-KEPT-PINS-ACCUMULATE-UNTIL-THE-OPERATOR-REMOVES-THEM`** (P3, R-D7). *(Implementation, §5.16: narrowed by
+  E2 to refusals that recur after a successful reclaim.)*
 
 **Extended rather than duplicated:**
 - **`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`** gains a dated section, "At #331's
@@ -3100,7 +3115,9 @@ it changes no file under `src/` or `effects/`:
   §1.8's (e1′) row "conditional on the pin being written". So the file keeps P1 and B's text, with its guard updated and
   a dated section: what D closes once merged, with the regression tests, and what remains, R-D1 — one storage fault can
   fail both the registration and the pin, and a resume after the store is writable again discards the checkout
-  (executed at the Git level by the restore lens on the three Gits; the engine's consequence reasoned).
+  (executed at the Git level by the restore lens on the three Gits; the engine's consequence reasoned). *(Implementation,
+  §5.16: and a `HEAD` moved from the captured parent, which refuses the pin, once `HEAD` is back at the head the event
+  log records — E1, executed; the file gains a dated section for it.)*
 
 **Not filed, because this change closes them** once merged:
 - **with a regression test and a mutation** (§5.5 to §5.7): FUB-D5-INDEX, FUB-D5-RESTORE, FUB-D4-B1PREDICATE,
@@ -3125,6 +3142,9 @@ the design, as before; none is accepted.
 - **O8.** Nothing here is in force until the owner adopts O8 and this pull request merges. The texts are proposed.
 - **#329's merge**, which needs O9, O14 and O11. D calls its helper, so D merges after it.
 - **The reviews.** This implementation is unreviewed. The orchestrator runs two lenses once CI is green on every leg.
+  *(Implementation, §5.16: two lenses read `20e27724` early, before CI was green on every leg; their review is early
+  evidence and clears nothing for the merge. The required regular and regression lenses run on D's head integrated
+  with #329's repaired head, once that is green on every leg.)*
 - **R-G's grade** stays P1. What is shown here is T-L7 and its mutation; with the design's rg2, which is not re-run,
   that is the closure the reviewers are asked to confirm.
 - **Windows and macOS** are CI's to show (§5.11). The hosted Windows queue lane runs only in the merge queue.
@@ -3176,3 +3196,125 @@ gates report. The canonical packet and every existing owner grant are unchanged.
 The ten gates of `CLAUDE.md` run at the head this pull request is pushed at, through `upstroke-build` on this lane's
 private base, in the foreground. A record cannot carry the result of a run on the commit that contains it, so the pull
 request body records that head and the result, with the logs under `fudi/gates/`.
+
+### 5.16 Repair round 2: the early review's E1 to E4
+
+> **On §5's terms:** a draft, PROPOSED, conditional on the owner's decision O8, and not merge-ready. Its merge waits on
+> O8's adoption and on #329 merged (O9, O14, O11). Nothing here adopts an owner decision. The round adds commits on
+> `20e27724`, with no rebase, and no `reviewed_sha` is re-stamped.
+
+**Who and on what.** `pr11_fud_impl2` (`claude-opus-5-5`, `max`), a fresh repairer `orch_pr11` spawned on 2026-10-03 on
+`20e27724`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl2.md`; round 1's brief, answer and unit bind where it does not
+change them. Its scope is exactly items E1 to E4 of the early review's triage
+(`~/orch-pr11/reviews/review-331-i1-early-triage.md`). Its figures are under `fudi2/…`.
+
+**CI at `20e27724`** (run 37138196522, `fudi2/ci/jobs-37138196522.tsv`): every job passed but `test (winguest)` (job
+111246977272) and the `upstroke-ci` rollup that follows it. The one failing test is #329's own
+`workspace_manager::tests::concurrent_snapshot_adds_and_removals_on_one_repository_never_fail` (Windows, os error 5;
+`fudi/ci/failed-job-111246977272-winguest.log:3147`, its result at `:3220`: 2,866 passed, 1 failed). **It is #329's,
+routed to #329 as R7** for its next fresh round; its read site and first-bad commit are unproved, and D takes #329's
+repaired head later, by a merge. On that leg all 25 of D's tests passed (`fudi2/e3/winguest-20e27724-d-tests.txt`).
+The pull request policy run at that head passed (`fudi2/ci/runs-20e27724.json`).
+
+**The early review** (`~/orch-pr11/reviews/review-331-i1-{regular,regression}-20e27724.review.md`): two lenses, both
+CHANGES_REQUIRED with no P1, run before CI was green on every leg. They are early evidence and clear nothing for the
+merge; the required lenses run later, on D's integrated head (§5.13). The witness files this round used check against
+`~/orch-pr11/reviews/SHA256SUMS-331-i1-early-witnesses`.
+
+**E1 (P2): the moved-`HEAD` safety claim, corrected. The loss stays in R-D1, at P1.**
+- **Reproduced first,** at `20e27724`, from the regular lens's witness source verbatim, appended to a `git archive` tree
+  (`fudi2/repro/e1e2/`, 3 of 3; the tool is `fudi2/tools/repro_e1e2.py`). The event log records `HEAD` A. The worker's
+  adapter moves the branch to B before the capture, so the capture records parent B. The after-capture hook resets the
+  branch to A and tears a registration, and the snapshot is refused. The pin is refused too: its error names the
+  captured branch at B and `HEAD` at A. The first resume compares `HEAD` with A, passes, and discards
+  `agent-output.txt`, with no pin and no warning. The second shape, `HEAD` moved after the capture and put back as the resume's refusal advises,
+  ends the same way.
+- **Corrected where the claim stood:** the legacy finding (its R-D1 bullet in place, a dated section with both sequences
+  and their witnesses, and its guard), §1.4's residual, §1.8's R-D1 row, §5.12, and the body. `design/15`'s paragraph
+  never made the claim (it says every resume discards the checkout's copy), so it is unchanged.
+- **What correcting the claim does not do.** It closes neither this case nor R-D1, an existing P1, and it implies no
+  preservation waiver and no G6 clearance. R-D1 stays P1 in the legacy finding, which now carries this case and its
+  witness, so the case stays in the preservation follow-through. **A faithful preserving mechanism is still required,
+  or a concrete owner decision.** The PR11 orchestrator tracks it as a required item: a design round for R-D1's
+  preservation, commissioned after this repair.
+- **No small, reviewed-design-faithful change keeps this output.** One candidate was executed, in scratch trees only
+  (`fudi2/repro/K1-SUMMARY.txt`; the tool is `fudi2/tools/k1.py`). K1 writes the kept pin whatever `HEAD` is:
+  `prepare_commit_from_candidate` skips its `HEAD` comparison for a `-kept` pin. It keeps the output in both sequences
+  — the pin holds the captured tree and the resume names it — where at this head both of its witnesses fail. It is not
+  D's design:
+  - it changes `Workspace::prepare_commit_from_candidate`, which D's proposed `src/workspace.rs` text does not name
+    (§3.8: "two things and no more"), and whose `HEAD` refusal §1.4 takes into the design and R-D1 names;
+  - it turns D's own T-P8 red;
+  - it leaves R-D1's ref-store shape as it was.
+
+  It is input for the commissioned design round, and nothing of it is on this branch.
+
+**E2 (P3): R-D7 narrowed.** Reproduced at `20e27724` (`fudi2/repro/e1e2/`). With the tear left unrepaired, two resumes
+each refuse at their reclaim (`reclaim_gate_workspaces`, `src/engine/resume.rs:426`), before the worker and before the
+pin lookup (`:562`). The event log is unchanged, and exactly one pin survives.
+- `PR331-KEPT-PINS-ACCUMULATE-UNTIL-THE-OPERATOR-REMOVES-THEM` now files only refusals that recur after a successful
+  reclaim, with this evidence:
+  - a checkout the snapshot cannot make after Git's takeover, whose cleanup succeeds (§3.2's v3);
+  - a tear made again during the resumed attempt (T-P13).
+- Its per-resume lookup claim carries R-D5's qualification, and the body says the same.
+- §3.2 and §3.10 speak only of the post-takeover failure, and they stand.
+
+**E3 (P2): T-L5 times no Git child it observes** (`36d50d2e`, test code only; `fudi2/e3/TABLE.txt`).
+- **Why not a handshake inside one access.** The access consults its deadline after every failed attempt, before the
+  next (#329's contract, step 6, `src/workspace_manager.rs:1753`). So whatever the test waits for between a failed
+  attempt and the next one is timed by that deadline. The only wait it never measures is one inside an attempt that
+  then succeeds, and an attempt is `switch_branch`'s production closure; no test here needs a seam in production code
+  (§5.5).
+- **So T-L5 runs the access twice.**
+  - The first access meets the tear unrepaired and refuses as a registry refusal, having attempted again: the
+    handshake's count moved.
+  - `HEAD` and the status are read after it returns, with no access running, so no deadline times
+    `git symbolic-ref HEAD` or `git status`.
+  - The second access's writer finishes the tear only after that access has failed on it once (`OnceContended`, the
+    `CONTENDED_ATTEMPTS` handshake), with two file writes and no Git child.
+  - The assertions stay strict: a refusal and never Git, then success, and `HEAD` on `other`.
+- **Executed,** each in a `git archive` tree of `36d50d2e` whose Compiling line names it, with the regression lens's
+  700 ms wrapper, hash-identical (`fudi2/e3/wrapper/git`):
+
+| Shape | 700 ms wrapper | Result |
+|---|---|---|
+| control, D's 25 new tests | no; yes | 25 passed; 25 passed |
+| T-L5 alone, three runs each | no; yes | passed, 0.52 s to 0.53 s; passed, 1.44 s to 1.45 s |
+| `m-inwindow`: T-L5 as `20e27724` has it, the handshake removed | no; yes | passed; **failed** at `src/workspace.rs:4310`, a registry refusal after 14 attempts |
+| `m-early-repair`: the tear finished before the second access | no | **failed**: "the switch failed on the tear at least once" |
+| `m-switch-unwrapped` (§5.7) | no | **failed**: a Git error, not a registry refusal |
+| `base-firstbad` (§5.6) | no | **failed**: a Git error, not a registry refusal |
+
+- **What still bounds it** is what bounds every `OnceContended` test (§5.5): the second access's own attempts run within
+  #329's 500 ms test deadline.
+
+**E4 (P3): the Windows path budget, recounted** (`fudi2/paths/BUDGET.txt`, from an executed probe,
+`fudi2/paths/probe/test.log`).
+- §5.11 now gives:
+  - **149 characters of 220** for the longest `$GIT_DIR`, T-L4's registration (153 with a ten-digit pid);
+  - **147 of 260** for a topology slot's worktree, before its file names;
+  - 186 (190) for the longest snapshot checkout.
+- Round 1's 140 and 138 left out the `upstroke-` prefix.
+- No other path-length figure is in this record (`fudi2/paths/record-search.txt`, a search for `MAX_PATH`,
+  `PATH_MAX`, `GIT_DIR`, "characters", 220 and 260): §1.9 names the 220 budget without a figure, and §3.2 names the
+  platforms' limits without one.
+- CI's `test (winguest)` ran every new test green at `20e27724` (above).
+
+**The re-run, the frozen sets and the instruments.**
+- **Re-run.** T-L5 is the only test this round changes, and nothing else under `src/` or `effects/` moves. The mutations
+  that kill it in §5.7, `m-switch-unwrapped` and `base-firstbad`, are red on it again, and the control is 25 of 25
+  green (the table above).
+- **The frozen sets** (`fudi2/frozen/`): G6's 34 frozen files are byte-identical from #329's head `54a1ff14` and from
+  master `5c222ff2`. The PR5-frozen legacy section differs from `54a1ff14` in exactly D's five files. Both test files
+  are still append-only against the merge `255f67b8`.
+- **Instruments:** none changes. The five proposed texts are byte-identical to `20e27724`'s.
+- **Notes:** `docs/internals/workspace.md`'s T-L5 section follows the test. The module gains no comment.
+
+**What waits, and what is not verified here.**
+- CI on every leg is not waited on.
+- The early review is not re-run; the required lenses run later, on D's integrated head.
+- Windows and macOS execution is CI's.
+- R7 is #329's.
+- O8 stays the owner's.
+
+The pull request body records the head the ten gates passed at, with the logs under `fudi2/gates/`.

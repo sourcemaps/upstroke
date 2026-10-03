@@ -13,17 +13,33 @@ guard: the owner's ruling on kept-pin retention, or a change that retires a kept
 
 ## Failure sequence
 
-Follow-up D's residual R-D7 (its record §1.4 and §1.8, and §3.2 for a cause that persists).
+Follow-up D's residual R-D7 (its record §1.4 and §1.8, and §3.2 for a checkout the snapshot cannot make). *(Narrowed by
+#331's repair round 2, item E2 of its early review: item 3 said that a registration that stays torn makes every resume
+pay one more attempt and keep one more pin, which the code does not do.)*
 
 1. A legacy attempt's gate or review snapshot is refused by the worktree registry after the worker's output was
    captured. The coordinator pins the captured candidate at the attempt's prepared pin followed by `-kept`
    (`src/engine/coordinator.rs:555`), one pin per refused attempt.
 2. No resume removes a kept pin (`src/engine/resume.rs`; `a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes`).
-3. Over a cause that persists — a registration that stays torn, or a genuine failure after Git took the destination
-   over, which D's veto refuses at once and keeps (record §3.2) — every resume pays one more worker attempt, as master's
-   did, and keeps one more pin (`every_kept_pin_is_named_after_a_second_refusal_on_the_next_resume` keeps two).
-4. Each pin keeps its candidate's objects reachable, and every later resume of the run names it and pays three Git
-   processes per recorded attempt to look it up (record §2.3). They accumulate until the operator removes them.
+3. **Pins accumulate when a refusal recurs after a successful reclaim.** A resume runs the worker again only past its
+   reclaim of the run's snapshots (`reclaim_gate_workspaces`, `src/engine/resume.rs:426`), and each refusal after that
+   attempt's capture pays one more worker attempt, as master's did, and keeps one more pin:
+   - a checkout the snapshot cannot make after Git took its destination over, whose cleanup succeeds — a genuine
+     failure D's veto refuses at once and keeps, so a cause that persists refuses every resume again (record §3.2,
+     its v3: three invocations ran the worker three times and kept two pins);
+   - a registration torn again during the resumed attempt, after the first tear was repaired
+     (`every_kept_pin_is_named_after_a_second_refusal_on_the_next_resume` keeps two).
+
+   **A registration that stays torn does not accumulate pins.** Each resume refuses at its reclaim, before the worker
+   runs and before the pin lookup: no attempt, no new pin, the event log unchanged, and exactly one pin surviving two
+   such resumes (executed by #331's early review, regular lens,
+   `~/orch-pr11/reviews/331-i1-early-witnesses/review331-regular-theo4b_z/static-tear.log`; reproduced at `20e27724` by
+   #331's repair round 2, `~/orch-pr11/logs/pr11_fud_impl2/repro/e1e2/test.log`).
+4. Each pin keeps its candidate's objects reachable. Every later resume **that reaches its lookup** names it and pays
+   three Git processes per recorded attempt to look it up (record §2.3); one that refuses at its reclaim looks nothing up
+   and names nothing, and one that fails after its lookup returns without its warnings (R-D5,
+   `PR331-A-RESUME-THAT-STOPS-BEFORE-ITS-REPORT-NAMES-NO-KEPT-PIN`). The pins accumulate until the operator removes
+   them.
 
 ## Severity: P3
 
