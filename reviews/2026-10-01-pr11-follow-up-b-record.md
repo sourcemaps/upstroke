@@ -58,7 +58,7 @@ there; its figures are under `~/orch-pr11/logs/pr11_fub_impl2/`, cited as `impl2
 | Design round 6 (§5) | **Superseded by §6 where §6's banner says.** Design review round 6 (three `gpt-6-astra` lenses at `max` on `ed3a97d9`: concurrency on its first run; design and regression each refused on [cyber] grounds twice and recast as conformance readings, which ran) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d6-triage.md`): one P1 executed (FUB-D6-PRUNE, a prune after the add's takeover), four P2s (INODE executed; DABSENCE, STATICRESUME and BOUND reasoned) and one P3 (PLATFORM). The P1 in round 6's own takeover veto raised the looping signal a sixth time. Round 6 chose no classifier (§5.3) and published the helper's contract for follow-up D (§5.5, now with a dated change). Its witnesses ran on Linux on Git 2.43.0 and 2.55.0 and a subset on the Windows guest's 2.50.1 (§6.10). This head changed no production code. |
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
-| Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state with no Git run (§8.2). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
+| Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
 | Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). |
 
 ## 1. Design
@@ -5579,7 +5579,8 @@ concurrency and regression, in the conformance-reading form, with no refusals. A
   one partial closure.
 
 **What round 9 does,** the triage's work list, adding no machinery:
-1. it rejects a populated destination before any Git runs (§8.2);
+1. it rejects a populated destination before Git's add runs, after a successful prevalidation (§8.2, as qualified at
+   repair round 3);
 2. it moves face 2's boundary to the prune's decision (§8.3);
 3. it makes the five candidate closures accurate, closure 1 as a partial mitigation after the orchestrator's addendum
    (`~/orch-pr11/answers/pr11_fub_design9-0.md`), adds the host-width reconciliation, and gives the owner a
@@ -5587,7 +5588,7 @@ concurrency and regression, in the conformance-reading form, with no refusals. A
 4. it gives R14 a G6 row that waits on the owner (§8.8);
 5. it fixes T15 (§8.10).
 
-### 8.2 A destination that is not an empty directory at the start: rejected before any Git runs (FUB-D8-POPULATED)
+### 8.2 A destination that is not an empty directory at the start: rejected before Git's add runs (FUB-D8-POPULATED)
 
 **Why round 8's rule was wrong.** Round 8 attempted such an add once and returned Git's error (§7.2).
 - **Git's add runs its sibling scan before it checks the destination:** `get_worktrees()`, then
@@ -5610,6 +5611,13 @@ a directory):
 
 **What it establishes.** No registry state can reach these answers, because no Git command runs for them. §7.7's
 claim 1 becomes exact (§8.9).
+*Qualified at repair round 3 (R4, P3, the implementation review's regular lens on `54a1ff14`; §9.13): the rule holds
+after a successful prevalidation and before `git worktree add`. The add's gate (`revalidate`) runs first and lists the
+registry, and that list is an access of its own. So a populated destination beside a registration already torn when
+the gate lists the store meets the gate first: it refuses as the registry's at the deadline, naming the torn entry,
+the destination is never read, and what is there stays. "No Git command runs" holds from the add's access onward, after
+a gate that passed. The Git-state answers still carry no registry state: a store the gate's list fails on refuses as
+the registry's, never as Git state.*
 
 **Executed** (`d9/witness/populated.jsonl`, `FIGURES-d9.txt`). Three versions and three rounds, with a fresh
 repository for each runner. "No Git process" is Git's own trace2 record, which shows no process started.
@@ -6013,6 +6021,8 @@ prune's deletion without reading the registry. The R14 file is updated in place.
   during an add that makes the add fail.
 - An add returns Git state only when its destination cannot be made, or is not an empty directory when the access
   begins. **In both cases no Git command runs,** so no registry state reaches the answer (§8.2, executed).
+  *Qualified at repair round 3 (§8.2's note, §9.13): no Git command runs from the add's access onward, once the gate's
+  list has passed; a store that list fails on refuses as the registry's.*
 - A registration deleted after the add's own writes is outside every access. That is face 2.
 
 Claims 2 to 7 stand as §7.7 left them.
@@ -6138,7 +6148,7 @@ chosen. So every option below needs the owner's ruling, and each says what that 
 | FUB-D8-C1PLACE | P1 / P2 | reasoned (all three) | **Fixed (design):** the check at the manager's Git errors, at the judge's gate and review verdicts before the release, and at an attempt's settlement; the Git-arm-only placement withdrawn | §8.4 | the code at `5c222ff2` |
 | FUB-D8-DURINGADD | P1 | executed (concurrency) | **Fixed (design), witnessed:** face 2 starts at the prune's decision; the reviewer's witness cited, and the claim re-executed with Git's own hook point | §8.3 | `duringadd.jsonl`: the add rc 0, the prune ordered by trace2, `status` 128, 18 of 18 |
 | FUB-D8-C2MISSING | P1 | the Git level executed (concurrency); the loss reasoned | **Fixed (design):** preservation at the boundary itself, for `NotRegistered`, `Missing` and `HoldsTree`'s `TreeMismatch`; a second boundary found (a retained retry) | §8.5 | `partial.jsonl`'s whole-entry state, 9 of 9 |
-| FUB-D8-POPULATED | P2 / P3 | executed (all three) | **Fixed (design), witnessed:** rejected before any Git runs; the link case corrected too | §8.2 | `populated.jsonl`: r9 Git after 0 with no Git process in every shape; r8 Git after 1 with the sibling's error |
+| FUB-D8-POPULATED | P2 / P3 | executed (all three) | **Fixed (design), witnessed:** rejected before any Git runs (qualified at repair round 3: after a successful prevalidation, before `git worktree add`, §8.2); the link case corrected too | §8.2 | `populated.jsonl`: r9 Git after 0 with no Git process in every shape; r8 Git after 1 with the sibling's error |
 | FUB-D8-C4SCHED | P2 | executed on 2.55.0 | **Fixed (design):** scheduled maintenance added as a starter; effective per-checkout and per-process configuration, and a prune already running, qualified | §8.6 | `citations-d9.txt`; the reviewers' witnesses |
 | FUB-D8-R14G6 | P2 | reasoned | **Fixed:** R14's G6 row needs the owner's disposition before G6 | §8.8 | `design/26:617-622`, `:507-508` |
 | FUB-D8-HOSTWIDTH | P2 | reasoned (design) | **Fixed:** width one does not remove the starter; only an isolated Git view does | §8.7 | — |
@@ -6182,7 +6192,8 @@ they returned is in the external-prune finding's candidate closures (`~/orch-pr1
 - the helper's contract as §5.5 dates it, with §7.6 as its current text: the three-way veto, the final attempt, the
   runtime allowance and `CONTENDED_ATTEMPTS`;
 - the add's veto with the removal proof and no probe (§7.2), a failure after the takeover as `Undecidable` (§7.3),
-  and a destination that is not an empty directory rejected before any Git command runs (§8.2);
+  and a destination that is not an empty directory rejected before `git worktree add` runs, after a successful
+  prevalidation (§8.2, as qualified at repair round 3, §9.13);
 - targeted removal with no engine prune (§2.5, §3.5, and §5.5's note for follow-up C), and round 6's store-absent
   branch (§5.3, T17);
 - the one instrument row (§7.9), B's `design/15` paragraph in force, and FUB-D9-TAKEOVERWORD's text correction;
@@ -6239,7 +6250,8 @@ orphaned. Addendum 1 withdrew the re-stamp: a `reviewed_sha` is the commit a fin
   returns by the deadline plus its last attempt's runtime plus the veto's (§7.6, R8″).
 - **The add's destination** (`AtDestination`, `:1861`; `Destination`, `:1919`):
   - `prepare` (`:1936`): an empty directory is used as it is; an absent one is made; anything else, or a destination
-    that cannot be made or read, is Git state naming it, with no Git command run (§8.2);
+    that cannot be made or read, is Git state naming it, before `git worktree add` runs (§8.2; since repair round 3
+    the message says so, §9.13);
   - `untouched` (`:1959`), the veto: an empty directory the access can remove and make again answers `Attempt` (§7.2's
     removal proof); a destination gone, holding anything, unreadable, or not removable or not makeable again answers
     `Undecidable` (§7.3);
@@ -6273,8 +6285,10 @@ instrument moves (§9.7).
 **`src/workspace_manager/tests.rs`.** The two tests §3.6 said the implementation moves:
 `a_removal_records_the_one_attempt_the_unix_arm_makes` (two removals, one attempt each) and
 `an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup` (`RegistryRefused` after the deadline,
-carrying the same Git text). The rest is new, from `:14855` (§9.4). Repair round 2 adds `as_git_writes_it` (`:15196`).
-It makes every registration these tests plant spell its paths as Git writes them (§9.12).
+carrying the same Git text). The rest is new, from `:14855` (§9.4). Repair round 2 adds `as_git_writes_it`, and
+repair round 3 moves it into the fixture module, for the coordinator's tests too (§9.13). Every registration this
+change's tests plant spells its paths as Git writes them through it: true since repair round 3, when the coordinator's
+`TearsAForeignRegistration` was the last plant brought to it (§9.12's note).
 
 **`src/engine/topology/coordinator.rs`.** Inside its `mod tests` only: the four verification tests (§9.4) and their
 review-input policies and hooks. Its production region is unchanged (`impl/basewit/`'s port asserts it). Repair round 2
@@ -6553,6 +6567,9 @@ there. Its brief is `~/orch-pr11/briefs/pr11_fub_impl2.md`, with two answers: `~
   - **Also left as it is:** the coordinator's `TearsAForeignRegistration`, which writes its `gitdir` with `display()`
     too. The decision named the planting sites in `src/workspace_manager/tests.rs`, and the policy's two tests passed
     on the guest and read no listed path.
+  - *Corrected at repair round 3 (R6, P3, the implementation review's regular lens; §9.13): so "every registration"
+    above was not true at this round; it was true of the six writes listed. Repair round 3 spells the coordinator's
+    plant as Git writes it too, and the claim is true from then on.*
 - **Nothing else moved** (`impl2/repair/what-moved-59d206b3-8364009d.txt`): two files, and every hunk is in test code.
   The coordinator's production region is byte-identical, and every other compiled input's tree id is unchanged.
 
