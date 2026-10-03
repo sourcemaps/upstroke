@@ -289,6 +289,14 @@ A symbolic or checked-out integration ref (`assert_publishable`),
 reading the ref.
 
 
+## `fn decide_pausing(`
+
+[`decide`], with the hooks its `assert_publishable` waits through; [`integrate`] passes its journal's, so
+a coordinator that lends itself as those hooks answers its messages while the check waits. Proposed
+at follow-up B's repair round 3 as part of hunk H1, conditional on the owner's freeze ruling and not
+adopted (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13). [`decide`] keeps its signature and
+waits by sleeping.
+
 ## `pub fn dispatch_head(`
 
 The head a freshly dispatched task's worktree is created at.
@@ -336,6 +344,15 @@ replayed to before.
 authorize ([`Refusal::DispatchHeadForeign`]), and for a symbolic or
 checked-out ref (`assert_publishable`); a Git error reading it.
 
+
+## `pub fn dispatch_head_at(`
+
+[`dispatch_head`]'s check, given the authorized head its caller computed and the hooks the check's
+registry access waits through. The coordinator's dispatch computes the head from the run's `started`
+and `events`, releases its borrow of the run, and lends itself as the hooks, so the check's waits
+answer its messages. Proposed at follow-up B's repair round 3 as hunk H2, conditional on the owner's
+freeze ruling and not adopted (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13).
+[`dispatch_head`] keeps its signature and waits by sleeping.
 
 ## `pub struct Authorized {`
 
