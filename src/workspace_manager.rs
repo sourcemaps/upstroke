@@ -7059,8 +7059,9 @@ static CONTENDED_HOLDS: std::sync::Mutex<
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Hold the next `Attempt` answer of an access over `common_git_dir` until the
-/// returned sender sends or is dropped ([`note_contended`]).
-#[cfg(test)]
+/// returned sender sends or is dropped ([`note_contended`]). Unix only, as its
+/// one caller is.
+#[cfg(all(test, unix))]
 pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sender<()> {
     let (release, released) = std::sync::mpsc::channel();
     CONTENDED_HOLDS
