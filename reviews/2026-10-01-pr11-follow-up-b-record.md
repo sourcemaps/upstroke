@@ -47,7 +47,9 @@ file the sentence names. **The implementation** (§9) is `pr11_fub_impl`'s (`cla
 **Its repair round 2** (§9.12) is `pr11_fub_impl2`'s (`claude-opus-5-5`, `max`), spawned on `59d206b3` after CI went red
 there; its figures are under `~/orch-pr11/logs/pr11_fub_impl2/`, cited as `impl2/…`. **Its repair round 3** (§9.13) is
 `pr11_fub_impl3`'s (`claude-opus-5-5`, `max`), spawned on `54a1ff14` after the implementation review's first round; its
-figures are under `~/orch-pr11/logs/pr11_fub_impl3/`, cited as `impl3/…`.
+figures are under `~/orch-pr11/logs/pr11_fub_impl3/`, cited as `impl3/…`. **Its repair round 4** (§9.14) is
+`pr11_fub_impl4`'s (`claude-opus-5-5`, `max`), spawned on `f9c88fdb` after #331's `test (winguest)` failed in this
+change's shared manager code; its figures are under `~/orch-pr11/logs/pr11_fub_impl4/`, cited as `impl4/…`.
 
 ## 0. Status
 
@@ -61,7 +63,7 @@ figures are under `~/orch-pr11/logs/pr11_fub_impl3/`, cited as `impl3/…`.
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. |
 
 ## 1. Design
 
@@ -4021,6 +4023,11 @@ there keeps the I/O refusal.
 changed, so that D's design can be checked against it again. The orchestrator compares the two before D is
 implemented.
 
+> **Checked 2026-10-03, repair round 4 (§9.14): no change to this contract.** Its item R7 widens what the topology's
+> list attempt covers where the manager compares the listed worktrees: the resolution of each path the list names
+> now runs inside the access. That is the caller's attempt, not the helper. D's legacy accesses resolve no listed
+> path, so it asks nothing of D.
+>
 > **Checked 2026-10-02, design round 9: no change to this contract.** §7.6 stays the current text. Round 9's one rule
 > change for the add (§8.2: a destination that is not an empty directory when the access begins is Git state with no
 > Git run) sits in the topology add's destination steps, before the helper's loop. D's snapshot destinations are fresh
@@ -6316,36 +6323,39 @@ heading. §0's last row, the authors' paragraph, and this section.
 
 | T | Test | Where | Runs on |
 |---|---|---|---|
-| T1 | `two_coordinators_in_two_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: two processes, 500 cycles each (1,000), 0 failures | WM `:16571` | all; 150 cycles each on Windows |
+| T1 | `two_coordinators_in_two_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: two processes, 500 cycles each (1,000), 0 failures | WM `:16832` | all; 150 cycles each on Windows |
 | T2 | `a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral` | CO `:4057` | all |
 | T2′ | `a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies` | CO `:4095` | all |
-| T3 | `three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: three processes, 340 cycles each | WM `:16582` | all; 100 each on Windows |
-| T4 | `a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt`, `a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure`, `a_registry_access_passes_two_failures_and_returns_the_success_after_them`, `an_undecidable_veto_refuses_at_once_naming_why`, `the_final_attempt_passes_a_failure_repaired_by_the_deadline`, `contended_attempts_counts_exactly_the_attempt_answers`, `a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt` | WM `:14904-15112` | all |
-| T5 | `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`, `no_production_argv_of_the_manager_names_prune` | WM `:16354`, `:16386` | all |
-| T6 | `an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt` | WM `:15489` | Unix |
-| T9 | `an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`, `r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one` | WM `:16295`, `:15146` | all |
-| T10 | `the_manager_never_fails_beside_the_legacy_engines_gate_snapshots` | WM `:16781` | all |
-| T11 | `a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`, `a_list_over_a_registration_half_written_passes_once_its_writer_finishes`, `a_list_over_a_whole_registration_git_cannot_list_refuses_at_its_deadline` | WM `:15316-15374` | all |
-| T12 | `an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_nothing_at_the_slot` | WM `:15442` | Unix |
-| T13 | `adds_whose_checkouts_outlast_the_deadline_do_not_wait_for_each_other` | WM `:16240` | Unix |
-| T14 | `an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it` | WM `:15526` | all |
-| T15 | `an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing` (FUB-D5-GENUINE's tree and a 300-byte name); `an_add_whose_destination_cannot_be_removed_refuses_after_one_attempt_and_keeps_it` (FUB-D6-INODE's two shapes); `a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies` | WM `:15675`, `:15729`; CO `:5383` | all, the 300-byte name on Unix only; Unix; Unix |
-| T16 | `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add` (a directory holding entries, and a file, each beside a sibling torn by `tear_registration` at the add's `Before` hook, after the gate's list; renamed at repair round 3, R4), `a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first` (the order: a sibling already torn when the gate lists the registry is met by the gate first; repair round 3, R4), `a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git`, `an_add_whose_destination_cannot_be_made_is_git_state_at_once`, `after_an_untouched_failure_the_destination_is_removed_and_made_again` (its retry held while the destination is read; repair round 3, R2); the control `a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before` | WM `:15827-16022`; CO `:5518` | all; Unix for the last four |
-| T17 | `a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout` | WM `:16080` | all |
-| T18 | `an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name` | WM `:16861` | Unix |
-| T20 | `an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is_never_git` | WM `:15789` | Unix |
-| T22 | `derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it` | WM `:16122` | all |
-| T23 | `a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again` | WM `:16195` | Unix |
-| 2P | `a_list_passes_a_registration_another_process_finishes_writing` (contention), `accesses_over_a_registration_a_dead_process_left_torn_refuse_and_are_never_git_state` (a torn write by a dead writer), `a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses` (a registration nobody writes) | WM `:16676-16758` | all |
-| LC | `a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end` | WM `:17075` | Linux |
+| T3 | `three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: three processes, 340 cycles each | WM `:16843` | all; 100 each on Windows |
+| T4 | `a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt`, `a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure`, `a_registry_access_passes_two_failures_and_returns_the_success_after_them`, `an_undecidable_veto_refuses_at_once_naming_why`, `the_final_attempt_passes_a_failure_repaired_by_the_deadline`, `contended_attempts_counts_exactly_the_attempt_answers`, `a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt` | WM `:15165-15373` | all |
+| T5 | `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`, `no_production_argv_of_the_manager_names_prune` | WM `:16615`, `:16647` | all |
+| T6 | `an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt` | WM `:15750` | Unix |
+| T9 | `an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`, `r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one` | WM `:16556`, `:15407` | all |
+| T10 | `the_manager_never_fails_beside_the_legacy_engines_gate_snapshots` | WM `:17042` | all |
+| T11 | `a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`, `a_list_over_a_registration_half_written_passes_once_its_writer_finishes`, `a_list_over_a_whole_registration_git_cannot_list_refuses_at_its_deadline` | WM `:15577-15635` | all |
+| T12 | `an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_nothing_at_the_slot` | WM `:15703` | Unix |
+| T13 | `adds_whose_checkouts_outlast_the_deadline_do_not_wait_for_each_other` | WM `:16501` | Unix |
+| T14 | `an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it` | WM `:15787` | all |
+| T15 | `an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing` (FUB-D5-GENUINE's tree and a 300-byte name); `an_add_whose_destination_cannot_be_removed_refuses_after_one_attempt_and_keeps_it` (FUB-D6-INODE's two shapes); `a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies` | WM `:15936`, `:15990`; CO `:5383` | all, the 300-byte name on Unix only; Unix; Unix |
+| T16 | `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add` (a directory holding entries, and a file, each beside a sibling torn by `tear_registration` at the add's `Before` hook, after the gate's list; renamed at repair round 3, R4), `a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first` (the order: a sibling already torn when the gate lists the registry is met by the gate first; repair round 3, R4), `a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git`, `an_add_whose_destination_cannot_be_made_is_git_state_at_once`, `after_an_untouched_failure_the_destination_is_removed_and_made_again` (its retry held while the destination is read; repair round 3, R2); the control `a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before` | WM `:16088-16283`; CO `:5518` | all; Unix for the last four |
+| T17 | `a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout` | WM `:16341` | all |
+| T18 | `an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name` | WM `:17122` | Unix |
+| T20 | `an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is_never_git` | WM `:16050` | Unix |
+| T22 | `derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it` | WM `:16383` | all |
+| T23 | `a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again` | WM `:16456` | Unix |
+| 2P | `a_list_passes_a_registration_another_process_finishes_writing` (contention), `accesses_over_a_registration_a_dead_process_left_torn_refuse_and_are_never_git_state` (a torn write by a dead writer), `a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses` (a registration nobody writes) | WM `:16937-17019` | all |
+| LC | `a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end` | WM `:17336` | Linux |
 | R1 | the 34 witnesses of §9.13.1 (`a_pipeline_is_granted_while_…` and `a_pipeline_is_served_while_…`), one or more per census access and per routing point; the controls `the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping` and `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T) | CO `:4562-5210`, `:5298`; `src/engine/topology/run/tests.rs` `:255` | all |
 | R3 | `a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so`, `a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed` (§9.13.3) | CO `:4205`, `:4221` | all |
+| R7 | `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add`, `a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io`, `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification`, and the control `a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once` (§9.14.4); the CI-failing `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`, unchanged | WM `:7407-7527`, `:7237` | Unix; all |
 
 **How they wait.** Each waits on a handshake or a seam, with time only as a watchdog.
 - A tear an access must fail on first is finished only after `contended_attempts` has moved. An add's own tear is
   planted at the add's `Before` effect hook, after the gate's `revalidate()` has listed the registry.
 - R1's witnesses (§9.13.1) finish their tear only after an invocation entered or left the runner after it, which
   needs the coordinator to have answered a message during the wait.
+- R7's witnesses (§9.14.4) end the sibling's removal inside the call's own registry wait, so the access must have
+  failed once on the sibling and waited through the call's hooks before its next attempt.
 - The two-process tests are children of this test binary (`--exact … --ignored`) behind `LinkedChild`: T1 and T3 run
   whole cycles of a `WorkspaceManager` in a checkout of their own; 2P's writer writes a registration file by file, as
   `git worktree add` does, stops half way and waits for its parent. Its dead-writer case kills it there, through the
@@ -6970,3 +6980,178 @@ it is true from this round.
 **Not verified here:**
 - the new witnesses on native Windows and macOS: they are not `cfg`-gated, so CI's legs run them;
 - CI's stable 1.99.0 compiling the head. This box has 1.97.1, and the 1.85 legs ran here.
+
+### 9.14 Repair round 4: R7, the shared Windows CI failure
+
+**Who and why.** `pr11_fub_impl4` (`claude-opus-5-5`, `max`), spawned by `orch_pr11` on `f9c88fdb` after follow-up
+D's draft #331 went red on `test (winguest)` in a test of this change's shared manager code. Its brief is
+`~/orch-pr11/briefs/pr11_fub_impl4.md`, and R7 is its whole scope. Its figures are under
+`~/orch-pr11/logs/pr11_fub_impl4/`, cited as `impl4/…`. It adopts no owner decision, and H1 and H2 stay as round 3
+committed them, proposed and not adopted (§9.14.5).
+
+**The commits, on `f9c88fdb`:**
+- `7bb9aac3`: the repair, its four witnesses and `design/15`'s sentences;
+- then this text, §9.4's re-pinned cites and its R7 row, §5.5's dated check, and the body.
+
+#### 9.14.1 What failed, and where
+
+**The discovery.** #331's head `20e27724`, "CI" run 37138196522, job 111246977272, `test (winguest)`: 2,866 passed,
+1 failed and 87 ignored, in 506.38 s (`~/orch-pr11/logs/pr11_fud_impl/ci/failed-job-111246977272-winguest.log`).
+`concurrent_snapshot_adds_and_removals_on_one_repository_never_fail` failed one of its 120 add-and-remove cycles:
+"adding k3-g0-a16-gates: failed to read …\snapshots\k1-g0-a16-gates: Access is denied. (os error 5)".
+- **The code is this change's.** At `20e27724`, `src/workspace_manager.rs`, `src/workspace_manager/tests.rs` and
+  `src/rundir.rs` are `54a1ff14`'s blobs, and none of D's own commits touches `src/workspace_manager*`
+  (`impl4/r7/site/c-d-manager-identity.txt`, `impl4/r7/site/site-lines.txt`). C (#330) and D (#331) both inherit
+  it, so the repair is B's.
+- **Not a filed finding.** It is not FUB-D9-WINPUBLISH, a rename in `readiness::publish_between`, and not PR249's
+  `locked` read. No file in `findings/` names this read.
+
+**The read site: the add's gate.** `WorkspaceManager::revalidate`, the containment check every create and removal
+runs before its funnel, compares the canonical execution root with the canonical path of every worktree
+`git worktree list` names. At `54a1ff14` (`:2123-2124`) it listed the registry in one tolerant access and then, after
+the access had returned, resolved each listed path with `canonical_prefix(record.path())?`. `add_snapshot` runs the
+gate three times, its own, `write_intent`'s and `add_worktree`'s, and each resolves every sibling the list names,
+the snapshots other pipelines are removing among them.
+- `canonical_prefix` returns any failure but absence as `UpstrokeError::Io { path, source }`, whose message is
+  "failed to read <path>: <source>" (`src/error.rs:97`, `src/workspace_manager/containment.rs:444`). The path is the
+  list's record, with the `/` Git writes turned into `\` (`src/workspace_manager/parsers.rs:278`). That is the CI
+  message, and it names a sibling, `k1`.
+- **Windows.** A directory that a removal has deleted while some handle on it is still open stays in its parent with
+  its deletion pending until the last handle closes, and every open of it until then answers `ERROR_ACCESS_DENIED`
+  (os error 5). `fs::canonicalize` opens the path. Removals here run concurrently, each deleting its checkout with
+  `remove_dir_all` and then its registration (§3.5), and every other thread's resolution holds a handle on the
+  directories it resolves for an instant. So a gate can resolve a sibling whose checkout is in that state while the
+  list still names it. This module already reads `ERROR_ACCESS_DENIED` as a pending deletion where it removes a tree
+  (`remove_tree_once_handles_close`, `src/workspace_manager.rs:1494-1507`).
+- **Not the destination's read.** `AtDestination::read` reads only the add's own destination, and a failure there is
+  Git state naming "the worktree destination", never "failed to read" a sibling. The orchestrator's reading holds.
+- **The same read in a verification.** `worktree_record` (`:5501-5502` at `54a1ff14`), the lookup that
+  `verify_worktree` and `quiescence` make, resolves the listed paths the same way, after its list's access.
+- **Every other resolution of a listed path already ran inside an access:** the removal's scan
+  (`revalidate_removal_proving`) and the torn plan are themselves the attempts of their accesses. D's legacy path
+  resolves no listed path.
+
+#### 9.14.2 The first-bad commit, as far as the evidence goes
+
+**The read site is master's.** At `5c222ff2` the gate (`:1712-1713`) and the lookup (`:5072-5073`) resolve the
+listed paths the same way, after the list (`impl4/r7/site/site-lines.txt`).
+- A deterministic probe, a sibling snapshot whose checkout is a link to itself (`ELOOP`, standing in for Windows'
+  answer), makes `revalidate()` and an `add_snapshot` beside it return `Io` naming the sibling, alike at `5c222ff2`,
+  `54a1ff14` and `f9c88fdb` (`impl4/r7/first-bad/FIRST-BAD-SUMMARY.txt`).
+
+**What this change changed is the window.** At master R-X, one mutex, was held by the list (`:5052`) and by a
+removal's mutation (`:3007`), so no list ran while a sibling's checkout was being deleted: a resolution met a deletion
+only if the deletion began after the list returned and before the resolution ran. Since `58c7c203` the list, the
+removal's scan and the removal's mutation take nothing (§3.4; `:5482` at `54a1ff14`), so a list can name a sibling
+whose checkout is being deleted while it runs.
+- **Measured on Linux,** under the CI-failing test's own load, 20 runs at each commit. A test-only shim counted the
+  gate's resolutions of a listed snapshot, and how many ran while that snapshot's checkout deletion was in progress:
+  0 of 4,597 at `5c222ff2`, 189 of 7,183 at `54a1ff14` and 250 of 7,489 at `f9c88fdb` (`impl4/r7/first-bad/`,
+  `impl4/tools/r7-first-bad.py`). Linux has no pending deletion, so every one of them passed here. They are the
+  resolutions that can meet one on Windows.
+
+**CI.**
+- The CLASS-INTERMITTENT census (5,136 job logs to 2026-10-02) names the test in 119 logs, none failed: 35 on
+  `test (winguest)`, 1 on `windows-latest`, 42 on macOS and 41 on ubuntu (`impl4/r7/census/census-r7.tsv`).
+- On `test (winguest)` since this change's code: `59d206b3` and `54a1ff14` passed it, and so did C's `1fc0c911`,
+  whose manager is C's own change. D's `20e27724`, whose manager is `54a1ff14`'s, failed it once
+  (`impl4/r7/ci/winguest-b-era-verdicts.tsv`).
+
+**What can be said, and what cannot.** The defect, a failure to read a listed sibling returned as the gate's own I/O
+error, predates this change. This change's unheld list and lock-free removal made routine the overlap that the
+failure needs and that master made rare. Whether a master build ever failed this way on Windows, and the failure
+rate at either commit, cannot be proved without native Windows runs at both, which this round did not make. The
+Windows determination method O7 stays stopped.
+
+**Not R1's cause.** R1 (§9.13.1) is about where an access's waits happen; R7 is about what an attempt covers. The
+failing test runs no coordinator: four threads call the manager with `NoHooks`. So R7 is not R1's scope, and it is
+repaired here as its own item.
+
+#### 9.14.3 The repair
+
+`visit_resolved_records` (`src/workspace_manager.rs:5699`, `impl4/r7/site/head-lines-7bb9aac3.txt`) is one tolerant
+registry access, with no hold, whose attempt is the list, its parse **and the resolution of each listed path the visit
+reaches**.
+- **A listed path that cannot be read** (`UpstrokeError::Io` from `canonical_prefix`) fails the attempt, as a list
+  Git could not finish does, and the access attempts again after its backoff, until the deadline. Nothing in the
+  error tells a pending deletion from a path the filesystem denies, so nothing is classified (§5.3). The next attempt
+  reads a sibling whose removal has finished as absent, or no longer lists it.
+- **A path still unreadable at the deadline** refuses as `RegistryRefused`, whose message carries the read's own
+  error, and never as that I/O error.
+- **A path the resolution read and refused,** a link with nothing behind it (`Refusal::ReparsePointOnChain`), is not
+  a failure to read. It is the access's answer at once, as before.
+- **The visit** is the gate's containment comparison, or the lookup's match, unchanged and in the list's order: the
+  first refusal, or the match, ends it. It runs again on each attempt.
+- `revalidate_with` and `worktree_record` call it. `list_worktree_records` is the list's one reading, which
+  `worktree_records` keeps as its whole attempt.
+
+**What it keeps.** The add's veto, the removal proof, targeted removal and R-X are untouched: `Destination`,
+`revalidate_removal_proving`, `remove_bound` and the holds do not change. The deadline and the refusal are the
+access's own, and a gate is still one access. The new waits are the gate's existing `pause_for`, so on the
+coordinator they answer its messages (R1); mutation m4 below shows it. No frozen file changes, and the helper's
+contract (§5.5, §7.6) does not change.
+
+**What it costs.** A listed worktree whose path stays unreadable, such as a foreign worktree the filesystem denies or
+a link loop, stops the gate at the deadline, ten seconds, and refuses resumably, where it failed at once as I/O.
+`design/15` says so in B's paragraph, and the error docs of `derive`, `revalidate` and `quiescence` name the refusal.
+
+#### 9.14.4 Witnesses and mutations
+
+Four tests in `src/workspace_manager/tests.rs`, `#[cfg(unix)]`, after the CI-failing test, whose assertions are
+unchanged. A real sibling snapshot is added and its checkout exchanged for a link to itself, so the registry names it
+and resolving it fails with `ELOOP`; for the first two the plant checks both before the call. The observer ends the
+sibling's removal, by removing the link, at the call's first registry wait, with no clock.
+- `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add`: the add succeeds,
+  after a wait through the call's hooks and a counted `Attempt` answer.
+- `a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io`: held past the deadline, the
+  add refuses as `RegistryRefused`, naming the read's failure, before its intent is written.
+- `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification`: the link is
+  planted at the verification's `Before` hook, after its gate, and the lookup attempts again and answers
+  `NotRegistered`.
+- `a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once`: the control. A link to nothing refuses as
+  the link's refusal, with no `Attempt` answer.
+
+**Red on `f9c88fdb`'s code** (`impl4/r7/base-port/start-f9c88fdb-4/`, `impl4/tools/r7-base-port.sh`): the first three
+fail, each with `Io` naming `…/snapshots/k1-g0-a1-gates`, the CI's shape with another errno. The control and the
+CI-failing test pass.
+
+**Mutations** (`impl4/mutation-r7/VERDICTS.txt`, `impl4/tools/campaign-r7.py`; each on a scratch copy of `f9c88fdb` with
+the round's diff and one mutation). The control is green on all five tests, and each mutation turns red exactly the
+witnesses it should:
+
+| Row | Mutation | Red |
+|---|---|---|
+| m1 | the gate resolves after its list's access again | the add, the bound |
+| m2 | an unreadable path is the access's answer, not a failed attempt | the add, the bound, the verification |
+| m3 | the lookup resolves after its list's access again | the verification |
+| m4 | the gate's wait sleeps on its thread, not through the call's hooks (R1) | the add |
+| m5 | a refusal the resolution made is attempted again | the control |
+
+**What the stand-in can and cannot show about Windows.** It drives the same call, `canonical_prefix(record.path())`
+in the gate and in the lookup, failing with something other than absence on a sibling the registry names and then
+reading as absent once the removal ends: the path R7 took, with `ELOOP` for `ERROR_ACCESS_DENIED`. The repair does not
+read the error, so the errno does not change what it does. It cannot show that a pending deletion is what Windows
+answered in the CI run, that one ends within the deadline on the guest, or that the CI-failing test now passes there.
+The `test (winguest)` leg is the truth for those. The witnesses do not run on Windows, where a link needs privilege.
+
+#### 9.14.5 The frozen proof, and what else ran
+
+**The frozen proof** (`impl4/frozen/frozen-proof-7bb9aac3.txt`, `impl4/tools/frozen-proof-r4.sh`):
+- **This round's own frozen change** (`f9c88fdb..7bb9aac3`) is none: 34 of 34 files are byte-identical.
+- **H1 and H2** are byte for byte as `e369b251` committed them. `integrate.rs` is that commit's blob at `f9c88fdb` and
+  at `7bb9aac3`, and the frozen change since `54a1ff14` is still that one file, +33/−7, in that one commit.
+- **Parts 1 and 2** are round 3's, line for line (`impl4/frozen/parts12-vs-round3.diff`, empty with the commit ids
+  masked). Part 1 against master is `integrate.rs`, +33/−7, and nothing else. Part 2 against `d724fb16` is 5 files,
+  +274/−81: master's four paths (+241/−74) plus H1 and H2. H1 and H2 stay proposed and not adopted.
+
+**What else ran:**
+- the committed files are the campaign's, byte for byte (`impl4/verify/commit-vs-campaign-7bb9aac3.txt`);
+- at `7bb9aac3` the Windows target was linted, and type-checked on 1.85 with `-D warnings`, and the macOS target was
+  linted: all three passed (`impl4/platform/code-7bb9aac3/`);
+- §9.4's cites into `src/workspace_manager/tests.rs` are re-pinned to `7bb9aac3`: one hunk of 261 lines follows
+  `:7294`, and each moved cite was checked against the `fn` line of a test its row names
+  (`impl4/record/record-line-cites-remap.txt`). Row R7 is added;
+- the ten gates ran at this round's head, and the body records them.
+
+**Not verified here:** anything on Windows or macOS beyond those lint and type checks, which includes the
+CI-failing test on the guest and the four witnesses on macOS, and CI's stable 1.99.0. CI is the truth for them.
