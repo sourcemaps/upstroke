@@ -256,7 +256,9 @@ fn both_drivers_run_each_transition_through_the_one_generic_function() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let read = |file: &str| {
         crate::effects::production_code(
-            &std::fs::read_to_string(root.join(file)).expect("a source file"),
+            &std::fs::read_to_string(root.join(file))
+                .expect("a source file")
+                .replace("\r\n", "\n"),
         )
     };
     let run = read("src/engine/topology/run.rs");

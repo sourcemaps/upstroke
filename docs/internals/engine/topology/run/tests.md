@@ -147,6 +147,25 @@ on a total.
 Calls, not definitions — neither is defined here, but the filter is the
 one the barrier census learned to use and costs nothing.
 
+## `fn both_drivers_run_each_transition_through_the_one_generic_function() {`
+
+**Both drivers run each transition through the one generic function** (R-T,
+follow-up B's repair round 3). `begin_dispatch`, `begin_retry` and
+`settle_judged` are each defined once, generic over the operator that runs
+them; the width-1 `step` runs each through its [`Stepping`], the coordinator
+runs each with itself as the operator, and neither driver calls a second
+implementation. `coordinator::tests::the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`
+is the behavioural control.
+
+## `fn both_drivers_run_each_transition_through_the_one_generic_function()` › `let read = |file: &str| {`
+
+Line endings are normalised before the source is blanked. rustfmt splits the
+`step`'s call of `begin_dispatch` after its parenthesis, so that needle spells
+a line break, and a checkout with Windows line endings holds `\r\n` there:
+without the normalisation the census fails a source that satisfies it. It did
+on `test (winguest)` at `f9c88fdb` (follow-up B's R8), while every Linux and
+macOS leg passed.
+
 ## `fn the_frozen_pool_table_is_read_through_one_seam() {`
 
 **The frozen pool table is read through one seam.**
