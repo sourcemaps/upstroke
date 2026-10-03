@@ -148,6 +148,7 @@ effect_free = [
     "execution_root",
     "execution_root_of",
     "from",
+    "instance_tag",
     "intent_path",
     "intents",
     "names",
@@ -338,11 +339,11 @@ effect_free = [
     "refusal_cause",
 ]
 
-# Slot and snapshot name arithmetic, and the intent record they are written into. Pure string and path work; not one of these reads or writes the filesystem. `Slot`'s five effect-site accessors are deliberately NOT here -- they stay in the parent, where the site-inventory census reads them by path.
+# Slot and snapshot name arithmetic, the per-incarnation instance names and tags (PR11 follow-up C), and the intent record they are written into. Pure string and path work; not one of these reads or writes the filesystem. `Slot`'s five effect-site accessors are deliberately NOT here -- they stay in the parent, where the site-inventory census reads them by path.
 [[module]]
 path = "src/workspace_manager/naming.rs"
 crate_path = "upstroke::workspace_manager::naming"
-shared = { as_str = 3, deserialize = 3, expecting = 3, fmt = 3, kind = 3, serialize = 2, try_from = 2, visit_str = 2 }
+shared = { as_str = 4, deserialize = 3, expecting = 3, fmt = 3, kind = 3, serialize = 2, slot = 2, try_from = 2, visit_str = 2 }
 funnel = [
 ]
 effectful = []
@@ -355,20 +356,26 @@ effect_free = [
     "gates",
     "deserialize",
     "expecting",
+    "from_entry",
     "id",
     "incarnation",
+    "instance_id",
+    "instance_intent_name",
+    "instance_relative",
     "integration",
     "integration_review",
     "intent_kind",
     "intent_name",
     "kind",
     "new",
+    "of_incarnation",
     "relative",
     "review",
     "run_id",
     "safe_component",
     "serialize",
     "slot",
+    "tag",
     "try_from",
     "validate",
     "visit_map",

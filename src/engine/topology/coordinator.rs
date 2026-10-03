@@ -2570,6 +2570,29 @@ mod tests {
         (progress, watching)
     }
 
+    fn gate_snapshot_names(
+        manager: &WorkspaceManager,
+        key: u32,
+        generation: u32,
+        attempts: &[u32],
+    ) -> Vec<String> {
+        attempts
+            .iter()
+            .map(|attempt| {
+                manager
+                    .slot_path(&crate::workspace_manager::Slot::Snapshot {
+                        name: crate::workspace_manager::SnapshotName::gates(
+                            key, generation, *attempt,
+                        ),
+                    })
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
     fn snapshot_names(intents: &[crate::workspace_manager::Slot]) -> Vec<String> {
         intents
             .iter()
@@ -4476,7 +4499,7 @@ mod tests {
             Ok("complete") => crate::events::log::WrittenShape::Complete,
             other => panic!("the parent names the kill shape: {other:?}"),
         };
-        let mut wide = durable_halting_on_gamma("coordinator-closure-kill");
+        let mut wide = durable_halting_on_gamma("closure-kill");
         crate::workspace_manager::fixture::write_file(
             &dir.join(KILL_HANDOFF),
             wide.env.fixture.root.to_string_lossy().as_bytes(),
@@ -6602,7 +6625,7 @@ mod tests {
             .collect();
         assert_eq!(
             gates,
-            vec!["k0-g0-a1-gates".to_owned(), "k0-g0-a2-gates".to_owned()],
+            gate_snapshot_names(&wide.env.fixture.manager, 0, 0, &[1, 2]),
             "the retry re-gated on a fresh snapshot of its own"
         );
         assert_eq!(count(&events, "task_merged"), 3, "{kinds:?}");
@@ -8879,7 +8902,7 @@ mod tests {
         let incarnation = child_env("UPSTROKE_TEST_CHILD_INCARNATION");
         let tasks = three();
         let mut wide = Wide::durable_contained(
-            "coordinator-child",
+            "coord-child",
             &tasks,
             3,
             WidePlans::default(),
@@ -11227,7 +11250,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     beta_gates,
-                    vec!["k1-g0-a1-gates".to_owned(), "k1-g0-a2-gates".to_owned()],
+                    gate_snapshot_names(&wide.env.fixture.manager, 1, 0, &[1, 2]),
                     "seed {seed}: ST-15 — beta's retry re-gated on a fresh snapshot of its own"
                 );
                 let retry_beside = points.iter().any(|point| {
@@ -13482,7 +13505,7 @@ mod tests {
                 .expect("the parent names the cell")
                 .parse()
                 .expect("a cell index");
-            let mut wide = finishing(halted, "interleaving-finalize-kill");
+            let mut wide = finishing(halted, "finalize-kill");
             crate::workspace_manager::fixture::write_file(
                 &dir.join(KILL_HANDOFF),
                 wide.env.fixture.root.to_string_lossy().as_bytes(),

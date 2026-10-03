@@ -16,8 +16,8 @@
 //! integration's, the sequence) into the name, so a caller that goes through them
 //! cannot collide — not even two tasks judged at once at the same generation and
 //! attempt — but they are not the only way to obtain one.
-//! [`Slot::from_intent_name`] reconstructs a [`Slot::Snapshot`] straight from an
-//! on-disk intent filename, so that reclaim never has to trust a path stored
+//! [`SlotInstance::from_intent_name`] reconstructs a [`Slot::Snapshot`] straight
+//! from an on-disk intent filename, so that reclaim never has to trust a path stored
 //! inside a record, and a name reconstructed that way carries whatever the
 //! filename carried. **So "never reused across roles or attempts" rests on
 //! caller discipline rather than on the type**, and this module documents that
@@ -25,6 +25,19 @@
 //!
 //! Pure string and path arithmetic. Nothing in this module reads or writes the
 //! filesystem; the funnels that act on the paths it names are the parent's.
+//!
+//! **A slot has one instance per coordinator incarnation** (PR11 follow-up C,
+//! `reviews/2026-10-02-pr11-follow-up-c-record.md`, §3.3 as §4.2 repairs it).
+//! [`Slot`] stays the logical identity every caller passes, frozen recovery and
+//! the merge module included; what the manager creates on disk is an
+//! *instance* of it, the slot's component followed by `_` and the creating
+//! incarnation's [`InstanceTag`]: `tasks/k<key>-g<gen>_<tag>`,
+//! `merge/s<seq>_<tag>`, `snapshots/<name>_<tag>`, and the intent
+//! `intents/<namespace>.<component>_<tag>.intent`. No incarnation renders
+//! another's names, so a dead coordinator's Git writers, which name their slot
+//! by path or by registration name, cannot reach the instance its successor
+//! uses. A name with no tag was written before instances existed, and is
+//! another incarnation's like any other ([`SlotInstance`]).
 //!
 //! **[`Slot`]'s five effect-site accessors are deliberately not here.** `row`,
 //! `add_site`, `write_intent_site`, `remove_site` and `remove_intent_site` map a
@@ -57,6 +70,7 @@ use std::path::PathBuf;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::Refusal;
 
@@ -100,7 +114,7 @@ pub enum Slot {
 /// the string, which is how a caller that uses them satisfies
 /// `decisions.workspace_candidates.snapshots`' "never reused across roles or
 /// attempts" — and, since attempts of different tasks run at once from PR11, across
-/// tasks: two tasks at the same generation and attempt name different slots. It is **not** a property of the type: `Slot::from_intent_name`
+/// tasks: two tasks at the same generation and attempt name different slots. It is **not** a property of the type: `SlotInstance::from_intent_name`
 /// rebuilds one straight from an on-disk intent filename, so a reconstructed
 /// name carries whatever the filename carried. The module doc says where that
 /// leaves the guarantee.
@@ -188,48 +202,92 @@ impl Slot {
         }
     }
 
-    /// The slot's path relative to the execution root.
+    /// [`Self::parts`] for the instance `tag` names: the component followed
+    /// by `_` and the tag, or the bare component for an untagged name.
+    ///
+    /// The tag's alphabet has no `_`, so [`SlotInstance::from_parts`] splits
+    /// an instance at its last `_` whatever the component holds.
+    fn instance_parts(&self, tag: Option<&InstanceTag>) -> (&'static str, Cow<'_, str>) {
+        let (namespace, component) = self.parts();
+        match tag {
+            Some(tag) => (
+                namespace,
+                Cow::Owned(format!("{component}_{}", tag.as_str())),
+            ),
+            None => (namespace, component),
+        }
+    }
+
+    /// The slot's path relative to the execution root, with no tag: the
+    /// logical slot's own spelling, which no instance the manager creates
+    /// has ([`Self::instance_relative`] is the path of one).
     #[must_use]
     pub fn relative(&self) -> PathBuf {
-        let (namespace, component) = self.parts();
+        self.instance_relative(None)
+    }
+
+    /// The path, relative to the execution root, of the instance of this slot
+    /// that `tag` names, or of the untagged name with `None`.
+    #[must_use]
+    pub(super) fn instance_relative(&self, tag: Option<&InstanceTag>) -> PathBuf {
+        let (namespace, component) = self.instance_parts(tag);
         PathBuf::from(namespace).join(&*component)
     }
 
-    /// The slot's identifier as the intent record spells it: a [`SlotId`],
-    /// the text `<namespace>/<component>`, chosen to mirror
-    /// [`Self::relative`] so that an operator reading the record can find the
-    /// directory. It is a name, not a path: nothing joins it to a root or
-    /// opens it, and the filesystem path of a slot comes from `relative()`,
-    /// which is `PathBuf` arithmetic over the same parts, never from this
-    /// text.
-    ///
-    /// The slot is validated first, which is what lets the result be a
-    /// `SlotId` by construction: a `SlotId` is the canonical spelling of a
-    /// slot that passes [`Self::validate`], and [`SlotId`]'s own parser
-    /// admits nothing else.
+    /// The slot's identifier with no tag; [`Self::instance_id`] says what an
+    /// identifier is.
     ///
     /// # Errors
     ///
     /// [`Refusal::SlotName`], from [`Self::validate`].
     pub fn id(&self) -> Result<SlotId, Refusal> {
+        self.instance_id(None)
+    }
+
+    /// The identifier of the instance `tag` names, as the intent record
+    /// spells it: a [`SlotId`], the text `<namespace>/<component>[_<tag>]`,
+    /// chosen to mirror [`Self::instance_relative`] so that an operator
+    /// reading the record can find the directory. It is a name, not a path:
+    /// nothing joins it to a root or opens it, and the filesystem path of an
+    /// instance comes from `instance_relative()`, which is `PathBuf`
+    /// arithmetic over the same parts, never from this text.
+    ///
+    /// The slot is validated first, which is what lets the result be a
+    /// `SlotId` by construction: a `SlotId` is the canonical spelling of an
+    /// instance of a slot that passes [`Self::validate`], and [`SlotId`]'s
+    /// own parser admits nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::SlotName`], from [`Self::validate`].
+    pub(super) fn instance_id(&self, tag: Option<&InstanceTag>) -> Result<SlotId, Refusal> {
         self.validate()?;
         Ok(SlotId {
             kind: self.intent_kind(),
-            text: self.id_text(),
+            text: self.instance_id_text(tag),
         })
     }
 
-    /// The text of [`Self::id`], before validation: an identifier, not a path.
-    fn id_text(&self) -> String {
-        let (namespace, component) = self.parts();
+    /// The text of [`Self::instance_id`], before validation: an identifier,
+    /// not a path.
+    fn instance_id_text(&self, tag: Option<&InstanceTag>) -> String {
+        let (namespace, component) = self.instance_parts(tag);
         format!("{namespace}/{component}")
     }
 
-    /// The intent file's name, injective over slots: the two parts are joined
-    /// by `.`, which [`safe_component`] forbids inside either.
+    /// The intent file's name with no tag; [`Self::instance_intent_name`] is
+    /// the name of an instance's.
     #[must_use]
     pub fn intent_name(&self) -> String {
-        let (namespace, component) = self.parts();
+        self.instance_intent_name(None)
+    }
+
+    /// The name of the intent file of the instance `tag` names, injective over
+    /// instances: the two parts are joined by `.`, which [`safe_component`]
+    /// forbids inside either, and the tag follows the component's last `_`.
+    #[must_use]
+    pub(super) fn instance_intent_name(&self, tag: Option<&InstanceTag>) -> String {
+        let (namespace, component) = self.instance_parts(tag);
         format!("{namespace}.{component}.intent")
     }
 
@@ -270,19 +328,155 @@ impl Slot {
         })
     }
 
-    /// Rebuild a slot from an intent file name, so reclaim never has to trust
-    /// a path stored inside a record.
+    /// The inverse of [`Self::parts`] on well-formed input: the slot whose
+    /// namespace and component these are, or `None` when no slot renders to
+    /// them. Reached only through [`SlotInstance::from_parts`], which the
+    /// intent-name parser, the namespace walk and [`SlotId`]'s parser share,
+    /// so the three spellings cannot drift apart. The `?` sites are
+    /// dispositioned on [`SlotInstance::from_intent_name`]. Containment is not
+    /// checked here; the callers validate what this returns.
+    fn from_parts(namespace: &str, component: &str) -> Option<Self> {
+        match namespace {
+            "tasks" => {
+                let rest = component.strip_prefix('k')?;
+                let (key, generation) = rest.rsplit_once("-g")?;
+                Some(Self::Task {
+                    key: key.to_owned(),
+                    generation: generation.parse().ok()?,
+                })
+            }
+            "merge" => {
+                let rest = component.strip_prefix('s')?;
+                Some(Self::Staging {
+                    sequence: rest.parse().ok()?,
+                })
+            }
+            "snapshots" => Some(Self::Snapshot {
+                name: SnapshotName(component.to_owned()),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The domain string [`InstanceTag::of_incarnation`] hashes ahead of the
+/// incarnation id, so that no other SHA-256 this crate takes of an id can
+/// coincide with a tag.
+const INSTANCE_TAG_DOMAIN: &[u8] = b"upstroke.slot-instance-tag.v1\0";
+
+/// Crockford's base32 alphabet, as `crate::ulid` spells it: no `I`, `L`, `O`
+/// or `U`, and no `_`, which is what lets an instance split at its last `_`.
+const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// The tag of the slot instances one coordinator incarnation creates: twelve
+/// Crockford base32 characters rendering the first 60 bits of SHA-256 over
+/// [`INSTANCE_TAG_DOMAIN`] and the incarnation id.
+///
+/// **A function of the id alone**, so every manager of one incarnation renders
+/// one instance of a slot, in any process. Three frozen recovery tests depend
+/// on that: a child process drives a staging worktree that its parent then
+/// asserts at its own manager's path, both derived with the run's recorded
+/// incarnation (the record, §4.2, "Why the randomness is in the id").
+///
+/// **Its uniqueness is the id's, and probabilistic.** The production id
+/// carries 128 bits the process draws from the host (`crate::ulid`'s
+/// incarnation constructor), so two production incarnations share a tag with
+/// probability 2^-60 per pair under SHA-256 as a random function, and their
+/// ids are equal with probability at most 2^-80 within one millisecond. A
+/// test's fixed ids render fixed, distinct tags.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstanceTag(String);
+
+impl InstanceTag {
+    /// The length of every tag, in characters: 60 bits, five to a character.
+    pub const LEN: usize = 12;
+
+    /// The tag of `incarnation`'s instances.
+    #[must_use]
+    pub fn of_incarnation(incarnation: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(INSTANCE_TAG_DOMAIN);
+        digest.update(incarnation.as_bytes());
+        let bits = digest
+            .finalize()
+            .into_iter()
+            .take(8)
+            .fold(0_u64, |value, byte| (value << 8) | u64::from(byte))
+            >> 4;
+        Self(
+            (0..Self::LEN)
+                .rev()
+                .map(|i| {
+                    #[expect(
+                        clippy::indexing_slicing,
+                        reason = "the five-bit mask bounds this index into the 32-entry alphabet"
+                    )]
+                    let byte = CROCKFORD[((bits >> (i * 5)) & 0x1F) as usize];
+                    char::from(byte)
+                })
+                .collect(),
+        )
+    }
+
+    /// The tag as its twelve characters.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `text` as a tag: exactly [`Self::LEN`] characters of the alphabet,
+    /// upper case, or nothing.
+    fn parse(text: &str) -> Option<Self> {
+        (text.len() == Self::LEN && text.bytes().all(|byte| CROCKFORD.contains(&byte)))
+            .then(|| Self(text.to_owned()))
+    }
+}
+
+/// One instance of a [`Slot`] on disk: the logical slot, and the tag of the
+/// incarnation that created it, or `None` for a name written before instances
+/// existed.
+///
+/// What the parent finds in the intents directory, under a slot namespace or
+/// in the registry, read back from a name. Every instance but the current
+/// incarnation's own is another incarnation's, and is residue of its slot's
+/// row: the manager never uses it, and every reclaim of its slot removes it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlotInstance {
+    /// The logical slot, as every caller of the manager names it.
+    slot: Slot,
+    /// The creating incarnation's tag; `None` for an untagged name.
+    tag: Option<InstanceTag>,
+}
+
+impl SlotInstance {
+    /// The logical slot this is an instance of.
+    #[must_use]
+    pub fn slot(&self) -> &Slot {
+        &self.slot
+    }
+
+    /// The tag of the incarnation that created it, or `None` for a name
+    /// written before instances existed.
+    #[must_use]
+    pub fn tag(&self) -> Option<&InstanceTag> {
+        self.tag.as_ref()
+    }
+
+    /// Read an intent file's name back into the instance it records, so that
+    /// reclaim never has to trust a path stored inside a record.
     ///
-    /// `Some` exactly on [`Self::intent_name`]'s image. The name is parsed and
-    /// then re-rendered, and only a name equal to its own rendering is an
-    /// intent name. A name that merely *reads* as one — `tasks.kalpha-g03.intent`
-    /// or `merge.s+7.intent`, both of which the integer parser accepts — is
-    /// refused, because the slot it would produce renders to a different file:
-    /// reclaim would remove that file's intent and leave this one for every
-    /// later start to enumerate, report as reclaimed, and leave again.
+    /// `Some` exactly on [`Slot::instance_intent_name`]'s image, tagged or
+    /// not. The name is parsed and then re-rendered, and only a name equal to
+    /// its own rendering is an intent name. A name that merely *reads* as one
+    /// — `tasks.kalpha-g03.intent` or `merge.s+7.intent`, both of which the
+    /// integer parser accepts — is refused, because the slot it would produce
+    /// renders to a different file: reclaim would remove that file's intent
+    /// and leave this one for every later start to enumerate, report as
+    /// reclaimed, and leave again.
     ///
     /// `None` is this parser's whole verdict. Three `?` reach it here, five
-    /// more inside [`Self::from_parts`], which this and [`SlotId`]'s parser
+    /// more inside [`Slot::from_parts`] through [`Self::from_parts`], which
+    /// this, the namespace walk's [`Self::from_entry`] and [`SlotId`]'s parser
     /// share, and the round-trip comparison is the last exit. Each is
     /// dispositioned here in terms of what the verdict means to the one
     /// caller, the intents directory walk:
@@ -311,44 +505,58 @@ impl Slot {
     /// parser itself does not know it is reading the intents directory, which
     /// is why the refusal, and its context, are the caller's.
     ///
-    /// Grammar here, containment in [`Self::validate`]: a well-formed name
+    /// Grammar here, containment in [`Slot::validate`]: a well-formed name
     /// whose component is not a [`safe_component`] — an empty key, a snapshot
     /// name carrying `.` — is returned, and `validate` refuses it.
     #[must_use]
-    pub(super) fn from_intent_name(name: &str) -> Option<Self> {
+    pub fn from_intent_name(name: &str) -> Option<Self> {
         let stem = name.strip_suffix(".intent")?;
-        let (namespace, component) = stem.split_once('.')?;
-        let slot = Self::from_parts(namespace, component)?;
-        (slot.intent_name() == name).then_some(slot)
+        let (namespace, instance) = stem.split_once('.')?;
+        let parsed = Self::from_parts(namespace, instance)?;
+        (parsed.slot.instance_intent_name(parsed.tag()) == name).then_some(parsed)
     }
 
-    /// The inverse of [`Self::parts`] on well-formed input: the slot whose
-    /// namespace and component these are, or `None` when no slot renders to
-    /// them. Shared by [`Self::from_intent_name`] and [`SlotId`]'s parser,
-    /// so the two spellings cannot drift apart. The `?` sites are
-    /// dispositioned on `from_intent_name`. Containment is not checked here;
-    /// the callers validate what this returns.
-    fn from_parts(namespace: &str, component: &str) -> Option<Self> {
-        match namespace {
-            "tasks" => {
-                let rest = component.strip_prefix('k')?;
-                let (key, generation) = rest.rsplit_once("-g")?;
-                Some(Self::Task {
-                    key: key.to_owned(),
-                    generation: generation.parse().ok()?,
-                })
-            }
-            "merge" => {
-                let rest = component.strip_prefix('s')?;
-                Some(Self::Staging {
-                    sequence: rest.parse().ok()?,
-                })
-            }
-            "snapshots" => Some(Self::Snapshot {
-                name: SnapshotName(component.to_owned()),
-            }),
-            _ => None,
-        }
+    /// Read the name of an entry of a slot namespace's directory —
+    /// `<namespace>/<name>` under the execution root — back into the instance
+    /// it is, or `None` when no instance of that namespace renders to it.
+    ///
+    /// The namespace walk's reader, the counterpart of
+    /// [`Self::from_intent_name`] with the same canon: only a name equal to its
+    /// own rendering is an instance. Containment is the caller's, through
+    /// [`Slot::validate`].
+    #[must_use]
+    pub fn from_entry(namespace: &str, name: &str) -> Option<Self> {
+        let parsed = Self::from_parts(namespace, name)?;
+        (parsed.slot.instance_parts(parsed.tag()).1 == name).then_some(parsed)
+    }
+
+    /// The instance whose namespace and component — the slot's component,
+    /// then `_` and a tag, or the component alone — these are, or `None` when
+    /// no instance of that namespace parses from them. Grammar only: each
+    /// caller compares the instance's own rendering with what it read, so
+    /// that a name that merely parses is not taken for one the engine wrote.
+    ///
+    /// **The split.** The tag's alphabet has no `_`, so a tag can only follow
+    /// the last `_`, and only exactly [`InstanceTag::LEN`] characters of the
+    /// alphabet after it make one. Anything else is a component with no tag:
+    /// a name written before instances existed, which is another
+    /// incarnation's like any other. A component the engine renders never ends
+    /// in `_` and twelve such characters — a task's ends in `-g<generation>`,
+    /// a staging's is `s<sequence>`, and every snapshot constructor ends in a
+    /// lower-case word or a digit after a `-` — so no untagged name of the
+    /// engine's reads as a tagged one.
+    fn from_parts(namespace: &str, instance: &str) -> Option<Self> {
+        let (component, tag) = match instance.rsplit_once('_') {
+            Some((component, tail)) => match InstanceTag::parse(tail) {
+                Some(tag) => (component, Some(tag)),
+                None => (instance, None),
+            },
+            None => (instance, None),
+        };
+        Some(Self {
+            slot: Slot::from_parts(namespace, component)?,
+            tag,
+        })
     }
 }
 
@@ -395,8 +603,9 @@ impl Slot {
 pub struct IntentRecord {
     /// `task`, `staging`, or `snapshot`: always the slot's own kind.
     kind: IntentKind,
-    /// The slot's identifier, from [`Slot::id`]: `<namespace>/<component>`,
-    /// mirroring the relative path so an operator can find the directory.
+    /// The instance's identifier, from [`Slot::instance_id`]:
+    /// `<namespace>/<component>_<tag>`, mirroring the instance's relative path
+    /// so an operator can find the directory.
     slot: SlotId,
     /// The run that owns it.
     run_id: String,
@@ -411,19 +620,27 @@ impl IntentRecord {
     /// so these names are the only keys a record can be read from.
     pub const FIELDS: [&'static str; 4] = ["kind", "slot", "run_id", "incarnation"];
 
-    /// The record for `slot`, which must pass [`Slot::validate`]. The kind
-    /// is the slot's own, so a record cannot be built with a kind that
+    /// The record for the instance of `slot` that `tag` names, the slot
+    /// passing [`Slot::validate`]. Its `slot` field is the instance's
+    /// identifier, which mirrors the instance's relative path. The kind is
+    /// the slot's own, so a record cannot be built with a kind that
     /// disagrees with its slot; the fields are private, so it cannot be
     /// changed into one afterwards either. This and the reader are the only
     /// two ways to hold a record, and both hold the same invariant.
     ///
     /// # Errors
     ///
-    /// [`Refusal::SlotName`], from [`Slot::validate`] through [`Slot::id`].
-    pub fn new(slot: &Slot, run_id: String, incarnation: String) -> Result<Self, Refusal> {
+    /// [`Refusal::SlotName`], from [`Slot::validate`] through
+    /// [`Slot::instance_id`].
+    pub fn new(
+        slot: &Slot,
+        tag: Option<&InstanceTag>,
+        run_id: String,
+        incarnation: String,
+    ) -> Result<Self, Refusal> {
         Ok(Self {
             kind: slot.intent_kind(),
-            slot: slot.id()?,
+            slot: slot.instance_id(tag)?,
             run_id,
             incarnation,
         })
@@ -674,21 +891,22 @@ impl fmt::Display for IntentKind {
     }
 }
 
-/// A slot's identifier as the intent record spells it: the canonical
-/// `<namespace>/<component>` of a slot that passes [`Slot::validate`].
+/// An instance's identifier as the intent record spells it: the canonical
+/// `<namespace>/<component>[_<tag>]` of an instance of a slot that passes
+/// [`Slot::validate`].
 ///
-/// This is a name, not a path. Its grammar mirrors the slot's relative path
-/// so that an operator reading a record can find the directory, and the
+/// This is a name, not a path. Its grammar mirrors the instance's relative
+/// path so that an operator reading a record can find the directory, and the
 /// `/` in it is part of the record's wire format on every platform. Nothing
 /// joins a `SlotId` to a root or opens it, and no code derives a filesystem
 /// path from its text: a path comes from the typed [`Slot`] through
-/// [`Slot::relative`], which is `PathBuf` arithmetic. A reader that needs
-/// the path parses the text back into a `Slot` and calls `relative()`.
+/// [`Slot::instance_relative`], which is `PathBuf` arithmetic. A reader that
+/// needs the path parses the text back into an instance and renders that.
 ///
-/// It is produced by [`Slot::id`] from a validated slot's parts, and it is
-/// parsed by [`TryFrom<String>`] on the way out of JSON through the same
-/// [`Slot::from_parts`] the intent-name parser uses, then validated, then
-/// compared with its own re-rendering. So the text a reader holds is always
+/// It is produced by [`Slot::instance_id`] from a validated slot's parts and
+/// a tag, and it is parsed by [`TryFrom<String>`] on the way out of JSON
+/// through the same [`SlotInstance::from_parts`] the intent-name parser uses,
+/// then validated, then compared with its own re-rendering. So the text a reader holds is always
 /// one a validated slot renders to: not `..`, not a leading `/`, not a
 /// backslash, not an empty key, not `merge/s01`. The private fields are the
 /// invariant; the only ways to hold one are those two.
@@ -717,9 +935,9 @@ impl SlotId {
         self.kind
     }
 
-    /// The grammar, as a verdict over the text: the slot it names, or the
-    /// first objection. Each `?` is a refusal with its reason.
-    fn parse(value: &str) -> Result<Slot, &'static str> {
+    /// The grammar, as a verdict over the text: the instance it names, or
+    /// the first objection. Each `?` is a refusal with its reason.
+    fn parse(value: &str) -> Result<SlotInstance, &'static str> {
         let (namespace, component) = value
             .split_once('/')
             .ok_or("it has no `/` between the namespace and the component")?;
@@ -727,16 +945,16 @@ impl SlotId {
             return Err("the namespace is not `tasks`, `merge` or `snapshots`");
         }
         safe_component(component)?;
-        let slot = Slot::from_parts(namespace, component)
+        let instance = SlotInstance::from_parts(namespace, component)
             .ok_or("no slot of that namespace renders that component")?;
-        slot.validate().map_err(|refusal| match refusal {
+        instance.slot.validate().map_err(|refusal| match refusal {
             Refusal::SlotName { why, .. } => why,
             _ => "the slot it names is refused",
         })?;
-        if slot.id_text() != value {
+        if instance.slot.instance_id_text(instance.tag()) != value {
             return Err("it is not the canonical spelling of the slot it names");
         }
-        Ok(slot)
+        Ok(instance)
     }
 }
 
@@ -745,8 +963,8 @@ impl TryFrom<String> for SlotId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match Self::parse(&value) {
-            Ok(slot) => Ok(Self {
-                kind: slot.intent_kind(),
+            Ok(instance) => Ok(Self {
+                kind: instance.slot.intent_kind(),
                 text: value,
             }),
             Err(why) => Err(SlotIdError { value, why }),
@@ -825,13 +1043,182 @@ mod tests {
         ]
     }
 
+    /// The slot an untagged intent name parses to: the shape every name had
+    /// before instances existed, and still the grammar's base case.
+    fn untagged(name: &str) -> Option<Slot> {
+        SlotInstance::from_intent_name(name)
+            .filter(|instance| instance.tag.is_none())
+            .map(|instance| instance.slot)
+    }
+
+    /// The fixed incarnation ids the frozen recovery tests (`CREATOR`,
+    /// `RESUMER`, `FIRST_RESUMER`) and the manager's fixture (`inc-1`) derive
+    /// managers with, and the tags an implementation independent of this
+    /// module computes for them: Python's `hashlib.sha256` over the domain
+    /// string and the id, the first 60 bits in Crockford base32
+    /// (`~/orch-pr11/logs/pr11_fuc_impl/vectors/vectors.py`).
+    const TAG_VECTORS: &[(&str, &str)] = &[
+        ("01KZTAAAAAAAAAAAAAAAAAAAAA", "BQ97HKQ6B47T"),
+        ("01KZTBBBBBBBBBBBBBBBBBBBBB", "GQXAV07CXT0Z"),
+        ("01KZTFFFFFFFFFFFFFFFFFFFFF", "M4A7Z8JN2T5Z"),
+        ("inc-1", "WG9T4H5MXCSP"),
+        ("", "8MQY56G7H8HD"),
+    ];
+
+    #[test]
+    fn a_tag_is_twelve_crockford_characters_of_its_incarnations_hash() {
+        for (incarnation, expected) in TAG_VECTORS {
+            let tag = InstanceTag::of_incarnation(incarnation);
+            assert_eq!(
+                tag.as_str(),
+                *expected,
+                "the tag of `{incarnation}` differs from the independent vector"
+            );
+            assert_eq!(tag.as_str().len(), InstanceTag::LEN);
+            assert!(
+                tag.as_str().bytes().all(|byte| CROCKFORD.contains(&byte)),
+                "{tag:?} is outside the alphabet"
+            );
+            assert_eq!(InstanceTag::parse(tag.as_str()).as_ref(), Some(&tag));
+            assert_eq!(
+                tag,
+                InstanceTag::of_incarnation(incarnation),
+                "a tag is a function of its incarnation id alone, so two managers of one \
+                 incarnation render one instance"
+            );
+        }
+        let distinct: std::collections::BTreeSet<InstanceTag> = TAG_VECTORS
+            .iter()
+            .map(|(incarnation, _)| InstanceTag::of_incarnation(incarnation))
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            TAG_VECTORS.len(),
+            "the fixed incarnations of the frozen tests and the fixture render distinct tags"
+        );
+    }
+
+    #[test]
+    fn only_twelve_crockford_characters_after_the_last_underscore_make_a_tag() {
+        for text in [
+            "BQ97HKQ6B47",
+            "BQ97HKQ6B47TX",
+            "bq97hkq6b47t",
+            "BQ97HKQ6B47I",
+            "BQ97HKQ6B47L",
+            "BQ97HKQ6B47O",
+            "BQ97HKQ6B47U",
+            "BQ97HKQ6B4_T",
+            "BQ97HKQ6B47-",
+            "",
+        ] {
+            assert_eq!(InstanceTag::parse(text), None, "`{text}` was read as a tag");
+        }
+        assert_eq!(
+            SlotInstance::from_intent_name("tasks.kalpha-g1_bq97hkq6b47t.intent"),
+            None,
+            "a lower-case tail is no tag, and `alpha-g1_bq97hkq6b47t` no task component"
+        );
+    }
+
+    #[test]
+    fn every_instance_shape_survives_the_split_at_its_last_underscore() {
+        let resumer = InstanceTag::of_incarnation("01KZTBBBBBBBBBBBBBBBBBBBBB");
+        let mut shapes = every_shape();
+        shapes.push(Slot::Task {
+            key: "my_key".to_owned(),
+            generation: 2,
+        });
+        shapes.push(Slot::Task {
+            key: "x_BQ97HKQ6B47T".to_owned(),
+            generation: 1,
+        });
+        for slot in shapes {
+            for tag in [None, Some(&resumer)] {
+                let expected = SlotInstance {
+                    slot: slot.clone(),
+                    tag: tag.cloned(),
+                };
+                let intent = slot.instance_intent_name(tag);
+                assert_eq!(
+                    SlotInstance::from_intent_name(&intent).as_ref(),
+                    Some(&expected),
+                    "`{intent}` did not come back as the instance that rendered it"
+                );
+                let relative = slot.instance_relative(tag);
+                let names: Vec<&str> = relative
+                    .components()
+                    .map(|component| {
+                        component
+                            .as_os_str()
+                            .to_str()
+                            .expect("every instance path component is UTF-8")
+                    })
+                    .collect();
+                let [namespace, name] = names.as_slice() else {
+                    panic!("an instance's path is its namespace and one name: {names:?}");
+                };
+                assert_eq!(
+                    SlotInstance::from_entry(namespace, name).as_ref(),
+                    Some(&expected),
+                    "`{namespace}/{name}` did not come back as the instance it names"
+                );
+                let id = slot
+                    .instance_id(tag)
+                    .expect("every fixture slot is a valid one");
+                assert_eq!(
+                    id.as_str(),
+                    names.join("/"),
+                    "the id mirrors the instance's path"
+                );
+                assert_eq!(
+                    intent,
+                    format!("{}.intent", id.as_str().replace('/', ".")),
+                    "and the intent name is its third spelling"
+                );
+                let again = SlotId::try_from(String::from(id.clone()))
+                    .expect("what `instance_id` builds, the grammar admits");
+                assert_eq!(again, id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_record_names_its_instance() {
+        let tag = InstanceTag::of_incarnation("inc-1");
+        let slot = Slot::Task {
+            key: "alpha".to_owned(),
+            generation: 1,
+        };
+        let record = IntentRecord::new(&slot, Some(&tag), "run".to_owned(), "inc-1".to_owned())
+            .expect("a valid slot makes a record");
+        let json = serde_json::to_string(&record).expect("a record serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"task","slot":"tasks/kalpha-g1_WG9T4H5MXCSP","run_id":"run","incarnation":"inc-1"}"#
+        );
+        let back: IntentRecord = serde_json::from_str(&json).expect("the record reads back");
+        assert_eq!(back, record);
+        for bad in [
+            "tasks/kalpha-g1_WG9T4H5MXCS",
+            "tasks/kalpha-g01_WG9T4H5MXCSP",
+            "tasks/kalpha_WG9T4H5MXCSP",
+            "merge/s01_WG9T4H5MXCSP",
+        ] {
+            assert!(
+                SlotId::try_from(bad.to_owned()).is_err(),
+                "`{bad}` was accepted as an instance id"
+            );
+        }
+    }
+
     #[test]
     fn every_slot_shape_survives_the_intent_name_round_trip() {
         for slot in every_shape() {
             slot.validate().expect("every fixture slot is a valid one");
             let name = slot.intent_name();
             assert_eq!(
-                Slot::from_intent_name(&name).as_ref(),
+                untagged(&name).as_ref(),
                 Some(&slot),
                 "`{name}` did not come back as the slot that rendered it"
             );
@@ -868,7 +1255,7 @@ mod tests {
             slot.validate()
                 .unwrap_or_else(|error| panic!("`{name}` is not a valid slot component: {error}"));
             assert_eq!(
-                Slot::from_intent_name(&slot.intent_name()).as_ref(),
+                untagged(&slot.intent_name()).as_ref(),
                 Some(&slot),
                 "`{name}` does not survive the intent-name round trip"
             );
@@ -914,7 +1301,7 @@ mod tests {
             "tasks.kalpha-g1.intent ",
         ] {
             assert_eq!(
-                Slot::from_intent_name(name),
+                SlotInstance::from_intent_name(name),
                 None,
                 "`{name}` was accepted as an intent name"
             );
@@ -933,7 +1320,7 @@ mod tests {
             ("tasks.ka/b-g1.intent", "only ASCII alphanumerics"),
             ("snapshots.-x.intent", "a leading `-`"),
         ] {
-            let slot = Slot::from_intent_name(name)
+            let slot = untagged(name)
                 .unwrap_or_else(|| panic!("`{name}` is well-formed under the grammar"));
             assert_eq!(
                 slot.intent_name(),
@@ -992,6 +1379,7 @@ mod tests {
                 key: "alpha".to_owned(),
                 generation: 1,
             },
+            None,
             "run".to_owned(),
             "01".to_owned(),
         )
@@ -1190,6 +1578,7 @@ mod tests {
             &Slot::Snapshot {
                 name: SnapshotName::gates(0, 1, 1),
             },
+            None,
             "run".to_owned(),
             "01".to_owned(),
         )
@@ -1267,7 +1656,7 @@ mod tests {
     #[test]
     fn a_record_round_trips_and_cannot_be_built_disagreeing() {
         for slot in every_shape() {
-            let record = IntentRecord::new(&slot, "run".to_owned(), "01".to_owned())
+            let record = IntentRecord::new(&slot, None, "run".to_owned(), "01".to_owned())
                 .expect("every fixture slot makes a record");
             assert_eq!(record.kind(), slot.intent_kind());
             assert_eq!(
@@ -1290,7 +1679,7 @@ mod tests {
             generation: 0,
         };
         assert!(
-            IntentRecord::new(&invalid, "run".to_owned(), "01".to_owned()).is_err(),
+            IntentRecord::new(&invalid, None, "run".to_owned(), "01".to_owned()).is_err(),
             "a slot that validate refuses makes no record"
         );
     }

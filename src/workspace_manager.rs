@@ -115,6 +115,65 @@ pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1")
 /// only under the run's own namespace.
 pub const RUN_REF_ROOT: &str = "refs/upstroke/runs";
 
+/// The command-scope configuration every Git child the manager starts runs
+/// under, in both of its builders ([`WorkspaceManager::command`] and
+/// [`read_only_git`]), one list so that the two cannot drift (the follow-up C
+/// record, §2.2 and §5.2-§5.3; `DESIGN.md` §15, "Engine Git children"):
+///
+/// - `maintenance.auto=false` and `gc.auto=0`: no Git process an engine
+///   command starts runs automatic maintenance, whose `gc` prunes worktrees and
+///   can detach from the command (executed in a partial clone, 2.43 and 2.55);
+/// - `gc.autoDetach=false` and `maintenance.autoDetach=false`: maintenance
+///   reached despite both runs attached, inside the command;
+/// - `rerere.enabled=false`: no engine cherry-pick reads or writes the
+///   repository's shared `rr-cache` or the worktree's `MERGE_RR`, so a
+///   resolution recorded at some other time, by the user or by a dead
+///   incarnation's pick, is never replayed into a slot, and a pick records
+///   nothing there for another to replay (`rerere.c`'s `setup_rerere` returns
+///   before either is opened when rerere is disabled);
+/// - `worktree.useRelativePaths=false`: an engine add never upgrades the
+///   repository's format in the common config, which Git 2.48 and later do for
+///   a first add under the user's `worktree.useRelativePaths=true`, and which
+///   Gits older than 2.48 then refuse; older Gits ignore the key.
+///
+/// Command scope outranks every configuration file, and Git hands each value
+/// to every Git child through `GIT_CONFIG_PARAMETERS`.
+const ENGINE_GIT_SWITCHES: [&str; 12] = [
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "gc.autoDetach=false",
+    "-c",
+    "maintenance.autoDetach=false",
+    "-c",
+    "rerere.enabled=false",
+    "-c",
+    "worktree.useRelativePaths=false",
+];
+
+/// The environment bindings every Git child the manager starts is given, in
+/// both builders, after [`NO_REPLACEMENT_OBJECTS`] (the follow-up C record,
+/// §2.2):
+///
+/// - `GIT_NO_LAZY_FETCH=1`: Git never fetches a missing object from a partial
+///   clone's promisor remote, the path by which an engine command reached
+///   automatic maintenance;
+/// - `GIT_ALLOW_PROTOCOL=` (empty): every transport is refused before any
+///   helper, `ssh` or `upload-pack` starts, on Gits that predate the variable
+///   above too;
+/// - `GIT_TERMINAL_PROMPT=0`: Git's credential prompts fail rather than read
+///   the terminal.
+///
+/// A command that needs an object a partial clone lacks therefore fails,
+/// naming it, and is resumable once the operator has fetched it.
+const ENGINE_GIT_ENVIRONMENT: [(&str, &str); 3] = [
+    ("GIT_NO_LAZY_FETCH", "1"),
+    ("GIT_ALLOW_PROTOCOL", ""),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
+
 // ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
@@ -495,6 +554,30 @@ pub enum Refusal {
         slot: String,
         /// Where its intent was looked for.
         intent: PathBuf,
+    },
+
+    /// An add whose new worktree's `$GIT_DIR` Git for Windows would refuse:
+    /// longer, in UTF-8 bytes as Git for Windows renders the path, than its
+    /// `PATH_MAX - 40`, 220 (`setup.c`'s `strlen` check, which dies with
+    /// "'$GIT_DIR' too big" in the add's checkout child after the add has
+    /// begun). Refused at once, before any registry access, so no retry of
+    /// the tolerant registry access can mistake it for contention (the
+    /// follow-up C record, §4.7, and the decision appendix's
+    /// FUC-D5-WINPATHBYTES).
+    #[error(
+        "refusing `git worktree add`: the `$GIT_DIR` Git for Windows would be handed, `{git_dir}`, \
+         is {bytes} bytes in UTF-8, over Git's budget of {budget} (`PATH_MAX - 40`). A run cannot \
+         move its private root, since a resume refuses an explicit root other than the recorded \
+         one, so this run must be finished by a binary whose slot names fit under its root, or \
+         abandoned"
+    )]
+    GitDirOverBudget {
+        /// The `$GIT_DIR`, as Git for Windows would render it.
+        git_dir: String,
+        /// Its length in UTF-8 bytes.
+        bytes: usize,
+        /// Git for Windows' budget.
+        budget: usize,
     },
 }
 
@@ -896,7 +979,8 @@ impl Primitive {
 mod naming;
 use self::naming::safe_component;
 pub use self::naming::{
-    IntentKind, IntentRecord, IntentRecordError, Slot, SlotId, SlotIdError, SnapshotName,
+    InstanceTag, IntentKind, IntentRecord, IntentRecordError, Slot, SlotId, SlotIdError,
+    SlotInstance, SnapshotName,
 };
 
 /// The slot's effect-site vocabulary: which [`EffectSiteId`] each of its four
@@ -1403,6 +1487,11 @@ pub struct WorkspaceManager {
     repo_key: String,
     run_id: String,
     incarnation: String,
+    /// The tag of this incarnation's slot instances, from `incarnation`
+    /// alone: every slot this manager adds, verifies or runs a command in is
+    /// this incarnation's instance of it (naming's module doc, "A slot has
+    /// one instance per coordinator incarnation").
+    tag: InstanceTag,
     /// The operator's authorized private root, canonicalized. It is the anchor
     /// the reparse-point walk starts at — see `containment::reparse_point_below`.
     ///
@@ -2044,6 +2133,7 @@ impl WorkspaceManager {
             repo_key,
             run_id: run_id.to_owned(),
             incarnation: incarnation.to_owned(),
+            tag: InstanceTag::of_incarnation(incarnation),
             private_root,
             execution_root,
         };
@@ -2082,16 +2172,36 @@ impl WorkspaceManager {
         &self.execution_root
     }
 
-    /// Where a slot's worktree lives.
+    /// Where this incarnation's instance of a slot lives: the only worktree of
+    /// the slot this manager adds, verifies or runs a command in.
     #[must_use]
     pub fn slot_path(&self, slot: &Slot) -> PathBuf {
-        self.execution_root.join(slot.relative())
+        self.instance_path(slot, Some(&self.tag))
     }
 
-    /// Where a slot's intent lives.
+    /// Where this incarnation's intent for a slot lives.
     #[must_use]
     pub fn intent_path(&self, slot: &Slot) -> PathBuf {
-        self.execution_root.join("intents").join(slot.intent_name())
+        self.instance_intent_path(slot, Some(&self.tag))
+    }
+
+    /// The tag of this incarnation's slot instances.
+    #[must_use]
+    pub fn instance_tag(&self) -> &InstanceTag {
+        &self.tag
+    }
+
+    /// Where the instance of `slot` that `tag` names lives, whichever
+    /// incarnation created it: `None` is the untagged name.
+    fn instance_path(&self, slot: &Slot, tag: Option<&InstanceTag>) -> PathBuf {
+        self.execution_root.join(slot.instance_relative(tag))
+    }
+
+    /// Where the intent of the instance of `slot` that `tag` names lives.
+    fn instance_intent_path(&self, slot: &Slot, tag: Option<&InstanceTag>) -> PathBuf {
+        self.execution_root
+            .join("intents")
+            .join(slot.instance_intent_name(tag))
     }
 
     /// The three containment conditions, re-checked.
@@ -2205,10 +2315,28 @@ impl WorkspaceManager {
         slot: Option<&Slot>,
         registration: Option<&Path>,
     ) -> Result<Vec<(PathBuf, PathBuf, Leaf)>, UpstrokeError> {
+        self.acted_through_instance_paths(
+            primitive,
+            slot.map(|slot| (slot, Some(&self.tag))),
+            registration,
+        )
+    }
+
+    /// [`Self::acted_through_paths`] for the instance of a slot that a tag
+    /// names, this incarnation's or another's: the slot roles resolve to that
+    /// instance's checkout and intent. Every primitive acts through this
+    /// incarnation's instance but the forced removal and the intent removal,
+    /// which act through every instance of their slot in turn.
+    fn acted_through_instance_paths(
+        &self,
+        primitive: Primitive,
+        instance: Option<(&Slot, Option<&InstanceTag>)>,
+        registration: Option<&Path>,
+    ) -> Result<Vec<(PathBuf, PathBuf, Leaf)>, UpstrokeError> {
         let mut paths = Vec::new();
         let anchor = self.private_root.clone();
         let need_slot = |role: ActedThrough| {
-            slot.ok_or_else(|| UpstrokeError::Refused {
+            instance.ok_or_else(|| UpstrokeError::Refused {
                 message: format!(
                     "internal: {primitive:?} acts through {role:?} but was given no slot"
                 ),
@@ -2238,25 +2366,33 @@ impl WorkspaceManager {
                     ));
                 }
                 ActedThrough::IntentFile => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.intent_path(slot), Leaf::Entry));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((
+                        anchor.clone(),
+                        self.instance_intent_path(slot, tag),
+                        Leaf::Entry,
+                    ));
                 }
                 ActedThrough::SlotParent => {
-                    let slot = need_slot(*role)?;
+                    let (slot, tag) = need_slot(*role)?;
                     let parent = self
-                        .slot_path(slot)
+                        .instance_path(slot, tag)
                         .parent()
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|| self.execution_root.clone());
                     paths.push((anchor.clone(), parent, Leaf::Directory));
                 }
                 ActedThrough::SlotCheckoutDirectory => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.slot_path(slot), Leaf::Directory));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((
+                        anchor.clone(),
+                        self.instance_path(slot, tag),
+                        Leaf::Directory,
+                    ));
                 }
                 ActedThrough::SlotCheckoutEntry => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.slot_path(slot), Leaf::Entry));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((anchor.clone(), self.instance_path(slot, tag), Leaf::Entry));
                 }
                 ActedThrough::HooksPath => {
                     paths.push((anchor.clone(), self.hooks_dir(), Leaf::Directory));
@@ -2364,8 +2500,35 @@ impl WorkspaceManager {
         slot: Option<&Slot>,
         registration: Option<&Path>,
     ) -> Result<(), UpstrokeError> {
+        self.revalidate_walked(
+            primitive,
+            self.acted_through_paths(primitive, slot, registration)?,
+        )
+    }
+
+    /// [`Self::revalidate_acted_through`] at the paths of the instance of a
+    /// slot that a tag names ([`Self::acted_through_instance_paths`]).
+    fn revalidate_acted_through_instance(
+        &self,
+        primitive: Primitive,
+        instance: Option<(&Slot, Option<&InstanceTag>)>,
+        registration: Option<&Path>,
+    ) -> Result<(), UpstrokeError> {
+        self.revalidate_walked(
+            primitive,
+            self.acted_through_instance_paths(primitive, instance, registration)?,
+        )
+    }
+
+    /// The walk of [`Self::revalidate_acted_through`] over `paths`, resolved
+    /// for `primitive`.
+    fn revalidate_walked(
+        &self,
+        primitive: Primitive,
+        paths: Vec<(PathBuf, PathBuf, Leaf)>,
+    ) -> Result<(), UpstrokeError> {
         refuse_unreal_directory(&self.base)?;
-        for (anchor, path, leaf) in self.acted_through_paths(primitive, slot, registration)? {
+        for (anchor, path, leaf) in paths {
             refuse_reparse_points(&anchor, &path, leaf)?;
         }
         if primitive.acted_through().contains(&ActedThrough::HooksPath) {
@@ -2519,14 +2682,22 @@ impl WorkspaceManager {
     /// empty; otherwise resumably_open". The answer says which happened, so a
     /// caller cannot read "did nothing" as "removed".
     ///
+    /// **The final sweep comes first** ([`Self::sweep_earlier_instances`]):
+    /// terminal finalization calls this last, after its scrubs, and an earlier
+    /// incarnation's writer that recreated its instance after its kind's scrub
+    /// would otherwise keep the root with no walk left to reach it (the
+    /// follow-up C record, §5.4). The R18 site itself still removes only the
+    /// scaffolding and the root.
+    ///
     /// # Errors
     ///
-    /// The containment refusals, or an I/O error.
+    /// The containment refusals, the sweep's refusals, or an I/O error.
     pub fn remove_execution_root(
         &self,
         hooks: &mut dyn EffectHooks,
     ) -> Result<bool, UpstrokeError> {
         self.revalidate()?;
+        self.sweep_earlier_instances(hooks)?;
         funnel(
             hooks,
             EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
@@ -2587,6 +2758,50 @@ impl WorkspaceManager {
         )
     }
 
+    /// Terminal finalization's final sweep: every instance of an earlier
+    /// incarnation, or untagged, that the execution root's slot namespaces or
+    /// the registry hold ([`Self::earlier_instances`], sources 2 and 3 of
+    /// [`Self::intents`], over all three namespaces), each removed with
+    /// force through its own kind's removal site, bound to its own
+    /// registration, as every walk removes one.
+    ///
+    /// **What it leaves.** This incarnation's own instances: at the last step
+    /// of a `Complete` or `Halted` finalization the scrubs have removed them,
+    /// a torn one no intent names stays the finalizer's refusal, and a live
+    /// one keeps the root. And whatever a still-running earlier writer
+    /// creates after the sweep's scan: the scan narrows the window to itself
+    /// and cannot close it (the record, §5.4's table; R-UR).
+    ///
+    /// The proof is [`WriterProof::NoWriterAlive`], the finalizer's own: an
+    /// entry that names nothing yet, an add still writing it, is passed over
+    /// and left as it is, never bound by its Git-generated name.
+    ///
+    /// A removal that fails refuses the sweep, resumably, and so the
+    /// finalization: the root is not removed over an instance that is still
+    /// there.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, [`UpstrokeError::RegistryRefused`], or a removal's error.
+    fn sweep_earlier_instances(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
+        for instance in self.earlier_instances(self.registered_instances()?)? {
+            let slot = instance.slot();
+            let tag = instance.tag();
+            let path = self.instance_path(slot, tag);
+            let binding = tolerant_registry_access(
+                &self.common_git_dir,
+                RegistryHold::Unheld,
+                &mut || Again::Attempt,
+                &mut || self.revalidate_removal_proving(&path, WriterProof::NoWriterAlive),
+            )?;
+            let ledger = hooks.durability_ledger();
+            funnel(hooks, slot.remove_site(), || {
+                self.remove_bound(slot, tag, &path, binding.admin.as_deref(), &ledger)
+            })?;
+        }
+        Ok(())
+    }
+
     /// The empty directory every funnel points `core.hooksPath` at.
     ///
     /// `decisions.workspace_candidates.candidate` calls the commit "hook-free",
@@ -2632,7 +2847,12 @@ impl WorkspaceManager {
         let path = self.intent_path(slot);
         // Owned snapshots: the record is persisted, and serde owns its
         // fields.
-        let record = IntentRecord::new(slot, self.run_id.clone(), self.incarnation.clone())?;
+        let record = IntentRecord::new(
+            slot,
+            Some(&self.tag),
+            self.run_id.clone(),
+            self.incarnation.clone(),
+        )?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.write_intent_site(), || {
             self.revalidate_acted_through(Primitive::WriteIntent, Some(slot), None)?;
@@ -2664,6 +2884,13 @@ impl WorkspaceManager {
     /// Git itself returns. When the repair finds nothing it may remove, the
     /// enumeration's refusal is returned as it was.
     ///
+    /// **Every instance's intent goes** (naming's module doc): this
+    /// incarnation's, and every other incarnation's intent of the same slot
+    /// the intents directory holds, tagged or not, in one execution of the
+    /// site, so a caller that counts the site's hooks counts one. Each is
+    /// walked at its own path before it is removed, and the directory is
+    /// synced once after the last.
+    ///
     /// # Errors
     ///
     /// A slot refusal, the containment refusals, or an I/O error. The name is
@@ -2683,28 +2910,68 @@ impl WorkspaceManager {
             self.revalidate()?;
         }
         let directory = self.execution_root.join("intents");
-        let path = directory.join(slot.intent_name());
+        let tags = self.intent_tags_of(slot)?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_intent_site(), || {
-            self.revalidate_acted_through(Primitive::RemoveIntent, Some(slot), None)?;
-            match fs::remove_file(&path) {
-                Ok(()) => sync_directory(&directory, &ledger),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(source) => Err(UpstrokeError::Filesystem {
-                    operation: "remove",
-                    path,
-                    source,
-                }),
+            let mut removed = false;
+            for tag in &tags {
+                self.revalidate_acted_through_instance(
+                    Primitive::RemoveIntent,
+                    Some((slot, tag.as_ref())),
+                    None,
+                )?;
+                let path = self.instance_intent_path(slot, tag.as_ref());
+                match fs::remove_file(&path) {
+                    Ok(()) => removed = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Filesystem {
+                            operation: "remove",
+                            path,
+                            source,
+                        });
+                    }
+                }
+            }
+            if removed {
+                sync_directory(&directory, &ledger)
+            } else {
+                Ok(())
             }
         })
     }
 
-    /// Every intent the execution root still carries, in directory order.
+    /// The tags of every intent of `slot` the intents directory holds, this
+    /// incarnation's first and always, whether its intent is there or not;
+    /// `None` is an untagged intent. A name that is not an intent of this
+    /// slot is not this removal's: [`Self::intents`] is where a malformed
+    /// name refuses.
     ///
     /// # Errors
     ///
-    /// An I/O error, or an intent file whose name no slot renders.
-    pub fn intents(&self) -> Result<Vec<Slot>, UpstrokeError> {
+    /// An I/O error reading the directory.
+    fn intent_tags_of(&self, slot: &Slot) -> Result<Vec<Option<InstanceTag>>, UpstrokeError> {
+        let mut others = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            if let Some(instance) = SlotInstance::from_intent_name(&name) {
+                if instance.slot() == slot && instance.tag() != Some(&self.tag) {
+                    others.insert(instance.tag().cloned());
+                }
+            }
+        }
+        let mut tags = vec![Some(self.tag.clone())];
+        tags.extend(others);
+        Ok(tags)
+    }
+
+    /// The names in `intents/`, staging leftovers excepted (see
+    /// [`Self::staging_leftovers`]), in directory order; nothing when the
+    /// directory does not exist.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, or a name that is not UTF-8.
+    fn intent_file_names(&self) -> Result<Vec<String>, UpstrokeError> {
         let directory = self.execution_root.join("intents");
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -2716,7 +2983,7 @@ impl WorkspaceManager {
                 });
             }
         };
-        let mut slots = Vec::new();
+        let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| UpstrokeError::Io {
                 path: directory.clone(),
@@ -2727,22 +2994,215 @@ impl WorkspaceManager {
                 message: format!("intent {} has a non-UTF-8 name", entry.path().display()),
             })?;
             // A staging file of the exact shape `write_intent` produces is
-            // never an intent; `reclaim_intents` removes it. Anything else
-            // that is not an intent name is the malformed file it is.
+            // never an intent; terminal finalization removes it.
             if staging_kind(name).is_some() {
                 continue;
             }
-            let slot = Slot::from_intent_name(name).ok_or_else(|| UpstrokeError::Git {
-                message: format!(
-                    "unexpected file `{name}` in the intent directory of {}",
-                    self.execution_root.display()
-                ),
-            })?;
-            slot.validate()?;
-            slots.push(slot);
+            names.push(name.to_owned());
         }
-        slots.sort();
-        Ok(slots)
+        Ok(names)
+    }
+
+    /// Every slot the execution root holds an instance of that a walk must
+    /// reach, as **logical** slots, each once, sorted.
+    ///
+    /// Three sources (the follow-up C record, §4.3):
+    /// 1. every intent of every incarnation, tagged or not;
+    /// 2. every directory `<root>/<namespace>/<instance>` that is not this
+    ///    incarnation's, an untagged name counting as another incarnation's;
+    /// 3. every registration whose `gitdir` names such a directory, read
+    ///    through the tolerant registry access ([`Self::registered_instances`]).
+    ///
+    /// An earlier incarnation's Git writer that had not yet run when its slot
+    /// was reclaimed recreates its instance's checkout and registration but
+    /// not its intent (executed, the record's §4.3), so a walk that read the
+    /// intents alone would never reach it again; every walk enumerates this,
+    /// so each meets such an instance as it meets one with an intent, and
+    /// removes it with the slot (see [`Self::remove_worktree_proving`]).
+    ///
+    /// **This incarnation's own instances count only through their intent.**
+    /// It creates an instance only after writing its intent, so an intentless
+    /// instance at its own tag is none of its dead instances, and the rule
+    /// that "a torn registration that no intent names is not this reclaim's to
+    /// remove" stands for it (frozen `finalize.rs`'s
+    /// `scrub_slots_still_refuses_a_torn_registration_no_intent_names`).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, an intent file whose name no instance renders, an intent
+    /// whose slot is refused, or [`UpstrokeError::RegistryRefused`] from the
+    /// registry's read.
+    pub fn intents(&self) -> Result<Vec<Slot>, UpstrokeError> {
+        self.logical_slots(self.registered_instances()?)
+    }
+
+    /// [`Self::intents`] over `registered`, the registry's instances as one
+    /// read of it found them: the torn-registration plan reads them inside its
+    /// own registry access, and every other caller through
+    /// [`Self::registered_instances`].
+    fn logical_slots(&self, registered: Vec<SlotInstance>) -> Result<Vec<Slot>, UpstrokeError> {
+        let mut slots = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            // Anything in `intents/` that is not an intent name is the
+            // malformed file it is.
+            let instance =
+                SlotInstance::from_intent_name(&name).ok_or_else(|| UpstrokeError::Git {
+                    message: format!(
+                        "unexpected file `{name}` in the intent directory of {}",
+                        self.execution_root.display()
+                    ),
+                })?;
+            instance.slot().validate()?;
+            slots.insert(instance.slot().clone());
+        }
+        for instance in self.earlier_instances(registered)? {
+            slots.insert(instance.slot().clone());
+        }
+        Ok(slots.into_iter().collect())
+    }
+
+    /// Every instance sources 2 and 3 of [`Self::intents`] find that is not
+    /// this incarnation's, `registered` being source 3: the instances of
+    /// earlier incarnations, and the untagged names written before instances
+    /// existed, sorted and each once.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error reading a namespace.
+    fn earlier_instances(
+        &self,
+        registered: Vec<SlotInstance>,
+    ) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let mut found = std::collections::BTreeSet::new();
+        for instance in self.namespace_instances()?.into_iter().chain(registered) {
+            if instance.tag() != Some(&self.tag) {
+                found.insert(instance);
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
+    /// Every directory under the three slot namespaces whose name is an
+    /// instance of a valid slot, whoever created it.
+    ///
+    /// Read with `symlink_metadata`, so a link at an instance's name is not a
+    /// directory and is not followed: it is not an instance, and it keeps the
+    /// execution root, as any entry the walks do not own does. An entry that
+    /// vanishes while it is read is skipped.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error reading a namespace or an entry.
+    fn namespace_instances(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let mut found = Vec::new();
+        for namespace in ["tasks", "merge", "snapshots"] {
+            let directory = self.execution_root.join(namespace);
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: directory,
+                        source,
+                    });
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|source| UpstrokeError::Io {
+                    path: directory.clone(),
+                    source,
+                })?;
+                let name = entry.file_name();
+                let Some(instance) = name
+                    .to_str()
+                    .and_then(|name| SlotInstance::from_entry(namespace, name))
+                    .filter(|instance| instance.slot().validate().is_ok())
+                else {
+                    continue;
+                };
+                match fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) if metadata.is_dir() => found.push(instance),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Io {
+                            path: entry.path(),
+                            source,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every registration of the repository's store whose `gitdir` names a
+    /// checkout directly under one of this execution root's slot namespaces,
+    /// as the instance that checkout is, whoever created it.
+    ///
+    /// **A tolerant registry access** ([`tolerant_registry_access`], no
+    /// hold), read the way the forced removal's scan reads the store and
+    /// never through Git's enumeration, which dies on a torn `commondir`: each
+    /// entry's `gitdir` by bytes, bound through `registration_checkout` and
+    /// canonical prefixes. An entry or a `gitdir` that vanishes while it is
+    /// read is skipped, and so is an entry with no `gitdir` or an empty one:
+    /// it names no path (an add of this process in flight is one, and names
+    /// no other incarnation's instance). Anything else that fails is attempted
+    /// again until the access's deadline and then refuses, resumably.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstrokeError::RegistryRefused`].
+    fn registered_instances(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || self.registered_instances_once(),
+        )
+    }
+
+    /// One attempt of [`Self::registered_instances`].
+    fn registered_instances_once(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let store = self.common_git_dir.join("worktrees");
+        let entries = match fs::read_dir(&store) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: store,
+                    source,
+                });
+            }
+        };
+        let root = canonical_prefix(&self.execution_root)?;
+        let mut found = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: store.clone(),
+                source,
+            })?;
+            let admin = entry.path();
+            let gitdir = admin.join("gitdir");
+            let bytes = match fs::read(&gitdir) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: gitdir,
+                        source,
+                    });
+                }
+            };
+            if trim_gitdir(&bytes).is_empty() {
+                continue;
+            }
+            let checkout = canonical_prefix(&registration_checkout(&admin, &bytes)?)?;
+            if let Some(instance) = instance_under(&root, &checkout) {
+                found.push(instance);
+            }
+        }
+        Ok(found)
     }
 
     /// Reclaim every intent this execution root carries: forced removal of
@@ -3082,6 +3542,8 @@ impl WorkspaceManager {
         commit: &str,
     ) -> Result<PathBuf, UpstrokeError> {
         let path = self.slot_target(slot)?;
+        #[cfg(windows)]
+        refuse_git_dir_over_budget(&path, crate::runner::host::GitdirRule::Windows)?;
         self.revalidate()?;
         let intent = self.intent_path(slot);
         funnel(hooks, slot.add_site(), move || {
@@ -3105,7 +3567,10 @@ impl WorkspaceManager {
             };
             if !durable {
                 return Err(Refusal::AddWithoutIntent {
-                    slot: slot.relative().display().to_string(),
+                    slot: slot
+                        .instance_relative(Some(&self.tag))
+                        .display()
+                        .to_string(),
                     intent,
                 }
                 .into());
@@ -3368,6 +3833,15 @@ impl WorkspaceManager {
     /// in that state then refuses as [`UpstrokeError::RegistryRefused`],
     /// carrying the scan's own text.
     ///
+    /// **Every instance of the slot goes** (naming's module doc): this
+    /// incarnation's, and every other incarnation's the execution root holds
+    /// — found through its intent, its directory under the slot's namespace,
+    /// or a registration whose `gitdir` names it — each bound to its own
+    /// registration and removed in turn, in one execution of the site. An
+    /// earlier incarnation's instance that cannot be removed refuses the
+    /// removal as any removal does, resumably: nothing retains it
+    /// (the follow-up C record, §4.5).
+    ///
     /// # Errors
     ///
     /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
@@ -3444,36 +3918,101 @@ impl WorkspaceManager {
         slot: &Slot,
         proof: WriterProof,
     ) -> Result<Vec<PathBuf>, UpstrokeError> {
-        let path = self.slot_target(slot)?;
-        let RemovalBinding {
-            admin: registration,
-            passed_over,
-        } = tolerant_registry_access(
+        slot.validate()?;
+        let bound = tolerant_registry_access(
             &self.common_git_dir,
             RegistryHold::Unheld,
             &mut || Again::Attempt,
-            &mut || self.revalidate_removal_proving(&path, proof),
+            &mut || self.bind_instances(slot, proof),
         )?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_site(), || {
-            self.remove_bound(slot, &path, registration.as_deref(), &ledger)
+            for (tag, path, binding) in &bound {
+                self.remove_bound(slot, tag.as_ref(), path, binding.admin.as_deref(), &ledger)?;
+            }
+            Ok(())
         })?;
+        let mut passed_over: Vec<PathBuf> = bound
+            .into_iter()
+            .flat_map(|(_, _, binding)| binding.passed_over)
+            .collect();
+        passed_over.sort();
+        passed_over.dedup();
         Ok(passed_over)
     }
 
-    /// [`Self::remove_worktree_proving`]'s mutation, with `registration` bound
-    /// by its scan: the checkout removed and its deletion made durable, then
-    /// that registration removed directly — `locked`, then its directory — and
-    /// then the store, when that left it empty. No `git worktree prune` runs,
-    /// and no entry the scan did not bind to this slot is touched.
+    /// One attempt of [`Self::remove_worktree_proving`]'s scan: every
+    /// instance of `slot` ([`Self::instance_tags_of`]), each with its path and
+    /// the registration the removal's scan binds to it.
+    fn bind_instances(
+        &self,
+        slot: &Slot,
+        proof: WriterProof,
+    ) -> Result<Vec<(Option<InstanceTag>, PathBuf, RemovalBinding)>, UpstrokeError> {
+        let mut bound = Vec::new();
+        for tag in self.instance_tags_of(slot)? {
+            let path = self.instance_path(slot, tag.as_ref());
+            let binding = self.revalidate_removal_proving(&path, proof)?;
+            bound.push((tag, path, binding));
+        }
+        Ok(bound)
+    }
+
+    /// The tags of every instance of `slot` the execution root holds, this
+    /// incarnation's first and always, whether it exists or not; `None` is
+    /// the untagged name. Found the three ways [`Self::intents`] finds an
+    /// instance: an intent, a directory under the slot's namespace, and a
+    /// registration whose `gitdir` names one (read once, not through its own
+    /// registry access: the caller's attempt is one).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, or a failure of the registry's read, which the caller's
+    /// registry access attempts again.
+    fn instance_tags_of(&self, slot: &Slot) -> Result<Vec<Option<InstanceTag>>, UpstrokeError> {
+        let mut others = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            if let Some(instance) = SlotInstance::from_intent_name(&name) {
+                if instance.slot() == slot {
+                    others.insert(instance.tag().cloned());
+                }
+            }
+        }
+        for instance in self
+            .namespace_instances()?
+            .into_iter()
+            .chain(self.registered_instances_once()?)
+        {
+            if instance.slot() == slot {
+                others.insert(instance.tag().cloned());
+            }
+        }
+        let own = Some(self.tag.clone());
+        others.remove(&own);
+        let mut tags = vec![own];
+        tags.extend(others);
+        Ok(tags)
+    }
+
+    /// [`Self::remove_worktree_proving`]'s mutation for one instance of
+    /// `slot`, the one `tag` names, with `registration` bound by its scan: the
+    /// checkout removed and its deletion made durable, then that registration
+    /// removed directly — `locked`, then its directory — and then the store,
+    /// when that left it empty. No `git worktree prune` runs, and no entry the
+    /// scan did not bind to this instance is touched.
     fn remove_bound(
         &self,
         slot: &Slot,
+        tag: Option<&InstanceTag>,
         path: &Path,
         registration: Option<&Path>,
         ledger: &DurabilityLedger,
     ) -> Result<(), UpstrokeError> {
-        self.revalidate_acted_through(Primitive::RemoveWorktree, Some(slot), registration)?;
+        self.revalidate_acted_through_instance(
+            Primitive::RemoveWorktree,
+            Some((slot, tag)),
+            registration,
+        )?;
         let present = match fs::symlink_metadata(path) {
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -5421,9 +5960,13 @@ impl WorkspaceManager {
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
             .args(["-c", "protocol.file.allow=never"])
+            .args(ENGINE_GIT_SWITCHES)
             .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
             .args(args)
             .stdin(Stdio::null());
+        for (key, value) in ENGINE_GIT_ENVIRONMENT {
+            command.env(key, value);
+        }
         command
     }
 
@@ -5803,29 +6346,39 @@ impl WorkspaceManager {
     }
 
     /// One attempt of [`Self::slots_with_torn_registrations`].
+    ///
+    /// Every instance of each slot is read ([`Self::instance_tags_of`]), so an
+    /// earlier incarnation's add a kill left torn is repaired with its slot,
+    /// whichever instance of it the tear is in.
     fn torn_plan(&self, excluding: Option<&Slot>) -> Result<Vec<Slot>, UpstrokeError> {
         let mut torn = Vec::new();
-        for slot in self.intents()? {
+        for slot in self.logical_slots(self.registered_instances_once()?)? {
             if excluding == Some(&slot) {
                 continue;
             }
-            let target = self.slot_target(&slot)?;
-            let Some(admin) = self
-                .revalidate_removal_proving(&target, WriterProof::Unknown)?
-                .admin
-            else {
-                continue;
-            };
-            let commondir = admin.join("commondir");
-            match fs::metadata(&commondir) {
-                Ok(metadata) if metadata.len() == 0 => torn.push(slot),
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(UpstrokeError::Io {
-                        path: commondir,
-                        source,
-                    });
+            slot.validate()?;
+            for tag in self.instance_tags_of(&slot)? {
+                let target = self.instance_path(&slot, tag.as_ref());
+                let Some(admin) = self
+                    .revalidate_removal_proving(&target, WriterProof::Unknown)?
+                    .admin
+                else {
+                    continue;
+                };
+                let commondir = admin.join("commondir");
+                match fs::metadata(&commondir) {
+                    Ok(metadata) if metadata.len() == 0 => {
+                        torn.push(slot);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Io {
+                            path: commondir,
+                            source,
+                        });
+                    }
                 }
             }
         }
@@ -5858,6 +6411,70 @@ pub use self::residue::{
     ResidueTarget, classify_object_residue, element_breaks_quiescence, observed_residue_elements,
     residue_classified_sites,
 };
+
+/// Git for Windows' budget for a `$GIT_DIR`, in bytes: `PATH_MAX - 40`, with
+/// its `PATH_MAX` of 260. Measured on the CI guest with Git 2.50.1.windows.1:
+/// a `.git` path of 220 characters adds, 221 fails "'$GIT_DIR' too big"
+/// (`~/pr10-evidence/fix-g5-b/r9/guest/gitdir-threshold.log`, lines 12-13 and
+/// 23-24), and Git compares `strlen`, so a non-ASCII character counts its
+/// UTF-8 bytes.
+#[cfg(any(windows, test))]
+const WINDOWS_GIT_DIR_BUDGET: usize = 220;
+
+/// Refuse an add at `checkout` whose `$GIT_DIR`, `<checkout>/.git` as `rule`
+/// renders it — Git for Windows' own spelling, no verbatim prefix and `/`
+/// separators — is longer than [`WINDOWS_GIT_DIR_BUDGET`] in UTF-8 bytes.
+///
+/// [`WorkspaceManager::add_worktree`] calls it on Windows only, before any
+/// registry access; it is compiled for tests everywhere so that the rendering
+/// and the boundary are pinned on every platform.
+///
+/// # Errors
+///
+/// [`Refusal::GitDirOverBudget`], or a Git error for a path that is not UTF-8,
+/// which Git for Windows could not be handed exactly.
+#[cfg(any(windows, test))]
+fn refuse_git_dir_over_budget(
+    checkout: &Path,
+    rule: crate::runner::host::GitdirRule,
+) -> Result<(), UpstrokeError> {
+    let git_dir = checkout.join(".git");
+    let Some(text) = git_dir.to_str() else {
+        return Err(UpstrokeError::Git {
+            message: format!(
+                "refusing `git worktree add` at {}: its `$GIT_DIR` is not UTF-8, so Git for \
+                 Windows cannot be handed it exactly",
+                checkout.display()
+            ),
+        });
+    };
+    let rendered = rule.spelling(text.as_bytes());
+    if rendered.len() > WINDOWS_GIT_DIR_BUDGET {
+        return Err(Refusal::GitDirOverBudget {
+            git_dir: String::from_utf8_lossy(&rendered).into_owned(),
+            bytes: rendered.len(),
+            budget: WINDOWS_GIT_DIR_BUDGET,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// The instance a canonical `checkout` is when it sits directly under one of
+/// the slot namespaces of the canonical execution root `root` and its name is
+/// an instance of a valid slot; `None` for anything else, the user's own
+/// worktrees and other runs' included.
+fn instance_under(root: &Path, checkout: &Path) -> Option<SlotInstance> {
+    let relative = checkout.strip_prefix(root).ok()?;
+    let mut components = relative.components();
+    let (Some(Component::Normal(namespace)), Some(Component::Normal(name)), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return None;
+    };
+    SlotInstance::from_entry(namespace.to_str()?, name.to_str()?)
+        .filter(|instance| instance.slot().validate().is_ok())
+}
 
 fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
     let pointer = worktree.join(".git");
@@ -5903,18 +6520,36 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
 /// into a `TreeMismatch` -- so this is not a second copy of a manager
 /// precaution but the same one, at the reads the manager makes outside its
 /// builder.
+///
+/// **[`ENGINE_GIT_SWITCHES`] and [`ENGINE_GIT_ENVIRONMENT`] too**, the switch
+/// set the manager's own builder gives every command: none of these reads
+/// reaches rerere or maintenance itself, but a configured program a read
+/// starts — `status` runs a clean filter over a stat-dirty file, measured on
+/// 2.43 and 2.55 — inherits them, and the two builders carry one set.
 fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
-    Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
-        .args(args)
-        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
-        .stdin(Stdio::null())
+    read_only_command(cwd, args)
         .output()
         .map_err(|error| UpstrokeError::Git {
             message: format!("failed to run git: {error}"),
         })
+}
+
+/// The command [`read_only_git`] runs, built and not started, so that a test
+/// can read its arguments and environment.
+fn read_only_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
+        .args(ENGINE_GIT_SWITCHES)
+        .args(args)
+        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
+        .stdin(Stdio::null());
+    for (key, value) in ENGINE_GIT_ENVIRONMENT {
+        command.env(key, value);
+    }
+    command
 }
 
 fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
@@ -5934,20 +6569,39 @@ fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError>
 
 /// Every object `git fsck --unreachable` reports, and nothing else.
 ///
+/// **A failed `fsck` is an error, never an empty listing**
+/// (`PR128-RESIDUE-UNREACHABLE-OBJECTS-IGNORES-THE-EXIT-STATUS`; the decision
+/// appendix's FUC-D5-SPLITREAD). `fsck` reads every worktree's index and
+/// `HEAD`, so it fails on a registration a killed add left torn, and on a
+/// split index whose shared base a late writer expired between its two reads;
+/// a listing taken from such a run's standard output is whatever it printed
+/// before it stopped. So a non-zero exit returns the command and its standard
+/// error, and the callers pass it on: a failed observation refuses rather
+/// than certifying "no residue" or "published".
+///
 /// # Errors
 ///
-/// A Git error.
+/// A Git error: `git` could not be run, or `fsck` exited non-zero.
 pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError> {
-    let output = read_only_git(
-        worktree,
-        &[
-            "fsck",
-            "--unreachable",
-            "--no-progress",
-            "--no-dangling",
-            "--connectivity-only",
-        ],
-    )?;
+    let args = [
+        "fsck",
+        "--unreachable",
+        "--no-progress",
+        "--no-dangling",
+        "--connectivity-only",
+    ];
+    let output = read_only_git(worktree, &args)?;
+    if !output.status.success() {
+        return Err(UpstrokeError::Git {
+            message: format!(
+                "git {} failed in {} ({}): {}",
+                args.join(" "),
+                worktree.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
     let listing = String::from_utf8_lossy(&output.stdout);
     Ok(listing
         .lines()
