@@ -8,7 +8,7 @@ reviewed_sha: 92c4ca81f9209d218df4534ee71d3445dc2906e1
 location: src/workspace.rs:871
 provenance: pre_existing
 first_bad: predates PR11: the legacy engine's four registry Git children have run untolerant since before PR5 froze `src/workspace.rs`; measured at the Git level on master `92c4ca81`'s argv by PR #329's first design round
-guard: follow-up D, before G6 — the change `pr11_fud_design` designs on branch `fix-P1/correctness_legacy-runs-in-linked-checkouts-race-the-shared-worktree-registry`, under the owner's decision B (both parts PR5 unfreezes): corrected B1′, which routes `src/workspace.rs`'s three registry Git children through PR #329's `tolerant_registry_access` (its record, §5.5) with the legacy retry predicate as the caller's veto and the removal's success decision inside its attempt, and B-PRESERVE, which keeps a registry-refused attempt's captured candidate (`src/engine/attempt.rs`, `src/engine/coordinator.rs`, `src/engine/resume.rs`); D's implementation follows PR #329's merge
+guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, and (e1′) and (e2′) by B-PRESERVE conditional on the kept pin's write; this file stays open until that pull request merges, and after it for what remains, R-D1 — a refused attempt whose kept pin cannot be written, where one storage fault can fail both the snapshot's registration and the pin (FUD-D4-PINSAMEFAULT) — until a change keeps the output durable without the pin, or the owner rules on it
 ---
 
 ## Failure sequence
@@ -156,3 +156,43 @@ Follow-up D calls `tolerant_registry_access` in `src/workspace_manager.rs` (`pub
 `effects/wrappers.toml`), with `Again`, `RegistryHold` and the test handshake `CONTENDED_ATTEMPTS` /
 `contended_attempts`, as #329's record §5.5 and §7.6 state the contract. The legacy accesses stay D's, and this file
 stays open under its guard.
+
+## Follow-up D's implementation (2026-10-03, draft #331): what it closes, and why this file stays
+
+**Implemented, and not granted.** Follow-up D's reviewed proposal is implemented on PR #331's branch, a draft, as its
+record's Implementation section gives it (`reviews/2026-10-02-pr11-follow-up-d-record.md`). Its five
+`effects/allowlist.toml` texts, and `design/15`'s paragraph, are **proposed, conditional on the owner's decision O8**,
+and nothing of it is in force until the owner adopts O8 and that pull request merges, after PR #329.
+
+**What it closes once merged, with its regression tests.**
+- **(e1) and (e2), a write in flight:** the three registry children each run as one attempt of PR #329's
+  `tolerant_registry_access`. `a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past`,
+  `a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration`,
+  `a_branch_switch_beside_a_tear_its_writer_finishes_switches`, `a_legacy_run_completes_past_a_tear_its_writer_finishes`
+  (e1) and `a_legacy_run_completes_past_a_topology_slot_its_writer_finishes` (e2), each red at master and under a
+  mutation that brings the Git error back.
+- **(e1′) and (e2′), residue or contention past the deadline:** the refused attempt's captured candidate is kept in the
+  checkout and pinned, and every resume names the pin with commands that take it back.
+  `a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes` (e1′) and
+  `a_topology_slots_torn_registration_refuses_a_legacy_snapshot_and_keeps_its_output` (e2′), with the recovery tests the
+  record lists, each red at master and under the mutation that discards again.
+
+**Why this file is not deleted.** The rule for this file is that it goes if, and only if, D's record says D wholly closes
+it (its §1.12). It does not: its claim 2 keeps the captured output "conditional on the pin's write" (the PR11 decision
+appendix's §10.3, FUD-D4-PINSAMEFAULT), and its §1.8 closes (e1′) only "conditional on the pin being written". What
+remains is **R-D1**, inside this file's consequence, the discard of paid output after a registry refusal:
+- **`HEAD` moved after the capture:** the pin is refused, the refusal says so and nothing is discarded
+  (`a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded`); a resume then refuses on the moved branch
+  before its discard, by the resume's branch check (`src/engine/resume.rs:532-541`, read, not executed here). Nothing is
+  lost.
+- **The ref store cannot be written:** the output is only in the checkout, and the refusal says so; once the store is
+  writable again, the next resume discards the checkout as at master. **One storage fault can do both:** a common Git
+  directory that cannot be written fails the snapshot's registration and then the pin's write. Executed at the Git level
+  by design review round 4's restore lens on Git 2.43.0, 2.50.1 and 2.55.0 — the add exits 128, the pin's
+  `update-ref` exits 128, no kept ref exists, and the discard restores `base` over `paid output`
+  (`/home/ubuntu/orch-pr11/reviews/331-d4-witnesses/review331-d4-restore-9tlo0lw2/*-single_store_fault.json`); the
+  engine's consequence is reasoned. Through a tear, the finding's own trigger, it needs an independent ref-store fault.
+
+**Grading and G6, unchanged by this note.** The file keeps P1; nothing here regrades it. (e2) and (e2′) block G6 until D
+is merged and validated, which needs O8 and PR #329 merged (O9, O14, O11). The restore lens found R-D1's one-fault case
+legacy-only, with no independent mixed blocker shown. No waiver and no acceptance is inferred.

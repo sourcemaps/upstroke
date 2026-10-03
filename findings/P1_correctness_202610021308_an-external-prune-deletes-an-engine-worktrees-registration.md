@@ -331,3 +331,37 @@ The source is the round's triage, `~/orch-pr11/reviews/review-329-d9-triage.md`,
 
 The triage reads them together: closures 1 to 3 are partial even combined, and a complete technical closure of face 2
 needs a change to G6-frozen recovery, or the owner's ruling on scope.
+
+## At #331's implementation (2026-10-03): the legacy face
+
+Recorded here, and not in a file of its own, because this file is the class's (its "Reconciliation"). Follow-up D's
+implementation is on PR #331's branch, a draft; its texts are **proposed, conditional on the owner's decision O8**, and
+nothing below is in force until the owner adopts O8 and that pull request merges after this one.
+
+- **Face 1, legacy: its discard is closed by D, once merged.** After a failed snapshot add, D's veto
+  (`legacy_add_veto`) attempts again only over an empty destination it can remove; a destination gone — the end state a
+  prune after the takeover leaves, with Git's junk removal done — answers `Undecidable`, the access refuses at once, and
+  the coordinator keeps and pins the captured candidate. The suite reproduces that end state with a checkout no add can
+  make (`a_snapshot_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`) and calls the veto on
+  each shape (`the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove`); a mutation that
+  answers `Return` turns both red. The resumable end — each resume pays one more worker attempt and keeps one more pin
+  — stays face 1's here.
+- **Face 2, legacy: open, and unchanged by D** (D's R-D9; FUD-D2-RD9 and FUD-D3-DURINGADD in #331's ledger). A deletion
+  that leaves the add successful — before the add returns, before the snapshot's verification, or while a gate or a
+  review runs — is returned as Git state or judged, and the legacy coordinator discards the paid output. D implements
+  no C-SIDE, so these successful-add discards stay stated in D's record and filed here; nothing accepts them. In a
+  mixed repository they apply to G6 and block it with the class.
+- **C-SIDE, isolated with O1** (the PR11 decision appendix's O8 option (ii)), not implemented. Its open findings, for
+  the change that takes it up:
+  - **FUD-D3-CSIDEPROOF** (P1 in the concurrency and regression lenses, P2 in design; executed): C-SIDE is a partial
+    mitigation; its residuals R-REWRITE and R-OUTSIDE are P1 where they occur (D's record §4.3).
+  - **FUD-D4-HEADRECREATE** (P1; executed at the Git level on Git 2.43.0, 2.50.1 and 2.55.0 by #331's design review
+    round 4, concurrency and regression lenses): a ref transaction already prepared when the prune removes `HEAD`
+    writes it again, so the four-name check passes a failure the deletion caused. R-REWRITE includes `HEAD`; it is the
+    legacy form of FUB-D9-HEADRECREATE above.
+  - **FUD-D4-LATERDEP**, C-SIDE's form (P1 in concurrency, P2 in regression and design; executed on the three Gits): a
+    list of the registration's files recorded after the verification does not cover a dependency created later — the
+    new `sharedindex.<hash>` a gate's `git update-index --split-index` writes — nor one gone before the list was taken.
+    D's record now narrows that alternative's claim to the dependencies recorded when the list is taken.
+  - **FUD-D4-ENV**'s regression-lens consequence: under an inherited `GIT_INDEX_FILE` a healthy snapshot has no `index`
+    of its own, so C-SIDE would false-refuse a genuine gate failure. That finding is filed on its own.
