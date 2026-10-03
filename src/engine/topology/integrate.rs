@@ -256,10 +256,24 @@ pub fn dispatch_head(
     events: &[TopologyEvent],
     key: TaskKey,
 ) -> Result<CommitSha, UpstrokeError> {
-    let authorized = authorized_head(started, events);
+    dispatch_head_at(
+        refs,
+        &mut crate::workspace_manager::NoHooks,
+        authorized_head(started, events),
+        started.integration_ref.as_str(),
+        key,
+    )
+}
+
+pub fn dispatch_head_at(
+    refs: &dyn IntegrationRefs,
+    hooks: &mut dyn crate::workspace_manager::EffectHooks,
+    authorized: AuthorizedHead,
+    refname: &str,
+    key: TaskKey,
+) -> Result<CommitSha, UpstrokeError> {
     let authority = authorized.describe();
-    let refname = started.integration_ref.as_str();
-    refs.assert_publishable(refname)?;
+    refs.assert_publishable_pausing(hooks, refname)?;
     match refs.direct_target(refname)? {
         Some(found) if found == authorized.head.0 => Ok(authorized.head),
         Some(found) => Err(Refusal::DispatchHeadForeign {
@@ -332,8 +346,16 @@ pub fn decide(
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
 ) -> Result<Decided, UpstrokeError> {
+    decide_pausing(&mut crate::workspace_manager::NoHooks, manager, request)
+}
+
+fn decide_pausing(
+    hooks: &mut dyn crate::workspace_manager::EffectHooks,
+    manager: &WorkspaceManager,
+    request: &IntegrationRequest,
+) -> Result<Decided, UpstrokeError> {
     let refname = request.integration_ref.as_str();
-    manager.assert_publishable(refname)?;
+    manager.assert_publishable_pausing(hooks, refname)?;
     let head =
         manager
             .direct_ref_target(refname)?
@@ -461,7 +483,7 @@ pub fn publish(
     authorized: Authorized,
 ) -> Result<Published, UpstrokeError> {
     let refname = authorized.integration_ref.as_str();
-    manager.assert_publishable(refname)?;
+    manager.assert_publishable_pausing(journal.hooks().effects(), refname)?;
     let found =
         manager
             .direct_ref_target(refname)?
@@ -542,7 +564,7 @@ pub fn integrate<J: IntegrationJournal + Verification>(
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
 ) -> Result<Terminal, UpstrokeError> {
-    let decided = decide(manager, request)?;
+    let decided = decide_pausing(journal.hooks().effects(), manager, request)?;
     match decided.exact_base {
         ExactBase::Fast => {
             let authorized = prepare_fast(journal, request, decided.head)?;
@@ -594,7 +616,11 @@ fn integrate_stale<J: IntegrationJournal + Verification>(
         Ok(proposal) => Picked::Clean {
             proposal: CommitSha(proposal.clone()),
         },
-        Err(_) => match manager.proposal_state(&staging, head.as_str())? {
+        Err(_) => match manager.proposal_state_pausing(
+            journal.hooks().effects(),
+            &staging,
+            head.as_str(),
+        )? {
             ProposalState::Conflict { paths } => Picked::Conflict { paths },
             ProposalState::Empty => Picked::Empty,
             ProposalState::Unclassified { detail } => Picked::Unclassified { detail },
