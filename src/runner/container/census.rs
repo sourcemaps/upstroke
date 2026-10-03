@@ -815,6 +815,12 @@ impl ReaperContainerScope {
     }
 
     #[must_use]
+    pub fn selects(&self, labels: &BTreeMap<String, String>) -> bool {
+        labels.get(LABEL_PRIVATE_ROOT) == Some(&self.private_root)
+            && labels.get(LABEL_INCARNATION) == Some(&self.incarnation)
+    }
+
+    #[must_use]
     pub fn list_argv(&self) -> Vec<String> {
         vec![
             self.program.to_string_lossy().into_owned(),

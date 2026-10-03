@@ -1423,3 +1423,161 @@ execution root); the second finds the report current, removes nothing and refuse
 appends, and planted answer files stay byte-identical. Every child's temporary directory is a guard the
 cell holds (`scaffold::child_temporary_of`, tag `tmp`, short for the Windows path budget), declared before
 the run it adopts, so the run is dropped first and the guard then reclaims what the child left.
+
+## `mod tests` › `const REAPER_BOUND: Duration = Duration::from_secs(60);`
+
+How long a witness waits for a dead coordinator's reaper to finish its calls. The reaper notices
+the death within one of its 10-millisecond polls; the bound exists so a mutation that arms nothing
+fails the test instead of hanging it.
+
+## `mod tests` › `fn reaper_finished(`
+
+Polls the relay until the reaper's calls are a listing, a kill and a removal per expected
+container, and a final listing, or the bound passes.
+
+## `mod tests` › `fn reclaimed_by_its_reaper(reclaimed: &Reclaimed<'_>) {`
+
+One reaper reclaimed exactly the expected containers: its first and last calls are the scope's
+listing argv, one `kill` and one `rm --force --volumes` per container, nothing else; delivered
+to the fake, each was stopped and removed by the actor `reaper`, none is left, and no census
+listed the runtime after the death.
+
+## `mod tests` › `fn a_resume_killed_inside_its_pre_flight_probe(`
+
+A durable run, then a resuming incarnation in a child over the parent's fake — the frozen
+recovery order with a `RunPreflight` over a `ContainerRunner` — killed while its shell probe's
+container runs. The relay is installed on the fake the child is served by, so the child's
+runner arms over it with nothing passed in the environment.
+
+## `mod tests` › `fn a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it()`
+
+`R6-C2`: the incarnation's first container — a pre-flight probe inside the frozen `recover.rs` —
+is covered; its reaper reclaims it before any census.
+
+## `mod tests` › `fn the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe() {`
+
+`R7-D2`, two-process: the reaper's first listing carries exactly the probe's
+`upstroke.private_root` and `upstroke.incarnation` labels as the daemon recorded them, and a
+container of another incarnation under the same private root, running beside it, is neither
+listed nor killed.
+
+## `mod tests` › `fn stranded_child(parent: &crate::engine::topology::scaffold::ParentSide) {`
+
+A width-three coordinator over the parent's fake that reports its error return, drops every
+handle on its runner, reports that, and then waits for a file the parent writes before it exits
+of its own accord, so the parent can observe it alive past its last handle.
+
+## `mod tests` › `fn a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits()`
+
+`R6-C1`, end to end: the runtime cannot observe, stop or remove three running containers, so the
+coordinator returns its error with their registrations held; while the child lives past its last
+handle the relay has no call; when it exits, its reaper reclaims all three.
+
+## `mod tests` › `fn a_contained_run_with_its_reaper_relayed(`
+
+An in-process width-three run over a contained runner whose reaper's program is the relay, after
+the relay's self-check (`R6-D2`): the stub, run by its path, records its call where the test
+reads, so a reaper's calls in this process would be seen.
+
+The relay is written and its self-check run by isolated children of the test binary
+(`FakeRuntime::install_reaper_relay`, `FakeRuntime::run_reaper_relay`), each under a deadline,
+so these controls make no host launch of their own (`FUA-I4-RELAY`, PR #328's implementation
+review round 4): a host launch ends in a wait for its reaper's acknowledged exit that is
+unbounded by design, and made here one stopped reaper held the test, and the suite with it. The
+relay's other users in this module, `a_resume_killed_inside_its_pre_flight_probe` and the
+stranded-runner test, install it the same way.
+
+## `mod tests` › `fn a_coordinator_that_ends_disarms_its_reaper_and_kills_nothing_at_width_three() {`
+
+`R6-D2`: a run that completes, its runner dropped: the relay holds only the self-check, and every
+container was released by its own runner. Ending the reaper by end-of-file rather than `CANCEL`
+(`fua-m10`) makes it list.
+
+## `mod tests` › `fn a_runner_whose_containers_all_ended_disarms_its_reaper_and_the_relay_is_never_called() {`
+
+`R6-C1`'s control: the observation is lost, so the pipelines fail, but every container is
+established gone; the drop disarms and the relay is never called.
+
+## `mod tests` › `fn every_container_an_incarnation_starts_is_covered_by_an_armed_reaper_with_its_scope() {`
+
+The design property, in-process, through a resume's pre-flight (`resume_over` with a
+`RunPreflight` over a container runner), `run_concurrently` at width three, and the width-1
+`step`: every container start was covered by an armed reaper whose scope selects its labels, and
+every container created was observed starting.
+
+
+## `mod tests` › `struct TearsAForeignRegistration {`
+
+PR11 review round 8's witness (`R8-CONC-1`), the verification face of
+`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: a review-input policy that, at the
+verification of a candidate (the staging worktree under `merge/`), plants another process's
+registration half written in the shared store — `HEAD` and `gitdir` written, `commondir` opened
+and empty, the state `git worktree add` passes through and leaves when it is killed there. Once:
+the first verification only. With `finishes`, a thread plays the other process finishing its
+write, but only after a registry access of this run has failed on it at least once — the
+`CONTENDED_ATTEMPTS` handshake of `workspace_manager::tolerant_registry_access`'s contract
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §6.4) — so the witness measures a retry and
+never a store that happened to be whole. Through the fixture's primitives: a topology module
+may name no `std::fs` write.
+
+## `mod tests` › `fn registry_drive(`
+
+`run_concurrently` with the review-input policy replaced, and the first-released scheduler.
+
+## `mod tests` › `fn tearing(`
+
+The policy and the administrative directory it plants, named `name` in the run's own store.
+
+## `mod tests` › `fn a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral() {`
+
+The record's T2: a registration another process finishes writing never reaches the verification
+as Git state. The verification's registry access fails on the write in flight, is attempted
+again, and passes once the writer finishes; nothing is deferred and both candidates merge.
+Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
+or a park at `max_defers` (round 3's measurement of the round 8 witness).
+
+## `mod tests` › `fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()`
+
+The record's T2′: a registration that stays torn — nobody finishes it — ends the command at the
+access's deadline as `UpstrokeError::RegistryRefused`, naming the entry's `commondir`, with
+nothing durable after `merge_verification_started`: no `merge_verification_unavailable`, no
+question, no `run_finished`. The operator's remedy (remove the registration) and a resume settle
+the open verification interrupted and verify the candidate again under a new sequence, and the
+run completes with nothing deferred. Mutation m2 (the deadline's refusal typed `Git`) makes the
+verification defer here.
+
+## `mod tests` › `struct RequiresAFailingFilter {`
+
+A review-input policy that, at the first verification, makes every checkout of the repository
+run a required smudge filter that fails (`info/attributes` and the repository's configuration,
+through the fixture's `git`): a snapshot's checkout then fails after Git took its destination
+over, as a checkout that cannot be made does.
+
+## `mod tests` › `fn a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies()`
+
+The record's T15, verification face, and R14
+(`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`): the judge's snapshot add fails
+after the takeover, which nothing outside Git tells from a prune deleting the snapshot's
+registration, so it refuses at once, resumably, and nothing durable is appended. With the
+environment repaired, a resume settles the verification interrupted and verifies again; the run
+completes. Before #329 the same failure was Git state, and the verification deferred and then
+parked at `max_defers`; R14 is that narrowing, which needs the owner's disposition before G6.
+Two tasks, because a single candidate already on the integration head merges with no
+verification.
+
+## `mod tests` › `struct DeniesTheSnapshots {`
+
+Round 5's construction: at the first verification, the execution root's `snapshots/` is made
+unwritable, so the judge's snapshot destination cannot be made.
+
+## `mod tests` › `struct RestoresTheSnapshots {`
+
+Restores `snapshots/` once the verification's terminal is durable, so the next verification
+proceeds.
+
+## `mod tests` › `fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {`
+
+The control beside T15: a destination that cannot be made is Git state at once, with no Git run
+(`workspace_manager`'s destination step), so `decisions.repairs.not_repairs` applies as it did:
+one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
+merged. Green before #329 too, where Git's own add failed to make the destination.

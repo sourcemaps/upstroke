@@ -19,8 +19,8 @@ use crate::rundir::{
 use crate::rundir::{HuskDisposition, Reclaimable};
 use crate::runner::container::ContainerHooks;
 use crate::runner::container::runtime::{
-    ContainerExecution, CreateSpec, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeError, RuntimeOp, StopMode,
+    ContainerExecution, CreatedContainer, DiscoveredContainer, ImageInspection, Liveness,
+    RuntimeError, RuntimeOp, StopMode,
 };
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, LockSite, RunDirSite,
@@ -2845,7 +2845,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn create(&self, spec: &CreateSpec) -> Result<CreatedContainer, RuntimeError> {
+    fn create(
+        &self,
+        covered: crate::runner::container::CoveredCreate<'_>,
+    ) -> Result<CreatedContainer, RuntimeError> {
+        let spec = covered.spec();
         self.note(format!("create {}", spec.name));
         self.state
             .lock()
@@ -2857,7 +2861,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         })
     }
 
-    fn start(&self, name: &str) -> Result<(), RuntimeError> {
+    fn start(
+        &self,
+        covered: crate::runner::container::CoveredStart<'_>,
+    ) -> Result<(), RuntimeError> {
+        let name = covered.name();
         self.note(format!("start {name}"));
         Ok(())
     }
@@ -2889,6 +2897,10 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(name);
         Ok(crate::runner::container::runtime::Settled::ProcessGone)
+    }
+
+    fn reaper_program(&self) -> PathBuf {
+        PathBuf::from(crate::runner::container::NO_OP_REAPER_PROGRAM)
     }
 }
 
@@ -4640,5 +4652,268 @@ fn a_kill_after_the_plan_is_written_leaves_a_husk_the_next_census_reclaims_priva
     assert!(
         crate::rundir::run_dir_names(&fixture.repo).is_empty(),
         "no run directory is left for the next command to step around"
+    );
+}
+
+#[cfg(unix)]
+fn reaped_p4_host() -> crate::runner::container::FakeRuntime {
+    let host = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    );
+    host.add_image(IMAGE_ID, Some("sha256:manifest"));
+    host.tag(IMAGE_REFERENCE, IMAGE_ID);
+    host.add_volume(CREDENTIAL_VOLUME);
+    host
+}
+
+#[cfg(unix)]
+fn p4_execution(
+    fixture: &Fixture,
+    checked: &PreLockChecked,
+    runtime: Box<dyn crate::runner::container::runtime::ContainerRuntime>,
+) -> crate::runner::container::exec::ContainerRunner {
+    let identity = crate::runner::container::exec::RunIdentity {
+        private_root: checked.private_root().to_path_buf(),
+        run_id: checked.run_id().to_owned(),
+        run_dir: fixture.public(),
+        incarnation: checked.incarnation().0.clone(),
+        repo_key: fixture.repo_key.as_str().to_owned(),
+    };
+    crate::runner::container::exec::ContainerRunner::new(
+        checked.runner_policy().clone(),
+        identity,
+        &fixture.repo,
+        crate::runner::container::env::ContainerEnvironment::from_image(vec![(
+            "PATH".to_owned(),
+            "/usr/bin:/bin".to_owned(),
+        )]),
+        runtime,
+    )
+    .expect("a container runner over the resolved policy")
+    .with_view(Box::new(crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::off(),
+    )))
+    .with_poll(std::time::Duration::from_millis(5))
+}
+
+#[cfg(unix)]
+fn create_over_containers(
+    fixture: &Fixture,
+    runtime: &dyn crate::runner::container::runtime::ContainerRuntime,
+    execution_runtime: Box<dyn crate::runner::container::runtime::ContainerRuntime>,
+) -> Result<Started, Refused> {
+    let selection = container_selection();
+    let checked = super::super::prelock::check(&super::super::prelock::PreLock {
+        selection: &selection,
+        runtime: Some(runtime),
+        private_root: &fixture.private_root,
+        ids: &Fixed::default(),
+    })
+    .expect("the container policy resolves by inspection");
+    let execution = p4_execution(fixture, &checked, execution_runtime);
+    let source = OneSource::default();
+    let probes = RunnerProbes {
+        shell: crate::gates::ShellKind::Sh,
+        workspace: fixture.repo.clone(),
+        adapters: &source,
+        policy_digest: execution.policy_digest().to_owned(),
+    };
+    let refs = FakeRefs::empty();
+    let mut hooks = TestHooks::new();
+    let plan_bytes = normalized_plan();
+    let clock = Fixed::default();
+    let agents = agents();
+    let ledger = std::sync::Mutex::new(InvocationLedger::new());
+    let request = Request {
+        repo_root: &fixture.repo,
+        repo_key: fixture.repo_key.clone(),
+        normalized_plan: &plan_bytes,
+        inputs: inputs(),
+        record: record(&agents, checked.runner_policy().clone()),
+        agents: &agents,
+        probes: &probes,
+        refs: &refs,
+        clock: &clock,
+        runner: &execution,
+        pair: ProbePair::grant(&ledger),
+    };
+    create_run(checked, request, &mut hooks, &mut Vec::new())
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned by a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started"]
+fn fresh_p4_probe_child() {
+    let parent = crate::engine::topology::scaffold::ParentSide::attach();
+    let root = PathBuf::from(std::env::var_os("UPSTROKE_TEST_FRESH_ROOT").expect("the root"));
+    let fixture = Fixture::at(&root);
+    let runtime = parent.runtime();
+    let created = create_over_containers(&fixture, &runtime, Box::new(parent.runtime()));
+    panic!("the parent kills this creator inside its first P4 probe; it returned {created:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fresh_runs_p4_probe_container_is_killed_by_its_reaper_before_run_started() {
+    use crate::runner::container::FakeRuntime;
+    use crate::runner::container::intent::{LABEL_INCARNATION, LABEL_PRIVATE_ROOT};
+    use crate::runner::container::runtime::{Liveness, RuntimeOp};
+    let bound = std::time::Duration::from_secs(120);
+    let fixture = Fixture::new("reaper-fresh-p4");
+    let host = reaped_p4_host();
+    let relay = fixture.root.join("relay");
+    host.install_reaper_relay(&relay);
+    let mut environment = vec![("UPSTROKE_TEST_FRESH_ROOT", fixture.root.as_os_str())];
+    environment.extend(crate::engine::topology::scaffold::child_temporary_of(
+        &fixture.root,
+    ));
+    let child = crate::engine::topology::scaffold::Served::spawn(
+        "engine::topology::create::tests::fresh_p4_probe_child",
+        &environment,
+        &fixture.root.join("child.stderr"),
+        host.acting_as(INCARNATION),
+    );
+    assert!(
+        host.await_journal(bound, |journal| journal
+            .iter()
+            .any(|entry| entry.op == RuntimeOp::Start)),
+        "the creator's first P4 probe container starts: {:?}; its stderr {}",
+        host.journal(),
+        child.stderr()
+    );
+    let started = std::time::Instant::now();
+    let running = loop {
+        let running: Vec<String> = host
+            .container_names()
+            .into_iter()
+            .filter(|name| {
+                host.container(name)
+                    .is_some_and(|container| container.state == Liveness::Running)
+            })
+            .collect();
+        if !running.is_empty() || started.elapsed() > bound {
+            break running;
+        }
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
+    };
+    assert_eq!(running.len(), 1, "one P4 probe container runs: {running:?}");
+    let probe = running[0].clone();
+    assert!(
+        matches!(
+            crate::rundir::classify_run_dir(&fixture.public()),
+            crate::rundir::RunDirClass::Husk
+        ),
+        "the creator is killed before `run_started`: the run directory is still a husk"
+    );
+    assert!(
+        FakeRuntime::reaper_calls(&relay).is_empty(),
+        "the reaper acts on nothing while its creator lives"
+    );
+    host.publish_for_reaper(&relay);
+    let censused = |host: &FakeRuntime| {
+        host.journal()
+            .iter()
+            .filter(|entry| entry.op == RuntimeOp::ListByLabel)
+            .count()
+    };
+    let censused_before_the_death = censused(&host);
+    let died = child.kill();
+    assert!(!died.success(), "the creator was killed: {died:?}");
+    drop(child);
+
+    let started = std::time::Instant::now();
+    let calls = loop {
+        let calls = FakeRuntime::reaper_calls(&relay);
+        if (calls.len() >= 4
+            && calls
+                .last()
+                .and_then(|call| call.first())
+                .map(String::as_str)
+                == Some("ps"))
+            || started.elapsed() > bound
+        {
+            break calls;
+        }
+        crate::workspace_manager::fixture::rest_within(
+            std::time::Duration::from_millis(10),
+            bound.saturating_sub(started.elapsed()),
+        );
+    };
+    let labels = host
+        .container(&probe)
+        .expect("the probe, as the daemon recorded it")
+        .labels;
+    let filters: Vec<String> = [LABEL_PRIVATE_ROOT, LABEL_INCARNATION]
+        .iter()
+        .map(|key| {
+            format!(
+                "label={key}={}",
+                labels.get(*key).cloned().unwrap_or_default()
+            )
+        })
+        .collect();
+    let verbs: Vec<(String, String)> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.first().cloned().unwrap_or_default(),
+                call.last().cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        calls.len() == 4
+            && filters.iter().all(|filter| calls[0].contains(filter))
+            && verbs[1] == ("kill".to_owned(), probe.clone())
+            && verbs[2] == ("rm".to_owned(), probe.clone())
+            && calls[3] == calls[0],
+        "the creator's reaper listed its P4 probe by the run's private root and this \
+         incarnation, killed and removed it, and listed again to find nothing: {calls:?}"
+    );
+    let delivered = host.deliver_reaper_calls(&relay);
+    assert!(
+        host.container(&probe).is_none(),
+        "the P4 probe container is gone, by its reaper's calls: {delivered:?}"
+    );
+    assert_eq!(
+        censused(&host),
+        censused_before_the_death,
+        "no census listed the runtime after the creator died"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_container_a_fresh_runs_creation_starts_is_covered_by_an_armed_reaper_with_its_scope() {
+    use crate::runner::container::runtime::{ContainerExecution, RuntimeOp};
+    let fixture = Fixture::new("reaper-covers-p4");
+    let host = reaped_p4_host().starting(Arc::new(|_: &crate::runner::container::Launch<'_>| {
+        crate::runner::container::Start::Exit(ContainerExecution {
+            exit_code: Some(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }));
+    host.observing_covers();
+    create_over_containers(&fixture, &host, Box::new(host.clone()))
+        .expect("the run is created over its P4 probe containers");
+    let observed = host.starts_observed();
+    let created = host
+        .journal()
+        .iter()
+        .filter(|entry| entry.op == RuntimeOp::Create)
+        .count();
+    assert!(
+        observed.len() >= 2 && observed.len() == created,
+        "the shell probe and the agent probe each started in a container under observation: \
+         {observed:?}, {created} created"
+    );
+    assert!(
+        observed.iter().all(|(_, covered)| *covered),
+        "every P4 probe container started under an armed reaper whose scope selects its labels: \
+         {observed:?}"
     );
 }
