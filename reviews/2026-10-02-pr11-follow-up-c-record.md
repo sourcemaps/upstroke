@@ -41,7 +41,8 @@ question, is `pr11_fuc_design5`'s (the same model and effort, a fresh session on
 are under `~/orch-pr11/logs/pr11_fuc_design5/`, cited as `c5/…`. The implementation (§6) is `pr11_fuc_impl`'s (the
 same model and effort, a fresh session on this branch at `30026823`), after design review round 5 and the orchestrator's
 assessment of the unit to build (`~/orch-pr11/c-impl/UNIT.md`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl/`,
-cited as `c6/…`.
+cited as `c6/…`. Repair round 2 (§6.9), after CI on `1fc0c911`, is `pr11_fuc_impl2`'s (the same model and effort, a fresh
+session on this branch at `1fc0c911`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl2/`, cited as `c6r2/…`.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -64,7 +65,7 @@ signal no process (§5, opening).
 
 | Phase | State |
 |---|---|
-| Implementation (§6) | **IMPLEMENTED, NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head, merged in at `e46b71d3`, and uses #329's targeted removal and tolerant registry access as they are. No frozen file changes, and D4 did not trigger (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge needs #329 merged, the owner's adoption of E-FUC-3, and the owner's O4, O7 (or R-REF's disposition) and O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6, opening). |
+| Implementation (§6) | **IMPLEMENTED, NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head, merged in at `e46b71d3`, and uses #329's targeted removal and tolerant registry access as they are. No frozen file changes, and D4 did not trigger (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition) and O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. |
 | Design, round 5 (§5) | Reviewed by design review round 5 on `30026823` (`~/orch-pr11/reviews/review-330-d5-triage.md`), whose items against U §6 takes. Round 5 read: **PROPOSED — the last design round before the owner's consolidated question; the owner's decisions D1 to D5 (§5.9).** It answers design review round 4, whose three lenses returned CHANGES_REQUIRED on `12375c7e` with one P1: Git's shared rerere state crosses U's instance boundary. Every engine Git command now runs with rerere disabled, executed on 2.43.0 and 2.55.0 for its effect: no engine pick reads or writes `rr-cache` (§5.2). The common git dir is censused path by path, by plain listings and trace2 on both versions, and the census adds `worktree.useRelativePaths=false` (§5.3). Terminal finalization's last step sweeps every earlier incarnation's instance in non-frozen manager code, and the window after it is R-UR, P3, with E-FUC-3's stated exception (§5.4). R-REF is the owner's decision D5 and blocks G6 until it is made (§5.5). This head changes no production code. |
 | Design, round 4 (§4) | Superseded in part by §5; §5.11 lists what it replaces. Round 4 read: **PROPOSED — U repaired, retention withdrawn, Q frozen; the owner's decisions D1 to D4 (§4.15).** It answers design review round 3, whose three lenses returned CHANGES_REQUIRED on `a0464f43` with one P1, in U's tag, and the looping signal raised the third time (§4.1). The production incarnation id now carries host randomness through the standard library's `RandomState`, and the tag is 60 bits of a hash of it (§4.2). Every walk discovers other incarnations' instances no intent names, executed again with saved evidence on 2.43.0 and 2.55.0 (§4.3). A dead instance that cannot be removed refuses the command, so Q1's order and the outcome equations stand (§4.5). The frozen oracles' replacements are specified fixture by fixture (§4.6). R-REF is regraded and filed (§4.8), Q's open items are restated (§4.9), and R-GU is analysed from DESC's side and filed by #329 (§4.11). This head changes no production code. |
 | Design, round 3 (§3) | Superseded in part by §4; §4.17 lists what it replaces. Round 3 read: **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
@@ -466,7 +467,8 @@ descriptor would need care. Recommended against.
 - `effects/wrappers.toml`, and `clippy.toml` if effectful: a row for each crate-visible function the lease side exposes
   to the manager. The design keeps that to one accessor.
 
-These are instruments, so the implementation's merge is the owner's under `CLAUDE.md`'s first limb, as is any erratum.
+These are instruments under `CLAUDE.md`'s first limb, whose merge the owner's standing direction for PR11 leaves to the
+orchestrator; an erratum is the owner's to adopt (corrected at repair round 2, §6.9).
 
 ### 1.10 Item 4: tests
 
@@ -1354,8 +1356,8 @@ Counts at this head are from `c2/census/census-6b28452d.txt`. Under D2b′ the c
 | `docs/internals` notes | `rundir`, `workspace_manager`, `engine/topology/ledger` and the effects vocabulary and sites notes, each pinned by the notes gates. |
 | `DESIGN.md` | §15 (`design/15_design_event_log_resume_run_layout.md:64`) gains the writer group, under D2b′ the keeper, and under D3(a) the R-1 boundary. Under D2b′, §26's Windows clause (`design/26_design_merge_queue_protocol.md:398`) changes too. |
 
-All but the ledger's subject code are instruments under `CLAUDE.md`'s first limb, so the implementation's merge is the
-owner's, as is each erratum.
+All but the ledger's subject code are instruments under `CLAUDE.md`'s first limb, whose merge the owner's standing
+direction for PR11 leaves to the orchestrator; each erratum is the owner's to adopt (corrected at repair round 2, §6.9).
 
 #### 2.7.5 D1b, for comparison
 
@@ -1916,8 +1918,8 @@ not Git.
   - the legacy commands' wait (§2.8).
 - **Instruments.** U adds no effect site, resource row, process start or governed primitive. The namespace listing uses
   `fs::read_dir`, which the manager, an allowlisted funnel module, already uses. The implementation's census confirms
-  this; if it finds an instrument moved, the merge is the owner's under `CLAUDE.md`'s first limb, as the erratum is in
-  any case.
+  this; an instrument it finds moved is a first-limb change, whose merge the owner's standing direction for PR11 leaves
+  to the orchestrator, and the erratum is the owner's to adopt in any case (corrected at repair round 2, §6.9).
 - **`DESIGN.md` §15**, whose "Synced intents" contract the intent names belong to, and the manager's and naming's
   internals notes.
 - **Tests**, added in non-frozen files:
@@ -3714,7 +3716,9 @@ rendering of their instances, and three of its fixture tags are shortened for Wi
 `src/engine/topology/candidate/tests.rs` binds its task registration by the instance's name. Their production code is
 unchanged.
 
-**Instruments** (`CLAUDE.md`'s first limb; the merge is the owner's in any case, for E-FUC-3).
+**Instruments** (`CLAUDE.md`'s first limb, whose merge the owner's standing direction for PR11 leaves to the
+orchestrator; the merge waits on the owner's decisions §6.9 names, E-FUC-3's adoption among them; corrected at repair
+round 2).
 - `effects/wrappers.toml`: naming's new crate-visible functions (`from_entry`, `instance_id`, `instance_intent_name`,
   `instance_relative`, `of_incarnation`, `tag`) and the manager's `instance_tag` classified `effect_free`, and naming's
   shared names pinned (`as_str` 3 to 4, `slot` 2). §3.3.6 expected no row to move; the census found these, and each is
@@ -3972,3 +3976,97 @@ As §5.8 leaves them, with the implementation's changes:
 - **Nothing is retained** (§4.5). A removal of an instance that fails refuses the whole command resumably, as any
   removal does; the next walk retries it. On Windows, an instance a process outside the dead job holds open refuses each
   resume until the handle closes (R-1W, corrected in place).
+
+### 6.9 Repair round 2: CI's Windows leg, the platform audit, and the merge wording
+
+**What this subsection is.** The work of `pr11_fuc_impl2` (`claude-opus-5-5`, `max`), a fresh repairer the PR11
+orchestrator spawned on this branch at `1fc0c911` under `~/orch-pr11/briefs/pr11_fuc_impl2.md`. Its scope is CI's red
+legs on `1fc0c911` and the merge wording, and nothing else. Its evidence is under `~/orch-pr11/logs/pr11_fuc_impl2/`,
+cited as `c6r2/…`. §6.8's E-FUC-3 item-3 point and Q's three `rejected` rows (§6.7) are left as they are: the
+implementation review assesses both first.
+
+**CI on `1fc0c911`** (run 37137405579; `c6r2/ci/ci-summary-37137405579.txt`, each job's log beside it):
+- **Green:** `lint`, `lint (windows)` and `lint (macos)`; the three `msrv (Rust 1.85, …)` legs; `test (ubuntu-latest)`;
+  `test (macos-latest)`, whose library passed 3,029 and ignored 104; and the pull-request policy run.
+- **Red:** `test (winguest)` (job 111244637558): the library passed 2,869, failed 1 and ignored 88. The failure is
+  `workspace_manager::tests::a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused`, which panicked at
+  `src\workspace_manager\tests.rs:928:55` with "plant the file: Os { code: 3, kind: NotFound, … }". `upstroke-ci`
+  failed on that leg alone ("TEST_WINDOWS did not succeed").
+
+**The cause is the test's fixture, not the product.**
+- The test is `cfg(windows)` and pre-existing. Its text is byte-identical at master `5c222ff2`, at #329's head and at
+  `1fc0c911` (`c6r2/rootcause/the-test-at-master-and-1fc0c911.txt`), and it never ran in this change's local gates.
+- It added the slot's worktree and then spelled the worktree's path as `execution_root().join(slot.relative())`, the
+  slot's untagged name. Under U the add makes this incarnation's instance, `tasks/kalpha-g1_<tag>` (§4.2), and nothing
+  makes the untagged directory, so writing the held file failed with Windows' error 3, the path not found.
+- The product does what U specifies. `add_worktree` returns `slot_path` (through `slot_target`), and a held checkout's
+  removal fails as `Filesystem { operation: "remove" }` naming the contained instance, the mapping #329's head has
+  (`c6r2/rootcause/add-return-and-removal-error.txt`). Once the file is planted in the instance, both cases assert
+  against the checkout the removal acts on: the closing case its attempt count across that checkout's removal and its
+  absence after, the held case its refusal naming it. Whether they pass is the Windows test leg's to say.
+
+**The fix** (`3e891d55`, test-only): the test takes the path `add_worktree` returns. Its assertions are unchanged. It
+runs only on the Windows test leg, `test (winguest)` on a pull request and `test (windows-latest)` in the merge queue,
+which is the truth for it.
+
+**Reproduced on Linux, and pinned there** (`c6r2/tools/r2-campaign.py`, results in `c6r2/mutation/`). A probe, never
+committed, runs the test's fixture under `cfg(unix)`:
+- **Control** (`r2-control`). Round 1's spelling refuses the plant with `NotFound` (os error 2, Linux's code for the
+  same absence), and the untagged path does not exist. This round's spelling plants inside the instance, and the
+  removal takes the instance with the file. With
+  `a_successors_reclaim_removes_an_earlier_incarnations_instance_and_never_verifies_it`, the T-TAG test and the Unix
+  removal-seam pin `a_removal_records_the_one_attempt_the_unix_arm_makes`: 4 passed.
+- **Mutation** (`r2-m-add-returns-untagged`). `add_worktree` returns the untagged path, the one the old spelling
+  assumed. It is killed: the probe and `a_successors_reclaim_…` fail on the add's return (2 failed, 2 passed). That test
+  is the cross-platform pin of what the Windows test now relies on.
+
+**Every platform-gated test, audited for the same derivation** (`c6r2/audit/`; tools `expand.sh`, `rsitems.py`,
+`platform-diff.py`, `audit-filter.py` and `audit-show.py` in `c6r2/tools/`):
+- **Method.** The library's test build is macro-expanded and never run (`-Zunpretty=expanded`), for
+  `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`. Expansion resolves every `cfg`
+  attribute and `cfg!` branch, so the items whose text differs between the three builds, or that only some compile, are
+  exactly the test build's platform-dependent code, whether the gate is on the item, its module or a branch inside it.
+- **Inventory** (`c6r2/audit/at-1fc0c911/summary.txt`). 3,230 tests on Linux (132 ignored), 2,958 on Windows (88) and
+  3,133 on macOS (104): the counts the Windows and macOS legs ran, and the local gates' 3,098 passed and 132 ignored
+  (`c6/gates/at-1fc0c911/03-test.log`). 458 tests are not run on all three targets, and 1,388 items differ between them.
+- **Filter.** Every such item whose text matches a pattern for spelling a slot, snapshot or worktree path or name from
+  an untagged name (`.relative()`, `.intent_name()`, a slot's `.id()`, `execution_root().join(`, literal namespace and
+  `k<key>-g<gen>` names, `SnapshotName`), or for planting or reading Git state by hand (the registry store, `gitdir`,
+  `commondir`, `locked`, `git worktree`, `registration_of`, the fixtures' `git` helpers). It matched 43 items, and each
+  was read (`c6r2/audit/at-1fc0c911/audit-show.txt`).
+- **Result** (`c6r2/audit/at-1fc0c911/audit-classification.txt`). **One derived a slot path from an untagged name: this
+  test.** Thirteen render the manager's instance (`slot_path`, `intent_path`, the path the add returns, its
+  `git_dir_of`). Six name only a namespace directory or the store. Twenty-one touch no slot: among them a container
+  view, a host-runner `gitdir` fixture, the legacy engine's repository shapes, the crate's own sources and the fixtures'
+  repository setup. One is production code master already has, the registration read whose Windows arm reads a held
+  marker.
+  `runner::container::exec::tests::real_docker_a_worktree_binary_cannot_shadow_the_certified_cli` checks out a worktree
+  by hand at `tasks/kalpha-g0` as a container's working directory. No manager API reads that path, so U does not reach
+  it, and it is unchanged.
+- **At `3e891d55`** (`c6r2/audit/at-3e891d55/summary.txt`): 42 flagged, none spelling `.relative()`. The Linux and
+  macOS expansions differ from `1fc0c911` only in libtest's line numbers.
+
+**Windows and macOS are compiled and linted here, never run** (`c6r2/platform/at-3e891d55/`, rc 0 each):
+- `cargo clippy --all-targets --all-features -D warnings` for `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`;
+- `cargo check --locked --all-targets --all-features` for `x86_64-pc-windows-msvc`, on stable and on 1.85.0, with
+  `-D warnings` passed inside the wrapper (`rustflags-arrival.txt`: it arrives).
+
+**The frozen proof at `3e891d55` is zero**: 34 of 34 against master and against #329's head, and Part 2 is master's
+four paths (`c6r2/frozen/frozen-proof-3e891d55.txt`). No legacy module or activation constant changed
+(`c6r2/frozen/legacy-activation-3e891d55.txt`).
+
+**The merge wording, corrected** (the orchestrator's note at the end of round 1's handover,
+`~/orch-pr11/handovers/pr11_fuc_impl.md`, under `~/orch-pr11/ORCH-PR11.md` §1):
+- **Touching an instrument does not make this merge the owner's.** The two instruments this change moves,
+  `effects/wrappers.toml` and `src/runner/contract.rs`'s payload census, are first-limb changes. The owner's standing
+  direction for PR11 gives the merge to the orchestrator and keeps only `MAINTAINING.md` step 7's second limb, and this
+  change touches no second-limb path (`c6r2/merge/limb-paths.txt`).
+- **The merge action is the orchestrator's,** under that direction's bar, once the genuine prerequisites are met. They
+  are the owner's decisions:
+  - E-FUC-3's adoption;
+  - O4;
+  - O7, or R-REF's disposition;
+  - the O3 or O3-R route for FUC-D5-GITINDEXFILE;
+  - #329 merged.
+- **No other merge permission is needed.**
+- **Corrected in place**, each marked "corrected at repair round 2": §1.9, §2.7.4, §3.3.6 and §6.1.
