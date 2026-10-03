@@ -7153,5 +7153,16 @@ The `test (winguest)` leg is the truth for those. The witnesses do not run on Wi
   (`impl4/record/record-line-cites-remap.txt`). Row R7 is added;
 - the ten gates ran at this round's head, and the body records them.
 
+**CI at round 3's head, read during this round.** At `f9c88fdb`, "CI" run 37149933777 failed on `test (winguest)`
+alone, job 111281445901: 2,880 passed, 1 failed and 87 ignored. The policy run passed
+(`impl4/r7/ci/ATTRIBUTION-f9c88fdb.txt`). The CI-failing test of R7 passed there.
+- **The failure is round 3's R-T census,** `both_drivers_run_each_transition_through_the_one_generic_function`. It
+  reads `run.rs` from disk and accepts `begin_dispatch(` only when a `\n` follows it, with no `\r\n` normalised, so a
+  checkout with CRLF endings fails it.
+- **Reproduced on Linux.** With `run.rs` and `coordinator.rs` given CRLF endings the test fails with the guest's
+  message, and the LF control passes, each arm rebuilt from its own tree (`impl4/r7/ci/crlf/`).
+- **It is R1's, not R7's,** and outside this round's brief, so it is not changed here. This head's `test (winguest)`
+  is expected to fail on it again, and that job's log still carries the R7 test's own verdict.
+
 **Not verified here:** anything on Windows or macOS beyond those lint and type checks, which includes the
 CI-failing test on the guest and the four witnesses on macOS, and CI's stable 1.99.0. CI is the truth for them.
