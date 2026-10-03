@@ -1692,12 +1692,18 @@ What lets the prober finish the tear: an invocation entering the runner (a pipel
 one leaving it (the observer released a held invocation inside the wait, and its end was applied),
 or a registry access answering `Attempt` (the width-1 control, where no pipeline is there to serve).
 
+## `mod tests` › `enum Torn {`
+
+The two torn shapes a witness plants: an empty `commondir`, on which Git's enumeration dies, and a
+registration that is `locked` and has no `gitdir`, which the removal scan cannot bind under
+`WriterProof::Unknown` and the enumeration passes over. Each is a shape a killed `git worktree add`
+leaves.
+
 ## `mod tests` › `struct Plant {`
 
-The tear `TearHeld` plants — `HEAD`, a `gitdir` spelt as Git writes it, and an empty `commondir` in
-the run's own store — and the prober it starts, which finishes `commondir` once what it waits for
-happened after the tear and otherwise writes nothing.
-
+The tear `TearHeld` plants in the run's own store — `HEAD`, a `gitdir` spelt as Git writes it and an
+empty `commondir`, or `locked` alone — and the prober it starts, which completes the registration
+once what it waits for happened after the tear and otherwise writes nothing.
 ## `mod tests` › `type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);`
 
 An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
@@ -1711,6 +1717,14 @@ returned: `Ok` only when it finished the tear after what it waited for. The drop
 prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
 never saw anything and the access refused at its deadline.
 
+
+## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
+
+The shape the tear takes.
+
+## `mod tests` › `impl TearHeld` › `fn planted(&self) -> impl Fn() -> bool + 'static {`
+
+Whether the tear has been planted, for a release order that waits for it.
 ## `mod tests` › `fn two_independent() -> [WideTask; 2] {`
 
 Beta, key 0, then alpha, key 1: in the order the admission dispatches them.
@@ -1799,8 +1813,8 @@ Census D2: the candidate's tree check.
 
 ## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_worktree_removal_waits_on_a_torn_registration() {`
 
-Census D3: the reclaim's worktree removal.
-
+Census D3: the reclaim's worktree removal — its scan, met by a registration that is `locked` and has
+no `gitdir`.
 ## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_intent_removal_waits_on_a_torn_registration() {`
 
 Census D3: the reclaim's intent removal.
@@ -1817,19 +1831,75 @@ Census C2: `integrate::publish`'s publishability check (H1).
 
 Census B1: the retained retry's worktree verification.
 
+## `mod tests` › `fn alpha_waits_for_the_tear(planted: impl Fn() -> bool + 'static) -> Script<'static> {`
+
+The release order of the repair witnesses: as `beta_settles_while_alpha_holds_its_first_gate` once
+the tear is planted, and before that alpha's worker and beta's invocations only, releasing nothing
+otherwise, so a first revalidation that waits out its deadline does not spend alpha's held gate.
+
+## `mod tests` › `fn served_while_a_repair_waits(`
+
+The witness of a revalidation's repair arm (census A6, B1 and B2: the torn plan and its scans) and
+of the verification's own read. With `residue`, a dead add's residue of a slot an intent names — its
+intent written before the run, its registration with an empty `commondir` planted at the fold — makes
+the first revalidation refuse at its deadline, the repair's plan find it, and its forced removal
+remove it; the tear is planted at the access the test names. The residue is gone afterwards.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration() {`
+
+The reclaim's intent removal: its repair's plan (the torn plan, R-X alone) meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration() {`
+
+The reclaim's intent removal: its repair's forced removal of the residue (the scan) meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_intent_removals_second_revalidation_waits_on_a_torn_registration()`
+
+The reclaim's intent removal: the revalidation after its repair meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_repair_plan_waits_on_a_torn_registration() {`
+
+The retained retry's verification: its repair's plan meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_second_revalidation_waits_on_a_torn_registration()`
+
+The retained retry's verification: the revalidation after its repair meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_verifications_worktree_read_waits_on_a_torn_registration() {`
+
+The retained retry's verification: its read of the worktree's record, inside its funnel, meets the
+tear.
+
 ## `mod tests` › `fn closing_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {`
 
 Beta's `attempt_finished` that closes its generation.
 
-## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_scrub_waits_on_a_torn_registration() {`
+## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_worktree_scrub_waits_on_a_torn_registration() {`
 
-Census B2: a retry whose retained worktree was changed by hand closes, and its scrub meets the tear.
+Census B2: a retry whose retained worktree was changed by hand closes, and its scrub's worktree
+removal (the scan) meets the tear.
 
-## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_scrub_waits_on_a_torn_registration() {`
+## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_intent_scrub_waits_on_a_torn_registration() {`
 
-Census D4: beta's second failed attempt escalates and closes the generation, and its scrub meets the
-tear; the task then parks, as the scaffold's failing gates leave it.
+Census B2: the same scrub's intent removal meets the tear; the scan passes over an empty `commondir`.
 
+## `mod tests` › `fn served_while_a_closed_retry_scrubs(tag: &str, torn: Torn) {`
+
+The B2 witnesses: beta's first attempt fails and retains its worktree, a file is staged in it by
+hand, the retry's verification fails, and the generation closes.
+## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_worktree_scrub_waits_on_a_torn_registration()`
+
+Census D4: beta's second failed attempt escalates and closes the generation, and its scrub's
+worktree removal (the scan) meets the tear; the task then parks, as the scaffold's failing gates
+leave it.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_intent_scrub_waits_on_a_torn_registration() {`
+
+Census D4: the same scrub's intent removal meets the tear.
+
+## `mod tests` › `fn served_while_a_failed_settlement_scrubs(tag: &str, torn: Torn) {`
+
+The D4 witnesses: both of beta's attempts fail their first gate.
 ## `mod tests` › `fn alpha_waits_for_gammas_integration(view: &Quiescent<'_>) -> Option<Release> {`
 
 The release order of the stale witnesses: everything but alpha's held worker while gamma is live,
@@ -1847,9 +1917,9 @@ The same, holding alpha's worker until gamma's `task_merged`.
 ## `mod tests` › `fn served_while_a_stale_integration_waits_under(`
 
 The stale witness: beta merges first, so gamma's integration is stale; with `conflicting`, gamma
-writes beta's file, its pick conflicts, and the rejection's repair is dispatched. The prober wakes on
-an ending: alpha's released worker ends, and the coordinator applies that end, inside the wait.
-
+writes beta's file, its pick conflicts, and the rejection's repair is dispatched. The tear takes the
+shape `torn`. The prober wakes on an ending: alpha's released worker ends, and the coordinator
+applies that end, inside the wait.
 ## `mod tests` › `fn candidate_created_of_gamma(body: &TopologyEventBody) -> bool {`
 
 Gamma's `task_candidate_created`.
@@ -1884,16 +1954,22 @@ Census C4: the cherry-pick's revalidation.
 
 ## `mod tests` › `fn a_pipeline_is_served_while_a_publications_staging_removal_waits_on_a_torn_registration() {`
 
-Census C5: the publication's staging removal.
+Census C5: the publication's staging removal — its scan.
 
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_staging_intent_removal_waits_on_a_torn_registration()`
+
+Census C5: the publication's staging intent removal.
 ## `mod tests` › `fn a_pipeline_is_served_while_a_conflicts_classification_waits_on_a_torn_registration() {`
 
 Census C3: `integrate_stale`'s `proposal_state` after the conflicting pick (H1).
 
 ## `mod tests` › `fn a_pipeline_is_served_while_a_rejections_staging_reclaim_waits_on_a_torn_registration() {`
 
-Census C5: the rejection's staging reclaim.
+Census C5: the rejection's staging reclaim — its scan.
 
+## `mod tests` › `fn a_pipeline_is_served_while_a_rejections_staging_intent_reclaim_waits_on_a_torn_registration()`
+
+Census C5: the rejection's staging intent removal.
 ## `mod tests` › `fn a_pipeline_is_served_while_a_repairs_materialization_waits_on_a_torn_registration() {`
 
 Census A5: the repair dispatch's materialization.

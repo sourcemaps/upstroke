@@ -4266,6 +4266,12 @@ mod tests {
         Contended,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Torn {
+        CommondirEmpty,
+        GitdirMissing,
+    }
+
     #[derive(Clone)]
     struct Plant {
         admin: PathBuf,
@@ -4273,10 +4279,11 @@ mod tests {
         runner: Arc<RecordingRunner>,
         wakes: Wakes,
         common: PathBuf,
+        torn: Torn,
     }
 
     impl Plant {
-        fn tear(&self) -> Prober {
+        fn whole(&self) {
             let checkout = self.admin.join("foreign-checkout").join(".git");
             crate::workspace_manager::fixture::write_file(
                 &self.admin.join("HEAD"),
@@ -4290,7 +4297,24 @@ mod tests {
                 )
                 .as_bytes(),
             );
-            crate::workspace_manager::fixture::write_file(&self.admin.join("commondir"), b"");
+        }
+
+        fn tear(&self) -> Prober {
+            match self.torn {
+                Torn::CommondirEmpty => {
+                    self.whole();
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("commondir"),
+                        b"",
+                    );
+                }
+                Torn::GitdirMissing => {
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("locked"),
+                        b"initializing\n",
+                    );
+                }
+            }
             let (wakes, common) = (self.wakes, self.common.clone());
             let progress = move |runner: &RecordingRunner| match wakes {
                 Wakes::Entered => runner.ran().len(),
@@ -4298,16 +4322,23 @@ mod tests {
                 Wakes::Contended => crate::workspace_manager::contended_attempts(&common),
             };
             let before = progress(&self.runner);
-            let (admin, runner) = (self.admin.clone(), Arc::clone(&self.runner));
+            let (admin, runner, finishing) =
+                (self.admin.clone(), Arc::clone(&self.runner), self.clone());
             let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
             let handle = std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + BOUND;
                 loop {
                     if progress(&runner) > before {
+                        if finishing.torn == Torn::GitdirMissing {
+                            finishing.whole();
+                        }
                         crate::workspace_manager::fixture::write_file(
                             &admin.join("commondir"),
                             b"../..\n",
                         );
+                        if finishing.torn == Torn::GitdirMissing {
+                            crate::workspace_manager::fixture::remove_file(&admin.join("locked"));
+                        }
                         return Ok(());
                     }
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -4368,12 +4399,22 @@ mod tests {
                     runner: Arc::clone(&wide.env.runner),
                     wakes,
                     common: wide.env.fixture.manager.common_git_dir().to_path_buf(),
+                    torn: Torn::CommondirEmpty,
                 },
                 prober: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 planting: None,
                 armed: false,
                 also: None,
             }
+        }
+
+        fn tearing(&mut self, torn: Torn) {
+            self.plant.torn = torn;
+        }
+
+        fn planted(&self) -> impl Fn() -> bool + 'static {
+            let prober = std::rc::Rc::clone(&self.prober);
+            move || prober.borrow().is_some()
         }
 
         fn finish(&mut self) -> Result<(), String> {
@@ -4675,10 +4716,12 @@ mod tests {
 
     #[test]
     fn a_pipeline_is_served_while_a_settlements_worktree_removal_waits_on_a_torn_registration() {
-        served_while_alpha_waits(
+        served_while_alpha_waits_with(
             "registry-served-reclaim-worktree",
             &[],
             TearAt::Fold(candidate_created_of_beta),
+            RunOutcome::Complete,
+            |_, hooks| hooks.tearing(Torn::GitdirMissing),
         );
     }
 
@@ -4718,6 +4761,169 @@ mod tests {
         );
     }
 
+    fn alpha_waits_for_the_tear(planted: impl Fn() -> bool + 'static) -> Script<'static> {
+        Box::new(move |view: &Quiescent<'_>| {
+            if planted() {
+                return beta_settles_while_alpha_holds_its_first_gate(view);
+            }
+            let beta_live = view.live.iter().any(
+                |(_, identity)| matches!(identity, Identity::Attempt { key, .. } if *key == TaskKey(0)),
+            );
+            released(view, |invocation| {
+                attempt_key(invocation) == Some(1)
+                    && role_of(invocation) == Some(AttemptRole::Worker)
+            })
+            .or_else(|| {
+                if beta_live {
+                    released(view, |invocation| attempt_key(invocation) == Some(0))
+                } else {
+                    None
+                }
+            })
+            .or(Some(Release::Nothing))
+        })
+    }
+
+    fn served_while_a_repair_waits(
+        tag: &str,
+        failing: &[(u32, u32)],
+        at: TearAt,
+        torn: Torn,
+        residue: bool,
+    ) {
+        let tasks = two_independent();
+        let plans = WidePlans {
+            gates: 2,
+            ..WidePlans::default()
+        };
+        let mut wide = Wide::started_with(tag, &tasks, 2, plans, holding(&tasks, failing));
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let leftover = common.join("worktrees").join("residue");
+        let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+        hooks.tearing(torn);
+        if residue {
+            let slot = crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
+            wide.env
+                .fixture
+                .manager
+                .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+                .expect("the residue's intent");
+            let checkout = wide.env.fixture.manager.slot_path(&slot).join(".git");
+            let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
+            let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
+            hooks.also = Some((
+                when,
+                Box::new(move || {
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("HEAD"),
+                        format!("{head}\n").as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("gitdir"),
+                        format!(
+                            "{}\n",
+                            crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                        )
+                        .as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
+                }),
+            ));
+        }
+        let planted = hooks.planted();
+        let pipelines = wide.env.pipelines();
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("the access is passed once the coordinator served a pipeline meanwhile");
+        drop(scheduler);
+        hooks
+            .finish()
+            .expect("an invocation reached the runner while the access waited on the tear");
+        drop(hooks);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        assert!(
+            !leftover.exists(),
+            "the repair removed the dead add's residue"
+        );
+        assert!(wide.run.invocations_balance());
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-intent-repair-plan",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 3),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-intent-repair-removal",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 4),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_intent_removals_second_revalidation_waits_on_a_torn_registration()
+     {
+        served_while_a_repair_waits(
+            "registry-served-intent-second-revalidation",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 5),
+            Torn::CommondirEmpty,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_repair_plan_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-verify-repair-plan",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 2),
+            Torn::GitdirMissing,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_second_revalidation_waits_on_a_torn_registration()
+    {
+        served_while_a_repair_waits(
+            "registry-served-verify-second-revalidation",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 4),
+            Torn::CommondirEmpty,
+            true,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_worktree_read_waits_on_a_torn_registration() {
+        served_while_a_repair_waits(
+            "registry-served-verify-worktree-read",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 2),
+            Torn::CommondirEmpty,
+            false,
+        );
+    }
+
     fn closing_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {
         matches!(body, TopologyEventBody::AttemptFinished { data }
             if data.key == TaskKey(0)
@@ -4725,13 +4931,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_is_served_while_a_closed_retrys_scrub_waits_on_a_torn_registration() {
+    fn a_pipeline_is_served_while_a_closed_retrys_worktree_scrub_waits_on_a_torn_registration() {
+        served_while_a_closed_retry_scrubs(
+            "registry-served-retry-close-worktree",
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_closed_retrys_intent_scrub_waits_on_a_torn_registration() {
+        served_while_a_closed_retry_scrubs(
+            "registry-served-retry-close-intent",
+            Torn::CommondirEmpty,
+        );
+    }
+
+    fn served_while_a_closed_retry_scrubs(tag: &str, torn: Torn) {
         served_while_alpha_waits_with(
-            "registry-served-retry-close",
+            tag,
             &[(0, 1)],
             TearAt::Fold(generation_closed_of_beta),
             RunOutcome::Complete,
             |wide, hooks| {
+                hooks.tearing(torn);
                 let slot = wide.env.fixture.manager.slot_path(
                     &crate::engine::topology::dispatch::task_slot(TaskKey(0), GenerationId(0)),
                 );
@@ -4750,13 +4972,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_is_served_while_a_failed_settlements_scrub_waits_on_a_torn_registration() {
+    fn a_pipeline_is_served_while_a_failed_settlements_worktree_scrub_waits_on_a_torn_registration()
+    {
+        served_while_a_failed_settlement_scrubs(
+            "registry-served-settle-scrub-worktree",
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_failed_settlements_intent_scrub_waits_on_a_torn_registration() {
+        served_while_a_failed_settlement_scrubs(
+            "registry-served-settle-scrub-intent",
+            Torn::CommondirEmpty,
+        );
+    }
+
+    fn served_while_a_failed_settlement_scrubs(tag: &str, torn: Torn) {
         served_while_alpha_waits_with(
-            "registry-served-settle-scrub",
+            tag,
             &[(0, 1), (0, 2)],
             TearAt::Fold(closing_attempt_finished_of_beta),
             RunOutcome::Parked,
-            |_, _| {},
+            |_, hooks| hooks.tearing(torn),
         );
     }
 
@@ -4787,6 +5025,7 @@ mod tests {
             tag,
             conflicting,
             at,
+            Torn::CommondirEmpty,
             alpha_waits_for_gammas_integration,
         );
     }
@@ -4795,6 +5034,7 @@ mod tests {
         tag: &str,
         conflicting: bool,
         at: TearAt,
+        torn: Torn,
         order: fn(&Quiescent<'_>) -> Option<Release>,
     ) {
         let tasks = [
@@ -4811,6 +5051,7 @@ mod tests {
         let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
         let before = crate::workspace_manager::contended_attempts(&common);
         let mut hooks = TearHeld::waking(&wide, "foreign-held", at, Wakes::Ended);
+        hooks.tearing(torn);
         let pipelines = wide.env.pipelines();
         let runner = Arc::clone(&wide.env.runner);
         let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
@@ -4909,6 +5150,19 @@ mod tests {
             "registry-served-staging-removal",
             false,
             TearAt::Fold(task_merged_of_gamma),
+            Torn::GitdirMissing,
+            alpha_waits_for_gammas_merge,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_publications_staging_intent_removal_waits_on_a_torn_registration()
+     {
+        served_while_a_stale_integration_waits_under(
+            "registry-served-staging-intent-removal",
+            false,
+            TearAt::Fold(task_merged_of_gamma),
+            Torn::CommondirEmpty,
             alpha_waits_for_gammas_merge,
         );
     }
@@ -4924,8 +5178,20 @@ mod tests {
 
     #[test]
     fn a_pipeline_is_served_while_a_rejections_staging_reclaim_waits_on_a_torn_registration() {
-        served_while_a_stale_integration_waits(
+        served_while_a_stale_integration_waits_under(
             "registry-served-staging-reclaim",
+            true,
+            TearAt::Fold(merge_rejected_of_gamma),
+            Torn::GitdirMissing,
+            alpha_waits_for_gammas_integration,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_rejections_staging_intent_reclaim_waits_on_a_torn_registration()
+    {
+        served_while_a_stale_integration_waits(
+            "registry-served-staging-intent-reclaim",
             true,
             TearAt::Fold(merge_rejected_of_gamma),
         );
