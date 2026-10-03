@@ -212,6 +212,16 @@ carries how the invocation's Runner call ended (`InvocationEnd`): completed, or 
 process fate the Runner established and its account of why — which is what tells a process that is
 gone from one that may still run (round R1, `R1-CONC-1`).
 
+`Wake` is the coordinator's own: the timer of one wait of a registry access the coordinator makes
+sends it, with that wait's token, into the coordinator's inbox (`registry_pause`; the follow-up B
+record's §9.13, R1). It names no pipeline. A wake that arrives outside its wait is stale and is
+dropped.
+
+## `impl ToCoordinator` › `const fn completes(&self) -> bool {`
+
+A completion — `Judged` or `Verified` — which a registry access's wait defers until the transition
+it waits in returns, because applying one appends.
+
 ## `pub trait Quiescence {`
 
 A test's hook into the deterministic intake (R-AD), called at two points. `granted` is handed every
@@ -318,7 +328,28 @@ Grant every waiting pipeline when the gate grants, in the order they asked.
 
 The source keeps the coordinator's protocol beside the struct (§10): the owner of every shared
 state, the linearization point, a pipeline's transitions, which completion wins, the cleanup after
-an interrupt, and why the unbounded channels are bounded.
+an interrupt, why the unbounded channels are bounded, and how a registry access the coordinator
+makes waits only for messages.
+
+## `struct Coordinator<'s>` › `deferred: VecDeque<(Origin, ToCoordinator)>,`
+
+Completions a registry access's wait received and deferred, applied first by [`Self::next_message`]
+once the transition returns.
+
+## `struct Coordinator<'s>` › `wakes: u64,`
+
+The last wait's token; each wait takes the next, so a stale wake never ends a later wait.
+
+## `struct Coordinator<'s>` › `ledger: crate::util::DurabilityLedger,`
+
+The run's hooks' durability ledger, taken once when the coordinator is built, for the manager's
+funnels that take the coordinator as their hooks: `durability_ledger` reads through `&self`, and the
+run's hooks are reachable only mutably.
+
+## `struct Coordinator<'s>` › `refusal: Option<String>,`
+
+Why the run's hooks answered the last phase they refused, read right after the answer, for the same
+reason.
 
 ## `impl Coordinator<'_>` › `fn drive(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -434,6 +465,35 @@ chooses what happens next.
 
 Ask the observer. A released invocation's pipeline is `Running` again; an injection must have put
 something in the injector; nothing released is `stuck`, which ends the command resumably.
+
+## `impl Coordinator<'_>` › `fn answer_until_woken(&mut self, token: u64) -> Result<(), UpstrokeError> {`
+
+One wait of a registry access the coordinator makes (R1): answer messages until the wake with
+`token` arrives. Without an observer, each message in arrival order. With one, the deterministic
+intake's own steps — an injected message, everything arrived buffered, a wait while a pipeline is
+`Running`, the buffered message that sorts first — over the messages the wait may apply, and the
+observer at quiescence; when the observer releases nothing, the wait waits for its next message,
+since the wake is on its way. It returns at the wake, leaving later messages where they are.
+
+## `impl Coordinator<'_>` › `fn answer_paused(&mut self, origin: Origin, message: ToCoordinator) -> Result<(), UpstrokeError> {`
+
+What a wait does with a message: a grant request, an end, a snapshot request or end, and a shutdown
+are applied as [`Self::handle`] applies them — none appends — and a completion is deferred; a stale
+wake is dropped.
+
+## `impl Coordinator<'_>` › `fn buffer_paused(&mut self, message: ToCoordinator) {`
+
+Buffer a message for the observer's intake, dropping a stale wake.
+
+## `impl Coordinator<'_>` › `fn take_canonical_answerable(&mut self) -> Option<ToCoordinator> {`
+
+The buffered message that sorts first by pipeline and arrival among those a wait may apply.
+
+## `impl Coordinator<'_>` › `fn observe_paused(&mut self) -> Result<bool, UpstrokeError> {`
+
+The observer at a wait's quiescence: a released invocation's pipeline is `Running` again, and
+nothing released only means the wait goes on. An append asked for inside a wait is refused: nothing
+is appended inside another transition.
 
 ## `impl Coordinator<'_>` › `fn admit_invocation(`
 
@@ -628,6 +688,30 @@ leaves no pipeline waiting on it.
 ## `impl Driver for Coordinator<'_>` › `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {`
 
 The frozen `integrate()`'s verification, run concurrently.
+
+## `impl Operator for Coordinator<'_> {`
+
+The coordinator runs its transitions with itself as the operator: the run, its seams and its own
+hooks for the transition's steps, and itself as the registry hooks
+(`run::begin_dispatch`, `run::begin_retry`, `run::settle_judged`, and through `DrivenJournal` the
+frozen `integrate()`).
+
+## `impl TopologyHooks for Coordinator<'_> {`
+
+The hooks the coordinator lends a registry access: its own effect hooks (`effects` is the
+coordinator, below), and the run's for the rest. `spawn` is called by path because the process-start
+census (`runner::contract`) counts the text `.spawn()`, and this accessor starts nothing. No
+`folded`: no append runs through these hooks — every append goes through the run with the run's own
+hooks — and a frozen census (`events::log::tests`) lists the production modules that name the
+fold's type, which this one does not.
+
+## `impl crate::workspace_manager::EffectHooks for Coordinator<'_> {`
+
+The run's effect hooks, with the wait of a registry access answered here. `phase` forwards and keeps
+the refusal's cause for `refusal_cause`; `durability_ledger` is the run's, taken at construction.
+`registry_pause` starts a timer thread that sleeps the wait's length and sends the wait's `Wake`,
+answers messages until that wake ([`Self::answer_until_woken`]), and joins the timer; a timer that
+cannot be started is reported and the wait is slept, as before.
 
 ## `struct Client {`
 
@@ -1589,6 +1673,241 @@ fixture goes, and says it was cancelled, and the cancelled writer wrote nothing.
 then reclaimed, and the wake the writer waited for arrives late (`CONTENDED_ATTEMPTS` moved by
 hand, as a late access would move it): nothing recreates the root. Before the repair the writer's
 handle was discarded, and that late wake recreated the reclaimed directory.
+
+## `mod tests` › `enum TearAt {`
+
+Where the R1 witnesses tear a foreign registration (the follow-up B record's §9.13): when an event
+is folded, or just before the n-th registry access the coordinator's thread starts after an event
+is folded (`workspace_manager::fixture::before_registry_access`), which names an access no fold
+precedes directly.
+
+## `mod tests` › `struct Prober {`
+
+The writer that finishes the tear, owned by `TearHeld`: the sender that cancels it and the handle
+its `finish` or its drop joins (standards §10).
+
+## `mod tests` › `enum Wakes {`
+
+What lets the prober finish the tear: an invocation entering the runner (a pipeline was granted),
+one leaving it (the observer released a held invocation inside the wait, and its end was applied),
+or a registry access answering `Attempt` (the width-1 control, where no pipeline is there to serve).
+
+## `mod tests` › `struct Plant {`
+
+The tear `TearHeld` plants — `HEAD`, a `gitdir` spelt as Git writes it, and an empty `commondir` in
+the run's own store — and the prober it starts, which finishes `commondir` once what it waits for
+happened after the tear and otherwise writes nothing.
+
+## `mod tests` › `type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);`
+
+An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
+retry, a file at a destination before an add.
+
+## `mod tests` › `struct TearHeld {`
+
+The run's hooks with one tear planted on the coordinator's thread at a `TearAt`, its prober owned
+and joined, and an optional `FoldAct`. `finish` cancels and joins the prober and hands back what it
+returned: `Ok` only when it finished the tear after what it waited for. The drop does the same for a
+prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
+never saw anything and the access refused at its deadline.
+
+## `mod tests` › `fn two_independent() -> [WideTask; 2] {`
+
+Beta, key 0, then alpha, key 1: in the order the admission dispatches them.
+
+## `mod tests` › `fn served_through(tag: &str, tasks: &[WideTask], at: TearAt) {`
+
+The dispatch witness of R1, without an observer: the first task's pipeline is spawned and asks for
+its worker while the coordinator dispatches the second, whose access meets the tear. The access is
+passed only because the coordinator granted the worker while it waited.
+
+## `mod tests` › `fn attempt_started_of(key: u32) -> fn(&TopologyEventBody) -> bool {`
+
+The predicate of a task's `attempt_started`.
+
+## `mod tests` › `fn task_dispatched_of(key: u32) -> fn(&TopologyEventBody) -> bool {`
+
+The predicate of a task's `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_head_check_waits_on_a_torn_registration() {`
+
+Census A1: the dispatch's head check (`integrate::dispatch_head_at`, H2), the first access of every
+dispatch.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_revalidation_waits_on_a_torn_registration() {`
+
+Census A2: the dispatch's own revalidation before `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_intent_waits_on_a_torn_registration() {`
+
+Census A3, the implementation review's witness: the intent's revalidation after `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_add_gate_waits_on_a_torn_registration() {`
+
+Census A4: the add's gate.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_add_waits_on_a_torn_registration() {`
+
+Census A4: the add itself, whose waits run inside its funnel (`funnel_lending`).
+
+## `mod tests` › `fn beta_settles_while_alpha_holds_its_first_gate(view: &Quiescent<'_>) -> Option<Release> {`
+
+The release order of the observed witnesses: alpha's worker first, then beta's invocations while
+beta is live, and alpha's held first gate only once beta is not — inside the wait of an access made
+for beta, where alpha's second gate is then asked for and granted, and enters the runner.
+
+## `mod tests` › `fn served_while_alpha_waits(tag: &str, failing: &[(u32, u32)], at: TearAt) -> Wide {`
+
+`served_while_alpha_waits_with`, expecting the run to complete.
+
+## `mod tests` › `fn served_while_alpha_waits_with(`
+
+The observed witness for a settlement, an integration or a retry of beta while alpha holds its first
+gate: two gates, so that alpha's next grant asks for no registry access first.
+
+## `mod tests` › `fn candidate_prepared_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `candidate_prepared`.
+
+## `mod tests` › `fn candidate_created_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `task_candidate_created`.
+
+## `mod tests` › `fn merge_prepared_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `merge_prepared`.
+
+## `mod tests` › `fn retained_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `attempt_finished`.
+
+## `mod tests` › `fn generation_closed_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `generation_closed`.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_path_read_waits_on_a_torn_registration() {`
+
+Census D1: the promotion's changed paths.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_parent_check_waits_on_a_torn_registration() {`
+
+Census D2: the candidate's parent check.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_tree_check_waits_on_a_torn_registration() {`
+
+Census D2: the candidate's tree check.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_worktree_removal_waits_on_a_torn_registration() {`
+
+Census D3: the reclaim's worktree removal.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_settlements_intent_removal_waits_on_a_torn_registration() {`
+
+Census D3: the reclaim's intent removal.
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_integrations_decision_waits_on_a_torn_registration() {`
+
+Census C1: `integrate::decide`'s publishability check (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_an_integrations_publication_waits_on_a_torn_registration() {`
+
+Census C2: `integrate::publish`'s publishability check (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {`
+
+Census B1: the retained retry's worktree verification.
+
+## `mod tests` › `fn closing_attempt_finished_of_beta(body: &TopologyEventBody) -> bool {`
+
+Beta's `attempt_finished` that closes its generation.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_closed_retrys_scrub_waits_on_a_torn_registration() {`
+
+Census B2: a retry whose retained worktree was changed by hand closes, and its scrub meets the tear.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_failed_settlements_scrub_waits_on_a_torn_registration() {`
+
+Census D4: beta's second failed attempt escalates and closes the generation, and its scrub meets the
+tear; the task then parks, as the scaffold's failing gates leave it.
+
+## `mod tests` › `fn alpha_waits_for_gammas_integration(view: &Quiescent<'_>) -> Option<Release> {`
+
+The release order of the stale witnesses: everything but alpha's held worker while gamma is live,
+and alpha's worker once gamma is not — inside the wait of an access of gamma's integration, where
+alpha holds no snapshot, so the stale arm is not deferred (R-W).
+
+## `mod tests` › `fn alpha_waits_for_gammas_merge(view: &Quiescent<'_>) -> Option<Release> {`
+
+The same, holding alpha's worker until gamma's `task_merged`.
+
+## `mod tests` › `fn served_while_a_stale_integration_waits(tag: &str, conflicting: bool, at: TearAt) {`
+
+`served_while_a_stale_integration_waits_under` with `alpha_waits_for_gammas_integration`.
+
+## `mod tests` › `fn served_while_a_stale_integration_waits_under(`
+
+The stale witness: beta merges first, so gamma's integration is stale; with `conflicting`, gamma
+writes beta's file, its pick conflicts, and the rejection's repair is dispatched. The prober wakes on
+an ending: alpha's released worker ends, and the coordinator applies that end, inside the wait.
+
+## `mod tests` › `fn candidate_created_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `task_candidate_created`.
+
+## `mod tests` › `fn task_merged_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `task_merged`.
+
+## `mod tests` › `fn merge_rejected_of_gamma(body: &TopologyEventBody) -> bool {`
+
+Gamma's `merge_rejected`.
+
+## `mod tests` › `fn repair_dispatched(body: &TopologyEventBody) -> bool {`
+
+A repair's `task_dispatched`.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_intent_waits_on_a_torn_registration() {`
+
+Census C4: the stale arm's staging intent.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_add_gate_waits_on_a_torn_registration() {`
+
+Census C4: the staging add's gate.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_add_waits_on_a_torn_registration() {`
+
+Census C4: the staging add.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_stale_integrations_pick_waits_on_a_torn_registration() {`
+
+Census C4: the cherry-pick's revalidation.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_staging_removal_waits_on_a_torn_registration() {`
+
+Census C5: the publication's staging removal.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_conflicts_classification_waits_on_a_torn_registration() {`
+
+Census C3: `integrate_stale`'s `proposal_state` after the conflicting pick (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_rejections_staging_reclaim_waits_on_a_torn_registration() {`
+
+Census C5: the rejection's staging reclaim.
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_repairs_materialization_waits_on_a_torn_registration() {`
+
+Census A5: the repair dispatch's materialization.
+
+## `mod tests` › `fn a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration()`
+
+Census A6: the first process stops after beta's `task_dispatched`, at a file planted at beta's
+destination; the next process resumes, starts alpha's attempt, and continues beta's open generation,
+whose worktree check meets the tear.
+
+## `mod tests` › `fn the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping() {`
+
+R-T's control: the width-1 `step` runs the same dispatch with its own hooks, whose waits sleep; the
+tear is finished once the access has answered `Attempt`, and the run completes.
 
 ## `mod tests` › `struct RequiresAFailingFilter {`
 

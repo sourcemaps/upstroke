@@ -252,6 +252,44 @@ fn the_loop_selects_through_one_function() {
 }
 
 #[test]
+fn both_drivers_run_each_transition_through_the_one_generic_function() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |file: &str| {
+        crate::effects::production_code(
+            &std::fs::read_to_string(root.join(file)).expect("a source file"),
+        )
+    };
+    let run = read("src/engine/topology/run.rs");
+    let coordinator = read("src/engine/topology/coordinator.rs");
+    for transition in ["begin_dispatch", "begin_retry", "settle_judged"] {
+        assert_eq!(
+            run.matches(&format!(
+                "pub(super) fn {transition}<O: Operator + ?Sized>("
+            ))
+            .count(),
+            1,
+            "`{transition}` is one function, generic over the operator that runs it"
+        );
+        assert!(
+            run.contains(&format!("{transition}(&mut self.stepping(seams, hooks)"))
+                || run.contains(&format!(
+                    "{transition}(\n                    &mut self.stepping(seams, hooks)"
+                )),
+            "the width-1 `step` runs `{transition}` through its `Stepping` operator"
+        );
+        assert!(
+            coordinator.contains(&format!("super::run::{transition}(self, manager,")),
+            "the coordinator runs `{transition}` with itself as the operator"
+        );
+        assert!(
+            !run.contains(&format!("self.{transition}("))
+                && !coordinator.contains(&format!(".{transition}(key")),
+            "no second implementation of `{transition}` is called by either driver"
+        );
+    }
+}
+
+#[test]
 fn the_frozen_pool_table_is_read_through_one_seam() {
     const FILE: &str = "src/engine/assembly.rs";
 
