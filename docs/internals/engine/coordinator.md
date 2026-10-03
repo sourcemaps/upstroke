@@ -13,6 +13,9 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
+of the attempt's error path, below.
+
 ## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
 
 The v0.1 conductor's public entry points -- `run`, `run_with` and
@@ -208,6 +211,16 @@ record does not describe.
 A fresh run has no signals of its own yet, and §13's other sources are
 not read in v0.1 — so this snapshot is honestly a record of how little
 was known when the run started.
+
+## `pub(super) const KEPT_PIN_SUFFIX: &str = "-kept";`
+
+The kept pin of a registry-refused attempt is the attempt's prepared-pin name with
+this appended: `refs/upstroke/prepared/<run>/<task index>-<attempt>-kept`. It is
+unique per run, task and attempt, because an attempt number is never reused in a
+run, and no prepared-commit path names it: the resume's orphan removal names
+`prepared_pin_ref` exactly, the schema-3 settlement check builds the exact expected
+pin, and the topology's pins live under `refs/upstroke/runs/`. The resume reads it
+(`src/engine/resume.rs`) and never removes it; the operator does.
 
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 
@@ -502,11 +515,32 @@ identity: this task's position in the plan. See
 The same entries the worker prompt quotes as operator
 instruction, routed to the judge as well (§12).
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone()) {`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `match run_attempt(&attempt_cx, workspace, resume.clone(), &mut refused) {`
 
 Any error between the agent editing files and the verdict
 leaves the tree dirty; the run cannot continue but must not
 hand the user a half-staged workspace either (§14).
+
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Some(candidate) = refused {`
+
+The one exception, follow-up D's B-PRESERVE (proposed, conditional on O8): when the
+attempt's gate or review snapshot was refused by the worktree registry after the
+worker's output was captured, `run_attempt` recorded the captured candidate, and
+this arm does not discard the checkout. It pins that candidate — the branch ref,
+parent and tree captured before the refusal, never the index as it stands now —
+through `prepare_commit_from_candidate` at the attempt's prepared pin followed by
+`KEPT_PIN_SUFFIX`, and returns a registry refusal that names the pin, or says that
+pinning it failed (`HEAD` moved after the capture, or the ref store could not be
+written; R-D1). `prepare_commit_from_candidate` refuses when `HEAD` moved from the
+captured branch and parent, writes a hook-free commit with upstroke's identity and
+pins it with a create-only `update-ref`. Every other attempt error discards the
+checkout, as before. The arm calls `prepared_pin_ref` and
+`prepare_commit_from_candidate`, both of which this module already called.
+
+The pin keeps the output on every later invocation: the resume discards the
+checkout's copy so the attempt runs again from a clean tree, and names the pin with
+the commands that take its output back (`src/engine/resume.rs`). A new run instead
+of a resume refuses over the kept output as it refuses over any uncommitted work.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let next = result.failure.as_ref().map(|failure| {`
 

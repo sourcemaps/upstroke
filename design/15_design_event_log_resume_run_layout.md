@@ -236,10 +236,13 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 
 `upstroke resume <run-id>` replays, verifies the run branch HEAD matches the last committed event (mismatch = refuse with an explanation), re-probes agents, re-snapshots capacity, and continues — parked questions intact. Git and the log cannot be updated atomically, so schema 3 makes the successful settlement itself carry the exact prepared identity: captured full run-branch ref, parent and tree feed hook-free `commit-tree`; the resulting commit, message, and deterministic private pin are verified before `attempt_finished` is appended. Publication compare-and-swaps the **recorded full branch ref**, never mutable symbolic `HEAD`, from the recorded parent to that commit, removes the pin with a non-dereferencing compare-and-swap, and then appends `task_committed`. Resume accepts only the resulting exact crash prefixes: parent plus matching pin means publish that object; commit plus matching pin means remove the pin; commit with the pin already gone means append the missing `task_committed`. A pin without a successful settlement is orphan residue and is removed without dereferencing symbolic refs. Any substituted or symbolic pin, third branch SHA, changed branch identity, or mismatched commit object refuses while preserving evidence. Schema-1/2 success has no prepared identity, so it is **never** adopted from parent plus subject alone; even a matching message can name an arbitrary tree. It also refuses when the frozen plan's digest moved, when the recorded chain structure no longer matches (a rung is an index into that chain), when the branch is gone, and when another process owns either the run or its physical worktree.
 
-**A legacy attempt the worktree registry refused.** *PROPOSED — follow-up D's design
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it), pending the owner's decision to unfreeze the PR5-frozen
-legacy modules it changes; nothing in this paragraph is in force until it is implemented, after the registry
-access it calls, follow-up B's (pull request #329), has landed.* A schema 1–3 run shares its repository's
+**A legacy attempt the worktree registry refused.** *PROPOSED, conditional on the owner's decision O8 (decision B)
+to unfreeze the PR5-frozen legacy modules it changes, and not granted — follow-up D
+(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
+implemented on draft pull request #331. Nothing in this paragraph is in force until the owner adopts O8 and that pull
+request merges, after follow-up B's (pull request #329), whose registry access it calls. Once in force, it replaces
+the last item of "A registry another process is writing" above, which says the frozen legacy engine's accesses do not
+take that access.* A schema 1–3 run shares its repository's
 worktree registry with every other checkout's runs. Its three Git children that
 enumerate the registry — a gate or review snapshot's `git worktree add`, a snapshot's removal together with the
 `git worktree list` that decides it, and the resume's `git switch` — each run as one attempt of that registry
@@ -251,9 +254,11 @@ refuses after the worker's output was captured, the coordinator does not discard
 captured candidate — the branch, parent and tree captured before the refusal, never the index as it stands
 then — as a commit at the attempt's prepared pin followed by `-kept`, and its refusal names that pin. Of the
 schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. Every resume
-discards the checkout's copy as before, so the attempt runs again from a clean tree. It looks for a kept pin at
-every attempt the run's log records, and names each one it finds with the commands that take its output back as
-the repository records it, deletions included: with replacement objects refused, as every legacy Git command
+discards the checkout's copy as before, so the attempt runs again from a clean tree. When it reaches its lookup — a
+resume that refuses earlier, at its reclaim, names none, and one whose later step fails returns that error without
+its warnings — it looks for a kept pin at every attempt the run's log records, and names each one it finds with the
+commands that take its output back as the repository records it — the index exactly, the working files through the
+checkout's own conversions — deletions included: with replacement objects refused, as every legacy Git command
 refuses them. It never removes a kept pin; the operator does, and a removed pin is named no more. Every legacy Git
 command also runs with Git's automatic maintenance off, so none of them starts a `git maintenance` or
 `git gc --auto` that could prune a registration another checkout is writing.

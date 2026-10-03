@@ -10875,3 +10875,1135 @@ fn v1_shapes_helper() {
         );
     }
 }
+
+const TORN_REGISTRATION: &str = "foreign-torn";
+
+fn after_capture_failed(error: impl std::fmt::Display) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!("the test's after-capture step: {error}"),
+    }
+}
+
+fn git_after_capture(root: &Path, args: &[&str]) -> Result<String, UpstrokeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(after_capture_failed)?;
+    if !output.status.success() {
+        return Err(after_capture_failed(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn torn_registration_of(repo: &Path) -> PathBuf {
+    repo.join(".git").join("worktrees").join(TORN_REGISTRATION)
+}
+
+fn plant_a_torn_registration_in(repo: &Path) -> std::io::Result<PathBuf> {
+    let admin = torn_registration_of(repo);
+    fs::create_dir_all(&admin)?;
+    let checkout = repo.with_file_name("torn-checkout").join(".git");
+    let mut gitdir =
+        crate::runner::host::GitdirRule::native().spelling(checkout.as_os_str().as_encoded_bytes());
+    gitdir.push(b'\n');
+    fs::write(admin.join("gitdir"), gitdir)?;
+    fs::write(admin.join("commondir"), b"")?;
+    Ok(admin)
+}
+
+fn repair_the_torn_registration(repo: &Path) {
+    fs::remove_dir_all(torn_registration_of(repo)).expect("the operator removes the residue");
+}
+
+fn captured_marker(repo: &Path) -> PathBuf {
+    repo.with_file_name("captured.txt")
+}
+
+fn record_the_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    fs::write(
+        captured_marker(workspace.root()),
+        format!(
+            "{} {} {}",
+            candidate.branch_ref, candidate.parent_oid, candidate.tree_oid
+        ),
+    )
+    .map_err(after_capture_failed)
+}
+
+fn captured(repo: &Path) -> (String, String, String) {
+    let text = fs::read_to_string(captured_marker(repo)).expect("the capture was recorded");
+    let mut parts = text.split_whitespace().map(str::to_owned);
+    let mut next = || parts.next().expect("three captured identities");
+    (next(), next(), next())
+}
+
+fn tear_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    plant_a_torn_registration_in(workspace.root())
+        .map(|_| ())
+        .map_err(after_capture_failed)
+}
+
+fn unstage_and_tear_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    git_after_capture(
+        workspace.root(),
+        &["reset", "-q", "HEAD", "--", "agent-output.txt"],
+    )?;
+    plant_a_torn_registration_in(workspace.root())
+        .map(|_| ())
+        .map_err(after_capture_failed)
+}
+
+fn move_head_and_tear_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    let root = workspace.root();
+    let moved = git_after_capture(
+        root,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "moved after capture",
+        ],
+    )?;
+    git_after_capture(root, &["update-ref", &candidate.branch_ref, &moved])?;
+    plant_a_torn_registration_in(root)
+        .map(|_| ())
+        .map_err(after_capture_failed)
+}
+
+fn block_the_snapshot_store_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    let run_id = rundir::latest_run(workspace.root())
+        .ok_or_else(|| after_capture_failed("no run has started"))?;
+    let store = paths_of(workspace.root(), &run_id).gate_worktrees();
+    fs::create_dir_all(&store).map_err(after_capture_failed)?;
+    let intents = store.join("intents");
+    if intents.is_dir() {
+        fs::remove_dir_all(&intents).map_err(after_capture_failed)?;
+    }
+    fs::write(&intents, "not a directory\n").map_err(after_capture_failed)
+}
+
+fn fail_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    Err(after_capture_failed(
+        "an attempt error that is not the registry's",
+    ))
+}
+
+fn replace_the_new_blob_and_tear_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    let root = workspace.root();
+    let listing = git_after_capture(
+        root,
+        &[
+            "-c",
+            "core.useReplaceRefs=false",
+            "ls-tree",
+            &candidate.tree_oid,
+            "new.txt",
+        ],
+    )?;
+    let original = listing
+        .split_whitespace()
+        .nth(2)
+        .ok_or_else(|| after_capture_failed("no new.txt in the captured tree"))?
+        .to_owned();
+    let other = root.with_file_name("replacement.txt");
+    fs::write(&other, "replacement content\n").map_err(after_capture_failed)?;
+    let replacement = git_after_capture(root, &["hash-object", "-w", &other.to_string_lossy()])?;
+    git_after_capture(root, &["replace", &original, &replacement])?;
+    plant_a_torn_registration_in(root)
+        .map(|_| ())
+        .map_err(after_capture_failed)
+}
+
+fn replace_the_captured_tree_and_tear_after_capture(
+    workspace: &Workspace,
+    candidate: &crate::workspace::CapturedCandidate,
+) -> Result<(), UpstrokeError> {
+    record_the_capture(workspace, candidate)?;
+    let root = workspace.root();
+    let parent_tree = git_after_capture(
+        root,
+        &[
+            "-c",
+            "core.useReplaceRefs=false",
+            "rev-parse",
+            &format!("{}^{{tree}}", candidate.parent_oid),
+        ],
+    )?;
+    git_after_capture(root, &["replace", &candidate.tree_oid, &parent_tree])?;
+    plant_a_torn_registration_in(root)
+        .map(|_| ())
+        .map_err(after_capture_failed)
+}
+
+fn one_gated_task(repo: &Path) {
+    seed(
+        repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
+             [[gates]]\nname = \"version\"\ncmd = \"git --version\"\n",
+        ),
+    );
+}
+
+fn refusal_options(
+    repo: &Path,
+    after_capture: super::options::AfterCandidateCapture,
+) -> RunOptions {
+    let mut opts = options(repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.after_candidate_capture = Some(after_capture);
+    opts
+}
+
+fn resume_the_run(
+    repo: &Path,
+    run_id: &str,
+    adapters: &dyn AdapterSource,
+) -> Result<RunReport, UpstrokeError> {
+    resume_harness(
+        &resume_options(repo, run_id),
+        &Harness {
+            adapters,
+            answers: None,
+            sleeper: None,
+        },
+    )
+}
+
+fn kept_pins(repo: &Path) -> Vec<(String, String)> {
+    git_in(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/upstroke/prepared/",
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.split_once(' '))
+    .filter(|(name, _)| name.ends_with("-kept"))
+    .map(|(name, oid)| (name.to_owned(), oid.to_owned()))
+    .collect()
+}
+
+fn registry_refusal_text(result: &Result<RunReport, UpstrokeError>, what: &str) -> String {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => message.clone(),
+        Err(other) => panic!("{what}: a registry refusal, never {other:?}"),
+        Ok(report) => panic!("{what}: a registry refusal, not {report:?}"),
+    }
+}
+
+fn kept_pin_warning(report: &RunReport) -> Option<&String> {
+    report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("-kept"))
+}
+
+fn tree_of(repo: &Path, revision: &str) -> String {
+    git_in(
+        repo,
+        &[
+            "-c",
+            "core.useReplaceRefs=false",
+            "rev-parse",
+            &format!("{revision}^{{tree}}"),
+        ],
+    )
+    .trim()
+    .to_owned()
+}
+
+fn status_of(repo: &Path) -> String {
+    git_in(
+        repo,
+        &[
+            "--no-replace-objects",
+            "-c",
+            "core.useReplaceRefs=false",
+            "status",
+            "--porcelain",
+        ],
+    )
+}
+
+fn advertised_commands(warning: &str, pin: &str) -> Vec<String> {
+    warning
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.starts_with("git "))
+        .map(|span| span.replace("<pin>", pin))
+        .collect()
+}
+
+fn subcommand_of(command: &str) -> String {
+    let mut words = command.split_whitespace().skip(1);
+    while let Some(word) = words.next() {
+        if word == "-c" || word == "-C" {
+            words.next();
+            continue;
+        }
+        if word.starts_with('-') {
+            continue;
+        }
+        return word.to_owned();
+    }
+    String::new()
+}
+
+fn run_the_advertised(repo: &Path, command: &str) -> std::process::ExitStatus {
+    let mut words = command.split_whitespace();
+    assert_eq!(words.next(), Some("git"), "{command}");
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(words)
+        .status()
+        .expect("run the advertised command")
+}
+
+fn follow_the_restore(repo: &Path, warning: &str, pin: &str) -> String {
+    let command = advertised_commands(warning, pin)
+        .into_iter()
+        .find(|command| matches!(subcommand_of(command).as_str(), "restore" | "checkout"))
+        .expect("the warning advertises a command for a HEAD still at the pin's parent");
+    assert!(run_the_advertised(repo, &command).success(), "{command}");
+    command
+}
+
+fn follow_the_pick(repo: &Path, warning: &str, pin: &str) -> String {
+    let commands = advertised_commands(warning, pin);
+    let restore = commands
+        .iter()
+        .position(|command| matches!(subcommand_of(command).as_str(), "restore" | "checkout"))
+        .expect("the warning advertises a restore");
+    let command = commands
+        .into_iter()
+        .skip(restore + 1)
+        .find(|command| !matches!(subcommand_of(command).as_str(), "update-ref" | "diff"))
+        .expect("the warning advertises a command for a later HEAD");
+    assert!(run_the_advertised(repo, &command).success(), "{command}");
+    command
+}
+
+fn recorded(repo: &Path, args: &[&str]) -> String {
+    let mut full = vec!["--no-replace-objects", "-c", "core.useReplaceRefs=false"];
+    full.extend_from_slice(args);
+    git_in(repo, &full)
+}
+
+fn differences_from_the_pin(repo: &Path, pin: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for entry in recorded(repo, &["ls-tree", "-r", "-z", "--full-tree", pin])
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+    {
+        let (meta, path) = entry.split_once('\t').expect("a tree entry");
+        let oid = meta.split_whitespace().nth(2).expect("an object id");
+        paths.insert(path.to_owned());
+        let bytes = recorded(repo, &["cat-file", "blob", oid]);
+        match fs::read_to_string(repo.join(path)) {
+            Ok(text) if text == bytes => {}
+            Ok(text) => problems.push(format!("{path} holds {text:?}, the pin records {bytes:?}")),
+            Err(error) => problems.push(format!("{path} is not in the checkout: {error}")),
+        }
+    }
+    for path in recorded(repo, &["ls-files", "-z"])
+        .split('\0')
+        .filter(|path| !path.is_empty())
+    {
+        if !paths.contains(path) {
+            problems.push(format!("{path} is in the index, not in the pin"));
+        }
+    }
+    let index = recorded(repo, &["write-tree"]).trim().to_owned();
+    if index != tree_of(repo, pin) {
+        problems.push(format!("the index's tree is {index}, not the pin's"));
+    }
+    problems
+}
+
+struct ShapedWorker {
+    inner: FakeAdapter,
+}
+
+impl AgentAdapter for ShapedWorker {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.inner.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        if run.profile.permissions != PermissionMode::ReadOnly {
+            let write = |name: &str, text: &str| fs::write(run.workspace.join(name), text);
+            write("tracked.txt", "paid edit\n").map_err(after_capture_failed)?;
+            write("new.txt", "paid new file\n").map_err(after_capture_failed)?;
+            fs::remove_file(run.workspace.join("deleted.txt")).map_err(after_capture_failed)?;
+        }
+        self.inner.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.inner.parse(out)
+    }
+
+    fn materialize_permissions(
+        &self,
+        profile: &WorkerProfile,
+        gate_cmds: &[String],
+        dir: &Path,
+        stem: &str,
+    ) -> Result<Option<PathBuf>, UpstrokeError> {
+        self.inner
+            .materialize_permissions(profile, gate_cmds, dir, stem)
+    }
+}
+
+struct OneAdapter<A: AgentAdapter> {
+    adapter: A,
+}
+
+impl<A: AgentAdapter> AdapterSource for OneAdapter<A> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == self.adapter.id()).then_some(&self.adapter as &dyn AgentAdapter)
+    }
+}
+
+fn shaped_worker() -> OneAdapter<ShapedWorker> {
+    OneAdapter {
+        adapter: ShapedWorker {
+            inner: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
+        },
+    }
+}
+
+fn shaped_repo(tag: &str) -> (ScratchTree, PathBuf) {
+    let (tree, repo) = temp_engine_repo(tag);
+    git_in(&repo, &["config", "core.autocrlf", "false"]);
+    fs::write(repo.join("tracked.txt"), "base\n").expect("a tracked file");
+    fs::write(repo.join("deleted.txt"), "base\n").expect("a file the worker deletes");
+    one_gated_task(&repo);
+    (tree, repo)
+}
+
+#[test]
+fn a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes() {
+    let (_tree, repo) = temp_engine_repo("kept-static");
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    let refusal = registry_refusal_text(&run, "the run beside a tear that stays");
+    let (_, parent, tree) = captured(&repo);
+    let status = status_of(&repo);
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+    assert!(
+        refusal.contains(pin.as_str()) && refusal.contains("is kept in this checkout"),
+        "the refusal names the pin: {refusal}"
+    );
+    assert!(
+        status.contains("agent-output.txt"),
+        "the checkout still holds the candidate: {status}"
+    );
+    assert_eq!(
+        tree_of(&repo, commit),
+        tree,
+        "the pin holds the captured tree"
+    );
+    assert_eq!(
+        git_in(&repo, &["rev-parse", &format!("{commit}^")]).trim(),
+        parent,
+        "on the captured parent"
+    );
+
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let while_torn = resume_the_run(&repo, &run_id, &fake(Effect::EditFile));
+    registry_refusal_text(&while_torn, "the resume while the residue stays");
+    assert_eq!(
+        status_of(&repo),
+        status,
+        "the refused resume discards nothing"
+    );
+    assert_eq!(kept_pins(&repo), kept, "and moves no pin");
+
+    repair_the_torn_registration(&repo);
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the repair");
+    assert!(committed(&report, "t1"), "{report:?}");
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    assert!(warning.contains(pin.as_str()), "{warning}");
+    assert_eq!(kept_pins(&repo), kept, "no resume removes a kept pin");
+}
+
+#[test]
+fn a_kept_pin_holds_the_captured_tree_when_the_index_changed_after_capture() {
+    let (_tree, repo) = temp_engine_repo("kept-index");
+    git_in(&repo, &["config", "core.autocrlf", "false"]);
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, unstage_and_tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    registry_refusal_text(&run, "the run beside a tear that stays");
+    let (_, _, tree) = captured(&repo);
+    let index = git_in(&repo, &["write-tree"]).trim().to_owned();
+    assert_ne!(index, tree, "the index changed after the capture");
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+    assert_eq!(
+        tree_of(&repo, commit),
+        tree,
+        "the pin holds the captured candidate, never the index as it stands at the refusal"
+    );
+    let paid = fs::read_to_string(repo.join("agent-output.txt")).expect("the paid output");
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report =
+        resume_the_run(&repo, &run_id, &fake(Effect::NoEdit)).expect("the resume after the repair");
+    assert!(
+        !repo.join("agent-output.txt").exists(),
+        "the resume discarded the checkout's copy"
+    );
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    follow_the_restore(&repo, warning, pin);
+    assert_eq!(
+        fs::read_to_string(repo.join("agent-output.txt")).expect("the restored output"),
+        paid,
+        "following the warning brings the paid output back"
+    );
+}
+
+#[test]
+fn following_the_kept_pin_warning_at_its_parent_restores_deletions_too() {
+    let (_tree, repo) = shaped_repo("kept-restore");
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &shaped_worker(),
+    );
+    registry_refusal_text(&run, "the shaped run beside a tear that stays");
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+    let kept_change = git_in(
+        &repo,
+        &["diff", "--name-status", &format!("{commit}^"), commit],
+    );
+    assert!(kept_change.contains("D\tdeleted.txt"), "{kept_change}");
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report =
+        resume_the_run(&repo, &run_id, &fake(Effect::NoEdit)).expect("the resume after the repair");
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    let command = follow_the_restore(&repo, warning, pin);
+    assert_eq!(
+        differences_from_the_pin(&repo, pin),
+        Vec::<String>::new(),
+        "`{command}` restores the kept tree exactly"
+    );
+    assert!(
+        !repo.join("deleted.txt").exists(),
+        "the deletion is restored too"
+    );
+}
+
+#[test]
+fn following_the_kept_pin_warning_on_a_later_head_applies_exactly_the_kept_change() {
+    let (_tree, repo) = shaped_repo("kept-later");
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &shaped_worker(),
+    );
+    registry_refusal_text(&run, "the shaped run beside a tear that stays");
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the repair");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert_ne!(
+        git_in(&repo, &["rev-parse", "HEAD"]).trim(),
+        git_in(&repo, &["rev-parse", &format!("{commit}^")]).trim(),
+        "HEAD advanced past the pin's parent"
+    );
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    let command = follow_the_pick(&repo, warning, pin);
+    let mut staged: Vec<String> = git_in(&repo, &["diff", "--cached", "--name-status", "HEAD"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    staged.sort_unstable();
+    assert_eq!(
+        staged,
+        ["A\tnew.txt", "D\tdeleted.txt", "M\ttracked.txt"],
+        "`{command}` stages exactly the kept change"
+    );
+}
+
+fn a_torn_topology_slot(repo: &Path) -> (crate::workspace_manager::WorkspaceManager, PathBuf) {
+    use crate::workspace_manager::{NoHooks, Slot, WorkspaceManager};
+    let private = repo.with_file_name("topo");
+    fs::create_dir_all(&private).expect("the topology run's private root");
+    let manager = WorkspaceManager::derive(
+        repo,
+        &private,
+        crate::workspace_manager::fixture::RUN_ID,
+        "inc-1",
+    )
+    .expect("a topology manager of the same repository");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("its execution root");
+    let slot = Slot::Task {
+        key: "alpha".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("its intent");
+    let head = git_in(repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let path = manager
+        .add_worktree(&mut NoHooks, &slot, &head)
+        .expect("a topology slot");
+    let admin = crate::workspace_manager::fixture::tear_registration(&manager, &path);
+    (manager, admin)
+}
+
+fn finish_the_topology_registration(admin: &Path) {
+    fs::write(admin.join("commondir"), "../..\n").expect("its writer writes commondir");
+    fs::remove_file(admin.join("locked")).expect("and unlocks");
+}
+
+#[test]
+fn a_topology_slots_torn_registration_refuses_a_legacy_snapshot_and_keeps_its_output() {
+    let (_tree, repo) = temp_engine_repo("kept-topo");
+    one_gated_task(&repo);
+    let (_manager, admin) = a_torn_topology_slot(&repo);
+    let run = run_with(
+        &refusal_options(&repo, record_the_capture),
+        &fake(Effect::EditFile),
+    );
+    registry_refusal_text(&run, "the run beside a topology writer's residue");
+    let (_, _, tree) = captured(&repo);
+    assert!(status_of(&repo).contains("agent-output.txt"));
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+    assert_eq!(
+        tree_of(&repo, commit),
+        tree,
+        "the pin holds the captured tree"
+    );
+
+    finish_the_topology_registration(&admin);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the topology writer finished");
+    assert!(committed(&report, "t1"), "{report:?}");
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    assert!(warning.contains(pin.as_str()), "{warning}");
+    assert_eq!(kept_pins(&repo), kept, "no resume removes a kept pin");
+}
+
+#[test]
+fn an_attempt_error_that_is_not_a_registry_refusal_still_discards() {
+    let (_tree, repo) = temp_engine_repo("kept-not-reg");
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, fail_after_capture),
+        &fake(Effect::EditFile),
+    );
+    assert!(
+        matches!(&run, Err(UpstrokeError::Git { message }) if message.contains("not the registry's")),
+        "{run:?}"
+    );
+    assert_eq!(
+        status_of(&repo),
+        "",
+        "the attempt's output is discarded, as before"
+    );
+    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_snapshot_failure_that_is_not_the_registrys_still_discards() {
+    let (_tree, repo) = temp_engine_repo("kept-store");
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, block_the_snapshot_store_after_capture),
+        &fake(Effect::EditFile),
+    );
+    assert!(
+        run.is_err() && !matches!(&run, Err(UpstrokeError::RegistryRefused { .. })),
+        "a snapshot store that cannot be made fails as before: {run:?}"
+    );
+    assert_eq!(
+        status_of(&repo),
+        "",
+        "the attempt's output is discarded, as before"
+    );
+    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded() {
+    let (_tree, repo) = temp_engine_repo("kept-unpinned");
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, move_head_and_tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    let refusal = registry_refusal_text(&run, "the run whose HEAD moved after capture");
+    assert!(
+        refusal.contains("is kept in this checkout, and pinning it at")
+            && refusal.contains("failed"),
+        "the refusal says the pin failed: {refusal}"
+    );
+    assert!(
+        status_of(&repo).contains("agent-output.txt"),
+        "nothing is discarded"
+    );
+    assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_review_snapshot_refused_after_capture_keeps_and_pins_the_candidate() {
+    let (_tree, repo) = temp_engine_repo("kept-review");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        Some("[interaction]\nmode = \"never\"\n"),
+    );
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    let refusal = registry_refusal_text(&run, "the review snapshot beside a tear that stays");
+    let (_, _, tree) = captured(&repo);
+    assert!(status_of(&repo).contains("agent-output.txt"));
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("one kept pin: {kept:?}");
+    };
+    assert!(refusal.contains(pin.as_str()), "{refusal}");
+    assert_eq!(
+        tree_of(&repo, commit),
+        tree,
+        "the pin holds the captured tree"
+    );
+}
+
+fn canonical_common_git_dir_of(repo: &Path) -> PathBuf {
+    let common = git_in(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    fs::canonicalize(common.trim()).expect("the canonical common git dir")
+}
+
+struct OnceContended {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    writer: std::thread::JoinHandle<Option<usize>>,
+}
+
+impl OnceContended {
+    fn spawn(repo: &Path, finish: impl FnOnce() + Send + 'static) -> Self {
+        let common = canonical_common_git_dir_of(repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::clone(&done);
+        let writer = std::thread::spawn(move || {
+            let watchdog = std::time::Instant::now() + Duration::from_secs(60);
+            while std::time::Instant::now() < watchdog
+                && !stop.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let now = crate::workspace_manager::contended_attempts(&common);
+                if now > before {
+                    finish();
+                    return Some(now - before);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        });
+        Self { done, writer }
+    }
+
+    fn join(self) -> Option<usize> {
+        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.writer.join().expect("the writer thread")
+    }
+}
+
+#[test]
+fn a_legacy_run_completes_past_a_tear_its_writer_finishes() {
+    let (_tree, repo) = temp_engine_repo("tear-legacy");
+    one_gated_task(&repo);
+    let writer = OnceContended::spawn(&repo, {
+        let repo = repo.clone();
+        move || repair_the_torn_registration(&repo)
+    });
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    let contended = writer.join();
+    let report = run.expect("the run is attempted past a tear its writer finished");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert!(
+        contended.is_some(),
+        "the snapshot add failed on the tear at least once"
+    );
+    assert_eq!(
+        kept_pins(&repo),
+        Vec::<(String, String)>::new(),
+        "nothing is kept"
+    );
+    assert_eq!(status_of(&repo), "", "and nothing is left behind");
+}
+
+#[test]
+fn a_legacy_run_completes_past_a_topology_slot_its_writer_finishes() {
+    let (_tree, repo) = temp_engine_repo("tear-topo");
+    one_gated_task(&repo);
+    let (_manager, admin) = a_torn_topology_slot(&repo);
+    let writer = OnceContended::spawn(&repo, move || finish_the_topology_registration(&admin));
+    let run = run_with(
+        &refusal_options(&repo, record_the_capture),
+        &fake(Effect::EditFile),
+    );
+    let contended = writer.join();
+    let report = run.expect("the run is attempted past the topology writer");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert!(
+        contended.is_some(),
+        "the snapshot add failed on the topology slot's registration at least once"
+    );
+    assert_eq!(
+        kept_pins(&repo),
+        Vec::<(String, String)>::new(),
+        "nothing is kept"
+    );
+}
+
+fn restore_at_the_parent_under(tag: &str, after_capture: super::options::AfterCandidateCapture) {
+    let (_tree, repo) = shaped_repo(tag);
+    let run = run_with(&refusal_options(&repo, after_capture), &shaped_worker());
+    registry_refusal_text(&run, tag);
+    let (_, _, tree) = captured(&repo);
+    let kept = kept_pins(&repo);
+    let [(pin, _)] = kept.as_slice() else {
+        panic!("{tag}: one kept pin: {kept:?}");
+    };
+    assert_eq!(
+        tree_of(&repo, pin),
+        tree,
+        "{tag}: the pin holds the captured tree"
+    );
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report =
+        resume_the_run(&repo, &run_id, &fake(Effect::NoEdit)).expect("the resume after the repair");
+    assert!(
+        !repo.join("new.txt").exists(),
+        "{tag}: the resume discarded the checkout's copy"
+    );
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    let command = follow_the_restore(&repo, warning, pin);
+    assert_eq!(
+        differences_from_the_pin(&repo, pin),
+        Vec::<String>::new(),
+        "{tag}: `{command}` restores the pin as the repository records it"
+    );
+}
+
+#[test]
+fn the_kept_pin_restore_writes_the_recorded_blob_under_a_blob_replacement() {
+    restore_at_the_parent_under("kept-blob", replace_the_new_blob_and_tear_after_capture);
+}
+
+#[test]
+fn the_kept_pin_restore_writes_the_recorded_tree_under_a_tree_replacement() {
+    restore_at_the_parent_under(
+        "kept-tree",
+        replace_the_captured_tree_and_tear_after_capture,
+    );
+}
+
+fn pick_on_a_later_head_under(
+    tag: &str,
+    after_capture: super::options::AfterCandidateCapture,
+    graft: bool,
+) {
+    let (_tree, repo) = shaped_repo(tag);
+    let run = run_with(&refusal_options(&repo, after_capture), &shaped_worker());
+    registry_refusal_text(&run, tag);
+    let kept = kept_pins(&repo);
+    let [(pin, commit)] = kept.as_slice() else {
+        panic!("{tag}: one kept pin: {kept:?}");
+    };
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the repair");
+    assert!(committed(&report, "t1"), "{tag}: {report:?}");
+    if graft {
+        let root = git_in(&repo, &["rev-list", "--max-parents=0", "HEAD"])
+            .trim()
+            .to_owned();
+        git_in(&repo, &["replace", "--graft", commit, &root]);
+    }
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pin");
+    let command = follow_the_pick(&repo, warning, pin);
+    let mut staged: Vec<String> = recorded(&repo, &["diff", "--cached", "--name-status", "HEAD"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    staged.sort_unstable();
+    assert_eq!(
+        staged,
+        ["A\tnew.txt", "D\tdeleted.txt", "M\ttracked.txt"],
+        "{tag}: `{command}` stages exactly the kept change"
+    );
+    for path in ["tracked.txt", "new.txt"] {
+        assert_eq!(
+            fs::read_to_string(repo.join(path)).expect("a picked file"),
+            recorded(&repo, &["cat-file", "blob", &format!("{commit}:{path}")]),
+            "{tag}: {path} holds what the pin records"
+        );
+    }
+    assert!(
+        !repo.join("deleted.txt").exists(),
+        "{tag}: the deletion applies"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("agent-output.txt")).expect("the later commit's file"),
+        recorded(&repo, &["cat-file", "blob", "HEAD:agent-output.txt"]),
+        "{tag}: the later commit's file stays"
+    );
+}
+
+#[test]
+fn the_kept_pin_pick_applies_the_recorded_change_under_a_tree_replacement() {
+    pick_on_a_later_head_under(
+        "pick-tree",
+        replace_the_captured_tree_and_tear_after_capture,
+        false,
+    );
+}
+
+#[test]
+fn the_kept_pin_pick_takes_the_recorded_parent_under_a_graft() {
+    pick_on_a_later_head_under("pick-graft", tear_after_capture, true);
+}
+
+struct TearingWorker {
+    inner: FakeAdapter,
+}
+
+impl AgentAdapter for TearingWorker {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.inner.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        if run.profile.permissions != PermissionMode::ReadOnly {
+            plant_a_torn_registration_in(&run.workspace).map_err(after_capture_failed)?;
+        }
+        self.inner.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.inner.parse(out)
+    }
+
+    fn materialize_permissions(
+        &self,
+        profile: &WorkerProfile,
+        gate_cmds: &[String],
+        dir: &Path,
+        stem: &str,
+    ) -> Result<Option<PathBuf>, UpstrokeError> {
+        self.inner
+            .materialize_permissions(profile, gate_cmds, dir, stem)
+    }
+}
+
+#[test]
+fn every_kept_pin_is_named_after_a_second_refusal_on_the_next_resume() {
+    let (_tree, repo) = temp_engine_repo("kept-twice");
+    one_gated_task(&repo);
+    let first = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    registry_refusal_text(&first, "the first refusal");
+    assert_eq!(kept_pins(&repo).len(), 1);
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let tearing = OneAdapter {
+        adapter: TearingWorker {
+            inner: FakeAdapter::new(vec![Effect::EditFile], vec![ReviewBehavior::Pass]),
+        },
+    };
+    let second = resume_the_run(&repo, &run_id, &tearing);
+    registry_refusal_text(&second, "the resumed attempt's own refusal");
+    let both = kept_pins(&repo);
+    assert_eq!(
+        both.len(),
+        2,
+        "each refused attempt keeps its own pin: {both:?}"
+    );
+
+    repair_the_torn_registration(&repo);
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the second repair");
+    assert!(committed(&report, "t1"), "{report:?}");
+    let warning = kept_pin_warning(&report).expect("the resume names the kept pins");
+    for (pin, _) in &both {
+        assert!(
+            warning.contains(pin.as_str()),
+            "every surviving pin is named; {pin} is not: {warning}"
+        );
+    }
+    assert_eq!(kept_pins(&repo), both, "no resume removes a kept pin");
+}
+
+fn named_after_a_failed_resume(tag: &str, retire: bool) {
+    let (_tree, repo) = temp_engine_repo(tag);
+    one_gated_task(&repo);
+    let run = run_with(
+        &refusal_options(&repo, tear_after_capture),
+        &fake(Effect::EditFile),
+    );
+    registry_refusal_text(&run, tag);
+    let kept = kept_pins(&repo);
+    let [(pin, _)] = kept.as_slice() else {
+        panic!("{tag}: one kept pin: {kept:?}");
+    };
+
+    repair_the_torn_registration(&repo);
+    let run_id = rundir::latest_run(&repo).expect("the run started");
+    let failed = resume_the_run(&repo, &run_id, &fake(Effect::SpawnError));
+    assert!(
+        failed.is_err(),
+        "{tag}: the resume fails after settling the interrupted attempt"
+    );
+    let mut warnings = Vec::new();
+    let events = events::read_all(
+        &rundir::public_dir(&repo, &run_id).join("events.jsonl"),
+        &mut warnings,
+    )
+    .expect("the run's log");
+    let mut state = RunState::new(vec!["t1".to_owned()]);
+    for event in &events {
+        state.apply(event);
+    }
+    assert!(
+        state
+            .interrupted_attempts()
+            .iter()
+            .all(|interrupted| interrupted.flight.attempt != 1),
+        "{tag}: attempt 1 is no longer in flight after the failed resume"
+    );
+    if retire {
+        git_in(&repo, &["update-ref", "-d", pin]);
+    }
+
+    let report = resume_the_run(&repo, &run_id, &fake(Effect::EditFile))
+        .expect("the resume after the failed one");
+    let named = report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains(pin.as_str()));
+    if retire {
+        assert_eq!(kept_pins(&repo), Vec::<(String, String)>::new());
+        assert!(
+            !named,
+            "{tag}: a removed pin is named no more: {:?}",
+            report.warnings
+        );
+    } else {
+        assert_eq!(
+            kept_pins(&repo),
+            kept,
+            "{tag}: the pin survives both resumes"
+        );
+        assert!(
+            named,
+            "{tag}: the pin is named again: {:?}",
+            report.warnings
+        );
+    }
+}
+
+#[test]
+fn a_kept_pin_is_named_after_a_resume_that_failed() {
+    named_after_a_failed_resume("kept-failed", false);
+}
+
+#[test]
+fn a_removed_kept_pin_is_named_no_more() {
+    named_after_a_failed_resume("kept-retired", true);
+}
