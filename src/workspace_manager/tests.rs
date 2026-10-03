@@ -914,7 +914,11 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
             .manager
             .write_intent(&mut NoHooks, &slot)
             .expect("the intent must be durable");
-        fixture
+        // The worktree is the instance the add made, at the path it returns:
+        // this incarnation's, named with its tag. The slot's untagged spelling
+        // names no checkout the manager makes (the follow-up C record, §4.2),
+        // so nothing exists there and a file cannot be planted under it.
+        let target = fixture
             .manager
             .add_worktree(&mut NoHooks, &slot, &fixture.head)
             .expect("the worktree the killed child was working in");
@@ -923,7 +927,6 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
         // process has. Opened on another thread so the handle outlives this
         // statement -- exactly the shape of a process that has exited while its
         // last handle is still closing.
-        let target = fixture.manager.execution_root().join(slot.relative());
         let held = target.join("held-by-the-dying-child");
         fs::write(&held, b"bytes the child had open").expect("plant the file");
 
