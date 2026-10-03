@@ -3615,10 +3615,11 @@ mod tests {
             if verifying
                 && self
                     .remaining
-                    .fetch_update(
+                    .compare_exchange(
+                        1,
+                        0,
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
-                        |n| n.checked_sub(1),
                     )
                     .is_ok()
             {
@@ -3826,10 +3827,11 @@ mod tests {
             if verifying
                 && self
                     .remaining
-                    .fetch_update(
+                    .compare_exchange(
+                        1,
+                        0,
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
-                        |n| n.checked_sub(1),
                     )
                     .is_ok()
             {
@@ -3936,10 +3938,11 @@ mod tests {
             if verifying
                 && self
                     .remaining
-                    .fetch_update(
+                    .compare_exchange(
+                        1,
+                        0,
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
-                        |n| n.checked_sub(1),
                     )
                     .is_ok()
             {
