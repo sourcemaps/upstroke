@@ -4291,29 +4291,31 @@ mod tests {
         run_git(&repo, &["branch", "other", &other]);
         let ws = Workspace::open(&repo).expect("open");
         let admin = plant_a_torn_registration(&repo, "foreign-switch");
-        let writer = OnceContended::spawn(common_git_dir_of(&repo), {
-            let (admin, head, repo) = (admin.clone(), head.clone(), repo.clone());
-            move || {
-                let unchanged = (
-                    String::from_utf8_lossy(&run_git(&repo, &["symbolic-ref", "HEAD"]))
-                        .trim()
-                        .to_owned(),
-                    String::from_utf8_lossy(&run_git(&repo, &["status", "--porcelain"]))
-                        .into_owned(),
-                );
-                finish_the_registration(&admin, &head);
-                unchanged
-            }
-        });
-        let switched = ws.switch_branch("other");
-        let finished = writer.join();
-        switched.expect("the switch is attempted past a tear its writer finished");
-        let (_, (branch, status)) = finished.expect("the switch failed on the tear at least once");
+        let common = common_git_dir_of(&repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let refused = registry_refusal(
+            ws.switch_branch("other"),
+            "a switch beside a tear that stays",
+        );
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the switch failed on the tear and was attempted again: {refused}"
+        );
+        let branch = String::from_utf8_lossy(&run_git(&repo, &["symbolic-ref", "HEAD"]))
+            .trim()
+            .to_owned();
+        let status =
+            String::from_utf8_lossy(&run_git(&repo, &["status", "--porcelain"])).into_owned();
         assert_eq!(
             (branch.as_str(), status.as_str()),
             ("refs/heads/main", ""),
             "a failed attempt changed neither HEAD nor the checkout"
         );
+        let writer = OnceContended::spawn(common, move || finish_the_registration(&admin, &head));
+        let switched = ws.switch_branch("other");
+        let finished = writer.join();
+        switched.expect("the switch is attempted past a tear its writer finished");
+        let (_, ()) = finished.expect("the switch failed on the tear at least once");
         assert_eq!(ws.current_branch().expect("the branch"), "other");
     }
 
