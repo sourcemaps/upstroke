@@ -8,6 +8,8 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is the kept-pin lookup and its warning, below.
+
 ## `pub fn resume(opts: &ResumeOptions) -> Result<RunReport, UpstrokeError> {`
 
 The v0.1 conductor's public resume entry points -- `resume`, `resume_with` and
@@ -207,12 +209,51 @@ A pin with no successful settlement is from a crash between preparing
 the object and appending AttemptFinished. It has no authority to move
 HEAD and is removed with an expected-old-value CAS before retrying.
 
+## `let mut kept = Vec::new();`
+
+Follow-up D's lookup (proposed, conditional on O8). For every attempt the replayed
+log records — each task's attempts from the first to the last one started, which
+`AttemptStarted` sets and the coordinator numbers contiguously — the resume asks
+`prepared_pin_target` whether the coordinator kept that attempt's candidate at its
+prepared pin followed by `KEPT_PIN_SUFFIX`. Every name the coordinator can write is
+among them, because it writes a kept pin only for the attempt it is running, whose
+`AttemptStarted` is already in the log. It reads the replayed state and changes no
+event.
+
+It looks at every recorded attempt, not only those still in flight: the resume's
+own `AttemptInterrupted` clears an attempt's in-flight state, so a resume that
+settled the attempt and then failed before its report would otherwise lose the pin
+for every later resume (FUD-D1-PINWARN;
+`a_kept_pin_is_named_after_a_resume_that_failed`). It costs three Git processes per
+recorded attempt per resume.
+
+A resume that refuses earlier — at the reclaim above, while a registration stays
+torn — never reaches this lookup and names nothing, and one whose later step fails
+returns that error without its warnings, as every legacy warning does (R-D5). The
+next resume that reports names every pin again.
+
 ## `let discarded = workspace.uncommitted_summary()?;`
 
 Crash residue: a dead agent's half-written edits. §14 rolls a failed
 attempt back to the last commit, and an attempt that never reported is
 no different — the session that would have explained these edits is
 gone, so nothing can verify them.
+
+## `if !kept.is_empty() {`
+
+One warning names every kept pin found, with the commands that take its output
+back as the repository records it: `git restore --source=<pin> --staged --worktree
+-- .` from the checkout's root while `HEAD` is still the pin's parent, and
+`git cherry-pick --no-commit <pin>` on a later `HEAD`, each carrying
+`--no-replace-objects -c core.useReplaceRefs=false`, the replacement controls every
+legacy Git child carries (FUD-D1-REPLACE). Both restore deletions. The restore
+reproduces the pin's index exactly; the working files come back through the
+checkout's own end-of-line and filter conversions, so their bytes are worth
+comparing (FUD-D4-RESTOREBYTES). A configured merge driver can make the cherry-pick
+succeed having applied none of the kept change, so the warning asks for a look at
+what it staged before the pin is removed (FUD-D4-CHERRYPICKMERGE). No resume
+removes a kept pin; `git update-ref -d <pin>` does, and the next resume's lookup
+then finds no ref and stops naming it.
 
 ## `let sleeper = harness.sleeper.unwrap_or(&RealSleeper);`
 

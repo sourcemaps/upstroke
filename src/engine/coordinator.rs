@@ -278,6 +278,8 @@ pub(super) fn run_harness_inner_with_id(
     Ok((report, run.state))
 }
 
+pub(super) const KEPT_PIN_SUFFIX: &str = "-kept";
+
 pub(super) fn prepared_pin_ref(run_id: &str, task_index: usize, attempt: u32) -> String {
     format!("refs/upstroke/prepared/{run_id}/{task_index}-{attempt}")
 }
@@ -541,9 +543,37 @@ impl Run<'_> {
                     after_candidate_capture: self.after_candidate_capture,
                 };
 
-                match run_attempt(&attempt_cx, workspace, resume.clone()) {
+                let mut refused = None;
+                match run_attempt(&attempt_cx, workspace, resume.clone(), &mut refused) {
                     Ok(result) => result,
                     Err(error) => {
+                        if let Some(candidate) = refused {
+                            let kept = format!(
+                                "{}{KEPT_PIN_SUFFIX}",
+                                prepared_pin_ref(&self.run_id, index, attempt)
+                            );
+                            let pinned = workspace.prepare_commit_from_candidate(
+                                &candidate.branch_ref,
+                                &candidate.parent,
+                                &candidate.tree,
+                                &format!("[upstroke] kept: {task_id} attempt {attempt}"),
+                                &kept,
+                            );
+                            return Err(UpstrokeError::RegistryRefused {
+                                message: match pinned {
+                                    Ok(_) => format!(
+                                        "{error}; the worker's output for attempt {attempt} of \
+                                         `{task_id}` is kept in this checkout and pinned at \
+                                         `{kept}`"
+                                    ),
+                                    Err(pin_error) => format!(
+                                        "{error}; the worker's output for attempt {attempt} of \
+                                         `{task_id}` is kept in this checkout, and pinning it at \
+                                         `{kept}` failed: {pin_error}"
+                                    ),
+                                },
+                            });
+                        }
                         let _ = workspace.discard_uncommitted();
                         return Err(error);
                     }

@@ -88,10 +88,33 @@ pub(super) struct AttemptResult {
     pub(super) reviews: Vec<events::ReviewRecord>,
 }
 
+pub(super) struct RefusedCandidate {
+    pub(super) branch_ref: String,
+    pub(super) parent: String,
+    pub(super) tree: String,
+}
+
+fn note_refused(
+    error: &UpstrokeError,
+    branch_ref: &str,
+    parent: &str,
+    tree: &str,
+    refused: &mut Option<RefusedCandidate>,
+) {
+    if matches!(error, UpstrokeError::RegistryRefused { .. }) {
+        *refused = Some(RefusedCandidate {
+            branch_ref: branch_ref.to_owned(),
+            parent: parent.to_owned(),
+            tree: tree.to_owned(),
+        });
+    }
+}
+
 pub(super) fn run_attempt(
     cx: &AttemptCx<'_>,
     workspace: &Workspace,
     resume_session: Option<String>,
+    refused: &mut Option<RefusedCandidate>,
 ) -> Result<AttemptResult, UpstrokeError> {
     let worker_workspace = workspace.root().to_path_buf();
     let command = super::assembly::WorkerAssembly {
@@ -151,11 +174,21 @@ pub(super) fn run_attempt(
         }
     }
     if failure.is_none() && !cx.gates.is_empty() {
-        let gate_workspace = workspace.gate_snapshot_for_candidate_in_store(
-            &candidate.parent_oid,
-            &candidate.tree_oid,
-            &cx.paths.gate_worktrees(),
-        )?;
+        let gate_workspace = workspace
+            .gate_snapshot_for_candidate_in_store(
+                &candidate.parent_oid,
+                &candidate.tree_oid,
+                &cx.paths.gate_worktrees(),
+            )
+            .inspect_err(|error| {
+                note_refused(
+                    error,
+                    &candidate.branch_ref,
+                    &candidate.parent_oid,
+                    &candidate.tree_oid,
+                    refused,
+                );
+            })?;
         if let Some(gate_failure) = gates::run_all(
             cx.gates,
             cx.runner,
@@ -175,11 +208,21 @@ pub(super) fn run_attempt(
             &cx.paths.artifacts(),
             super::assembly::WorkerSubject::of(cx.task),
         );
-        let review_workspace = workspace.gate_snapshot_for_candidate_in_store(
-            &candidate.parent_oid,
-            &candidate.tree_oid,
-            &cx.paths.gate_worktrees(),
-        )?;
+        let review_workspace = workspace
+            .gate_snapshot_for_candidate_in_store(
+                &candidate.parent_oid,
+                &candidate.tree_oid,
+                &cx.paths.gate_worktrees(),
+            )
+            .inspect_err(|error| {
+                note_refused(
+                    error,
+                    &candidate.branch_ref,
+                    &candidate.parent_oid,
+                    &candidate.tree_oid,
+                    refused,
+                );
+            })?;
         for (pass, reviewer) in cx.reviewers.iter().enumerate() {
             let pass = u32::try_from(pass).unwrap_or(u32::MAX);
             let review = super::topology::attempt::ReviewPasses::run(

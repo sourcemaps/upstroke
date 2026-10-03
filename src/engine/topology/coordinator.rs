@@ -3596,6 +3596,445 @@ mod tests {
         replay_equals_live(&resumed);
     }
 
+    struct TearsAForeignRegistration {
+        admin: PathBuf,
+        head: String,
+        common: PathBuf,
+        finishes: bool,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReviewInputPolicy for TearsAForeignRegistration {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                let checkout = self.admin.join("foreign-checkout").join(".git");
+                crate::workspace_manager::fixture::write_file(
+                    &self.admin.join("HEAD"),
+                    format!("{}\n", self.head).as_bytes(),
+                );
+                crate::workspace_manager::fixture::write_file(
+                    &self.admin.join("gitdir"),
+                    format!("{}\n", checkout.display()).as_bytes(),
+                );
+                crate::workspace_manager::fixture::write_file(&self.admin.join("commondir"), b"");
+                if self.finishes {
+                    let before = crate::workspace_manager::contended_attempts(&self.common);
+                    let (admin, common) = (self.admin.clone(), self.common.clone());
+                    std::thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + BOUND;
+                        while crate::workspace_manager::contended_attempts(&common) <= before
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("commondir"),
+                            b"../..\n",
+                        );
+                    });
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    fn registry_drive(
+        wide: &mut Wide,
+        policy: Arc<dyn ReviewInputPolicy + Send + Sync>,
+    ) -> Result<Progress, UpstrokeError> {
+        let mut hooks = wide.env.hooks();
+        let mut pipelines = wide.env.pipelines();
+        pipelines.input_policy = policy;
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        wide.run.run_concurrently(
+            &wide.env.seams(),
+            &pipelines,
+            &mut hooks,
+            Some(&mut scheduler),
+        )
+    }
+
+    fn tearing(
+        wide: &Wide,
+        name: &str,
+        finishes: bool,
+    ) -> (Arc<TearsAForeignRegistration>, PathBuf) {
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let admin = common.join("worktrees").join(name);
+        let policy = Arc::new(TearsAForeignRegistration {
+            admin: admin.clone(),
+            head: wide.env.fixture.head.clone(),
+            common,
+            finishes,
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        (policy, admin)
+    }
+
+    #[test]
+    fn a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::started_with(
+            "registry-verification-transient",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let (policy, _admin) = tearing(&wide, "foreign-in-flight", true);
+        let progress = registry_drive(&mut wide, policy)
+            .expect("a registration another process finishes writing ends nothing");
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.run.events();
+        assert_eq!(
+            count(events, "merge_verification_unavailable"),
+            0,
+            "{:?}",
+            kinds_of(events)
+        );
+        assert_eq!(count(events, "task_merged"), 2);
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the verification's registry access failed on the write in flight first"
+        );
+        assert!(wide.run.invocations_balance());
+        replay_equals_live(&wide);
+    }
+
+    #[test]
+    fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()
+     {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::durable(
+            "registry-verification-static",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let (policy, admin) = tearing(&wide, "foreign-torn", false);
+        let error = registry_drive(&mut wide, policy)
+            .expect_err("a registration that stays torn ends the command");
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("commondir")),
+            "{error:?}"
+        );
+        let kinds = kinds_of_log(&wide);
+        for absent in [
+            "merge_verification_unavailable",
+            "question_asked",
+            "run_finished",
+        ] {
+            assert!(!kinds.contains(&absent), "{absent} in {kinds:?}");
+        }
+        assert_eq!(
+            kinds.last(),
+            Some(&"merge_verification_started"),
+            "nothing durable after the verification began: {kinds:?}"
+        );
+        for file in ["HEAD", "gitdir", "commondir"] {
+            crate::workspace_manager::fixture::remove_file(&admin.join(file));
+        }
+        crate::workspace_manager::fixture::remove_dir(&admin);
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-2",
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next process resumes once the operator removed the registration");
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let kinds = kinds_of_log(&resumed);
+        assert_eq!(
+            count(
+                &resumed.env.durable_events(),
+                "merge_verification_interrupted"
+            ),
+            1,
+            "{kinds:?}"
+        );
+        assert_eq!(
+            count(
+                &resumed.env.durable_events(),
+                "merge_verification_unavailable"
+            ),
+            0,
+            "{kinds:?}"
+        );
+        assert_eq!(count(&resumed.env.durable_events(), "task_merged"), 2);
+        let sequences: std::collections::BTreeSet<u32> = resumed
+            .env
+            .durable_events()
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data } => Some(data.sequence.0),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sequences.len() >= 2,
+            "the interrupted verification verified again under a new sequence: {kinds:?}"
+        );
+        replay_equals_live(&resumed);
+    }
+
+    #[cfg(unix)]
+    struct RequiresAFailingFilter {
+        base: PathBuf,
+        info: PathBuf,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl ReviewInputPolicy for RequiresAFailingFilter {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                crate::workspace_manager::fixture::write_file(
+                    &self.info.join("attributes"),
+                    b"* filter=b329fails\n",
+                );
+                for (key, value) in [
+                    ("filter.b329fails.smudge", "false"),
+                    ("filter.b329fails.clean", "cat"),
+                    ("filter.b329fails.required", "true"),
+                ] {
+                    crate::workspace_manager::fixture::git(&self.base, &["config", key, value]);
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies()
+     {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::durable(
+            "registry-verification-genuine",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let base = wide.env.fixture.base.clone();
+        let info = wide.env.fixture.manager.common_git_dir().join("info");
+        let policy = Arc::new(RequiresAFailingFilter {
+            base: base.clone(),
+            info: info.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = match registry_drive(&mut wide, policy) {
+            Err(error) => error,
+            Ok(progress) => panic!(
+                "a snapshot whose checkout fails after the takeover ends the command, not \
+                 {progress:?}: {:?}",
+                kinds_of_log(&wide)
+            ),
+        };
+        assert!(
+            matches!(&error, UpstrokeError::RegistryRefused { message } if message.contains("b329fails") || message.contains("is gone")),
+            "{error:?}"
+        );
+        let kinds = kinds_of_log(&wide);
+        assert!(
+            !kinds.contains(&"merge_verification_unavailable") && !kinds.contains(&"run_finished"),
+            "nothing durable: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&"merge_verification_started"),
+            "{kinds:?}"
+        );
+        crate::workspace_manager::fixture::remove_file(&info.join("attributes"));
+        crate::workspace_manager::fixture::git(
+            &base,
+            &["config", "--remove-section", "filter.b329fails"],
+        );
+        let (_, mut resumed) = wide
+            .resume(
+                "inc-2",
+                holding(&tasks, &[]),
+                crate::engine::topology::select::Ceiling::unlimited(),
+            )
+            .expect("the next process resumes once the environment is repaired");
+        let runner = Arc::clone(&resumed.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress =
+            drive(&mut resumed, Some(&mut scheduler)).expect("the resumed run completes");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = resumed.env.durable_events();
+        assert_eq!(count(&events, "merge_verification_interrupted"), 1);
+        assert_eq!(count(&events, "merge_verification_unavailable"), 0);
+        assert_eq!(count(&events, "task_merged"), 2);
+        replay_equals_live(&resumed);
+    }
+
+    #[cfg(unix)]
+    struct DeniesTheSnapshots {
+        snapshots: PathBuf,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl ReviewInputPolicy for DeniesTheSnapshots {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            _tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let verifying = worktree.parent().and_then(std::path::Path::file_name)
+                == Some(std::ffi::OsStr::new("merge"));
+            if verifying
+                && self
+                    .remaining
+                    .compare_exchange(
+                        1,
+                        0,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                crate::workspace_manager::fixture::set_mode(&self.snapshots, 0o555);
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(unix)]
+    struct RestoresTheSnapshots {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        snapshots: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl crate::engine::topology::seams::TopologyHooks for RestoresTheSnapshots {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            self.inner.spawn()
+        }
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            if events
+                .last()
+                .is_some_and(|event| event.body.kind() == "merge_verification_unavailable")
+            {
+                crate::workspace_manager::fixture::set_mode(&self.snapshots, 0o755);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before() {
+        let tasks = [
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ];
+        let mut wide = Wide::started_with(
+            "registry-verification-destination",
+            &tasks,
+            2,
+            WidePlans::default(),
+            holding(&tasks, &[]),
+        );
+        let snapshots = wide.env.fixture.manager.execution_root().join("snapshots");
+        let _restore = crate::workspace_manager::fixture::ModeRestored::of(&snapshots);
+        let mut pipelines = wide.env.pipelines();
+        pipelines.input_policy = Arc::new(DeniesTheSnapshots {
+            snapshots: snapshots.clone(),
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let mut hooks = RestoresTheSnapshots {
+            inner: wide.env.hooks(),
+            snapshots,
+        };
+        let runner = Arc::clone(&wide.env.runner);
+        let mut scheduler = Scheduler::first(&runner);
+        let progress = wide
+            .run
+            .run_concurrently(
+                &wide.env.seams(),
+                &pipelines,
+                &mut hooks,
+                Some(&mut scheduler),
+            )
+            .expect("a destination that cannot be made is Git state the verification defers on");
+        drop(scheduler);
+        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+        let events = wide.run.events();
+        assert_eq!(
+            count(events, "merge_verification_unavailable"),
+            1,
+            "{:?}",
+            kinds_of(events)
+        );
+        assert_eq!(count(events, "task_merged"), 2);
+        replay_equals_live(&wide);
+    }
+
     fn arming_on(
         runner: &RecordingRunner,
         harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,

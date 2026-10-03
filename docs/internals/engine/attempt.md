@@ -12,6 +12,9 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
+**Proposed, conditional on the owner's decision O8 (decision B), and not granted.** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as proposed, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the owner adopts O8 and the pull request merges. In this module it is one more argument of `run_attempt`, the type
+that argument holds and the function that fills it, below.
+
 ## `const MAX_FEEDBACK_ENTRIES: usize = 6;`
 
 Most recent feedback entries carried into an escalated prompt. Older
@@ -121,10 +124,34 @@ failed first and no review happened. Derived from the reviews having
 happened rather than from passes being configured, so the ledger never
 credits a model with work it did not do (§13).
 
+## `pub(super) struct RefusedCandidate {`
+
+The candidate a gate or review snapshot's worktree-registry refusal stopped, as
+`capture_candidate` captured it: the branch ref, the parent and the tree. It is what
+the coordinator keeps (follow-up D's B-PRESERVE). The captured identity, never the
+index as it stands at the refusal: another Git client can unstage or change the
+index between the capture and the refusal (FUB-D5-INDEX), and
+`gates_review_and_commit_use_one_frozen_candidate_tree` already holds the captured
+candidate authoritative over a mutated index.
+
+## `fn note_refused(`
+
+Records the captured candidate into the caller's slot when, and only when, the
+snapshot's error is `UpstrokeError::RegistryRefused`: it compares the variant and
+copies three strings, and nothing else. A snapshot error of any other kind — the
+store cannot be made, the verification's Git error — records nothing, so the
+coordinator discards the checkout as before
+(`a_snapshot_failure_that_is_not_the_registrys_still_discards`).
+
 ## `pub(super) fn run_attempt(`
 
 Run one attempt and verify it, without deciding what happens next: the
 caller owns commit, rollback, retry, and escalation (§11/§14).
+
+`refused` is follow-up D's slot (proposed, conditional on O8): it is filled only
+at the two snapshot calls, through `note_refused`, when the snapshot's
+registry access refused. The error `run_attempt` returns, its return type, and
+every other `?` are as before; the coordinator reads the slot after an error.
 
 ## `let worker_workspace = workspace.root().to_path_buf();`
 
@@ -155,6 +182,13 @@ result and the allowance decision is derived from it.
 Through the seam and the classifier, so the schema-4 driver runs the
 same rung rather than a copy of it.
 
+## `let gate_workspace = workspace`
+
+The gate snapshot. Its `inspect_err` calls `note_refused` with the candidate
+captured above, so a registry refusal of this snapshot's add or removal leaves the
+captured branch, parent and tree in `refused` before the error returns through `?`
+unchanged (`a_registry_refusal_after_capture_keeps_and_pins_the_captured_candidate_across_both_resumes`).
+
 ## `let mut reviews = Vec::new();`
 
 §11.2: gates are objective but shallow — a strong reviewer judges the
@@ -166,11 +200,15 @@ Passes short-circuit, like gates do (§11.1): once one has said no, a
 second opinion on the same diff changes nothing about what happens next
 and costs another frontier invocation to learn it.
 
-## `let review_workspace = workspace.gate_snapshot_for_candidate_in_store(`
+## `let review_workspace = workspace`
 
 Like gates, reviewers may inspect repository context beyond the
 supplied diff. Give them the exact staged candidate, never ignored
 worker inputs or residue from the authoritative workspace.
+
+Its `inspect_err` records the captured candidate when this snapshot's registry
+access refused, as the gate snapshot's does; the error then returns through `?`
+unchanged (`a_review_snapshot_refused_after_capture_keeps_and_pins_the_candidate`).
 
 ## `&review::ReviewInvocations {`
 

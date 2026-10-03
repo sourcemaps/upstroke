@@ -14,7 +14,9 @@ use std::process::{Command, Output, Stdio};
 use crate::error::UpstrokeError;
 use crate::events::PreparedCommit;
 use crate::runner::host::{GitdirRule, ManagedRepository, RECORDED_OBJECTS_INCLUDE};
-use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
+use crate::workspace_manager::{
+    Again, NO_REPLACEMENT_OBJECTS, RegistryHold, tolerant_registry_access,
+};
 
 pub struct Workspace {
     root: PathBuf,
@@ -40,12 +42,24 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
 
 const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
 
+const AUTO_MAINTENANCE_REFUSED: [&str; 8] = [
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "gc.autoDetach=false",
+    "-c",
+    "maintenance.autoDetach=false",
+];
+
 fn git_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(directory)
         .args(REPLACE_REFS_REFUSED)
+        .args(AUTO_MAINTENANCE_REFUSED)
         .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1);
     command
 }
@@ -452,8 +466,21 @@ impl Workspace {
         let revision = format!("refs/heads/{name}^{{tree}}");
         let tree_oid = self.git(&["rev-parse", "--verify", &revision])?;
         self.refuse_unsafe_checkout_tree(tree_oid.trim())?;
-        self.git_with_private_hooks(&["switch", "-q", "--no-recurse-submodules", "--", name])
-            .map(|_| ())
+        tolerant_registry_access(
+            &canonical_common_dir(&self.root)?,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || {
+                self.git_with_private_hooks(&[
+                    "switch",
+                    "-q",
+                    "--no-recurse-submodules",
+                    "--",
+                    name,
+                ])
+                .map(|_| ())
+            },
+        )
     }
 
     pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {
@@ -876,33 +903,40 @@ impl Workspace {
     ) -> Result<(), UpstrokeError> {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(hooks_path);
-        let output = git_command(&self.root)
-            .arg("-c")
-            .arg(hooks_config)
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                "--force",
-            ])
-            .arg(path)
-            .arg(commit)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git worktree add: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(UpstrokeError::Git {
-                message: format!(
-                    "git worktree add failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        Ok(())
+        tolerant_registry_access(
+            &canonical_common_dir(&self.root)?,
+            RegistryHold::Shared,
+            &mut || legacy_add_veto(path),
+            &mut || {
+                let output = git_command(&self.root)
+                    .arg("-c")
+                    .arg(&hooks_config)
+                    .args([
+                        "-c",
+                        "core.fsmonitor=false",
+                        "worktree",
+                        "add",
+                        "-q",
+                        "--detach",
+                        "--force",
+                    ])
+                    .arg(path)
+                    .arg(commit)
+                    .output()
+                    .map_err(|e| UpstrokeError::Git {
+                        message: format!("failed to run git worktree add: {e}"),
+                    })?;
+                if !output.status.success() {
+                    return Err(UpstrokeError::Git {
+                        message: format!(
+                            "git worktree add failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    });
+                }
+                Ok(())
+            },
+        )
     }
 
     fn verify_gate_worktree(&self, path: &Path, hooks_path: &Path) -> Result<(), UpstrokeError> {
@@ -1554,30 +1588,38 @@ fn cleanup_gate_workspace(
 ) -> Result<(), UpstrokeError> {
     let mut hooks_config = OsString::from("core.hooksPath=");
     hooks_config.push(hooks_path);
-    let removal = git_command(source_root)
-        .arg("-c")
-        .arg(&hooks_config)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "worktree",
-            "remove",
-            "--force",
-        ])
-        .arg(path)
-        .output()
-        .map_err(|error| UpstrokeError::Git {
-            message: format!("failed to remove gate worktree {}: {error}", path.display()),
-        })?;
-    if worktree_is_registered(source_root, path, &hooks_config)? {
-        return Err(UpstrokeError::Git {
-            message: format!(
-                "could not reclaim registered gate worktree {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&removal.stderr).trim()
-            ),
-        });
-    }
+    tolerant_registry_access(
+        &canonical_common_dir(source_root)?,
+        RegistryHold::Unheld,
+        &mut || Again::Attempt,
+        &mut || {
+            let removal = git_command(source_root)
+                .arg("-c")
+                .arg(&hooks_config)
+                .args([
+                    "-c",
+                    "core.fsmonitor=false",
+                    "worktree",
+                    "remove",
+                    "--force",
+                ])
+                .arg(path)
+                .output()
+                .map_err(|error| UpstrokeError::Git {
+                    message: format!("failed to remove gate worktree {}: {error}", path.display()),
+                })?;
+            if worktree_is_registered(source_root, path, &hooks_config)? {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "could not reclaim registered gate worktree {}: {}",
+                        path.display(),
+                        String::from_utf8_lossy(&removal.stderr).trim()
+                    ),
+                });
+            }
+            Ok(())
+        },
+    )?;
     let _ = fs::remove_dir_all(path);
     let _ = fs::remove_dir_all(hooks_path);
     match fs::remove_file(intent_path) {
@@ -1597,6 +1639,63 @@ fn cleanup_gate_workspace(
         let _ = fs::remove_dir(directory);
     }
     Ok(())
+}
+
+fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {
+    let probe = Workspace {
+        root: root.to_path_buf(),
+    };
+    let common = probe.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
+        path: common.clone(),
+        source,
+    })
+}
+
+fn legacy_add_veto(path: &Path) -> Again {
+    let undecidable = |what: String| Again::Undecidable {
+        why: format!("the snapshot destination {} {what}", path.display()),
+    };
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return undecidable(
+                "is gone after the failed add: Git took it over, or may have, and nothing \
+                 outside Git tells the add's own failure from a registration deleted under it"
+                    .to_owned(),
+            );
+        }
+        Err(error) => return undecidable(format!("could not be read: {error}")),
+    };
+    if !metadata.file_type().is_dir() {
+        return undecidable("is not a directory".to_owned());
+    }
+    match fs::read_dir(path).map(|mut entries| entries.next()) {
+        Ok(None) => {}
+        Ok(Some(Ok(_))) => return undecidable("is not empty".to_owned()),
+        Ok(Some(Err(error))) | Err(error) => {
+            return undecidable(format!("could not be listed: {error}"));
+        }
+    }
+    if let Err(error) = fs::remove_dir(path) {
+        return undecidable(format!(
+            "is an empty directory this access cannot remove ({error})"
+        ));
+    }
+    remake_destination(path)
+}
+
+fn remake_destination(path: &Path) -> Again {
+    match create_private_dir(path) {
+        Ok(()) => Again::Attempt,
+        Err(error) => Again::Undecidable {
+            why: format!(
+                "the snapshot destination {} was removed empty and could not be made again: \
+                 {error}",
+                path.display()
+            ),
+        },
+    }
 }
 
 fn worktree_is_registered(
@@ -3876,6 +3975,463 @@ mod tests {
                 0,
                 "`{undo}` can take the pair back off a child `git_command` built"
             );
+        }
+    }
+
+    fn common_git_dir_of(repo: &Path) -> PathBuf {
+        let common = String::from_utf8(run_git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ))
+        .expect("a common git dir this test names is UTF-8");
+        fs::canonicalize(common.trim()).expect("the canonical common git dir")
+    }
+
+    fn as_git_writes_it(path: &Path) -> Vec<u8> {
+        GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes())
+    }
+
+    fn plant_a_torn_registration(repo: &Path, name: &str) -> PathBuf {
+        let admin = common_git_dir_of(repo).join("worktrees").join(name);
+        fs::create_dir_all(&admin).expect("the foreign registration's directory");
+        let checkout = repo.with_file_name(format!("{name}-checkout")).join(".git");
+        let mut gitdir = as_git_writes_it(&checkout);
+        gitdir.push(b'\n');
+        fs::write(admin.join("gitdir"), gitdir).expect("its gitdir");
+        fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not yet written");
+        admin
+    }
+
+    fn finish_the_registration(admin: &Path, head: &str) {
+        fs::write(admin.join("HEAD"), format!("{head}\n")).expect("the writer writes HEAD");
+        fs::write(admin.join("commondir"), "../..\n").expect("and then commondir");
+    }
+
+    struct OnceContended<T> {
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        writer: std::thread::JoinHandle<Option<(usize, T)>>,
+    }
+
+    impl<T: Send + 'static> OnceContended<T> {
+        fn spawn(common: PathBuf, finish: impl FnOnce() -> T + Send + 'static) -> Self {
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = std::sync::Arc::clone(&done);
+            let writer = std::thread::spawn(move || {
+                let watchdog = std::time::Instant::now() + Duration::from_secs(60);
+                while std::time::Instant::now() < watchdog
+                    && !stop.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let now = crate::workspace_manager::contended_attempts(&common);
+                    if now > before {
+                        return Some((now - before, finish()));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                None
+            });
+            Self { done, writer }
+        }
+
+        fn join(self) -> Option<(usize, T)> {
+            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.writer.join().expect("the writer thread")
+        }
+    }
+
+    fn snapshot_store(tree: &crate::rundir::scratch_tree::ScratchTree) -> PathBuf {
+        let store = tree.path().join("gate-store");
+        fs::create_dir(&store).expect("a private snapshot store");
+        store
+    }
+
+    fn entries_of(directory: &Path) -> Vec<PathBuf> {
+        match fs::read_dir(directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.expect("a store entry").path())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("listing {}: {error}", directory.display()),
+        }
+    }
+
+    fn registry_refusal<T>(result: Result<T, UpstrokeError>, what: &str) -> String {
+        match result {
+            Err(UpstrokeError::RegistryRefused { message }) => message,
+            Err(other) => panic!("{what}: a registry refusal, never {other:?}"),
+            Ok(_) => panic!("{what}: a registry refusal, not success"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past() {
+        let (tree, repo) = temp_repo("legacy-add-tear");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let admin = plant_a_torn_registration(&repo, "foreign-add");
+        let destinations = store.join("worktrees");
+        let writer = OnceContended::spawn(common_git_dir_of(&repo), {
+            let (admin, head) = (admin.clone(), parent.clone());
+            move || {
+                let seen: Vec<(String, bool)> = entries_of(&destinations)
+                    .into_iter()
+                    .map(|path| {
+                        let empty =
+                            fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none());
+                        (path.to_string_lossy().into_owned(), empty)
+                    })
+                    .collect();
+                finish_the_registration(&admin, &head);
+                seen
+            }
+        });
+        let result = ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store);
+        let finished = writer.join();
+        let snapshot = result.expect("the add is attempted past a tear its writer finished");
+        assert!(
+            snapshot.workspace().root().join("README.md").is_file(),
+            "the snapshot holds the candidate"
+        );
+        let (contended, seen) = finished.expect("the add failed on the tear at least once");
+        assert!(contended >= 1, "{contended}");
+        assert_eq!(seen.len(), 1, "one snapshot destination: {seen:?}");
+        assert!(
+            seen.iter().all(|(_, empty)| *empty),
+            "after the failed attempt the destination is still the empty directory the \
+             snapshot made: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_add_beside_a_tear_that_stays_refuses_as_the_registrys_and_leaves_its_intent() {
+        let (tree, repo) = temp_repo("legacy-add-static");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let admin = plant_a_torn_registration(&repo, "foreign-static");
+        let common = common_git_dir_of(&repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let message = registry_refusal(
+            ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store),
+            "an add beside a tear that stays",
+        );
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the add was attempted again"
+        );
+        assert!(
+            message.contains(&common.join("worktrees").display().to_string())
+                && message.contains("deadline"),
+            "the refusal names the store and its deadline: {message}"
+        );
+        assert_eq!(
+            entries_of(&store.join("intents")).len(),
+            1,
+            "the snapshot's intent stays for the reclaim"
+        );
+        fs::remove_dir_all(&admin).expect("the operator removes the torn registration");
+        assert_eq!(
+            ws.reclaim_gate_workspaces(&store)
+                .expect("the reclaim takes the refused snapshot once the store is whole"),
+            1
+        );
+        assert!(entries_of(&store.join("intents")).is_empty());
+    }
+
+    fn run_git_with_input(repo: &Path, args: &[&str], input: &[u8]) -> String {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run git");
+        child
+            .stdin
+            .take()
+            .expect("git's stdin")
+            .write_all(input)
+            .expect("write git's input");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git's output is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    fn a_tree_no_checkout_can_make(repo: &Path, shape: &str) -> String {
+        let blob = run_git_with_input(repo, &["hash-object", "-w", "--stdin"], b"x\n");
+        if shape == "name-too-long" {
+            return run_git_with_input(
+                repo,
+                &["mktree"],
+                format!("100644 blob {blob}\t{}\n", "n".repeat(300)).as_bytes(),
+            );
+        }
+        let file = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("100644 blob {blob}\tfile.txt\n").as_bytes(),
+        );
+        let entry = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {file}\tfake-entry\n").as_bytes(),
+        );
+        let store = run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {entry}\tworktrees\n").as_bytes(),
+        );
+        run_git_with_input(
+            repo,
+            &["mktree"],
+            format!("040000 tree {store}\t.git\n100644 blob {blob}\tREADME.md\n").as_bytes(),
+        )
+    }
+
+    #[test]
+    fn a_snapshot_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {
+        for shape in ["git-path", "name-too-long"] {
+            if shape == "name-too-long" && !cfg!(unix) {
+                continue;
+            }
+            let (tree, repo) = temp_repo("legacy-add-cannot");
+            let ws = Workspace::open(&repo).expect("open");
+            let parent = ws.head_sha_full().expect("parent");
+            let candidate = a_tree_no_checkout_can_make(&repo, shape);
+            let store = snapshot_store(&tree);
+            let common = common_git_dir_of(&repo);
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let message = registry_refusal(
+                ws.gate_snapshot_for_candidate_in_store(&parent, &candidate, &store),
+                shape,
+            );
+            assert_eq!(
+                crate::workspace_manager::contended_attempts(&common),
+                before,
+                "{shape}: one attempt, never attempted again"
+            );
+            assert!(
+                message.contains("1 attempt(s)") && message.contains("is gone"),
+                "{shape}: refused at once, because Git's junk removal took the destination: \
+                 {message}"
+            );
+            assert!(
+                entries_of(&store.join("worktrees")).is_empty(),
+                "{shape}: nothing is left at the destination"
+            );
+            assert!(
+                !String::from_utf8_lossy(&run_git(&repo, &["worktree", "list", "--porcelain"]))
+                    .contains("upstroke-gates-"),
+                "{shape}: and nothing stays registered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration() {
+        let (tree, repo) = temp_repo("legacy-remove-tear");
+        let ws = Workspace::open(&repo).expect("open");
+        let parent = ws.head_sha_full().expect("parent");
+        let candidate = ws.staged_tree_oid().expect("tree");
+        let store = snapshot_store(&tree);
+        let snapshot = ws
+            .gate_snapshot_for_candidate_in_store(&parent, &candidate, &store)
+            .expect("a gate snapshot");
+        let root = snapshot.workspace().root().to_path_buf();
+        let admin = plant_a_torn_registration(&repo, "foreign-remove");
+        let writer = OnceContended::spawn(common_git_dir_of(&repo), {
+            let (admin, head) = (admin.clone(), parent.clone());
+            move || finish_the_registration(&admin, &head)
+        });
+        drop(snapshot);
+        let finished = writer.join();
+        assert!(
+            finished.is_some(),
+            "the removal failed on the tear at least once"
+        );
+        assert!(!root.exists(), "the snapshot's directory is gone");
+        let listed = String::from_utf8_lossy(&run_git(&repo, &["worktree", "list", "--porcelain"]))
+            .into_owned();
+        assert!(
+            !listed.contains("upstroke-gates-"),
+            "the snapshot's registration is gone: {listed}"
+        );
+        assert!(
+            entries_of(&store.join("intents")).is_empty(),
+            "and so is its intent"
+        );
+    }
+
+    #[test]
+    fn a_branch_switch_beside_a_tear_its_writer_finishes_switches() {
+        let (_tree, repo) = temp_repo("legacy-switch-tear");
+        let head = String::from_utf8(run_git(&repo, &["rev-parse", "HEAD"]))
+            .expect("an object id is ASCII")
+            .trim()
+            .to_owned();
+        let other = String::from_utf8(run_git(
+            &repo,
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "other"],
+        ))
+        .expect("an object id is ASCII")
+        .trim()
+        .to_owned();
+        run_git(&repo, &["branch", "other", &other]);
+        let ws = Workspace::open(&repo).expect("open");
+        let admin = plant_a_torn_registration(&repo, "foreign-switch");
+        let common = common_git_dir_of(&repo);
+        let before = crate::workspace_manager::contended_attempts(&common);
+        let refused = registry_refusal(
+            ws.switch_branch("other"),
+            "a switch beside a tear that stays",
+        );
+        assert!(
+            crate::workspace_manager::contended_attempts(&common) > before,
+            "the switch failed on the tear and was attempted again: {refused}"
+        );
+        let branch = String::from_utf8_lossy(&run_git(&repo, &["symbolic-ref", "HEAD"]))
+            .trim()
+            .to_owned();
+        let status =
+            String::from_utf8_lossy(&run_git(&repo, &["status", "--porcelain"])).into_owned();
+        assert_eq!(
+            (branch.as_str(), status.as_str()),
+            ("refs/heads/main", ""),
+            "a failed attempt changed neither HEAD nor the checkout"
+        );
+        let writer = OnceContended::spawn(common, move || finish_the_registration(&admin, &head));
+        let switched = ws.switch_branch("other");
+        let finished = writer.join();
+        switched.expect("the switch is attempted past a tear its writer finished");
+        let (_, ()) = finished.expect("the switch failed on the tear at least once");
+        assert_eq!(ws.current_branch().expect("the branch"), "other");
+    }
+
+    #[test]
+    fn every_git_child_of_this_module_runs_with_automatic_maintenance_off() {
+        let (_tree, repo) = temp_repo("legacy-maintenance");
+        for (key, configured) in [
+            ("maintenance.auto", "true"),
+            ("gc.auto", "6700"),
+            ("gc.autoDetach", "true"),
+            ("maintenance.autoDetach", "true"),
+        ] {
+            run_git(&repo, &["config", key, configured]);
+        }
+        let ws = Workspace::open(&repo).expect("open");
+        let seen: Vec<(&str, String)> = [
+            "maintenance.auto",
+            "gc.auto",
+            "gc.autoDetach",
+            "maintenance.autoDetach",
+        ]
+        .into_iter()
+        .map(|key| {
+            (
+                key,
+                ws.git(&["config", "--get", key])
+                    .expect("the setting reads")
+                    .trim()
+                    .to_owned(),
+            )
+        })
+        .collect();
+        assert_eq!(
+            seen,
+            [
+                ("maintenance.auto", "false".to_owned()),
+                ("gc.auto", "0".to_owned()),
+                ("gc.autoDetach", "false".to_owned()),
+                ("maintenance.autoDetach", "false".to_owned()),
+            ],
+            "a command-line setting outranks the repository's"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove() {
+        let (tree, _repo) = temp_repo("legacy-add-veto");
+        let destination = |tag: &str| tree.path().join(format!("dest-{tag}"));
+
+        let empty = destination("empty");
+        fs::create_dir(&empty).expect("an empty destination");
+        assert_eq!(legacy_add_veto(&empty), Again::Attempt);
+        assert!(
+            fs::read_dir(&empty).is_ok_and(|mut entries| entries.next().is_none()),
+            "the destination is an empty directory again"
+        );
+
+        let gone = destination("gone");
+        assert!(
+            matches!(legacy_add_veto(&gone), Again::Undecidable { why } if why.contains("is gone")),
+            "a destination Git's junk removal took"
+        );
+        assert!(!gone.exists(), "and nothing is made there");
+
+        let stray = destination("stray");
+        fs::create_dir(&stray).expect("a destination");
+        fs::write(stray.join("stray.txt"), "stray\n").expect("a file in it");
+        assert!(matches!(
+            legacy_add_veto(&stray),
+            Again::Undecidable { why } if why.contains("is not empty")
+        ));
+        assert!(
+            stray.join("stray.txt").is_file(),
+            "and nothing in it is touched"
+        );
+
+        let file = destination("file");
+        fs::write(&file, "a file where the destination was\n").expect("a file");
+        assert!(matches!(
+            legacy_add_veto(&file),
+            Again::Undecidable { why } if why.contains("is not a directory")
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let target = destination("target");
+            fs::create_dir(&target).expect("an empty directory");
+            let link = destination("link");
+            std::os::unix::fs::symlink(&target, &link).expect("a link to it");
+            assert!(matches!(
+                legacy_add_veto(&link),
+                Again::Undecidable { why } if why.contains("is not a directory")
+            ));
+            assert!(target.is_dir(), "the link's target is untouched");
+
+            let parent = destination("read-only-parent");
+            fs::create_dir(&parent).expect("a parent");
+            let pinned = parent.join("dest");
+            fs::create_dir(&pinned).expect("an empty destination");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o555))
+                .expect("a parent nothing can write");
+            let probe = fs::create_dir(parent.join("probe"));
+            let answer = legacy_add_veto(&pinned);
+            let still_there = pinned.is_dir();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
+                .expect("writable again");
+            assert!(
+                probe.is_err(),
+                "prerequisite not met: the mode bit did not bind (root, or CAP_DAC_OVERRIDE)"
+            );
+            assert!(
+                matches!(&answer, Again::Undecidable { why } if why.contains("cannot remove")),
+                "an empty destination this access cannot remove: {answer:?}"
+            );
+            assert!(still_there, "and it stays where it is");
         }
     }
 }

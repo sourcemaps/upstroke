@@ -39,6 +39,20 @@ the include file its role processes read that graph through. And
 `ensure_execution_prerequisites` refuses a Git older than 2.41 by name. This
 module reads that constant and calls none of the manager's funnels.
 
+A second amendment is **proposed, conditional on the owner's decision O8 (decision B),
+and not granted**: follow-up D (#331, a draft), to close
+`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and R-G. The
+row's text in `effects/allowlist.toml` gives it exactly, marked there as proposed, and
+the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
+Implementation section) is why. It is two things. The three Git children that
+enumerate the shared worktree registry — `switch_branch`'s `git switch`,
+`add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
+`git worktree remove` with the `git worktree list` that decides it — each run as one
+attempt of `crate::workspace_manager::tolerant_registry_access`, follow-up B's
+(#329); and `git_command` refuses Git's automatic maintenance. Their sections below
+say how. Nothing it adds is in force until the owner adopts O8 and the pull request
+merges. The module still calls no funnel of the manager: the access takes no site.
+
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.
 
@@ -95,6 +109,26 @@ reason `pin_replacement_refs_in` gives, and with the variable alone both failed
 on 2.40.0 and 2.41.0 and passed on 2.42.0 and 2.43.0 (`r3/` in the pull
 request's evidence). With this, both pass on all four.
 
+## `const AUTO_MAINTENANCE_REFUSED: [&str; 8] = [`
+
+`-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c
+maintenance.autoDetach=false`, which `git_command` passes after `REPLACE_REFS_REFUSED`
+(follow-up D's R-G, proposed, conditional on O8). Git's automatic maintenance can
+start a `git worktree prune` that deletes a registration with no `gitdir` at once,
+whatever the expiry — the state another checkout's add is in before its first
+write (`should_prune_worktree`). Five builtins start it (`am`, `commit`, `fetch`,
+`merge`, `rebase`); the legacy engine runs none of them in production, so its one
+route is a promisor lazy fetch a legacy child starts in a partial clone, and at Git
+2.55.0 the default `geometric` strategy prunes worktrees. A `-c` setting outranks
+every configuration file and reaches every Git process the child starts through
+`GIT_CONFIG_PARAMETERS`, and `maintenance.auto=false` stops `maintenance run --auto`
+before it is built (`prepare_auto_maintenance`), so no Git child of this module, and
+no Git process one of them starts, runs automatic maintenance. On Windows maintenance
+would run attached, and the settings stop it the same way. What this does not reach:
+maintenance or a prune that a role's own Git, or the user's, starts (R-D10).
+`every_git_child_of_this_module_runs_with_automatic_maintenance_off` reads the four
+values back through the builder over a repository configuring the opposite.
+
 ## `fn git_command(directory: &Path) -> Command {`
 
 Where every Git child this file's production code starts is built, and so the
@@ -126,6 +160,11 @@ see.
 
 `every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
 the shape; see its section.
+
+Follow-up D (proposed, conditional on O8) adds `AUTO_MAINTENANCE_REFUSED` after
+`REPLACE_REFS_REFUSED`; see its section. The census's assertions about the builder
+still hold: one `Command::new(`, the pair set, `REPLACE_REFS_REFUSED` passed, and the
+fourteen call sites in the same functions in the same order.
 
 ## `impl Workspace` › `pub fn open(root: &Path) -> Result<Self, UpstrokeError> {`
 
@@ -278,6 +317,17 @@ A commit's subject — the first line of its message.
 Move to an existing branch — how `resume` gets back onto the run's own
 branch when the operator has wandered off it.
 
+`git switch` refuses a branch checked out elsewhere by scanning the worktree
+registry (`die_if_checked_out`) before it changes anything, so it dies on another
+checkout's registration half written. Under follow-up D (proposed, conditional on
+O8) the switch is one attempt of `tolerant_registry_access`, with no hold and a
+veto that always answers `Again::Attempt`: a failed attempt changed nothing, so the
+next attempt is the same attempt. A failure that outlasts the access's deadline —
+contention, residue, or a genuine failure of the switch, which the access cannot
+tell apart — refuses as `UpstrokeError::RegistryRefused` instead of a Git error at
+once (R-D6). The resume calls this only over a clean checkout, so the refusal
+discards nothing. `a_branch_switch_beside_a_tear_its_writer_finishes_switches`.
+
 ## `impl Workspace` › `pub fn branch_exists(&self, name: &str) -> Result<bool, UpstrokeError> {`
 
 Whether a branch exists locally.
@@ -388,6 +438,29 @@ The exact path is already known to be the new worktree's top level.
 Avoid round-tripping it through Git's textual path output, which is
 not necessarily UTF-8 on Unix.
 
+## `impl Workspace` › `fn add_gate_worktree(`
+
+The snapshot's add, as one attempt of `tolerant_registry_access` (follow-up D,
+proposed, conditional on O8): the `git worktree add` child and its exit check. It
+holds the registry lock shared, as the manager's adds do, under the canonical common
+git dir `canonical_common_dir` resolves, so a legacy process's lock key and refusal
+text match the manager's for the same repository. Its veto is `legacy_add_veto`.
+Git's add scans its siblings, makes its entry and that entry's `locked`, and only then
+takes the destination over; on any failure after that its junk removal removes the
+entry and the destination. So the add is attempted again only over the empty
+directory `PendingGateWorkspace` made, and anything else refuses at once. The add's
+own failure is never returned as Git state: no arm of the veto answers
+`Again::Return`. What that costs a genuine checkout failure after the takeover (a
+path the snapshot cannot hold, a failing filter, a store that refuses a write, a
+missing object): a resumable refusal with the output pinned, where master discarded
+it; each resume over a cause that persists pays one more worker attempt, as master's
+did, and keeps one more pin.
+
+A deletion that leaves the add successful — a prune that decided in the add's window
+and deletes the registration before or after the add returns — never reaches the
+veto, and the verification below then fails as Git state: that is R-D9, inside
+`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, not closed here.
+
 ## `impl Workspace` › `pub fn prepare_commit_from_candidate(`
 
 Prepare and pin a commit from the exact candidate identities already
@@ -434,11 +507,74 @@ root. The root may be shared (notably `/tmp`) and is never chmodded.
 
 Use the exact stable store whose synced intents resume will reclaim.
 
+## `fn cleanup_gate_workspace(`
+
+A snapshot's removal and the list that decides whether it took the registration are
+**one** attempt of `tolerant_registry_access` (follow-up D, proposed, conditional on
+O8), with no hold and a veto that always answers `Again::Attempt`. The attempt
+succeeds when the list does not register the path, whatever the removal's exit
+status — the existing treatment, which counts an already-unregistered destination
+("is not a working tree") as reclaimed — and fails with the removal's words while the
+list registers it, or with the list's own error when the list fails. Wrapping the
+list apart from the removal (round 4's B1′) let a removal the tear failed be decided
+by a list that ran after the tear finished, which still registered the path
+(FUB-D4-B1REMOVE; `a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration`).
+Everything after the attempt is as it was. A snapshot's drop now waits up to the
+access's deadline when the store is in the way, where it failed at once and left
+residue for the resume; a refused add costs two such waits, the add's and then this
+cleanup's, each plus its last attempt's runtime.
+
 ## `let _ = fs::remove_dir_all(path);`
 
 `worktree remove` normally removes the directory too. Once Git confirms
 no registration remains, these exact private paths are safe to remove
 even if a partially failed add populated only part of either one.
+
+## `fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {`
+
+`git rev-parse --path-format=absolute --git-common-dir` through `git_path`, and so
+through `git_command`, then `fs::canonicalize`: the two steps
+`recorded_objects_scope` takes, and the spelling `tolerant_registry_access` requires
+of its key (the manager's `common_git_dir` is the same). The tests read the access's
+`CONTENDED_ATTEMPTS` handshake under the same spelling.
+
+## `fn legacy_add_veto(path: &Path) -> Again {`
+
+The snapshot add's veto: the removal predicate, described by what it observes
+(FUD-D3-TAKEOVERWORD), as follow-up B's round 8 dates it for both adds. After a
+failed attempt it reads the destination with `symlink_metadata`, and `read_dir` when
+it is a directory, and starts no Git child:
+
+| The destination after the failed attempt | The answer |
+|---|---|
+| an empty directory this access can remove | it is removed and made again (`remake_destination`), and the answer is `Again::Attempt` |
+| gone | `Again::Undecidable` |
+| an empty directory this access cannot remove | `Again::Undecidable` |
+| a directory that is not empty, anything that is not a directory (a link included), or metadata it cannot read | `Again::Undecidable` |
+
+`Again::Undecidable` makes the access refuse at once as
+`UpstrokeError::RegistryRefused`, naming why, and B-PRESERVE keeps the captured
+candidate (`src/engine/coordinator.rs`). Why attempting again over an empty,
+removable destination is safe needs no history: it holds nothing to lose, because the
+worker's output is the captured candidate in the run's own checkout, and the next
+attempt is bounded — it ends in success, or at the deadline in a refusal that keeps.
+What reaches that arm, none of it told apart: a failure before Git took the
+destination over, the case the arm is for; a takeover whose junk removal emptied the
+destination and could not remove it, since become removable (R-D4); a takeover cut
+short by a signal before Git wrote there (R-D3). A destination gone means the failure
+came after Git took it over — the add's own (a checkout that cannot be made) or a
+prune that deleted the add's registration (FUD-D2-PRUNE) — and nothing outside Git
+tells the two apart, so the output is kept in both. On Windows std exposes no stable
+file identity at the MSRV, and the rule needs none: a delete-pending destination that
+cannot be made again is `Undecidable`, a refusal that keeps.
+`the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove`
+calls it on each shape.
+
+## `fn remake_destination(path: &Path) -> Again {`
+
+Makes the destination again as the private directory `PendingGateWorkspace` made
+(`create_private_dir`, mode 0700 on Unix) and answers `Again::Attempt`; a destination
+it removed and cannot make again is `Again::Undecidable`.
 
 ## `fn sparse_checkout_is_refused_before_worker_spend()` › `run_git(&repo, &["update-index", "--skip-worktree", "README.md"]);`
 
@@ -698,3 +834,97 @@ type. The production region calls no function of another crate module but
 `crate::ulid::ulid`. What it reads as production and a compiler would not: a
 `#[cfg(test)]` item outside the test module. One that builds a `Command` fails
 the census rather than hiding from it.
+
+## `fn common_git_dir_of(repo: &Path) -> PathBuf {`
+
+The canonical common git dir the way `canonical_common_dir` computes it, so a test
+keys `crate::workspace_manager::contended_attempts` exactly as the access counts. It
+runs the plain `git` of the test's own repository, not this module's builder, so the
+tests compile and run against the module as master had it (their first-bad shape).
+
+## `fn plant_a_torn_registration(repo: &Path, name: &str) -> PathBuf {`
+
+A foreign registration torn the way a writer killed while it writes `commondir` leaves
+it: `gitdir` written, as Git writes it (`GitdirRule::native().spelling`: `/` on
+Windows, the path's own bytes elsewhere), and `commondir` opened and empty. Every
+enumeration of the store dies on it ("failed to read …/commondir: Success" on glibc):
+`git worktree add`'s sibling scan, `git worktree list`, `git worktree remove`, and
+`git switch`'s `die_if_checked_out`. `finish_the_registration` is what its writer
+writes last: `HEAD`, then `commondir`.
+
+## `struct OnceContended<T> {`
+
+The writer of a tear, on its own thread, gated by the access's handshake rather than
+by time: it waits until `contended_attempts` for the repository exceeds its value
+before the access began — the access failed on the tear and decided to attempt again
+— and only then runs `finish`, returning how many attempts were contended and what
+`finish` saw. A sixty-second watchdog bounds it, and `join` stops it once the access
+has returned, so a mutation that never contends fails at its assertion rather than
+wedging the suite.
+
+## `fn a_snapshot_add_beside_a_tear_its_writer_finishes_is_attempted_past() {`
+
+T-L1. A snapshot add beside a tear its writer finishes after the add's first failed
+attempt succeeds, and the snapshot holds the candidate. The writer looks at the
+destination before it finishes the tear: one destination, the empty directory the
+snapshot made, because the add fails in its sibling scan before Git takes the
+destination over and the veto made it again. Red at master (the add's Git error at
+once) and under the mutation that makes the veto refuse over an empty destination.
+
+## `fn a_snapshot_add_beside_a_tear_that_stays_refuses_as_the_registrys_and_leaves_its_intent() {`
+
+T-L2, as split by FUD-D2-TL2: only what is portable. A tear that stays: the add
+refuses as `UpstrokeError::RegistryRefused`, never Git; it was attempted again at
+least once; the refusal names the store and its deadline; and the snapshot's intent is
+left for the reclaim, which takes it once the operator removes the residue. No attempt
+count is asserted: one attempt slower than the deadline is the only one, correctly.
+The final-attempt rule is follow-up B's to test, apart from real Git.
+
+## `fn a_snapshot_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {`
+
+T-L3. A candidate no checkout can make — a `.git/` path, on every platform, and on Unix
+a 300-byte name — fails after Git took the destination over, and Git's junk removal
+takes the destination. The veto finds it gone and answers `Undecidable`, so the add
+refuses after exactly one attempt (the handshake's count does not move), naming why,
+and nothing is left at the destination or registered. Red under the `Return` mutation
+(Git state, the round-2 veto's answer) and under the always-`Attempt` mutation (the
+checkout attempted again until the deadline).
+
+## `fn a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration() {`
+
+T-L4. A snapshot's drop beside a tear its writer finishes after the removal's first
+failed attempt: the snapshot's directory, registration and intent are gone. It also
+distinguishes round 4's B1′, which ran the removal once with its status ignored and
+wrapped the list apart: there the first removal fails, the tear finishes, the separate
+list then succeeds and still registers the snapshot, and the drop leaves it.
+
+## `fn a_branch_switch_beside_a_tear_its_writer_finishes_switches() {`
+
+T-L5. `switch_branch` beside a tear its writer finishes after the first failed attempt
+switches, and a failed attempt changes neither `HEAD` nor the checkout. It runs the
+access twice. The first meets the tear unrepaired and refuses as
+`UpstrokeError::RegistryRefused`, having attempted again; `HEAD` and the status are read
+after it returns, with no access running, because the access's deadline would time any
+Git child read between two of its attempts (standards §12: a deadline bounds a wedged
+producer, it does not time a healthy one). The second access's writer finishes the tear
+on the handshake, with two file writes, and the switch succeeds. Red at master, where
+the switch's Git error returns at once, and when the tear is finished before the second
+access, which then never fails on it.
+
+## `fn every_git_child_of_this_module_runs_with_automatic_maintenance_off() {`
+
+T-L7, R-G's regression. A repository configuring `maintenance.auto=true`,
+`gc.auto=6700`, `gc.autoDetach=true` and `maintenance.autoDetach=true`: through the
+builder, `git config --get` of each reads `false`, `0`, `false` and `false`, because a
+command-line setting outranks the repository's. It executes Git, so it holds on every
+Git at or above the 2.41 floor. Red at master and with the four settings dropped from
+the builder.
+
+## `fn the_snapshot_add_veto_attempts_again_only_over_an_empty_destination_it_can_remove() {`
+
+T-L8. The veto called directly, with no Git: an empty destination is `Attempt` and is an
+empty directory again; one gone is `Undecidable` and nothing is made there; one holding
+a file, a file in its place, a link to an empty directory (Unix), and an empty one
+under a parent nothing can write (Unix) are `Undecidable`, and each is left as it was.
+The read-only parent's case refuses to run, rather than passing vacuously, where the
+mode bit does not bind (root, or `CAP_DAC_OVERRIDE`).

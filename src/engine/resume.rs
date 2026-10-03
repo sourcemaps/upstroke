@@ -23,7 +23,7 @@ use crate::runner::host::{Contained, HostRunner, contain_write_command};
 use crate::util;
 use crate::workspace::Workspace;
 
-use super::coordinator::{Run, prepared_pin_ref};
+use super::coordinator::{KEPT_PIN_SUFFIX, Run, prepared_pin_ref};
 use super::options::{Harness, ResumeOptions, RunOptions};
 use super::preflight::{
     Preflight, Recorded, RecordedRouting, chain_summaries, normalized_plan_bytes,
@@ -559,6 +559,19 @@ pub(super) fn resume_harness_inner_on(
         }
     }
 
+    let mut kept = Vec::new();
+    for (task_index, progress) in replayed.state.progress.iter().enumerate() {
+        for attempt in 1..=progress.attempts {
+            let kept_pin = format!(
+                "{}{KEPT_PIN_SUFFIX}",
+                prepared_pin_ref(&run_id, task_index, attempt)
+            );
+            if workspace.prepared_pin_target(&kept_pin)?.is_some() {
+                kept.push(format!("`{kept_pin}`"));
+            }
+        }
+    }
+
     let discarded = workspace.uncommitted_summary()?;
     if !discarded.is_empty() {
         warnings.push(format!(
@@ -567,6 +580,24 @@ pub(super) fn resume_harness_inner_on(
             discarded.join(", ")
         ));
         workspace.discard_uncommitted()?;
+    }
+    if !kept.is_empty() {
+        warnings.push(format!(
+            "the worker output of the attempt(s) a worktree-registry refusal stopped is kept, and \
+             no resume removes it: {}. Each pin is a commit on the HEAD its output was captured \
+             on. To take the output back as the repository records it — its index exactly, its \
+             working files through the checkout's own end-of-line and filter conversions, so \
+             compare their bytes before relying on them — deletions included, and not as \
+             `git replace` substitutes for it: while HEAD is still the pin's parent, \
+             `git --no-replace-objects -c core.useReplaceRefs=false restore --source=<pin> \
+             --staged --worktree -- .` from the checkout's root; on a later HEAD, \
+             `git --no-replace-objects -c core.useReplaceRefs=false cherry-pick --no-commit \
+             <pin>`, and before removing the pin check what it staged (`git diff --cached`), \
+             because a configured merge driver can make it succeed having applied none of the \
+             kept change. `git update-ref -d <pin>` removes the pin, and every later resume then \
+             stops naming it",
+            kept.join(", ")
+        ));
     }
 
     let sleeper = harness.sleeper.unwrap_or(&RealSleeper);
