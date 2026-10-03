@@ -149,3 +149,10 @@ to T-P3 were executed on a scratch prototype, and `switch_branch`'s sequence at 
 this file stays open, narrowed to the residue. Without either, (e2) and (e2′) both block G6 and the file stays as it
 is. The owner may instead rule that the mixed residue case does not block G6, with this P1 kept filed; without that
 ruling no waiver is inferred.
+
+## The helper exists (2026-10-03, PR #329's implementation)
+
+Follow-up D calls `tolerant_registry_access` in `src/workspace_manager.rs` (`pub(crate)`, classified `effect_free` in
+`effects/wrappers.toml`), with `Again`, `RegistryHold` and the test handshake `CONTENDED_ATTEMPTS` /
+`contended_attempts`, as #329's record §5.5 and §7.6 state the contract. The legacy accesses stay D's, and this file
+stays open under its guard.

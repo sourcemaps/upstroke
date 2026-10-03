@@ -89,3 +89,11 @@ FUB-D8-HOSTWIDTH). Round 8 said either remedy also removes this starter from the
   run adds, in either face of the P1;
 - a Git view that cannot reach the registry, the container runner's or an equivalent on the host, removes the agent as
   a starter.
+
+## In force (2026-10-03, PR #329's implementation)
+
+The reconciliation's "once PR #329 is implemented" now holds. A failure after Git took an engine add's destination over
+refuses at once as `UpstrokeError::RegistryRefused`, never as Git state, and a prune's deletion before the takeover is
+attempted past (`a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again`,
+`an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt`). This file's own remedies are unchanged under
+its PR12 guard.

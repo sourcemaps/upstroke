@@ -67,3 +67,12 @@ closure that keeps the specified outcome for a genuine failure.
 **To close it,** something must tell a checkout that cannot be made from a deleted registration without reading the
 registry. Round 7's probe did that with a second checkout, and failed (FUB-D7-SPLITINDEX, FUB-D7-CONFIG). Any such
 closure is new machinery, and it is the owner's to ask for.
+
+## In force (2026-10-03, PR #329's implementation)
+
+The narrowing this file records is now the code's behaviour. An add whose checkout cannot be made refuses after one
+attempt, with nothing at its slot (`an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing`).
+A verification whose snapshot checkout fails after the takeover ends the command resumably, with nothing durable
+appended, and its resume verifies again under a new sequence
+(`a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies`).
+`design/26` is unchanged, pending the owner's disposition (O9).

@@ -294,3 +294,40 @@ leaves every durable consequence.
   not read, passes it (closure 1's residuals).
 - **PR #329's round-7 registry-free checkout probe.** It is withdrawn: two executed P1s, FUB-D7-SPLITINDEX and
   FUB-D7-CONFIG.
+
+## At #329's implementation (2026-10-03)
+
+**Face 1's narrowing is in force.** A deletion that fails an engine add after Git took its destination over now refuses
+at once, resumably, and never returns as Git state. The suite reproduces the end state with a required filter that fails
+the first checkout (`a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again`). A deletion before
+the takeover is attempted past (`an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt`).
+
+**For follow-up C's R-P.** Every explicit engine `git worktree prune` stays deleted, removal is bound to the instance's
+own registration, and there is no global-prune fallback (`no_production_argv_of_the_manager_names_prune`,
+`no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`).
+
+**Face 2 is unchanged.** It is open, implements none of the closures above, and blocks G6 as this file says.
+
+**Where the closures' code now is.** The line citations above are `8df42436`'s. #329 changed the removal scan's
+store-absent branch that closure 3 would extend: it now also binds nothing for an empty directory at the target, the
+destination an add makes before Git runs (`revalidate_removal_proving`, `src/workspace_manager.rs:5548`). A target
+whose `.git` file names an entry in the absent store still refuses, as before.
+
+## Design review round 9's findings against these closures (2026-10-02)
+
+Recorded here so that the change that takes this up meets them. PR #329's ledger carries each as deferred to this file.
+The source is the round's triage, `~/orch-pr11/reviews/review-329-d9-triage.md`, and the owner's decision appendix, §6.
+- **FUB-D9-POLICY (P1):** closure 1 misses the verification's review-input policy. After a complete deletion the
+  policy's `Workspace::open` fails its `rev-parse`, and the verification is `Unavailable` before any placement of the
+  check is reached.
+- **FUB-D9-HEADRECREATE (P1):** a ref transaction already prepared recreates a deleted `HEAD`. Executed on 2.43, 2.50
+  and 2.55. The four-file check then passes the gate's failure, so R-REWRITE is not limited to `index`.
+- **FUB-D9-RESUMESCRUB (P1):** closure 2's kept slot does not survive the next resume. Frozen recovery closes a
+  retained generation and reclaims it before it recreates open ones (`src/engine/topology/recover.rs:1019-1021`).
+- **FUB-D9-INFLIGHTSCRUB (P1):** closure 2 misses interrupted-attempt recovery. The resume settles the attempt
+  interrupted, closes its generation and scrubs the checkout with its unpinned edits (`recover.rs:1461`).
+- **FUB-D9-TASKSEL (P2; P3 in the design lens):** `maintenance.<task>.enabled=false` does not stop an explicit
+  `git maintenance run --task=…`. Closure 4 is to be qualified.
+
+The triage reads them together: closures 1 to 3 are partial even combined, and a complete technical closure of face 2
+needs a change to G6-frozen recovery, or the owner's ruling on scope.
