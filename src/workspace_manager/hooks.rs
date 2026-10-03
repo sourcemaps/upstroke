@@ -82,6 +82,20 @@ pub trait EffectHooks {
     /// reaches every wrapper. An observer with no state of its own answers
     /// `None`.
     fn refusal_cause(&self) -> Option<String>;
+
+    /// Wait out one wait of a registry access the call makes: a backoff
+    /// between two attempts, or one turn of its wait for this process's
+    /// registry lock (`workspace_manager::tolerant_registry_access`).
+    ///
+    /// The default sleeps for `pause` on the calling thread, which is what
+    /// production passes, what a pipeline's own accesses do on its own thread,
+    /// and what every observer that does not care inherits. The topology
+    /// coordinator answers its messages for the length of the wait instead
+    /// (`engine::topology::coordinator`), so that no wait of an access it makes
+    /// keeps a pipeline from its grants (the record's §9.13, R1).
+    fn registry_pause(&mut self, pause: std::time::Duration) {
+        std::thread::sleep(pause);
+    }
 }
 
 /// What production passes: nothing is armed and nothing is recorded.
@@ -374,8 +388,24 @@ pub(super) fn funnel<T, F>(
 where
     F: FnOnce() -> Result<T, UpstrokeError>,
 {
+    funnel_lending(hooks, site, |_| primitive())
+}
+
+/// [`funnel`], lending the hooks to the primitive between the two phases: for
+/// a primitive whose registry access must wait through the call's
+/// [`EffectHooks::registry_pause`] (`Worktree.Add`'s attempts, and
+/// `Worktree.Verify`'s list), since the funnel holds the only mutable borrow
+/// of the hooks for the whole call.
+pub(super) fn funnel_lending<T, F>(
+    hooks: &mut dyn EffectHooks,
+    site: EffectSiteId,
+    primitive: F,
+) -> Result<T, UpstrokeError>
+where
+    F: FnOnce(&mut dyn EffectHooks) -> Result<T, UpstrokeError>,
+{
     consult(hooks, site, HookPhase::Before)?;
-    let value = primitive()?;
+    let value = primitive(&mut *hooks)?;
     consult(hooks, site, HookPhase::After)?;
     Ok(value)
 }

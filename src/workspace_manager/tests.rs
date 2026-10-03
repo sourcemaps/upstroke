@@ -4319,12 +4319,28 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.changed_paths(slot, &head).map(drop)),
         ),
         (
+            "changed_paths_pausing",
+            Box::new(|slot| {
+                manager
+                    .changed_paths_pausing(&mut NoHooks, slot, &head)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_diff",
             Box::new(|slot| manager.candidate_diff(slot, &head, &head).map(drop)),
         ),
         (
             "proposal_state",
             Box::new(|slot| manager.proposal_state(slot, &head).map(drop)),
+        ),
+        (
+            "proposal_state_pausing",
+            Box::new(|slot| {
+                manager
+                    .proposal_state_pausing(&mut NoHooks, slot, &head)
+                    .map(drop)
+            }),
         ),
         (
             "unresolved_conflicts",
@@ -14892,6 +14908,7 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || {
             asked += 1;
             Again::Return
@@ -14924,6 +14941,7 @@ fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -14969,6 +14987,7 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -14999,6 +15018,7 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || Again::Undecidable {
             why: "the destination now holds a file".to_owned(),
         },
@@ -15036,6 +15056,7 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15069,6 +15090,7 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || answers.next().unwrap_or(Again::Return),
         &mut || {
             made += 1;
@@ -15095,6 +15117,7 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut std::thread::sleep,
         &mut || {
             std::thread::sleep(blocked);
             Again::Attempt
@@ -15152,10 +15175,16 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             .expect("the other thread holds R-X");
         let mut made = 0_u32;
         let started = std::time::Instant::now();
-        let result = tolerant_registry_access(&key, hold, &mut || Again::Attempt, &mut || {
-            made += 1;
-            Ok(made)
-        });
+        let result = tolerant_registry_access(
+            &key,
+            hold,
+            &mut std::thread::sleep,
+            &mut || Again::Attempt,
+            &mut || {
+                made += 1;
+                Ok(made)
+            },
+        );
         let took = started.elapsed();
         let _ = release.send(());
         holder.join().expect("the holder thread");

@@ -62,6 +62,7 @@ thread_local! {
     static MARKER_READ_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
+    static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -183,6 +184,82 @@ pub(crate) fn note_marker_read_attempt(attempt: u32) {
             }
         }
     });
+}
+
+// -----------------------------------------------------------------------
+// Acting just before one registry access
+// -----------------------------------------------------------------------
+
+/// What a test does just before one registry access of its own thread, given
+/// the access's common git dir: plant a registration the access will meet.
+pub(crate) type AccessAct = Box<dyn FnOnce(&Path)>;
+
+/// The armed act and how many accesses on this thread are still to start
+/// before it runs (1: the next).
+struct AccessPlant {
+    skip: usize,
+    act: AccessAct,
+}
+
+/// An act armed before one registry access of this thread, disarmed by
+/// dropping it, so a test that unwinds leaves nothing for whatever runs next
+/// on this thread.
+pub(crate) struct AccessPlanting {
+    /// Not `Send`: the armed act is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for AccessPlanting {
+    fn drop(&mut self) {
+        ACCESS_PLANT.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Run `act` on this thread just before the `nth` registry access that starts
+/// on it from now (1: the next one), before that access's first attempt.
+///
+/// Thread-local for the reason the removal observer is: the suite runs tests
+/// in parallel, and a pipeline's accesses run on its own thread, so only the
+/// accesses of the thread that armed it are counted — the coordinator's, when
+/// a test arms it from a hook the coordinator calls.
+pub(crate) fn before_registry_access(nth: usize, act: AccessAct) -> AccessPlanting {
+    ACCESS_PLANT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(AccessPlant {
+                skip: nth.max(1),
+                act,
+            });
+        }
+    });
+    AccessPlanting {
+        _not_send: PhantomData,
+    }
+}
+
+/// A registry access over `common_git_dir` is about to make its first attempt
+/// on this thread: run the armed act when it is this access's turn. Called
+/// from `super::note_access_start`; the act runs with nothing borrowed.
+pub(crate) fn note_access_start(common_git_dir: &Path) {
+    let due = ACCESS_PLANT.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return None;
+        };
+        match slot.as_mut() {
+            Some(plant) if plant.skip > 1 => {
+                plant.skip -= 1;
+                None
+            }
+            Some(_) => slot.take().map(|plant| plant.act),
+            None => None,
+        }
+    });
+    if let Some(act) = due {
+        act(common_git_dir);
+    }
 }
 
 /// A scratch tree for one fixture, guarded by the token that authorises its
