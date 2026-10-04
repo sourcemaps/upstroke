@@ -7914,7 +7914,12 @@ fn note_contended(common_git_dir: &Path) {
         .remove(common_git_dir);
     if let Some(released) = held {
         // Bounded: a holder that never releases is a wedged test, and the
-        // access then goes on to its deadline as if nothing held it.
+        // access then goes on to its deadline as if nothing held it. A sender
+        // dropped unsent releases the access at once, as a send does, so the
+        // code under test never waits on a holder that is gone. Whether the
+        // holder let go or failed is not this access's to judge: it may run on
+        // a pipeline, whose panic becomes a judgement, so the test that owns
+        // the holder joins it and fails on its failure (standards §10).
         let _ = released.recv_timeout(std::time::Duration::from_secs(60));
     }
 }
@@ -7927,7 +7932,10 @@ static CONTENDED_HOLDS: std::sync::Mutex<
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Hold the next `Attempt` answer of an access over `common_git_dir` until the
-/// returned sender sends or is dropped ([`note_contended`]).
+/// returned sender sends or is dropped ([`note_contended`]). A drop releases
+/// the access as a send does, so the release alone cannot tell a holder that
+/// let go from one that failed: a test that hands the sender to a thread joins
+/// that thread and fails on its failure (standards §10).
 #[cfg(test)]
 pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sender<()> {
     let (release, released) = std::sync::mpsc::channel();

@@ -3,9 +3,11 @@
 Extended notes for [`src/engine/topology/coordinator.rs`](../../../../src/engine/topology/coordinator.rs).
 
 The code is the authority for what it does; this file is the whole of its prose but for the
-concurrency protocol standards §10 places at its site, which the source keeps in four comments:
+concurrency protocol standards §10 places at its site, which the source keeps in seven comments:
 above `PipelineSeams` (what the shared handles are shared for), `SnapshotGate` (the snapshot gate),
-`Coordinator` (the coordinator's protocol) and `Client` (a pipeline's side of it). Each section
+`Coordinator` (the coordinator's protocol), `Client` (a pipeline's side of it) and `Timer` (the
+wait timer), and in `mod tests` above `TearsAForeignRegistration` and `DelayedRelease` (the two
+test workers an owner joins). Each section
 here is headed by the line of code it describes, spelled as it is in the source, so the heading is
 the grep string that finds the code.
 
@@ -2206,6 +2208,32 @@ it, and no worker of it reached the runner, so its pipeline was never spawned.
 Dispatch after its `task_dispatched`: the intent's access meets the tear; no `attempt_started` for
 the task, and no pipeline.
 
+## `mod tests` › `struct DelayedRelease {`
+
+The worker that holds the slow dispatch witness's first contended answer, and its owner: the sender
+that cancels the worker's wait for that answer, and the handle `finish`, or the drop, joins
+(standards §10; the protocol stays in the source, above the type). Repair round 11 (B6; I6-1, the
+follow-up B record's §9.23): fix P spawned the worker and discarded its handle, so a worker that
+panicked before its delay dropped its release unsent, the held access went on at once, and the
+witness passed without the delay it is about. Both i6 review lenses showed it passing in 0.04 s
+with the deadline seam undone and a panic injected into the worker.
+
+## `mod tests` › `impl DelayedRelease` › `fn finish(&mut self) -> Result<(), String> {`
+
+Cancel what is left of the worker's wait for an attempt, join the worker, and turn a panic into the
+witness's failure: a worker that panicked dropped its release unsent, and the access went on
+without the delay. A second call finds nothing to join.
+
+## `mod tests` › `impl Drop for DelayedRelease` › `fn drop(&mut self) {`
+
+Finish a worker no step finished: when the scenario already unwinds, say what the join found on
+stderr; otherwise fail with it.
+
+## `mod tests` › `fn a_delayed_release_whose_worker_panicked_fails_its_witness() {`
+
+`finish` over a worker that panicked returns the failure, never `Ok`: an owner that drops the
+worker's verdict, as the witness's discarded handle did before repair round 11, fails here.
+
 ## `mod tests` › `fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {`
 
 The dispatch's intent witness above, with its access slow to come back to its wait: the access's
@@ -2217,6 +2245,13 @@ waits to `WITNESS_REGISTRY_DEADLINE`, so the access still reaches its wait, the 
 injected there, and the dispatch still starts no attempt. With the deadline seam undone it fails
 with the Windows leg's message. Fix P; the Windows reading is a Linux stand-in's, not a measured
 cause of the guest's failure.
+
+The worker that holds the answer and releases it after the 700 ms is owned (`DelayedRelease`, repair
+round 11, I6-1): the build step spawns it and hands it over a channel to the check step, which joins
+it before its own assertions and fails when it panicked, since its release then dropped unsent and
+the access went on without the delay. Its wait for the first attempt also ends at a cancel, so a
+scenario that unwinds first joins it within the delay. The hold, its 700 ms and the witness's cost
+are unchanged.
 
 ## `mod tests` › `fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {`
 
