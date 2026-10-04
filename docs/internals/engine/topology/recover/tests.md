@@ -3256,9 +3256,28 @@ recreated the root, besides performing the row's action.
 This is the setup resume that report asks for. `FIRST_RESUMER` resumes the fixture through
 `run_recovery_order` over the real refs and its handle is dropped: the marker is removed, the
 execution root and the integration ref are created, `run_resumed` is the log's second line and no
-process holds the run (all asserted). A witness plants the dead incarnation's work after it, so the
-planted events follow a `run_resumed`, as a stepping incarnation's do. Returns the number of
-durable events, for `kinds_after`.
+process holds the run (all asserted; the last through `assert_no_process_holds_the_run`, which first
+waits for this process's own copies of the run's cleanup lease). A witness plants the dead
+incarnation's work after it, so the planted events follow a `run_resumed`, as a stepping
+incarnation's do. Returns the number of durable events, for `kinds_after`.
+
+## `fn assert_no_process_holds_the_run(fixture: &Fixture, tag: &str) {`
+
+The first incarnation's death, observed. Its resume created the integration ref through
+`update_ref`, which held the run's cleanup lease in this process for the Git child's life, and a
+fork another test thread made in that window keeps a copy until it execs or exits
+(`rundir::hold_cleanup_lease_for_child`). One observation right after the drop can read such a
+copy as a holder of the run (`PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING`). So this first
+makes the wait every later
+resume makes (`wait_for_cleanup_hold_release_observing`, bounded by `release_bound`, with
+`Fixture::holder_observed` as its acknowledgement) and then reads `rundir::is_running` once. The
+primary lock, this process's claim and an observation that fails still read running at once, and a
+copy that outlives the bound still fails. A red keeps the witness's message as its prefix and adds
+the wait's result and what acquiring the run lock answers, which tells this process's claim (its
+own pid), another holder of the primary lock (its pid), an observation error and a lease held past
+the bound apart. `a_lease_copy_a_sibling_fork_kept_from_the_first_resume_is_waited_out_before_its_death_is_read`
+and `a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death` hold both
+behaviours. Proposed frozen hunk H3, not adopted.
 
 Two simplifications remain and are the fixture's, not this helper's: `Fixture::manager` derives the
 manager under the creator's incarnation, so an intent planted through it names the creator (the
@@ -5066,7 +5085,15 @@ whose refs seam is the manager. `kill_after_run_started_creates_integration_ref`
 marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
 enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
 and the resume, the ref is created once at the recorded name and base), appends `run_resumed`
-after the committed prefix, and the log replays twice to equal states.
+after the committed prefix, and the log replays twice to equal states. **The prefix is the creator's
+work done in this process**, and P8's ref write held the run's cleanup lease here, so the resume is
+counted as a later incarnation's (`resume_attempts`) and waits for this process's own copies of the
+lease first, as every later resume does (`await_previous_incarnations_release`):
+`PR329-A-CREATION-PREFIX-RESUME-REFUSED-ON-A-HELD-CLEANUP-LEASE` was the first resume refused on such a
+copy. `before_the_resume` runs just before that: nothing for rows 31 and 32, and for
+`a_resume_over_a_creation_prefix_waits_out_a_lease_copy_a_sibling_fork_kept_from_its_ref_write` a
+parked fork holding a copy of P8's lease, which the wait releases. Proposed frozen hunk H3, not
+adopted.
 
 ## `const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";`
 
@@ -6360,7 +6387,9 @@ descriptors; these tests resume in the process that drove the run, about a
 millisecond after its last ref write, while sibling threads fork, so the
 copies this process leaked into their exec windows are still held. Before a
 later resume — the fixture's second and every one after, counted in
-`resume_attempts` — this waits, bounded by `release_bound`, until the run's
+`resume_attempts`, and a creation body's first, whose prefix this process wrote
+(`a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges`)
+— this waits, bounded by `release_bound`, until the run's
 cleanup lease is observed free, and records in `hold_past_bound` what the
 wait found. It never decides the resume: the trunk makes the real resume
 whatever the wait found, and a refusal that follows an expired wait is the
