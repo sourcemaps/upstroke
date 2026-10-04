@@ -5333,4 +5333,59 @@ mod tests {
             assert!(published.is_err(), "{shape}: a publication pin is refused");
         }
     }
+
+    #[test]
+    fn the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry() {
+        const NOTES: &str = include_str!("../docs/internals/workspace.md");
+
+        let section = NOTES
+            .split("\n## ")
+            .find(|section| section.starts_with("`const PRIVATE_INDEX_CONTROLS: [&str; 4] = [`"))
+            .expect("the notes carry the `PRIVATE_INDEX_CONTROLS` heading");
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for (proposition, pin) in [
+            (
+                "Git removes an orphan only at a later split write that creates a shared index file",
+                "Git removes an orphan only at a later split write of the checkout's own index that \
+                 creates a shared index file",
+            ),
+            (
+                "and only once the orphan is older than the configured expiry",
+                "and only once the orphan is older than the checkout's configured \
+                 `splitIndex.sharedIndexExpire`",
+            ),
+            (
+                "with the default expiry an orphan stays until it is older than two weeks",
+                "With the default, `2.weeks.ago`, an orphan stays until it is older than two weeks \
+                 and such a write follows",
+            ),
+            (
+                "with `never` automatic expiry never reclaims an orphan",
+                "with `never`, automatic expiry never reclaims it",
+            ),
+            (
+                "repeated captures can accumulate orphans",
+                "repeated captures can accumulate them",
+            ),
+            (
+                "the variable stays O3's class, with FUD-D4-ENV's",
+                "the variable is O3's class, with FUD-D4-ENV's",
+            ),
+        ] {
+            assert!(
+                section.contains(pin),
+                "the notes must state that {proposition}; looked for {pin:?} in:\n{section}"
+            );
+        }
+
+        assert!(
+            !section.contains(
+                "leaving orphan shared index files that Git's next split write of the checkout's \
+                 own index removes"
+            ),
+            "the retired claim that Git's next split write of the checkout's own index removes \
+             the orphans must not come back:\n{section}"
+        );
+    }
 }

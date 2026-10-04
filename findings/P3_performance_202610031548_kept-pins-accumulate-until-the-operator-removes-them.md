@@ -68,8 +68,28 @@ none of it; the operator does:
 - **after a crash or a failure:** an inert `.partial`, a final name whose directory fsync failed, or a private index file
   `upstroke-kept-<pid>-<ULID>*.index` in the checkout's own Git directory, none ever read again;
 - **under an inherited `GIT_TEST_SPLIT_INDEX`** (O3's class): orphan `sharedindex.*` files in the checkout's Git
-  directory, which Git's next split write of the checkout's own index removes.
+  directory, which Git removes only at a later split write of the checkout's own index that creates a shared index
+  file, and only once they are older than the checkout's `splitIndex.sharedIndexExpire` *(corrected by #331's repair
+  round 5, below: this said that Git's next split write of the checkout's own index removes them)*.
 
 A pin is a ref and keeps its objects reachable; a copy is the size of the output's new objects. Neither is lost or
 removed by any resume. The retention rule stays the owner's, as above.
 
+## The orphan shared index files outlast the next split write (2026-10-04, #331's repair round 5)
+
+D-I2-1 of #331's review round i2 (the regression lens, P3, executed on Git 2.43.0 in ordinary and linked checkouts;
+its witness is `~/orch-pr11/reviews/331-i2-witnesses/review-split-expiry-0imgakuv/`): the section above said that
+Git's next split write of the checkout's own index removes the orphan shared index files a capture leaves under an
+inherited `GIT_TEST_SPLIT_INDEX`. It does not, and the bullet is corrected in place. What removes an orphan is Git's
+own expiry, which runs only when a split write of the checkout's own index creates a shared index file, and which
+takes only files older than the checkout's `splitIndex.sharedIndexExpire`:
+- **with the default, `2.weeks.ago`,** an orphan stays until it is older than two weeks and such a write follows;
+- **with `never`,** automatic expiry never reclaims it;
+- **with `now`,** the next such write takes it;
+- **repeated captures can accumulate them:** two after a first capture, three after a second and four after a third,
+  each followed by such a write, under the default and under `never` alike.
+
+#331's repair round 5 executed the sequence again, on Git 2.43.0 and 2.55.0, in ordinary and linked checkouts, with
+the engine's own capture command line (`~/orch-pr11/logs/pr11_fud_impl5/repro/`; the record's §5.19). The cost stays
+what this section files: growth in the checkout's Git directory, the variable O3's class with FUD-D4-ENV's, and the
+owner's choice. Nothing accepts it.

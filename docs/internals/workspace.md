@@ -115,15 +115,21 @@ splitIndex.sharedIndexExpire=never`, passed by the two private-hooks builders wi
 `GIT_INDEX_FILE` on a workspace value that carries a private index file, and on no other.
 The private index file sits in the checkout's own Git directory and takes the checkout's
 configuration by design, so under `core.splitIndex=true` Git would write it split — a new
-`sharedindex.*` beside the checkout's own — and every split write unlinks each other shared
-index of that directory older than `splitIndex.sharedIndexExpire`, the one the checkout's
-own index names included. Round 3's capture did exactly that (RD3-1: `git status` exit 128
-afterwards). The first control writes the private index whole, so no split write runs for
-it; the second makes whatever still splits it — an inherited `GIT_TEST_SPLIT_INDEX` —
-unlink nothing, leaving orphan shared index files that Git's next split write of the
-checkout's own index removes (a disclosed cost, the variable O3's class). Both are
-command-scope settings, like `core.fsmonitor=false`: they decide how the private file is laid
-out and what its writes may unlink, never what the capture takes.
+`sharedindex.*` beside the checkout's own — and every split write that creates a shared
+index file unlinks each other shared index of that directory older than
+`splitIndex.sharedIndexExpire`, the one the checkout's own index names included. Round 3's
+capture did exactly that (RD3-1: `git status` exit 128 afterwards). The first control writes
+the private index whole, so no split write runs for it; the second makes whatever still
+splits it — an inherited `GIT_TEST_SPLIT_INDEX` — unlink nothing, and so leaves orphan
+shared index files in the checkout's Git directory. Git removes an orphan only at a later
+split write of the checkout's own index that creates a shared index file, and only once the
+orphan is older than the checkout's configured `splitIndex.sharedIndexExpire`. With the
+default, `2.weeks.ago`, an orphan stays until it is older than two weeks and such a write
+follows; with `never`, automatic expiry never reclaims it; and repeated captures can
+accumulate them. A disclosed cost, left to the owner's choice and not accepted here; the
+variable is O3's class, with FUD-D4-ENV's. Both are command-scope settings, like
+`core.fsmonitor=false`: they decide how the private file is laid out and what its writes may
+unlink, never what the capture takes.
 
 ## `const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];`
 
@@ -1178,3 +1184,16 @@ deleted, or its branch ref made symbolic. A pin at a `-kept` name is written on 
 parent with the captured tree; a pin at a publication name refuses. Red under `k-headcheck`,
 under `m-k-observe-only` (detached, deleted and symbolic rows) and, for the publication half,
 under `m-k-all`.
+
+## `fn the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry() {`
+
+The pin of D-I2-1 (#331's review round i2, regression lens, executed on Git 2.43.0 in ordinary
+and linked checkouts). It reads these notes, finds the `PRIVATE_INDEX_CONTROLS` section by its
+heading, collapses its whitespace, and asserts that it states what removes an orphan shared index
+file — a later split write of the checkout's own index that creates a shared index file, once
+the orphan is older than the checkout's `splitIndex.sharedIndexExpire` — with the default's
+window, `never`'s none, the accumulation and the variable's O3 class, and that the retired claim,
+that Git's next split write of the checkout's own index removes the orphans, is absent. Notes,
+not the record: the package excludes `reviews/` and `findings/`. Git's behaviour is unchanged,
+so no behaviour test can guard the sentence; the reviewer's sequence, executed again on Git
+2.43.0 and 2.55.0, is the evidence. Red on round 4's notes.
