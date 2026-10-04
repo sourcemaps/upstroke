@@ -1823,13 +1823,27 @@ and says what it did not see. A prober that took a cancel for progress fails her
 An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
 retry, a file at a destination before an add.
 
+## `mod tests` › `const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
+
+The registry access deadline a tear witness gives its own repository
+(`crate::workspace_manager::RegistryDeadline`): the production deadline's ten seconds rather than
+the suite's 500 ms. Every such witness ends its access's wait itself -- its prober finishes the
+tear, or its scheduler injects a shutdown -- once the coordinator reaches the point the witness is
+about, and how many Git processes run before that point is the platform's to say: on the Windows
+leg under the suite's load the three before a dispatch's intent witness could inject its shutdown
+took longer than 500 ms, and the access refused first. Fix P (P-all), follow-up C's round 5, in this
+change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's.
+
 ## `mod tests` › `struct TearHeld {`
 
 The run's hooks with one tear planted on the coordinator's thread at a `TearAt`, its prober owned
 and joined, and an optional `FoldAct`. `finish` cancels and joins the prober and hands back what it
 returned: `Ok` only when it finished the tear after what it waited for. The drop does the same for a
 prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
-never saw anything and the access refused at its deadline.
+never saw anything and the access refused at its deadline. While it lives it holds a
+`RegistryDeadline` giving its repository's accesses `WITNESS_REGISTRY_DEADLINE`, so every tear
+witness's access waits to the production length, whatever the platform's Git costs before the
+witness's own act ends the wait (fix P).
 
 
 ## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
@@ -1944,6 +1958,13 @@ Census C1: `integrate::decide`'s publishability check (H1).
 ## `mod tests` › `fn a_pipeline_is_served_while_an_integrations_publication_waits_on_a_torn_registration() {`
 
 Census C2: `integrate::publish`'s publishability check (H1).
+
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {`
+
+Census C6: the publishability re-check that `WorkspaceManager::compare_and_swap_ref` makes before its
+funnel, through the hooks `integrate::publish` hands it (CAS-1, the record's §9.21). The tear is
+planted before the second registry access after beta's `merge_prepared`, so `publish`'s own check
+(C2) passes and the swap's re-check meets it.
 
 ## `mod tests` › `fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {`
 
@@ -2143,7 +2164,9 @@ its wait), no wait may have slept on the coordinator's thread, **nothing may be 
 shutdown**, the integration ref must be where the log authorizes it, the invocations must balance,
 and the run must be reopened once the coordinator is gone; `check` adds what the transition must not
 have done. At `a58c2ce3`, and with the stop undone, the access passes once the tear is finished and
-the transition appends on.
+the transition appends on. When no shutdown was injected, its panic keeps the message
+"the shutdown was injected while the tear stood" and adds what the command ended on, so a
+recurrence says which path it took (fix P).
 
 ## `mod tests` › `fn two_held(tag: &str) -> Wide {`
 
@@ -2183,6 +2206,18 @@ it, and no worker of it reached the runner, so its pipeline was never spawned.
 Dispatch after its `task_dispatched`: the intent's access meets the tear; no `attempt_started` for
 the task, and no pipeline.
 
+## `mod tests` › `fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {`
+
+The dispatch's intent witness above, with its access slow to come back to its wait: the access's
+first failed attempt is held (`workspace_manager::hold_next_contended`) for 700 ms, longer than the
+suite's 500 ms registry deadline, before its deadline check, as three slow Git processes held it on
+the Windows leg (the coordinator's grant to the waiting pipeline runs the scaffold runner's
+`git rev-parse`, and the access's second attempt is another `git worktree list`). Its repository
+waits to `WITNESS_REGISTRY_DEADLINE`, so the access still reaches its wait, the shutdown is still
+injected there, and the dispatch still starts no attempt. With the deadline seam undone it fails
+with the Windows leg's message. Fix P; the Windows reading is a Linux stand-in's, not a measured
+cause of the guest's failure.
+
 ## `mod tests` › `fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {`
 
 Continuation: beta's add is broken after its `task_dispatched` (the R1 witness's set-up), a fresh
@@ -2218,6 +2253,11 @@ Integration: the frozen `decide`'s publishability check (H1) meets the tear; no 
 
 Publication: after `merge_prepared`, the frozen `publish`'s check (H1) meets the tear; no
 `task_merged`, and no compare-and-swap moved the ref.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {`
+
+Publication, CAS-1: after `merge_prepared` and `publish`'s own check, the compare-and-swap's
+publishability re-check meets the tear; no `task_merged`, and the ref is where the log authorizes it.
 
 ## `mod tests` › `fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {`
 

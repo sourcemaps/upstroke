@@ -6114,6 +6114,74 @@ fn a_parked_fork_holds_the_lease_copy_and_its_socket_and_nothing_else() {
     }
 }
 
+/// The lease observation the recovery suite's lease-copy waits make
+/// (`workspace_manager::fixture::observe_cleanup_lease`) tells apart what
+/// `observe_cleanup_hold` folds together: a lease a fork's copy holds, and an
+/// inspection that failed, both of which production reads held, fail-closed.
+/// A wait that trusted production's answer retried an inspection error until
+/// it passed (I5-1, the follow-up B record's §9.22). Each state is constructed
+/// and read by both: no lease file, a parked fork's copy, that copy released,
+/// the lease file at mode `000`, and its mode put back by a wait's
+/// acknowledgement. Evaluated on the Unix legs, where the lease exists and a
+/// mode bit binds a non-root user.
+#[cfg(unix)]
+#[test]
+fn the_lease_waits_observation_tells_a_failed_inspection_from_a_held_lease() {
+    use crate::workspace_manager::fixture::{
+        ParkedFork, a_wait_read_the_lease_held, observe_cleanup_lease, unreadable_until_read_held,
+    };
+
+    let tree = scratch("lease-told-apart");
+    let public = public_dir(&tree.path().join("repo"), "01CHILDLEASE00000000000000C");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let observed = || {
+        (
+            observe_cleanup_lease(&public).map_err(|error| error.kind()),
+            observe_cleanup_hold(&public, &mut NoHooks),
+        )
+    };
+    assert_eq!(
+        observed(),
+        (Ok(false), false),
+        "no lease file: free to both"
+    );
+
+    let parked = ParkedFork::holding_the_lease_of(&public);
+    assert_eq!(
+        observed(),
+        (Ok(true), true),
+        "the copy the parked fork {} keeps: held to both",
+        parked.pid()
+    );
+    let status = parked.release();
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+    assert_eq!(observed(), (Ok(false), false), "released: free to both");
+
+    let unreadable = unreadable_until_read_held(&public.join("cleanup.lock"));
+    assert_eq!(
+        observed(),
+        (Err(std::io::ErrorKind::PermissionDenied), true),
+        "an inspection that failed is the error here, where production reads it held"
+    );
+    assert!(
+        unreadable.never_read_held(),
+        "observing acknowledged nothing: only a wait's acknowledgement puts the mode back"
+    );
+    a_wait_read_the_lease_held();
+    assert!(
+        !unreadable.never_read_held(),
+        "a wait's acknowledgement of a held reading put the mode back"
+    );
+    assert_eq!(
+        observed(),
+        (Ok(false), false),
+        "and the lease reads free to both again"
+    );
+}
+
 /// Whether `pid` is no child of this process any more, asked without
 /// collecting anything: `waitid` with `WNOWAIT` answers `ECHILD`, so it has
 /// been collected. A child still there, running or ended, is left exactly as

@@ -6,9 +6,9 @@ category: correctness
 pr: 329
 reviewed_sha: 519cfc9e55ff3138585cd67ae0c733b2455a4fbd
 location: src/engine/topology/recover/tests.rs:17809
-provenance: undetermined
-first_bad:
-guard: final-range G6, which counts every occurrence matching this fingerprint as red and uses it to classify no other failure; then the change that takes up `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`, which re-runs this witness and deletes this file only on evidence of what held the lease
+provenance: pre_existing
+first_bad: 6a5324e72cba7440afc6024569991a81f29dc0a8
+guard: the owner's freeze ruling on the proposed frozen hunk H3 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.20, revised at §9.22), which makes this witness's first resume wait, bounded, for this process's own copies of the run's cleanup lease and fail at once on an observation that fails; on a yes, the change that merges H3 deletes this file; until then, final-range G6 counts every occurrence matching this fingerprint as red and uses it to classify no other failure
 ---
 
 ## Failure sequence
@@ -82,3 +82,62 @@ same at `d724fb16`, master `5c222ff2` and `519cfc9e`
 3. **Whether a fixture's first resume should wait out a held lease,** as #320 made its later resumes do (G5's §2.1
    notes that S1's refused resume was a fixture's first), is that change's to decide. The production refusal is not in
    question here.
+
+## The step-5 diagnosis and the proposed repair (2026-10-04)
+
+After the supervisor's step-5 merge triage made this finding mandatory merge work for #329, `pr11_fub_step5`
+diagnosed it in isolation: `~/orch-pr11/logs/pr11_fub_step5/REPORT.md`, whose directory the paths
+below are relative to. `reviewed_sha` is unchanged. This section supersedes the provenance and the empty first bad
+recorded above.
+
+**What held the lease, in a natural sighting at #329's head** (`repro/natural/head-05.log`). The attribution was the same
+as for W1's file, over 11 natural whole-suite runs of each tree (`--skip real_docker`):
+- The first resume's worktree-lock scan read the lease held: the file opened and `flock` answered `EWOULDBLOCK`, and a
+  re-probe 27 µs later was still held.
+- P8's ref write had held the lease for 16.6 ms, and the hold was gone before the scan reached it.
+- No reaper of the run exists in this fixture, and P8's Git child had exited; it runs with no hooks and no fsmonitor,
+  so it leaves no descendant. So the holder was a copy of P8's lease descriptor in a process the test process forked
+  during that write: `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`'s class, now shown for this witness. The
+  process itself was not captured.
+- At master this witness did not fail in 11 runs. The archive holds three natural failures before #329: `d724fb16`,
+  `e980146` and `78f99c70` (`diag/census/windows.txt`).
+
+**By construction** (`repro/CONSTRUCTED.txt`). The same forker fails this witness 8 of 10 at `d724fb16`, 4 of 10 at
+master and 6 of 10 at #329's head, and 0 of 10 with the closing control. At `6a5324e7`, where this body's P8 first ran
+on the repository's own ref, it fails 4 of 10; at its parent `d1c82601`, where P8 ran on the fake refs, 0 of 10. A
+copy planted before the resume refuses with this fingerprint, and #320's wait, run before the resume, waits the copy
+out.
+
+**Why #320's remedy did not cover it.** Its wait (`await_previous_incarnations_release`) runs only before a fixture's
+second and later resumes, and this resume is the fixture's first. The prefix is the creator's work done in this
+process, which counts as no resume.
+
+**Provenance `pre_existing`, first bad `6a5324e7`** (`REPORT.md` §4.1).
+
+**The repair, proposed:** H3 (the record's §9.20; commit `3ce7bb46`). The body counts the prefix it wrote through the
+funnels as a previous incarnation, so its first resume waits for this process's own copies as every later resume does.
+A regression test plants a copy of P8's lease before the resume, and the body adopts the ref. `recover/tests.rs` is
+G6-frozen, so H3 is proposed in RULING P-1's form, conditional on the owner's freeze ruling, and **not adopted**. This
+file stays until the change that merges H3 deletes it.
+
+## H3 revised at the B4 round (2026-10-04)
+
+`pr11_fub_impl10` revised H3 after the i5 review's I5-1 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.2 and
+§9.22.3). `reviewed_sha`, provenance and first bad are unchanged, and the guard above now names the revised hunk.
+
+- **What was wrong with H3 as proposed.** It counted the creation's prefix as a previous incarnation, as the section
+  above says, so the first resume waited through #320's `await_previous_incarnations_release`. That wait observes
+  through `cleanup::is_held`, which reads an inspection error as held. So an unreadable `cleanup.lock` was waited on as
+  a holder, and the resume converged once it was readable again, where before H3 the resume refused on that error at
+  once.
+- **The revision.** The body no longer counts its prefix in `resume_attempts`. Before its first resume it waits through
+  `await_own_lease_copies_release`, which keeps #320's bound, rest and acknowledgement but observes through the
+  fixture's `observe_cleanup_lease`. Only a lease found held is waited on, and an observation that fails fails the body
+  at once, naming its error. A copy past the bound leaves the resume to production, whose refusal carries the expired
+  wait's note, as before.
+- **Its regression tests.** `a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once` is red
+  at `d7865780` with the witnesses alone, and green under the reviewer's pre-H3 control and at the revised code
+  (`~/orch-pr11/logs/pr11_fub_impl10/repro/SUMMARY.txt`).
+  `a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume` holds the expired wait's note.
+- **Still proposed.** The revised H3 is in RULING P-1's form, conditional on the owner's freeze ruling, and not adopted.
+  This file stays until the change that merges it deletes the file.
