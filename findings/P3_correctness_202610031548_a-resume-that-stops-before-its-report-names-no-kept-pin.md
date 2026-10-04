@@ -47,3 +47,17 @@ Deliver a failing legacy command's warnings: render the partial report the faile
 warnings on the error (`UpstrokeError::WithWarnings` exists for that shape). A resume that refuses at its reclaim could
 also look the pins up before it refuses, which is a change to the frozen legacy resume's order and needs its own owner
 decision, as D's did. Nothing here is proposed.
+
+## R-D1's guarded discard shares the delivery limit (2026-10-04, #331's implementation round 3)
+
+R-D1's preservation design, round 4, implemented on draft #331 and PROPOSED conditional on the owner's decision O8
+(`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), gives the resume three more warnings: the pin it put back from
+a copy, the fresh copy it wrote (with the `git fetch` that restores the pin from it), and what stayed in the checkout.
+**They are delivered as the kept-pin warning is, and lost the same way:** a resume whose later step fails returns that
+error without them. Executed by `an_unreadable_leftover_and_a_nested_repository_are_left_in_place_and_named`: the
+guarded discard leaves an unreadable file and a nested repository in place, the resumed attempt's own capture then
+fails on them, and the error carries none of the resume's warnings, the leftovers warning among them. What is not lost:
+the run's event log records what the discard removed (`RunResumed.discarded`, which lists the paths found less those
+left in place), the kept pin and its copies survive, and a guarded discard that refuses names its pin and the run's
+public directory, where the copies are, in its own refusal text.
+

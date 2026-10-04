@@ -8,7 +8,7 @@ reviewed_sha: 92c4ca81f9209d218df4534ee71d3445dc2906e1
 location: src/workspace.rs:871
 provenance: pre_existing
 first_bad: predates PR11: the legacy engine's four registry Git children have run untolerant since before PR5 froze `src/workspace.rs`; measured at the Git level on master `92c4ca81`'s argv by PR #329's first design round
-guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, and (e1′) and (e2′) by B-PRESERVE conditional on the kept pin's write; this file stays open until that pull request merges, and after it for what remains, R-D1 — a refused attempt whose kept pin cannot be written, where one storage fault can fail both the snapshot's registration and the pin (FUD-D4-PINSAMEFAULT), or a HEAD moved from the captured parent refuses the pin while the resume's branch check guards the checkout only until HEAD is back at the head the event log records (#331's early review, E1) — until a faithful preserving mechanism keeps the output durable without the pin, from the design round the PR11 orchestrator commissions for it, or the owner decides it concretely
+guard: follow-up D's implementation, on draft #331 and PROPOSED conditional on the owner's decision O8 (decision B), closes (e1) and (e2) by corrected B1′, (e1′) and (e2′) by B-PRESERVE, and R-D1 — a refused attempt whose kept pin cannot be written (FUD-D4-PINSAMEFAULT's one storage fault), or whose HEAD moved from the captured parent (#331's early review, E1) — by R-D1's preservation design, round 4 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256 `f9e81c07…`: K, G4 and N, implemented by #331's implementation round 3 with its instrument rows, conditional on O8 as D's texts are); this file stays open until that pull request merges — after PR #329, O8's adoption, and the required reviews, the regular verdict on R-D1's design among them, which is unmet
 ---
 
 ## Failure sequence
@@ -227,3 +227,48 @@ captured tree, and the resume names it — and it turned D's own
 (`~/orch-pr11/logs/pr11_fud_impl2/repro/K1-SUMMARY.txt`). It changes `Workspace::prepare_commit_from_candidate`, which
 D's proposed `src/workspace.rs` text does not name and whose `HEAD` refusal D's design takes as it is (its record,
 §1.4), and it leaves the ref-store shape above as it was. It is that design round's input, not adopted.
+
+## R-D1's preservation, implemented (2026-10-04, #331's implementation round 3)
+
+**Implemented on draft #331, and not granted.** R-D1's preservation design, round 4
+(`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256
+`f9e81c078dc4be62e1c4cda24563ecb061e3971b1b06e438cc63a85a09a95415`), is implemented on #331's branch as its record's
+§5.17 gives it: part K (a kept pin is written whatever `HEAD` is), part G4 (the resume removes the attempt in flight's
+copy only once a kept pin of upstroke's and a copy of it that same resume made durable both hold it, capturing through a
+private index file of the checkout's own Git directory, and reverting exactly the captured changes), and part N (an
+attempt error after the worker ran, and a reviewed candidate whose publication fails, keep the checkout and pin what it
+holds). Its code, its amended `effects/allowlist.toml` texts and its `design/15` sentences are **proposed, conditional
+on the owner's decision O8**, exactly as D's own are; its three instrument rows (two `effects/wrappers.toml` rows with
+their `clippy.toml` denials, and the payload census of `src/runner/contract.rs`, five `.env(` to seven) are first-limb
+instrument rows under the standing delegation, as the supervisor reads it, and not an owner adoption.
+
+**What it closes once merged, with its engine witnesses** (each red at D's head as the merge has it, green here, and
+red under a mutation that brings its loss back; the record's §5.17 gives every row and its mutations):
+- **`HEAD` moved:** `a_branch_moved_before_capture_and_back_keeps_the_output_through_the_first_resume` (A1, A1t),
+  `a_branch_moved_before_capture_and_reset_hard_back_keeps_the_output_in_the_pin` (A1h),
+  `a_branch_moved_after_capture_keeps_the_output_pinned_at_its_captured_identity` (A2, A2h) and
+  `a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused` (A3 to A6) — the moved-`HEAD` case of the
+  section above, executed through the engine;
+- **the store:** `one_storage_fault_that_refuses_the_snapshot_and_the_pin_loses_nothing` (B1, FUD-D4-PINSAMEFAULT's one
+  fault), `a_resume_refuses_while_the_ref_store_cannot_take_the_kept_pin` (B2) and
+  `a_store_fault_at_the_pins_objects_or_its_reflog_loses_nothing` (B3, B4);
+- **the name:** `a_resume_writes_the_kept_pin_a_blocked_name_refused_and_refuses_while_it_is_blocked` (C1, C2, C4) and
+  `a_foreign_ref_at_the_kept_name_is_neither_trusted_nor_named_as_the_output` (C3);
+- **a crash, and a pin lost:** `a_run_that_dies_after_its_capture_loses_nothing_on_resume` (E1),
+  `a_run_that_dies_between_its_pins_commit_and_its_ref_loses_nothing_on_resume` (E2) and
+  `a_kept_pin_removed_before_the_resume_is_written_again_from_the_checkout` (F1, F2).
+
+**What it does not close, stated.** D1 (a reftable lock held during the pin) and D2 (process creation failing for one
+of the pin's children) are the harness's and reasoned: this box's Git, 2.43.0, has no reftable, and no test here makes
+process creation fail; both are a pin write that fails, which G4 writes at the resume as it does C1's. "No loss" holds
+in the covered cases only, never as a universal guarantee; the proposal's §9.3 is the boundary (another actor destroying
+the checkout before the copy exists, or the run's directory after it; the inherited repository context, O3's; the
+instant inside phase A between Git's up-to-date check of a file and its unlink; what a disk or a kernel does). The new
+refusals and costs are the proposal's §9.1, disclosed in the record.
+
+**Why this file stays.** The implementation is a draft: O8 is not adopted, the regular verdict on R-D1's design is
+unmet (its routing held and unassigned), D's merge waits on PR #329, and the required reviews of this implementation
+have not run. Nothing here waives preservation, regrades this file, or clears G6; (e2) and (e2′) block G6 until D is
+merged and validated. N1 and N2, found beside R-D1, are filed on their own
+(`PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`,
+`PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`).

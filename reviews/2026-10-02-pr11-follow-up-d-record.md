@@ -36,7 +36,9 @@ branch. Round 2 (§2) is `pr11_fud_design2`'s; its figures are under `~/orch-pr1
 `fud3/…`. Round 4 (§4) is `pr11_fud_design4`'s; it runs no witness, and its own files are under
 `~/orch-pr11/logs/pr11_fud_design4/`, cited as `fud4/…`. The implementation (§5) is `pr11_fud_impl`'s; its figures are
 under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`. Its repair round 2 (§5.16) is `pr11_fud_impl2`'s; its
-figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`.
+figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`. Its implementation round 3 (§5.17), which
+implements R-D1's preservation design, is `pr11_fud_impl3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_impl3/`,
+cited as `fudi3/…`.
 
 ## 0. Status
 
@@ -48,6 +50,7 @@ figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`.
 | Design, round 4 (§4) | **PROPOSED — the last design round before the owner's consolidated question,** pending the owner's decision B. It answers round 3's review (`ac18321f`: three lenses, CHANGES_REQUIRED; the concurrency lens re-run after a capacity error). It is text only: no machinery, no adopted closure, and the five exact unfreeze texts unchanged. R-D9 is divided by whether the deletion fails the add, so a deletion before a successful add returns is inside it (FUD-D3-DURINGADD). C-SIDE is restated as a partial mitigation with two P1 residuals, its stronger forms are weighed, its cost is stated as three widened `effects/allowlist.toml` texts, and it is aligned with #329's corrected closure 1 at `8df42436` (FUD-D3-CSIDEPROOF). The add veto's empty-destination arm is described by what it observes, in `design/15` too (FUD-D3-TAKEOVERWORD). This head changes no code. |
 | Implementation (§5) | **Implemented on this branch as a draft, and PROPOSED — conditional on the owner's decision O8 (decision B), and not granted.** D's reviewed proposal at `9b2262f4`, on #329's head `54a1ff14` merged in (not rebased), with design review round 4's applicable fixes (the PR11 decision appendix's §10.3 and §11 D rows). C-SIDE (O1) and ENV-1's widening (O3) are isolated and not implemented. **Not merge-ready:** it waits on O8's adoption and on #329 merged (O9, O14, O11). Every new test is red on its first-bad shape and killed by a mutation (§5.6, §5.7). The implementation is not yet reviewed. |
 | Implementation, repair round 2 (§5.16) | **The early review's E1 to E4 repaired**, on the same terms: draft, PROPOSED, conditional on O8, not merge-ready. Two lenses read `20e27724` before CI was green on every leg, so their review is early evidence and clears nothing for the merge. E1 corrects the moved-`HEAD` safety claim: the resume's branch check guards the checkout only while `HEAD` differs from the head the event log records, and the executed loss is R-D1's, which stays open at P1 for a preserving mechanism or the owner. E2 narrows R-D7 to refusals that recur after a successful reclaim. E3 rewrites T-L5 so that no Git child it observes runs inside the access's deadline. E4 recounts the Windows path budget with `ScratchTree::acquire`'s prefix. CI at `20e27724` failed only on #329's own test, routed to #329. |
+| Implementation, round 3 (§5.17) | **R-D1's preservation design, round 4, implemented as a draft, and PROPOSED — conditional on O8, exactly as D's own texts.** The proposal `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (sha256 `f9e81c07…5415`; its regression lens PASSED, its required regular verdict UNMET, its routing held): part K (a kept pin written whatever `HEAD` is), part G4 (the resume's guarded exact discard of the attempt in flight, behind a kept pin and a copy that same resume made durable) and part N (an attempt error after the worker ran, and a publication failure, keep the checkout and pin it), with the design's three instrument rows. B's published head `55029628` is merged **provisionally**, not as B's final head. N1 and N2 are filed. Not merge-ready, unreviewed, and R-D1's preservation is the owner's through O8. |
 
 ## 1. Design
 
@@ -585,8 +588,14 @@ pin without a successful settlement that is not orphan residue and is not remove
 2. **A legacy attempt that a registry refusal stops after capture loses nothing, conditional on the pin's write.** Its
    captured candidate stays in the checkout and is pinned. The resume names the pin with commands that take it back,
    deletions included, and never removes it. The exception is the pin-write failure of §1.4, which one storage fault
-   can cause. *(Implementation, §5.9: FUD-D4-PINSAMEFAULT.)*
-3. **Every other legacy error path is as at master.**
+   can cause. *(Implementation, §5.9: FUD-D4-PINSAMEFAULT.)* *(Implementation round 3, §5.17: R-D1's preservation
+   design writes the kept pin whatever `HEAD` is and has the resume remove the checkout's copy only once a kept pin and a
+   copy of it the resume made durable both hold it, writing the pin at the resume when the refusal's could not be; claim
+   2 no longer depends on the refusal's pin, within the covered cases §5.17 gives, conditional on O8.)*
+3. **Every other legacy error path is as at master.** *(Implementation round 3, §5.17: no longer. R-D1's part N keeps
+   the checkout and pins what it holds on every attempt error after the worker ran and on every publication failure of a
+   reviewed candidate — `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT` and
+   `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`, filed; its new refusals and costs are §5.17's.)*
 
 **The G6 classification.** These are the lenses' consensus (`~/orch-pr11/reviews/review-329-d4-triage.md`), the
 finding's reading, and #329's record §5.6 at `ed3a97d9`. Per the addendum, D closes the mixed cases only together with
@@ -604,8 +613,8 @@ therefore depends on that helper converging in #329's review and landing as its 
 
 | | What | Consequence | Where |
 |---|---|---|---|
-| R-D1 | A pin that cannot be written (`HEAD` moved, or the ref store failed at that moment) | the output is only in the checkout, and the refusal says so; a resume refuses on a moved `HEAD` before its discard only while `HEAD` differs from the head the event log records, and discards with no pin once it does not (Implementation, §5.16: E1, executed); a ref-store fault means the resume discards as today, and one storage fault can cause it (FUD-D4-PINSAMEFAULT; Implementation, §5.9) | §1.4 |
-| R-D2 | A crash after capture | the resume discards, as today; pre-existing, not this finding | §1.4 |
+| R-D1 | A pin that cannot be written (`HEAD` moved, or the ref store failed at that moment) | the output is only in the checkout, and the refusal says so; a resume refuses on a moved `HEAD` before its discard only while `HEAD` differs from the head the event log records, and discards with no pin once it does not (Implementation, §5.16: E1, executed); a ref-store fault means the resume discards as today, and one storage fault can cause it (FUD-D4-PINSAMEFAULT; Implementation, §5.9). *(Implementation round 3, §5.17: R-D1's preservation design implemented, conditional on O8: the pin is written whatever `HEAD` is, and the resume pins and copies the checkout before any discard; closed in §5.17's covered cases once merged.)* | §1.4 |
+| R-D2 | A crash after capture | the resume discards, as today; pre-existing, not this finding. *(Implementation round 3, §5.17: the resume's guarded discard pins and copies the leftovers first; E1 and E2 executed through the engine.)* | §1.4 |
 | R-D3 | D's own Git child killed by a signal between the takeover and its first write | attempted again until the deadline, then refused: kept, never Git state | §1.3 |
 | R-D4 | Windows: no file identity in std at MSRV | the veto reads only "an empty directory"; a takeover whose junk removal left the destination empty refuses at the deadline: kept | §1.3 |
 | R-D5 | A resumed run that fails | it returns its error without the resume's warnings, as every legacy warning; the pin was named by its own refusal, and stays | §1.4 |
@@ -2836,7 +2845,9 @@ capture.
 arm: with a refused candidate recorded, `prepare_commit_from_candidate` pins it at the attempt's `prepared_pin_ref`
 followed by `-kept`, and the arm returns `UpstrokeError::RegistryRefused` naming the pin ("…; the worker's output for
 attempt <n> of `<task>` is kept in this checkout and pinned at `<pin>`") or its failure ("…, and pinning it at `<pin>`
-failed: <error>"), with no discard. Every other error discards, as before.
+failed: <error>"), with no discard. Every other error discards, as before. *(Implementation round 3, §5.17: no
+longer — part N keeps and pins on every attempt error after the worker ran, and the refused arm's pin is written whatever
+`HEAD` is.)*
 
 **`src/engine/resume.rs`** (PR5-frozen): `KEPT_PIN_SUFFIX` imported; the lookup (`:562`) over every attempt the replayed
 log records (`progress[i].attempts`), through `prepared_pin_target`; the discard unchanged; and one warning (`:584`)
@@ -3117,7 +3128,9 @@ it changes no file under `src/` or `effects/`:
   fail both the registration and the pin, and a resume after the store is writable again discards the checkout
   (executed at the Git level by the restore lens on the three Gits; the engine's consequence reasoned). *(Implementation,
   §5.16: and a `HEAD` moved from the captured parent, which refuses the pin, once `HEAD` is back at the head the event
-  log records — E1, executed; the file gains a dated section for it.)*
+  log records — E1, executed; the file gains a dated section for it.)* *(Implementation round 3, §5.17: R-D1's
+  preservation design is implemented on this draft, conditional on O8; the file stays open until the merge, which waits on
+  O8, #329 and the required reviews, and gains a dated section naming the engine witnesses.)*
 
 **Not filed, because this change closes them** once merged:
 - **with a regression test and a mutation** (§5.5 to §5.7): FUB-D5-INDEX, FUB-D5-RESTORE, FUB-D4-B1PREDICATE,
@@ -3318,3 +3331,488 @@ pin lookup (`:562`). The event log is unchanged, and exactly one pin survives.
 - O8 stays the owner's.
 
 The pull request body records the head the ten gates passed at, with the logs under `fudi2/gates/`.
+
+### 5.17 Implementation round 3: R-D1's preservation design, round 4 (K, G4 and N), N1 and N2, and B's head merged provisionally
+
+> **On §5's terms:** a draft, PROPOSED, conditional on the owner's decision O8, and not merge-ready. Its merge waits on
+> O8's adoption, on #329 merged (O9, O14, O11), on the integration of #329's *final* head, and on the required reviews:
+> **the regular review of R-D1's design is unmet** (its routing held and unassigned), and this draft does not clear it.
+> Nothing here adopts an owner decision, a contract or a freeze. The round adds four commits on `88376a10` — the
+> provisional merge `47e62ee5`, the implementation `45b1a7b1`, the test revision `a4972d09` and this record's commit —
+> with no rebase, and no `reviewed_sha` is re-stamped.
+
+**Who and on what.** `pr11_fud_impl3` (`claude-opus-5-5`, `max`), a fresh implementation session `orch_pr11` spawned on
+2026-10-04 on `88376a10` (CI run 37152667513 green on every job, `fudi3/ci/jobs-37152667513.tsv`). Its brief is
+`~/orch-pr11/briefs/pr11_fud_impl3.md`; round 1's and round 2's briefs and `~/orch-pr11/d-impl/UNIT.md` bind where it
+does not change them. Its authority is the supervisor's scheduling determination
+`/home/ubuntu/babysit-pr11/evidence/d-r4-implementation-authority-20261004.md` (sha256 `26a15e96…`), not a new owner
+grant. The design is `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, sha256
+`f9e81c078dc4be62e1c4cda24563ecb061e3971b1b06e438cc63a85a09a95415` (round 4; its regression lens PASSED with no
+finding, `~/orch-pr11/reviews/review-rd1r4-f9e81c07-triage.md`). Its figures are under `fudi3/…`. The stopped round-2
+regular review of R-D1's design was not read, opened, run, used or listed, nor its parent directory; nothing here
+retries, rewords, reroutes or relabels it.
+
+#### 5.17.1 #329's published head, merged provisionally
+
+- **`47e62ee5`** merges #329's published draft head `550296284ffdcf02b7e6e4cde70d202c4caceb76` (parents `88376a10` and
+  `55029628`), a merge and not a rebase. **It is PROVISIONAL:** #329's step-5 witness work and CAS-1 remain open, so
+  this is not #329's final head. A later step integrates #329's actual final code and text, with its validation, native
+  CI and review; this merge cannot count as that final integration. #329's CI at `55029628` (run 37186359003) passed
+  every job (`fudi3/ci/jobs-37186359003-B.tsv`).
+- **No textual conflict** (`fudi3/merge-preview.txt`): #329's delta since `54a1ff14` touches none of D's legacy files.
+- **One semantic conflict, resolved in the merge** so that it compiles. #329's repair rounds 3 and 6 (`eef97e41`, its
+  R1; `22d70ef6`, its I2-1) give `tolerant_registry_access` a `pause_for` argument, the wait between attempts that the
+  access used to sleep itself, so D's three legacy calls no longer compiled. They now pass a private
+  `legacy_registry_pause`, a sleep on the calling thread, which is the wait an access with no hooks makes
+  (`EffectHooks::registry_pause`'s default): they wait as before. D's proposed `src/workspace.rs` text gains one clause
+  naming it ("and one more sleeps out, on the calling thread, each pause the three accesses wait between their
+  attempts"), proposed and conditional as the rest, and `docs/internals/workspace.md` a section.
+- **At the merge:** `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check` rc 0, and `cargo
+  test --all-targets --all-features` 3,164 passed, 0 failed, 130 ignored, and the binary's 10
+  (`fudi3/build/test-merge-2.log`, `clippy-merge-2.log`, `fmt-merge-2.log`; `MERGE-STATE.txt`).
+- **What #329's head brings that is #329's own:** its proposed frozen hunk H1 in `src/engine/topology/integrate.rs`, a
+  G6-frozen file (#329's `e369b251`, H2 withdrawn by `0edfc509`), conditional on #329's freeze ruling and not adopted.
+  It is on this branch only through the provisional merge (§5.17.8).
+
+#### 5.17.2 What it implements, and how faithfully
+
+- **Two code commits.** `45b1a7b1` implements the design; `a4972d09` revises four of its tests after the first full
+  mutation pass (§5.17.3), test code and its notes only. The final code is `a4972d09`'s, and every figure below is at
+  it unless it says otherwise.
+- **The design's two patches, applied as they are:** `rd1r4-proposed.patch` (sha256 `5b7a5e5b…`) and
+  `rd1r4-instruments.patch` (`06dedba6…`), `fudi3/patch-inputs.sha256`. Applied to the merge's files, each designed file
+  is the implementation's byte for byte — `src/engine/coordinator.rs`, `effects/wrappers.toml`, `clippy.toml` and
+  `src/runner/contract.rs` — or differs only as stated here (`fudi3/patch/FIDELITY.txt`):
+  1. **one compile fix:** `canonical_common_dir`'s `Workspace` literal, a fourth literal (D's own, `cb1beacf`) that the
+     design's census of three missed, gains `private_index: None`;
+  2. **rustfmt**, layout only, in `src/workspace.rs` and `src/engine/resume.rs` (`fudi3/build/rustfmt-*.diff`);
+  3. **`with_private_index`'s two-line comment moved** to its section of `docs/internals/workspace.md`: a module with a
+     notes file carries no other comment (`CODING_STANDARDS.md` §13);
+  4. `src/engine/tests.rs`: the designed file (the design's T-P7, T-P7b and T-P8 hunks and its helper
+     `block_the_kept_pin_and_tear_after_capture`) is a byte prefix of the implementation's, the new tests appended after
+     it; `src/workspace.rs`'s test module keeps every designed byte before its closing brace, with T-K1 after them.
+- **Part K** (`src/workspace.rs`): `prepare_commit_from_candidate` observes and compares `HEAD` only for a pin whose
+  name does not end with `KEPT_PIN_SUFFIX`, which moves here (`pub(crate)`); the coordinator and the resume import it.
+- **Part G4** (`src/workspace.rs`, `src/engine/resume.rs`): with exactly one attempt in flight, the resume removes the
+  checkout's uncommitted paths only through `Workspace::discard_into_kept_pin`: a capture into a private index file of
+  the checkout's own Git directory, named by `GIT_INDEX_FILE` with `-c core.splitIndex=false -c
+  splitIndex.sharedIndexExpire=never` (`PRIVATE_INDEX_CONTROLS`, round 4's RD3-1), every `diff-tree` on that private
+  index; the footprint of what stands in the revert's way, added with `-f`; the attempt's copies read first, a missing
+  pin put back from one (`git bundle unbundle`, a create-only `update-ref`), a pin and a copy that disagree refused; a
+  fresh copy written by this resume — `.partial`, `list-heads`, `sync_all`, rename, the directory's `sync_all` —
+  whatever copies exist (round 4's RD3-2); the two-phase revert (`read-tree -m -u R T`, then `checkout-index` with no
+  `-f`); the index reset; the post-check. Any failure refuses, discarding nothing the pin and its durable copy do not
+  hold. The moved-branch refusal names `git update-ref refs/heads/<branch> <recorded>`.
+- **Part N** (`src/engine/coordinator.rs`): every attempt error after the worker ran (N1) and every publication failure
+  of a reviewed candidate (N2: its branch not the run's, its prepared commit refused, its settlement not appended) keeps
+  the checkout and pins what it holds (`kept_on_error`; `Workspace::pin_checkout` for N1), returning the error with a
+  warning naming the pin or its failure.
+- **The O8 texts** (`effects/allowlist.toml`; `fudi3/texts/apply_o8_texts.py`): the proposal's §8.2 with round 2's
+  §6.2 where §8.2 keeps it — `src/workspace.rs`'s four edits (its third paragraph as round 4 gives it),
+  `src/engine/coordinator.rs`'s and `src/engine/resume.rs`'s replacement paragraphs, and `src/engine/tests.rs`'s
+  amendment — each still under D's TOML comment "PROPOSED, conditional on the owner's decision O8 (decision B), and not
+  granted"; `src/engine/attempt.rs`'s text and every `path`, `allows`, `packet` and `shrinks_when` unchanged; the
+  proposal's `--` rendered as the file's em dash. **`design/15`:** round 2's four places, the discard sentence as round
+  4 gives it (§8.3), the PROPOSED marking kept; no sentence `src/export.rs` pins moves.
+- **The three instrument rows** (`rd1r4-instruments.patch`, byte for byte): `Workspace::pin_checkout` and
+  `Workspace::discard_into_kept_pin` in `effects/wrappers.toml`'s `effectful` list for `src/workspace.rs`, with the
+  block comment, and their two `clippy.toml` denials; and `src/runner/contract.rs`'s payload census row for
+  `src/workspace.rs`, five `.env(` to seven. **They are first-limb instrument rows under the standing delegation, as the
+  supervisor reads it, and not an owner adoption.** The canonical packet and every adopted grant are unchanged.
+
+#### 5.17.3 The tests
+
+Each test waits on a handshake, never time alone: an after-capture hook, a child's exit, or a `git` shim's own marker.
+Every call into the legacy engine is bounded (`bounded`, `bounded_child`: 300 s), so a mutation that wedges fails rather
+than hangs. No test needs a seam in production code. The rows are the proposal's §10.1 tables (round 4's, round 3's and
+round 2's with round 1's T-K1 and T-R1 to T-R12); "added" rows are this round's, for R-D1 cases and controls the tables
+left to the harness. "D's head" is the first-bad shape `base-firstbad` — the four legacy modules as the merge
+`47e62ee5` has them, the implementation's tests kept (`KEPT_PIN_SUFFIX` spelled `"-kept"`, its home at D's head being
+private) — and the second base is the earlier design round's patch, `patch -p1` on the merge's modules, compiled with
+the implementation's tests (round 1's for rounds 1 and 2, round 2's for round 3, round 3's for round 4; an added row's
+is in the table). The campaign ran at
+`a4972d09` (`fudi3/mutation/`, one directory per shape with its diff, log and summary; `fudi3/tools/campaign.py`;
+`fudi3/record/TESTS.md`, `MUTATIONS.md`, `COVERAGE.txt`).
+
+**A first full pass, superseded** (`fudi3/mutation-pass3-superseded/`, its `SUPERSEDED.txt`; two earlier partial passes
+are `mutation-pass1-superseded/` and `mutation-pass2-superseded/`). Run at `45b1a7b1` and read against the design's
+rows, it found four tests asserting more, or other, than their rows, and two transforms not doing what their
+definitions say. `a4972d09` revises the tests:
+- **T-GRESET** also required the first resume to be a resume refusal, which D's head ends as a Git error from
+  `git clean`; its row asserts only the second resume.
+- **T-X18** required a kept pin; its row asserts that `cache.bin` stays and that no pin holds it.
+- **T-X20** let its first resume die inside the resumed attempt, so its second resume met attempt 2. The row's two
+  resumes in a row meet one attempt, and only then does round 1's exact rule see the nested repository it wedges on.
+- **T-R9** compared the checkout with the pin after the restore, which a pin of `HEAD`'s tree also satisfies; round 1's
+  row has the resume pin the leftovers.
+
+The transforms, corrected in `fudi3/tools/campaign.py` (the pass used `campaign-before-fidelity3.py`):
+- **`shared-index`** kept G4's footprint, where the harness's mutation of that name takes none;
+- **`m-g-trust`** dropped only the pin's identity check, where round 1 defines it as trusting any ref at the kept name,
+  content included.
+
+The pass below is the whole campaign again, at `a4972d09`.
+
+| Row | Test | Case | Round | D's head (first-bad): predicted / actual | Second base: predicted / actual | Killing mutations (actual) |
+|---|---|---|---|---|---|---|
+| T-K1 | `a_kept_pin_is_written_whatever_head_is_and_a_publication_pin_is_not` | A, K's scope | 1 | red / red | R1: green / green | `k-headcheck`, `m-k-all`, `m-k-observe-only` |
+| T-R1 | `a_branch_moved_before_capture_and_back_keeps_the_output_through_the_first_resume` | A1, A1t | 1 | red / red | R1: green / green | `k-headcheck`, `m-add-returns`, `m-discard`, `m-g-parent-is-head`, `m-index`, `m-removepin`, `m-restore` |
+| T-R2 | `a_branch_moved_before_capture_and_reset_hard_back_keeps_the_output_in_the_pin` | A1h | 1 | red / red | R1: green / green | `k-headcheck`, `m-add-returns`, `m-discard`, `m-index`, `m-removepin` |
+| T-R3 | `a_branch_moved_after_capture_keeps_the_output_pinned_at_its_captured_identity` | A2, A2h | 1 | red / red | R1: green / green | `k-headcheck`, `m-add-returns`, `m-advice`, `m-discard`, `m-index`, `m-removepin` |
+| T-R4 | `a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused` | A3 to A6 | 1 | red / red | R1: green / green | `k-headcheck`, `m-add-returns`, `m-discard`, `m-index`, `m-k-observe-only` |
+| T-R5 | `one_storage_fault_that_refuses_the_snapshot_and_the_pin_loses_nothing` | B1 | 1 | red / red | R1: green / green | `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-none`, `m-index`, `m-removepin` |
+| T-R6 | `a_resume_refuses_while_the_ref_store_cannot_take_the_kept_pin` | B2 | 1 | red / red | R1: green / red | `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `m-pinfail-discards`, `m-removepin` |
+| (B3, B4) | `a_store_fault_at_the_pins_objects_or_its_reflog_loses_nothing` | B3, B4 | added | - / red | R1: - / red | `m-g-after-discard`, `m-g-none`, `m-pinfail-discards`, `m-removepin`, `n1-discard`, `n1-nopin` |
+| T-R7 | `a_resume_writes_the_kept_pin_a_blocked_name_refused_and_refuses_while_it_is_blocked` | C1, C2, C4 | 1 | red / red | R1: green / red | `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-discard-anyway`, `m-g-none`, `m-pinfail-discards`, `m-removepin` |
+| T-R8 | `a_foreign_ref_at_the_kept_name_is_neither_trusted_nor_named_as_the_output` | C3 | 1 | red / red | R1: green / red | `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-discard-anyway`, `m-g-none`, `m-g-parent-is-head`, `m-g-trust`, `m-pinfail-discards`, `m-removepin` |
+| T-R9 | `a_run_that_dies_after_its_capture_loses_nothing_on_resume` | E1 | 1 | red / red | R1: green / green | `m-g-after-discard`, `m-g-none`, `m-removepin` |
+| T-R9 (E2) | `a_run_that_dies_between_its_pins_commit_and_its_ref_loses_nothing_on_resume` | E2 | 1 | red / red | R1: green / green | `m-g-after-discard`, `m-g-none`, `m-removepin` |
+| T-R10 | `a_kept_pin_removed_before_the_resume_is_written_again_from_the_checkout` | F1, F2 | 1 | red / red | R1: green / green | `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-none`, `m-removepin` |
+| T-R11 | `a_resume_refuses_while_the_checkout_holds_more_than_its_kept_pin` | X3 | 1 | red / red | R1: green / red | `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `m-g-subject-only`, `m-g-trust`, `m-removepin` |
+| T-R12 | `leftovers_with_no_attempt_in_flight_are_discarded_as_before` | X2, the control | 1 | green / green | R1: green / green | `m-g-every-leftover` |
+| T-RD1-1 | `a_foreign_index_reset_during_the_resumes_capture_cannot_change_the_kept_tree` | RD1-1 | 2 | red / red | R1: red / red | `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-none`, `m-pinfail-discards`, `m-removepin`, `shared-index` |
+| T-RD1-2 | `an_assume_unchanged_entry_holding_output_is_kept_before_the_discard` | RD1-2 | 2 | red / red | R1: red / red | `from-real-index`, `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-none`, `m-pinfail-discards`, `m-removepin`, `shared-index` |
+| T-RD1-3 | `the_output_survives_a_pin_deleted_after_the_resumes_last_pin_check` | RD1-3 | 2 | red / red | R1: red / red | `m-add-returns`, `m-discard`, `m-g-none`, `no-copy`, `reset-clean` |
+| T-RD1-4 | `an_ignore_rule_that_changes_with_the_discard_exposes_nothing_to_it` | RD1-4 V1, V3 | 2 | red (V3) / red | R1: red / red | `m-g-none`, `reset-clean` |
+| T-RD1-5 | `an_interrupted_text_write_does_not_stop_the_resume` | RD1-5 | 2 | red (lost) / red | R1: red / red | `m-g-after-discard`, `m-g-none`, `m-removepin`, `review-diff` |
+| T-GRESET | `a_discard_stopped_part_way_finishes_on_the_next_resume_without_operator_cleanup` | G-RESET | 2 | green / green | R1: red / red | `equality`, `m-add-returns`, `m-discard`, `m-removepin`, `no-post-check` |
+| T-N1a | `an_undecodable_diff_keeps_the_output_pinned` | N1, RD1-5c | 2 | red / red | R1: red / red | `n1-discard`, `n1-nopin`, `review-diff` |
+| T-N1b = T-P7 | `an_attempt_error_that_is_not_a_registry_refusal_keeps_the_output_pinned` | N1 | 2 | red / red | R1: red / red | `n1-discard`, `n1-nopin` |
+| T-N1c | `a_branch_moved_during_the_capture_keeps_the_output_pinned` | N1a, N1ah | 2 | red / red | R1: red / red | `m-g-parent-is-head`, `m-removepin`, `n1-discard`, `n1-nopin` |
+| (N1d) | `an_error_after_the_worker_wrote_and_before_its_capture_keeps_the_output_pinned` | N1d | added | - / red | R1: - / red | `n1-discard`, `n1-nopin` |
+| T-N1e = T-P7b | `a_snapshot_failure_that_is_not_the_registrys_keeps_the_output_pinned` | N1, R-C-RELSTORE's shape | 2 | red / red | R1: red / red | `m-keepall`, `n1-discard`, `n1-nopin` |
+| (N1e) | `an_earlier_attempts_retained_output_is_kept_when_the_next_worker_cannot_start` | N1e | added | - / red | R1: - / red | `n1-discard`, `n1-nopin` |
+| T-N2a | `a_reviewed_candidate_refused_on_a_moved_head_is_kept_and_pinned` | N2a, N2ah | 2 | red / red | R1: red / red | `k-headcheck`, `m-k-all`, `n2-discard` |
+| T-N2b | `a_candidate_captured_on_another_branch_is_kept_and_pinned` | N2c | 2 | red / red | R1: red / red | `n2-discard` |
+| T-N2c | `a_reviewed_candidate_whose_settlement_is_not_appended_is_kept` | N2d | 2 | red / red | R1: red / red | `m-removepin`, `n2-discard` |
+| T-X10 | `an_unreadable_leftover_and_a_nested_repository_are_left_in_place_and_named` | X10, N1b2 | 2 | red / red | R1: red / red | `m-g-after-discard`, `m-g-none`, `m-removepin`, `n1-discard`, `no-ignore-errors`, `reset-clean` |
+| T-X16 | `an_operators_new_file_after_a_pinned_refusal_stays_in_the_checkout` | X16 | 2 | red / red | R1: red / red | `equality`, `m-add-returns`, `m-discard`, `m-g-none`, `no-leave-in-place`, `reset-clean` |
+| T-X18 | `the_discard_reads_the_checkouts_per_worktree_ignore_rules` | X18 | 2 | green / green | R1: green / green | `no-worktree-config` |
+| T-X19 | `a_branch_moved_during_the_discard_refuses_with_the_output_kept` | X19 | 2 | green, no refusal / red | R1: green, no refusal / red | `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `no-copy`, `no-head-check`, `reset-clean` |
+| T-X20 | `a_nested_repository_with_a_commit_does_not_wedge_the_resume` | X20 | 2 | green / green | R1: red / red | `equality`, `revert-gitlinks` |
+| (X4) | `every_kind_of_change_is_pinned_and_an_ignored_file_survives` | X4 | added | - / red | R1: - / green | `m-g-after-discard`, `m-g-none`, `m-removepin`, `m-restore` |
+| (X6) | `a_resume_that_dies_before_its_revert_is_finished_by_the_next` | X6, C6 | added | - / red | R3: - / red | `copy-overwrite`, `m-add-returns`, `m-discard`, `m-g-none`, `m-removepin`, `no-copy`, `reset-clean`, `reuse-copy` |
+| (X17) | `a_leftover_whose_name_is_not_utf8_is_pinned_then_reverted` | X17 | added | - / red | R1: - / green | `m-g-after-discard`, `m-g-none`, `m-removepin` |
+| T-RD2-1 | `a_retry_after_a_deleted_pin_restores_it_from_the_untouched_copy` | RD2-1 | 3 | red / red | R2: red / red | `copy-overwrite`, `equality`, `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `m-removepin`, `no-copy`, `no-post-check`, `no-recover`, `reset-clean` |
+| T-RD2-1b | `the_output_survives_its_pin_deleted_after_the_restore` | RD2-1b | 3 | red / red | R2: red / red | `copy-overwrite`, `equality`, `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `no-copy`, `no-post-check`, `no-recover`, `reset-clean` |
+| T-RD2-1m | `a_kept_pin_moved_from_its_copy_refuses_and_discards_nothing` | RD2-1m | 3 | red / red | R2: red / red | `copy-overwrite`, `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `no-copy`, `no-post-check`, `reset-clean` |
+| T-RD2-1c | `a_copy_cut_short_before_its_rename_is_never_taken_for_the_copy` | RD2-1c | 3 | red / red | R2: green / green | `m-add-returns`, `m-discard`, `m-g-none`, `no-copy` |
+| T-RD2-2 | `an_ignored_directory_where_head_has_a_file_is_pinned_before_the_discard` | RD2-2 | 3 | red / red | R2: red / red | `m-g-after-discard`, `m-g-none`, `m-removepin`, `no-copy`, `no-footprint`, `no-worktree-config`, `private-gitdir`, `shared-index` |
+| T-RD2-2r | `an_ignored_file_where_head_has_a_directory_is_pinned_before_the_discard` | RD2-2r | 3 | red / red | R2: red / red | `m-g-after-discard`, `m-g-none`, `m-removepin`, `no-copy`, `no-footprint`, `no-worktree-config`, `private-gitdir`, `shared-index` |
+| T-RD2-2p | `an_obstruction_a_refusals_pin_lacks_is_refused_and_kept` | RD2-2p | 3 | red / red | R2: red / red | `equality`, `footprint-unheld-removed`, `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `m-g-trust`, `no-footprint`, `no-worktree-config`, `private-gitdir`, `shared-index` |
+| T-RD2-2u | `an_unreadable_file_in_the_discards_way_is_refused_and_kept` | RD2-2u | 3 | red / red | R2: red / red | `m-g-none` |
+| T-RD2-2n | `a_nested_repository_in_the_discards_way_is_refused_and_kept` | RD2-2n | 3 | red / red | R2: red / red | `equality`, `m-g-after-discard`, `m-g-discard-anyway`, `m-g-none`, `no-footprint`, `no-worktree-config`, `phase-b-force`, `private-gitdir`, `read-tree-revert`, `reset-clean`, `shared-index` |
+| T-RD2-2b | `a_file_written_after_the_capture_is_never_written_over` | RD2-2b | 3 | red / red | R2: red / red | `m-g-discard-anyway`, `m-g-none`, `m-g-subject-only`, `m-g-trust`, `phase-b-force`, `read-tree-revert`, `reset-clean` |
+| T-RD2-3 | `a_branch_conditioned_configuration_is_the_captures_configuration` | RD2-3 | 3 | green / green | R2: red / red | `m-add-returns`, `m-discard`, `m-removepin`, `no-worktree-config`, `private-gitdir` |
+| T-RD2-3e | `an_exact_gitdir_conditioned_configuration_is_the_captures_configuration` | RD2-3e | 3 | green / green | R2: red / red | `m-add-returns`, `m-discard`, `m-removepin`, `no-worktree-config`, `private-gitdir` |
+| T-RD2-3s | `a_suffix_gitdir_conditioned_configuration_is_the_captures_configuration` | RD2-3s | 3 | green / green | R2: red / red | `m-add-returns`, `m-discard`, `m-removepin`, `no-worktree-config`, `private-gitdir` |
+| T-RD2-3w | `a_relative_include_in_the_worktree_configuration_is_the_captures_configuration` | RD2-3w | 3 | green / green | R2: red / red | `m-add-returns`, `m-discard`, `m-removepin`, `no-worktree-config`, `private-gitdir` |
+| T-RD2-3h | `a_remote_conditioned_configuration_is_read_alike` | RD2-3h, the control | 3 | green / green | R2: green / green | `m-add-returns`, `m-discard`, `m-removepin` |
+| T-RD2-3p | `a_condition_only_a_private_directory_meets_changes_no_byte` | RD2-3p | 3 | red / red | R2: red / red | `m-g-after-discard`, `m-g-none`, `m-removepin`, `no-worktree-config`, `private-gitdir` |
+| T-RD3-1 | `a_capture_leaves_a_split_index_readable_and_pins` | RD3-1 | 4 | red / red | R3: red / red | `n1-discard`, `n1-nopin`, `no-split-control`, `no-split-controls` |
+| T-RD3-1g | `a_resume_capture_leaves_a_split_index_readable` | RD3-1g | 4 | green / green | R3: red / red | `m-add-returns`, `m-discard`, `no-split-controls` |
+| T-RD3-1e | `an_inherited_split_index_variable_expires_nothing` | RD3-1e, RD3-1ge | 4 | red / red | R3: red / red | `n1-discard`, `n1-nopin`, `no-expire-control`, `no-split-controls` |
+| T-RD3-1f | `the_discard_never_queries_the_checkouts_fsmonitor` | RD3-1f | 4 | green / green | R3: red / red | `diff-tree-on-checkout`, `m-add-returns`, `m-discard` |
+| (§10.4) | `a_hostile_repository_keeps_its_index_readable_and_its_monitor_unqueried` | §10.4's shared-state check | added | - / red | R3: - / red | `diff-tree-on-checkout`, `n1-discard`, `n1-nopin`, `no-split-control`, `no-split-controls` |
+| T-RD3-2 | `a_resume_writes_and_syncs_its_own_copy_before_the_revert` | RD3-2, RD3-2c | 4 | red / red | R3: red / red | `copy-overwrite`, `m-add-returns`, `m-discard`, `m-g-none`, `no-copy`, `reset-clean`, `reuse-copy` |
+| T-RD3-2r | `a_pin_restored_from_a_copy_is_copied_afresh_before_the_revert` | RD3-2r | 4 | red / red | R3: red / red | `copy-overwrite`, `m-add-returns`, `m-discard`, `m-g-none`, `m-removepin`, `no-copy`, `no-recover`, `reset-clean`, `reuse-copy` |
+| T-RD3-2p | `a_resume_that_cannot_write_its_own_copy_refuses_and_discards_nothing` | RD3-2p | 4 | red / red | R3: red / red | `m-add-returns`, `m-discard`, `m-g-discard-anyway`, `m-g-none`, `no-copy`, `reuse-copy` |
+| T-RD2-1cr | `a_copy_cut_short_is_never_restored_from` | RD2-1cr | 4 | red / red | R3: green / green | `copy-in-place`, `m-add-returns`, `m-discard`, `m-g-after-discard`, `m-g-none`, `m-removepin`, `no-copy` |
+| T-P8 | `a_kept_pin_that_cannot_be_written_is_reported_and_nothing_is_discarded` | R-D1, reconciled | D | green / green | R1: green / green | `m-add-returns`, `m-discard`, `m-pinfail-discards` |
+
+**Where a verdict differs from the design's prediction, and why** (each is in the table above):
+- **T-R6, T-R8 and T-R11 are red on round 1's own patch,** where round 2's table predicts green. Round 1 refuses and
+  discards nothing in each, in other words: "pinning them at … before discarding them failed", and "does not hold
+  exactly: it is not upstroke's kept commit of that attempt" for both of the others. The tests take round 4's words
+  ("keeping them before the discard stopped", "is not upstroke's kept commit of this attempt", "holds otherwise").
+- **T-R7 is red on round 1's patch** for a reason of substance: round 1 ends a symbolic kept name as a Git error
+  ("refusing to follow it", nothing discarded), where its own row, and round 4, refuse.
+- **T-X19 is red at D's head and on round 1's patch,** where the table reads "green, no refusal". Neither has a revert
+  for the branch to move during, so the shim never moves it and the test's first assertion fails. The table's column
+  reads the harness twin, under which neither loses anything.
+- **`m-pinfail-discards` does not turn T-R5 red,** where round 1 §4.2 predicts it. T-R5's fault, `.git` and
+  `.git/refs` read-only, also stops the mutant's discard (`git reset --hard` cannot create `.git/index.lock`), so
+  nothing is lost. T-P8 and T-R7, whose faults leave the index writable, kill it.
+
+**Where a test departs from its row, and why:**
+- **T-X10:** the resume's guarded discard leaves the unreadable file and the nested repository in place, and then the
+  resumed attempt's own capture fails on them (`git add -A` on the checkout's index), as master's does on the nested
+  repository; so the leftovers warning is not delivered (R-D5). The test reads the run's `run_resumed` record, which
+  names what was discarded and not what was left.
+- **T-X20:** the first resume runs with the run's event log read-only. It stops after its guarded discard having
+  recorded nothing, so the second finds the same attempt in flight. Whether the second's attempt commits is the nested
+  repository's to decide, so the test asserts no refusal and the repository kept.
+- **T-RD2-3 to T-RD2-3h:** two resumes, the first dying inside the resumed attempt (a child of the test binary), so
+  that "two resumes complete" holds of both guarded discards.
+- **T-GRESET and T-RD2-1, -1m on Windows:** the proposal names `share_mode(0)`, which would deny Git's own read of the
+  file; the capture would then not hold it, and the part-way stop the rows predict would not arise. The holder shares
+  read, so Git reads the file and its unlink fails. Not executed here; `test (winguest)` runs it.
+- **T-RD2-1cr:** a planted `.partial` cannot kill `copy-in-place`, which changes what a crash leaves, not what a test
+  plants; the test crashes the resume itself, with a shim that cuts the file `bundle create` wrote and kills the run.
+- **T-RD3-1:** the after-capture hook records the `sharedindex.*` set at the arm, so the comparison sees only the pin's
+  own writes and not the coordinator's capture before it.
+- **T-RD3-1f and the §10.4 check:** only the hook's calls in the checkout's own directory are counted (a snapshot's
+  worktree is another), and only while the engine runs.
+- **B3 (added):** an object store that takes no object fails the gate snapshot's own commit first, a Git error, so the
+  run ends through N1's arm with its pin failing too, not through the refused arm; the resume pins once healed.
+- **The shim's `foreign`:** an action's own Git runs without the engine child's variables (`GIT_INDEX_FILE`,
+  `GIT_NO_REPLACE_OBJECTS`), as another client's would; an early draft of T-RD1-1 reset the capture's private index
+  instead of the checkout's and passed vacuously, which `foreign` closed before any figure here.
+
+**Not covered by an engine test, stated:** D1 (a reftable lock: this box's Git is 2.43.0, with no reftable), D2 and B5
+(reasoned, as the design has them), and the harness-only variants RD1-1b, RD1-2t, RD1-3m and X15, RD1-4 V2, RD2-1t, X8,
+X9, X13, X14 and X21; the design executes them in its harness on four Gits.
+
+#### 5.17.4 Mutations
+
+| Shape | What it changes | Red (actual) | The design's engine killers | Predicted but green |
+|---|---|---|---|---|
+| `copy-in-place` | the copy is written at its final name, with no partial name and no rename after the fsync | 1: T-RD2-1cr | T-RD2-1cr | - |
+| `copy-overwrite` | round 2's one copy name, written again on every resume, and no scan of the copies | 6: (X6), T-RD2-1, T-RD2-1b, T-RD2-1m, T-RD3-2, T-RD3-2r | T-RD2-1, T-RD2-1b, T-RD2-1m | - |
+| `diff-tree-on-checkout` | G4's diff-tree reads the checkout's index through the plain builder again | 2: (§10.4), T-RD3-1f | T-RD3-1f | - |
+| `equality` | the pin must hold exactly the checkout's tree (round 1's rule), not contain its changes | 7: T-GRESET, T-RD2-1, T-RD2-1b, T-RD2-2n, T-RD2-2p, T-X16, T-X20 | T-GRESET, T-X16, T-X20, T-RD2-1 | - |
+| `footprint-unheld-removed` | content in the revert's way that the pin does not hold is removed instead of refused | 1: T-RD2-2p | T-RD2-2p | - |
+| `from-real-index` | G4's private index starts from a copy of the checkout's index, not from HEAD's tree | 1: T-RD1-2 | T-RD1-2 | - |
+| `k-headcheck` | K undone: a kept pin compares HEAD with the captured parent again | 6: T-K1, T-N2a, T-R1, T-R2, T-R3, T-R4 | T-K1, T-R1, T-R2, T-R3, T-R4, T-N2a | - |
+| `m-add-returns` | the add's veto answers Return: a failed add is Git state at once, as at master | 52: (X6), T-GRESET, T-L1, T-L2, T-L3, T-L6 (e1), T-L6 (e2), T-P1/3/5, T-P10, T-P11, T-P12, T-P12g, T-P13, T-P14, T-P15, T-P2, T-P4, T-P4b, T-P6, T-P8, T-P9, T-R1, T-R10, T-R11, T-R2, T-R3, T-R4, T-R5, T-R6, T-R7, T-R8, T-RD1-1, T-RD1-2, T-RD1-3, T-RD2-1, T-RD2-1b, T-RD2-1c, T-RD2-1cr, T-RD2-1m, T-RD2-2p, T-RD2-3, T-RD2-3e, T-RD2-3h, T-RD2-3s, T-RD2-3w, T-RD3-1f, T-RD3-1g, T-RD3-2, T-RD3-2p, T-RD3-2r, T-X16, T-X19 | D's shape | - |
+| `m-advice` | the moved-branch refusal without its git update-ref clause | 1: T-R3 | T-R3 | - |
+| `m-always-attempt` | the add's veto always answers Attempt | 1: T-L3 | D's shape | - |
+| `m-b1pred` | the veto never attempts again over an empty destination | 5: T-L1, T-L2, T-L6 (e1), T-L6 (e2), T-L8 | D's shape | - |
+| `m-discard` | the refused arm discards | 47: (X6), T-GRESET, T-P1/3/5, T-P10, T-P11, T-P12, T-P12g, T-P13, T-P14, T-P15, T-P2, T-P4, T-P4b, T-P6, T-P8, T-P9, T-R1, T-R10, T-R11, T-R2, T-R3, T-R4, T-R5, T-R6, T-R7, T-R8, T-RD1-1, T-RD1-2, T-RD1-3, T-RD2-1, T-RD2-1b, T-RD2-1c, T-RD2-1cr, T-RD2-1m, T-RD2-2p, T-RD2-3, T-RD2-3e, T-RD2-3h, T-RD2-3s, T-RD2-3w, T-RD3-1f, T-RD3-1g, T-RD3-2, T-RD3-2p, T-RD3-2r, T-X16, T-X19 | D's shape | - |
+| `m-g-after-discard` | G's order: the pin is written after the discard, so it holds HEAD's tree | 18: (B3, B4), (X17), (X4), T-R10, T-R5, T-R7, T-R8, T-R9, T-R9 (E2), T-RD1-1, T-RD1-2, T-RD1-5, T-RD2-1cr, T-RD2-2, T-RD2-2n, T-RD2-2r, T-RD2-3p, T-X10 | T-R5, T-R9, T-R10 | - |
+| `m-g-discard-anyway` | G's refusal: a failed keep is ignored and the discard runs | 12: T-R11, T-R6, T-R7, T-R8, T-RD2-1, T-RD2-1b, T-RD2-1m, T-RD2-2b, T-RD2-2n, T-RD2-2p, T-RD3-2p, T-X19 | T-R6, T-R7 | - |
+| `m-g-every-leftover` | G's scope: it acts with no attempt in flight too | 1: T-R12 | T-R12 | - |
+| `m-g-none` | G undone: the resume discards as at D's head | 35: (B3, B4), (X17), (X4), (X6), T-R10, T-R11, T-R5, T-R6, T-R7, T-R8, T-R9, T-R9 (E2), T-RD1-1, T-RD1-2, T-RD1-3, T-RD1-4, T-RD1-5, T-RD2-1, T-RD2-1b, T-RD2-1c, T-RD2-1cr, T-RD2-1m, T-RD2-2, T-RD2-2b, T-RD2-2n, T-RD2-2p, T-RD2-2r, T-RD2-2u, T-RD2-3p, T-RD3-2, T-RD3-2p, T-RD3-2r, T-X10, T-X16, T-X19 | T-R5, T-R6, T-R7, T-R8, T-R9, T-R10, T-R11 | - |
+| `m-g-parent-is-head` | G requires the pin's parent to be HEAD | 3: T-N1c, T-R1, T-R8 | T-R1 | - |
+| `m-g-subject-only` | G's containment: identity and message only | 2: T-R11, T-RD2-2b | T-R11 | - |
+| `m-g-trust` | G's check: any ref at the kept name is trusted, its identity and its content alike (round 1's definition) | 4: T-R11, T-R8, T-RD2-2b, T-RD2-2p | T-R8, T-R11 | - |
+| `m-index` | the coordinator pins the live index and HEAD at the refusal | 6: T-P2, T-R1, T-R2, T-R3, T-R4, T-R5 | D's shape | - |
+| `m-interrupted` | the lookup over the attempts still in flight only | 2: T-P13, T-P14 | D's shape | - |
+| `m-k-all` | K's scope: every pin skips HEAD | 2: T-K1, T-N2a | T-K1 | - |
+| `m-k-observe-only` | K's observation skip undone: only the comparison is skipped for a kept pin | 2: T-K1, T-R4 | T-K1, T-R4 | - |
+| `m-keepall` | a snapshot's Git error records the candidate too | 1: T-N1e = T-P7b | D's shape | - |
+| `m-maint` | git_command without the four maintenance settings | 1: T-L7 | D's shape | - |
+| `m-no-review-record` | the review snapshot's call records nothing | 1: T-P9 | D's shape | - |
+| `m-noexist` | the warning names every recorded attempt's pin, existing or not | 1: T-P15 | D's shape | - |
+| `m-pinfail-discards` | the refused arm discards when its pin fails | 7: (B3, B4), T-P8, T-R6, T-R7, T-R8, T-RD1-1, T-RD1-2 | T-P8, T-R5, T-R7 | T-R5 |
+| `m-plain` | the warning's commands without the replacement controls | 4: T-P10, T-P11, T-P12, T-P12g | D's shape | - |
+| `m-removal-alone` | round 4's B1': the removal once, its list in its own access | 1: T-L4 | D's shape | - |
+| `m-remove-unwrapped` | the removal and its list as master ran them | 2: T-L4, T-P1/3/5 | D's shape | - |
+| `m-removepin` | the resume removes each kept pin it finds | 44: (B3, B4), (X17), (X4), (X6), T-GRESET, T-N1c, T-N2c, T-P1/3/5, T-P10, T-P11, T-P12, T-P12g, T-P13, T-P14, T-P2, T-P4, T-P4b, T-P6, T-R1, T-R10, T-R11, T-R2, T-R3, T-R5, T-R6, T-R7, T-R8, T-R9, T-R9 (E2), T-RD1-1, T-RD1-2, T-RD1-5, T-RD2-1, T-RD2-1cr, T-RD2-2, T-RD2-2r, T-RD2-3, T-RD2-3e, T-RD2-3h, T-RD2-3p, T-RD2-3s, T-RD2-3w, T-RD3-2r, T-X10 | D's shape | - |
+| `m-restore` | round 5's warning: git checkout <pin> -- ., and no command for a later HEAD | 8: (X4), T-P10, T-P11, T-P12, T-P12g, T-P4, T-P4b, T-R1 | D's shape | - |
+| `m-return` | a destination gone, or empty and not removable, answers Return | 2: T-L3, T-L8 | D's shape | - |
+| `m-switch-unwrapped` | switch_branch's git switch as master ran it | 1: T-L5 | D's shape | - |
+| `n1-discard` | N1 undone: an attempt error discards the checkout, as at D's head | 11: (B3, B4), (N1d), (N1e), (§10.4), T-N1a, T-N1b = T-P7, T-N1c, T-N1e = T-P7b, T-RD3-1, T-RD3-1e, T-X10 | T-N1a, T-N1b = T-P7, T-N1c, T-N1e = T-P7b | - |
+| `n1-nopin` | N1 half-undone: an attempt error keeps the checkout but pins nothing | 10: (B3, B4), (N1d), (N1e), (§10.4), T-N1a, T-N1b = T-P7, T-N1c, T-N1e = T-P7b, T-RD3-1, T-RD3-1e | T-N1c | - |
+| `n2-discard` | N2 undone: a publication failure discards the checkout, as at D's head | 3: T-N2a, T-N2b, T-N2c | T-N2a, T-N2b, T-N2c | - |
+| `no-copy` | no copy of the pin outside the repository's refs before the discard | 13: (X6), T-RD1-3, T-RD2-1, T-RD2-1b, T-RD2-1c, T-RD2-1cr, T-RD2-1m, T-RD2-2, T-RD2-2r, T-RD3-2, T-RD3-2p, T-RD3-2r, T-X19 | T-RD1-3, T-RD2-1, T-RD2-1b, T-RD2-1m, T-RD2-1c | - |
+| `no-dir-sync` | the copy's directory is never fsynced after the rename | 0: none | none in-process (trace) | - |
+| `no-expire-control` | the view sets core.splitIndex=false but not splitIndex.sharedIndexExpire=never | 1: T-RD3-1e | T-RD3-1e | - |
+| `no-file-sync` | the copy's data is never fsynced before the rename | 0: none | none in-process (trace) | - |
+| `no-footprint` | nothing in the revert's way is added again with -f before the pin is written or checked | 4: T-RD2-2, T-RD2-2n, T-RD2-2p, T-RD2-2r | T-RD2-2, T-RD2-2r | - |
+| `no-head-check` | no check after the revert that the run branch did not move | 1: T-X19 | T-X19 | - |
+| `no-ignore-errors` | a path add cannot take fails the whole capture (plain add -A) | 1: T-X10 | T-X10 | - |
+| `no-leave-in-place` | a new file the pin never held refuses, instead of being left in place | 1: T-X16 | T-X16 | - |
+| `no-post-check` | no check after the revert that every path it changed is HEAD's again | 4: T-GRESET, T-RD2-1, T-RD2-1b, T-RD2-1m | T-GRESET, T-RD2-1 | - |
+| `no-recover` | the copies are kept, but a missing pin is captured again instead of recovered | 3: T-RD2-1, T-RD2-1b, T-RD3-2r | T-RD2-1 | - |
+| `no-split-control` | the view sets splitIndex.sharedIndexExpire=never but not core.splitIndex=false | 2: (§10.4), T-RD3-1 | T-RD3-1 | - |
+| `no-split-controls` | the private-index view sets neither core.splitIndex=false nor splitIndex.sharedIndexExpire=never | 4: (§10.4), T-RD3-1, T-RD3-1e, T-RD3-1g | T-RD3-1, T-RD3-1g, T-RD3-1e | - |
+| `no-worktree-config` | the capture is round 2's private Git directory with no copy of the checkout's config.worktree | 10: T-RD2-2, T-RD2-2n, T-RD2-2p, T-RD2-2r, T-RD2-3, T-RD2-3e, T-RD2-3p, T-RD2-3s, T-RD2-3w, T-X18 | T-X18, T-RD2-3, T-RD2-3w | - |
+| `phase-b-force` | phase B writes with checkout-index -f, over whatever is at the path | 2: T-RD2-2b, T-RD2-2n | T-RD2-2b, T-RD2-2n | - |
+| `private-gitdir` | the capture is round 2's private Git directory (detached HEAD, config.worktree copied) | 9: T-RD2-2, T-RD2-2n, T-RD2-2p, T-RD2-2r, T-RD2-3, T-RD2-3e, T-RD2-3p, T-RD2-3s, T-RD2-3w | T-RD2-3, T-RD2-3e, T-RD2-3s, T-RD2-3w, T-RD2-3p | - |
+| `read-tree-revert` | round 2's one read-tree -m -u R HEAD, which takes ignored files for expendable | 2: T-RD2-2b, T-RD2-2n | T-RD2-2b, T-RD2-2n | - |
+| `reset-clean` | the discard is reset --hard and clean -qfd, as before, not the exact revert | 13: (X6), T-RD1-3, T-RD1-4, T-RD2-1, T-RD2-1b, T-RD2-1m, T-RD2-2b, T-RD2-2n, T-RD3-2, T-RD3-2r, T-X10, T-X16, T-X19 | T-RD1-4, T-X10, T-X16, T-RD2-2b, T-RD2-2n | - |
+| `reuse-copy` | an existing copy is relied on with no fsync, and no fresh copy is written (round 3's rule) | 4: (X6), T-RD3-2, T-RD3-2p, T-RD3-2r | T-RD3-2, T-RD3-2p, T-RD3-2r | - |
+| `revert-gitlinks` | the discard also reverts submodule paths, which no discard can remove | 1: T-X20 | T-X20 | - |
+| `review-diff` | G4's capture also decodes the review diff as strict UTF-8 (capture_candidate's) | 2: T-N1a, T-RD1-5 | T-RD1-5 | - |
+| `shared-index` | G4 captures through the checkout's own index, with no footprint (round 1's capture, as the harness's mutation of that name) | 6: T-RD1-1, T-RD1-2, T-RD2-2, T-RD2-2n, T-RD2-2p, T-RD2-2r | T-RD1-1, T-RD1-2, T-RD2-2, T-RD2-2r | - |
+
+Each shape is a scratch tree of `a4972d09` (`git archive`), changed by exactly its transform (its `mutation.diff`), and
+built and tested through `upstroke-build` on this lane's private pool. Every Compiling line names its scratch tree. A
+shape runs the 86 tests: this round's 61 (T-K1 and the 60 engine tests) and D's 25. The shapes are:
+- round 4's 7 (`no-split-controls` to `no-file-sync`) and round 3's 24 read against G4, the proposal's §10.2. The 24
+  include round 1's `k-headcheck` and the N mutations `n1-discard`, `n1-nopin` and `n2-discard`;
+- round 1's other 11 engine-level mutations (round 1 §4.2, `m-k-observe-only` to `m-pinfail-discards`), read against
+  G4;
+- D's mutations from §5.7 but `m-keepany`, 17 (`m-add-returns` to `m-noexist`), re-run.
+
+"The design's engine killers" are the tests those sections name; "Predicted but green" lists any that stayed green.
+
+**Coverage** (`fudi3/record/COVERAGE.txt`, from the 64 summaries):
+- every Compiling line names its scratch tree;
+- the control is 86 of 86 green;
+- `base-firstbad` turns 52 of the 86 red, round 1's patch 42, round 2's 20 and round 3's 9;
+- **every one of the 86 tests is turned red by at least one mutation** (the census's "tests with no killing mutation:
+  0");
+- every mutation turns at least one test red, but `no-dir-sync` and `no-file-sync`, which only the trace sees
+  (§5.17.5);
+- every engine killer the design names is red, but T-R5 under `m-pinfail-discards` (§5.17.3);
+- D's 17 shapes keep their meaning, and D's 25 tests stay green at every base. Of D's §5.7 shapes, `m-keepany` is not
+  re-run: part N makes it the design, and `n1-discard` is its inverse.
+
+**Red before, green after.** Of the 64 rows above (the 61 new tests, and D's T-P7, T-P7b and T-P8 as the design
+reconciles them):
+- 52 are red at D's head;
+- 8 are green there and red on the design round whose regression they guard: T-GRESET and T-X20 on round 1's patch,
+  T-RD2-3, -3e, -3s and -3w on round 2's, and T-RD3-1g and T-RD3-1f on round 3's;
+- 4 are green at every base: the matrix's controls T-R12, T-X18 and T-RD2-3h, and the reconciled T-P8. T-R12 is red
+  under `m-g-every-leftover`, T-X18 under `no-worktree-config`, and T-P8 under `m-pinfail-discards`. T-RD2-3h is red
+  only under D's `m-add-returns`, `m-discard` and `m-removepin`: no R-D1 mutation turns it red, as none should, since
+  the configuration it conditions reads alike in the capture and in the checkout.
+
+All 64 are green at `a4972d09`.
+
+#### 5.17.5 Durability by trace, and the shared-state check
+
+- **The copy's barrier, traced on Linux** (`fudi3/tools/durability_trace.py`, run by `trace_mutants.py`;
+  `fudi3/durability/mut-control/SUMMARY.txt`): T-RD3-2 under `strace -f -ttt` — a resume over a copy planted under its
+  final name — shows, in the thread that writes the copy, `openat` of the fresh
+  `.partial` for writing, `fsync` of it returning 0, its `rename` to the final `.bundle`, `openat` of the run's public
+  directory and its `fsync` returning 0, all before the first `git read-tree -m` is executed. The found copy is not
+  relied on.
+- **The trace's own mutations,** each a scratch tree built apart: under `no-dir-sync` no fsync of the copies' directory
+  precedes the first `read-tree -m` (`mut-no-dir-sync/`), and under `no-file-sync` no fsync of the `.partial` precedes
+  its close and rename (`mut-no-file-sync/`). Each is reported NOT durable; the control built the same way is durable.
+  In process both are green (§5.17.4), as the design predicts: only the trace, or the harness's model, sees them.
+- **Built from `45b1a7b1`,** whose production code and T-RD3-2 are `a4972d09`'s (`a4972d09` changes test code
+  elsewhere). An earlier run of the tool, before it tracked `close`, read a directory fsync on a reused descriptor as
+  the file's under `no-file-sync`, with the same verdict (`fudi3/durability/SUPERSEDED-fd-reuse/README.txt`); the
+  first trace, `durability/head/`, is a WIP build's.
+- **macOS and Windows are not traced.** `sync_all` is `F_FULLFSYNC` there and `FlushFileBuffers`; `sync_parent` does
+  nothing on Windows. Reasoned, as the design states.
+- **The shared-state check** (the proposal's §10.4) is the engine test
+  `a_hostile_repository_keeps_its_index_readable_and_its_monitor_unqueried`: `core.splitIndex=true` with
+  `splitIndex.sharedIndexExpire=now`, `core.untrackedCache=true` and a logging fsmonitor hook; N1's pin adds and removes
+  no shared index, the index reads after the pin and after the resume, and no engine child queries the checkout's
+  fsmonitor. CI's Linux and macOS legs run it.
+
+#### 5.17.6 The findings
+
+- **Filed from their drafts** (`~/orch-pr11/logs/pr11_rd1_round4/drafts/`), in `findings/README.md`'s form, with their
+  original severity (P1), review pin (`reviewed_sha` `88376a10`), provenance (`pre_existing`) and first-bad commit:
+  `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT` (N1,
+  `findings/P1_correctness_202610040917_an-attempt-error-after-the-worker-ran-discards-its-output.md`) and
+  `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS` (N2, `…202610040918_…`). Only the guard's first
+  words change, to name this round, and each gains a dated section: implemented on this draft, conditional on O8, with
+  its engine witnesses and their mutations; open until the merge. **Their G6 non-applicability stays a claim:** it needs
+  classifying on the final range, the Q6 / topology-writer face and the R-C-RELSTORE face included. There is no waiver.
+- **The legacy finding stays open,** with its guard naming R-D1's preservation design and a dated section listing the
+  engine witnesses of R-D1's cases and what stays unshown (D1, D2, B5). Nothing regrades it or clears G6.
+- **R-D5** (`PR331-A-RESUME-THAT-STOPS-BEFORE-ITS-REPORT-NAMES-NO-KEPT-PIN`) and **R-D7**
+  (`PR331-KEPT-PINS-ACCUMULATE-UNTIL-THE-OPERATOR-REMOVES-THEM`) gain dated sections: G4's three warnings share R-D5's
+  delivery limit (T-X10 executes it), and N's and G4's pins, G4's copies, `.partial`s, unsynced final names, private
+  index files and orphan shared index files accumulate under R-D7.
+- **The R-D1 design reviews' items** — round 1's RD1-1 to RD1-6, G-RESET, N1 and N2; round 2's regression items RD2-1
+  to RD2-3; round 3's RD3-1 and RD3-2 — are what round 4's design answers. This implementation carries their
+  regression tests (§5.17.3), and the pull request body names them with their triages; they are not ledger rows,
+  being items of a design document rather than of this branch. Their closure is for the required reviews to confirm.
+
+#### 5.17.7 The costs and limits, kept
+
+All of the proposal's §9.1 and §9.3, in the code's behaviour and here:
+- **The new copy and refusal costs:** one copy per resume that reaches the revert, never written over; refusals while
+  the pin's store, name or copy cannot be written, while the checkout conflicts with its pin, while a discard is stopped
+  part-way (one resume), while the branch moves during a discard, while a pin disagrees with its copy or two copies
+  disagree, while a restore fails, while something in the discard's way is not held by a pin made before G4, cannot be
+  added, or is a nested repository, while the log records more than one attempt in flight (the proposal's §5.2), and
+  **while the resume cannot complete its own copy's barrier** — a full or read-only file system, a directory fsync that
+  fails — even when the attempt already has a copy (T-RD3-2p); after an attempt error or a failed publication, a dirty,
+  pinned checkout that a new run refuses until a resume or a clean; ignored content in the discard's way entering the
+  repository's objects and the copy; the resume's extra Git children.
+- **The O3 exception:** an inherited `GIT_TEST_SPLIT_INDEX` still splits the private index's writes; they unlink nothing
+  (`splitIndex.sharedIndexExpire=never`) and leave orphan `sharedindex.*` files that Git's next split write of the
+  checkout's index removes. The variable is O3's class, with FUD-D4-ENV's.
+- **The phase-A window:** a write into a file in the instant between Git's up-to-date check and its unlink is lost, as
+  in Git's own checkout, reset and read-tree; disclosed, not designed away.
+- **"No loss" only in the covered cases** (§5.17.3 and the proposal's §1, §4.6, §10), never as a universal guarantee.
+- **What this proves, and what it does not.** The engine witnesses here are the actual legacy engine on Linux, Git
+  2.43.0. The proposal's harness models the engine's Git sequences on four Gits; its power loss is a model; its census
+  is ordinary Git. None of it, and nothing here, is promoted to physical power-loss proof or native-platform proof: no
+  power was lost, no disk failed, and nothing ran on Windows or macOS here.
+
+#### 5.17.8 The frozen effects
+
+`fudi3/tools/frozen-proof3.sh` at the final code commit `a4972d09` (`fudi3/frozen/frozen-proof-a4972d09.txt`; this
+record's commit changes no code, and the pull request body cites the same proof at the head it is pushed at):
+- **G6's frozen set** (PR11's R-D list: 26 production files and 8 whole-file test children):
+  - **zero delta from #329's provisional head `55029628`,** 34 of 34 byte-identical;
+  - from master `5c222ff2`, 33 of 34: `src/engine/topology/integrate.rs` differs by +16 −4. That is exactly
+    master..`55029628`'s difference, #329's proposed frozen hunk H1, inherited through the provisional merge and
+    conditional on #329's freeze ruling. This round's own delta over the set is zero.
+- **Against G5's range `d724fb16`** (O12 not adopted, so not a clean proof): five files, +257 −78. They are master's own
+  four (+241 −74, #322's and #327's) and #329's H1. E-G6-1's two-tier rule, executed and not adopted, reports FAIL for
+  exactly one unenumerated path, `src/engine/topology/integrate.rs`: #329's H1, not this round's.
+- **The PR5-frozen legacy section** (24 paths, `FROZEN_LEGACY_ALLOWLIST` at the head, `src/effects.rs` unchanged): from
+  `55029628`, exactly D's five differ.
+- **D's O8 five-file set, exactly** (`git diff --numstat`, insertions and deletions):
+
+  | File | This round, `88376a10..a4972d09` | of which the merge `47e62ee5` | of which the implementation, `47e62ee5..a4972d09` | Cumulative, master..`a4972d09` (= from `55029628`, = from `54a1ff14`) | Blob at `a4972d09` |
+  |---|---|---|---|---|---|
+  | `src/workspace.rs` | +921 −22 | +8 −0 | +913 −22 | +1,537 −82 | `acc92d0e…` |
+  | `src/engine/attempt.rs` | **unchanged** (blob `51534706…` at `88376a10`, the merge and `a4972d09`) | — | — | +53 −10 | `51534706…` |
+  | `src/engine/coordinator.rs` | +87 −11 | — | +87 −11 | +116 −10 | `d2a6be71…` |
+  | `src/engine/resume.rs` | +113 −10 | — | +113 −10 | +138 −4 | `f829a38d…` |
+  | `src/engine/tests.rs` | +3,724 −16 | — | +3,724 −16 | +4,840 −0 | `9d43ed5d…` |
+
+- **Append-only** (`fudi3/frozen/append-only-a4972d09.txt`):
+  - against master, `src/engine/tests.rs` is master's blob with bytes appended, and `src/workspace.rs`'s test module
+    keeps every byte master's had before its closing brace;
+  - against the merge, the test module only gains T-K1. `src/engine/tests.rs` is **not** append-only: the design's
+    patch changes D's T-P7, T-P7b and T-P8 (the 16 deletions) before appending.
+- **Schema 4:** `TOPOLOGY_ACTIVATION` is `Inactive`, and no path under `src/topology/` or `src/engine/topology/` changes
+  from `55029628`.
+- **Every other path this round changes:**
+  - `clippy.toml`, `effects/wrappers.toml` and `src/runner/contract.rs` (the instrument rows);
+  - `effects/allowlist.toml` (the O8 texts) and `design/15`;
+  - the notes of `workspace`, `engine/coordinator`, `engine/resume` and `engine/tests`;
+  - the record, and the finding files of §5.17.6.
+
+#### 5.17.9 What passes only through proposed instruments
+
+- **The three instrument rows** (`fudi3/tools/instrument_probe.py`, `fudi3/instruments/instr-*/summary.txt`, each a
+  scratch tree of `a4972d09` with one row taken back out, built with `--all-targets`; the same at `45b1a7b1`,
+  `instruments/at-45b1a7b1/`): with every row, the five effects and contract tests pass; without the two
+  `effects/wrappers.toml` rows,
+  `every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified` and
+  `every_effectful_wrapper_is_on_the_disallowed_list` fail; without the two `clippy.toml` denials,
+  `every_effectful_wrapper_is_on_the_disallowed_list` fails; with the payload census at five,
+  `every_production_command_spec_payload_is_classified` fails. (An earlier `--lib` run, superseded, failed the two
+  denial censuses for a missing rlib, its own message: `fudi3/instruments/SUPERSEDED-lib-only-README.txt`.)
+- **The O8 texts** (`fudi3/tools/allow-probe.py`, `fudi3/instruments/allow-probe.txt`): with the five modules'
+  module-level allows removed, 88 clippy denials lie on lines this round adds at `a4972d09` — 17 in production
+  (`src/workspace.rs` 15, among them the copy's `OpenOptions`, `sync_all`, `rename` and `remove_file`;
+  `src/engine/coordinator.rs` 1, the call of `Workspace::pin_checkout`; `src/engine/resume.rs` 1, the call of
+  `Workspace::discard_into_kept_pin`, both denied by the new `clippy.toml` rows) and 71 in tests. Gate 2 passes over
+  them only through those allows, which the five rows admit and whose texts are the proposed O8 texts. No check reads
+  the texts' words (§5.14).
+
+#### 5.17.10 Platforms
+
+- **Linux:** every figure here.
+- **Windows and macOS, type-checked and linted only** (`fudi3/platform/code-a4972d09/`, and `code-45b1a7b1/` before the
+  test revision; each Checking line names this worktree): Windows clippy, Windows MSRV with `RUSTFLAGS='-D warnings'`,
+  macOS clippy, and the Linux MSRV with `-D warnings`, each rc 0 with no warning. The first run, at a WIP commit, failed
+  Windows on an unused variable in one test (`fudi3/platform/code-0b91221e/`), fixed before the implementation commit.
+  **Nothing ran on Windows or macOS here; CI is the truth for those legs.**
+- **Per platform:** the shim, mode-bit and fsmonitor tests are `cfg(unix)`; the non-UTF-8 name test is Linux-only (APFS
+  refuses such names); T-GRESET and T-RD2-1, -1m run on Windows with the read-sharing holder.
+
+#### 5.17.11 What waits, and what is not verified
+
+- **O8,** and every contract or freeze adoption: the owner's. The texts and design sentences are proposed.
+- **#329's final head:** this merge is provisional; its final integration, with validation, native CI and review, is
+  owed.
+- **The required reviews:** the regular review of R-D1's design is unmet; this implementation is unreviewed.
+- **N1's and N2's G6 classification** on the final range.
+- **Windows and macOS execution** is CI's (`test (winguest)` with a CRLF checkout, the hosted legs).
+- **Not executed here:** D1, D2, B5; physical power loss; a failed fsync on a real disk.
+
+#### 5.17.12 CI history
+
+- **`88376a10`:** run 37152667513 passed every job and the `upstroke-ci` rollup, and the policy run 37152667575 passed
+  (`fudi3/ci/jobs-37152667513.tsv`, `runs-88376a10.json`); the two cancelled runs at that head were superseded by the
+  body edit.
+- **#329's `55029628`,** merged provisionally: run 37186359003 passed every job (`fudi3/ci/jobs-37186359003-B.tsv`).
+- CI at this round's head is not waited on; the orchestrator reads native CI.
+
+The pull request body records the head the ten gates passed at, with the logs under `fudi3/gates/`.

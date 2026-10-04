@@ -54,3 +54,22 @@ Decide a retention rule: for example, retire a kept pin once a later attempt of 
 output has been recovered, with the warning saying so. A rule that removes a pin the operator has not acted on would
 remove the only durable copy of paid output, which is what D exists to keep, so it is the owner's call. Nothing here is
 proposed.
+
+## R-D1's preservation adds to what accumulates (2026-10-04, #331's implementation round 3)
+
+R-D1's preservation design, round 4 (sha256 `f9e81c07…`), implemented on draft #331 and PROPOSED conditional on the
+owner's decision O8 (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), keeps more, and the engine still removes
+none of it; the operator does:
+- **pins:** one per attempt that part N keeps (an attempt error after the worker ran, or a reviewed candidate whose
+  publication fails) or that the resume's guarded discard (part G4) pins at the resume, beside the coordinator's;
+- **copies:** one bundle per resume that reaches the guarded revert, `kept-<task index>-<attempt>-<ULID>.bundle` in the
+  run's public directory, never written over (the proposal's §2.5: round 3 wrote one per discarded attempt) —
+  executed by `a_resume_that_dies_before_its_revert_is_finished_by_the_next`, which leaves two copies;
+- **after a crash or a failure:** an inert `.partial`, a final name whose directory fsync failed, or a private index file
+  `upstroke-kept-<pid>-<ULID>*.index` in the checkout's own Git directory, none ever read again;
+- **under an inherited `GIT_TEST_SPLIT_INDEX`** (O3's class): orphan `sharedindex.*` files in the checkout's Git
+  directory, which Git's next split write of the checkout's own index removes.
+
+A pin is a ref and keeps its objects reachable; a copy is the size of the output's new objects. Neither is lost or
+removed by any resume. The retention rule stays the owner's, as above.
+
