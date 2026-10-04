@@ -18428,6 +18428,17 @@ fn await_marker(marker: &Path, what: &str) {
     }
 }
 
+/// `path` as one POSIX shell word: single-quoted, with each `'` in it
+/// closed, escaped and reopened (`'\''`). Git hands a filter's command to the
+/// shell, and the witnesses' scripts assign their directory in shell, so a
+/// temporary directory whose name holds a space or an apostrophe reaches both
+/// whole (the follow-up C record, §6.10).
+#[cfg(unix)]
+fn sh_quoted(path: &Path) -> String {
+    let text = path.to_str().expect("a fixture path is UTF-8");
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
 /// The DESC witness's repository (the record, §3.3.3): `.gitattributes`
 /// sends `*.dat` through the `hold` filter, whose smudge runs `script`; C1
 /// adds `b.dat`, and C2, on top of it, rewrites `a.txt` as `C2 base`. Returns
@@ -18440,7 +18451,7 @@ fn filtered_commits(fixture: &Fixture, script: &Path) -> (String, String) {
         &[
             "config",
             "filter.hold.smudge",
-            &format!("sh {}", script.display()),
+            &format!("sh {}", sh_quoted(script)),
         ],
     );
     git(base, &["config", "filter.hold.clean", "cat"]);
@@ -18512,14 +18523,14 @@ fn desc_filter_route_a_dead_adds_junk_removal_cannot_reach_the_successors_slot()
     write_file(
         &script,
         format!(
-            "dir='{dir}'\n\
+            "dir={dir}\n\
              if mkdir \"$dir/claimed\" 2>/dev/null; then\n\
              : > \"$dir/held\"\n\
              n=0\n\
              while [ ! -e \"$dir/release\" ] && [ \"$n\" -lt 6000 ]; do sleep 0.01; n=$((n+1)); done\n\
              fi\n\
              exec cat\n",
-            dir = hold.display()
+            dir = sh_quoted(&hold)
         )
         .as_bytes(),
     );
@@ -18564,7 +18575,7 @@ fn desc_helper_route_a_dead_filters_late_helper_cannot_reach_the_successors_slot
     write_file(
         &script,
         format!(
-            "dir='{dir}'\n\
+            "dir={dir}\n\
              if mkdir \"$dir/claimed\" 2>/dev/null; then\n\
              top=\"$(pwd)\"\n\
              ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR\n\
@@ -18574,7 +18585,7 @@ fn desc_helper_route_a_dead_filters_late_helper_cannot_reach_the_successors_slot
                : > \"$dir/helper-done\" ) < /dev/null > /dev/null 2>&1 &\n\
              fi\n\
              exec cat\n",
-            dir = hold.display()
+            dir = sh_quoted(&hold)
         )
         .as_bytes(),
     );
@@ -18777,7 +18788,7 @@ fn instance_kill_child() {
         .write_intent(&mut NoHooks, &slot)
         .expect("the dead incarnation's intent");
     let _ = manager.add_worktree(&mut KillAt(at), &slot, &head);
-    unreachable!("the add's funnel aborts at its {phase} phase");
+    panic!("the add's funnel returned past the kill armed at its {phase} phase");
 }
 
 const INSTANCE_KILL_ROOT: &str = "UPSTROKE_PR330_INSTANCE_KILL_ROOT";
