@@ -562,6 +562,14 @@ admits no attempt snapshot while a stale integration runs outside its
 verification, and lets `verify` return only when none is live, so every
 snapshot this removes is the integration's own.
 
+**Its enumeration waits through the journal's hooks:** the proposed frozen hunk C-R1, conditional on
+the owner's freeze ruling and not adopted (`reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11). The
+walk enumerates through `WorkspaceManager::intents_pausing(journal.hooks().effects())`, so the registry
+read that discovers earlier incarnations' instances waits through the journal's hooks. On the topology
+coordinator that read answers its messages while pipelines are live, as the removals that follow it
+already did. Without C-R1 the walk calls the hookless `intents()`, whose read sleeps on the calling
+thread.
+
 ## `fn reclaim_staging(`
 
 After a rejection or an unavailable terminal: the snapshots, then the

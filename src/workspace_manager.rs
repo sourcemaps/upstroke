@@ -3122,6 +3122,15 @@ impl WorkspaceManager {
     /// remove" stands for it (frozen `finalize.rs`'s
     /// `scrub_slots_still_refuses_a_torn_registration_no_intent_names`).
     ///
+    /// **It takes no hooks, so the registry read's waits sleep on the calling
+    /// thread.** That is the form a caller with none takes: a resume's
+    /// recovery walks, which run before any coordinator exists. Every walk that
+    /// holds hooks enumerates through [`Self::intents_pausing`] instead: the
+    /// reclaims, a closure's snapshot reclaim, and — under the proposed frozen
+    /// hunk C-R1, conditional on the owner's freeze ruling — the finalizer's
+    /// scrub and the merge module's snapshot reclaim (the follow-up C record,
+    /// §6.11).
+    ///
     /// # Errors
     ///
     /// An I/O error, an intent file whose name no instance renders, an intent

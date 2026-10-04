@@ -5577,6 +5577,26 @@ mod tests {
         );
     }
 
+    /// The follow-up C record's §6.11, the proposed frozen hunk C-R1: an
+    /// integration's snapshot reclaim enumerates through its journal's hooks
+    /// (`integrate.rs`'s `reclaim_snapshots`, `intents_pausing`), so the registry
+    /// read that discovers earlier incarnations' instances answers the
+    /// coordinator's messages while a pipeline is live. It is the eighth registry
+    /// access after gamma's candidate. Without C-R1 (`2c3e413c`) the read slept
+    /// on the coordinator's thread to its deadline, no pipeline was served, and
+    /// the integration was refused.
+    #[test]
+    fn a_pipeline_is_served_while_an_integrations_snapshot_discovery_waits_on_an_unreadable_registration()
+     {
+        served_while_a_stale_integration_waits_under(
+            "served-integration-discovery",
+            false,
+            TearAt::Access(candidate_created_of_gamma, 8),
+            Torn::GitdirUnreadable,
+            alpha_waits_for_gammas_merge,
+        );
+    }
+
     #[test]
     fn a_pipeline_is_served_while_a_conflicts_classification_waits_on_a_torn_registration() {
         served_while_a_stale_integration_waits(
@@ -6411,6 +6431,32 @@ mod tests {
         );
     }
 
+    /// The follow-up C record's §6.11, with the proposed frozen hunk C-R1: a
+    /// shutdown answered inside a wait of the finalization scrub's registry
+    /// read ends the command there. Nothing is scrubbed and the execution root
+    /// stays, and the run is resumable.
+    #[test]
+    fn a_shutdown_answered_inside_a_finalizations_scrub_discovery_finalizes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-scrub",
+            StoppedInItsWait {
+                at: TearAt::Access(run_finished, 1),
+                torn: Torn::GitdirUnreadable,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the finalization stopped before the execution root was removed"
+                );
+            },
+        );
+    }
+
     /// The follow-up C record's §6.11: a shutdown answered inside a wait of
     /// the final sweep's registry read ends the command there. The sweep
     /// removes nothing further, the execution root stays, and the run is
@@ -7014,6 +7060,24 @@ mod tests {
             Torn::GitdirMissing,
             gamma_halts_while_alpha_gates,
             RunOutcome::Halted,
+        );
+    }
+
+    /// The follow-up C record's §6.11, the proposed frozen hunk C-R1: the
+    /// frozen finalization's scrub enumerates through the coordinator's hooks
+    /// (`finalize.rs`'s `scrub_slots`, `intents_pausing`), so the registry read
+    /// that discovers earlier incarnations' instances waits through the
+    /// coordinator. It is the first registry access after `run_finished`. Without
+    /// C-R1 (`2c3e413c`) the read slept on the coordinator's thread.
+    #[test]
+    fn a_finalizations_scrub_discovery_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a finalization scrub's registry read meeting an unreadable registration",
+            || two_held("waits-scrub-discovery"),
+            TearAt::Access(run_finished, 1),
+            Torn::GitdirUnreadable,
+            first_invoking,
+            RunOutcome::Complete,
         );
     }
 
