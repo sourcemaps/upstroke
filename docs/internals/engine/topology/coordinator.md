@@ -2057,6 +2057,19 @@ R-T's control: the width-1 `step` runs the same dispatch with its own hooks, who
 tear is finished once the access has answered `Attempt`, and the run completes. The sleep is seen:
 `fixture::slept_pauses` moves on the stepping thread.
 
+## `mod tests` › `struct FoldsSeen {`
+
+Hooks that record the kind of every event folded through them, forwarding the rest to the harness.
+
+## `mod tests` › `fn every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks()`
+
+R-T in behaviour (the follow-up B record's §9.16, I2-4). Beta's first attempt fails its gate and is
+retained, so the width-1 `step` takes the retry arm: begin the retry, judge it inline, settle it. Every
+event `step` appended — the retry's `attempt_started` and its settlement's `candidate_prepared`
+included — must have been folded through the hooks `step` was handed. A transition run with any
+other hooks (the review's single-call mutation hands the retry's settlement fresh `NoTopologyHooks`)
+leaves events folded through hooks the caller never sees, and the lists differ.
+
 ## `mod tests` › `fn a_shutdown_injected_once_the_tear_stands(`
 
 The scheduler of a shutdown witness (I2-1): at its first quiescent point after the tear is planted —

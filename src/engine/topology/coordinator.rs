@@ -5516,6 +5516,102 @@ mod tests {
         });
     }
 
+    struct FoldsSeen {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        seen: Vec<&'static str>,
+    }
+
+    impl TopologyHooks for FoldsSeen {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            self.inner.effects()
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.inner.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.inner.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.inner.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            TopologyHooks::spawn(&mut self.inner)
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.inner.folded(fold, events);
+            if let Some(last) = events.last() {
+                self.seen.push(last.body.kind());
+            }
+        }
+    }
+
+    #[test]
+    fn every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks()
+     {
+        let tasks = two_independent();
+        let plans = WidePlans {
+            gates: 2,
+            ..WidePlans::default()
+        };
+        let mut narrow = Wide::started_with(
+            "width-one-retry-hooks",
+            &tasks,
+            1,
+            plans,
+            RecordingRunner::new().answering(wide_responder(&tasks, &[(0, 1)])),
+        );
+        let mut hooks = FoldsSeen {
+            inner: narrow.env.hooks(),
+            seen: Vec::new(),
+        };
+        let seams = narrow.env.seams();
+        let before = narrow.run.events().len();
+        let mut steps = 0_u32;
+        let mut retried = false;
+        loop {
+            steps += 1;
+            assert!(steps < 200, "the width-1 loop did not finish");
+            let retrying = matches!(narrow.run.admitted(), Ok(Admitted::Retry { .. }));
+            let progress = narrow.run.step(&seams, &mut hooks).expect("a step");
+            if retrying {
+                retried = true;
+                assert!(
+                    matches!(progress, Progress::Settled { accepted: true, .. }),
+                    "the retry was judged and settled in the same step: {progress:?}"
+                );
+            }
+            if matches!(progress, Progress::Finished { .. }) {
+                break;
+            }
+        }
+        assert!(
+            retried,
+            "the width-1 step retried beta's retained generation"
+        );
+        let appended = kinds_of(&narrow.run.events()[before..]);
+        assert_eq!(
+            hooks.seen, appended,
+            "every event the width-1 step appended, the retry's settlement included, was folded \
+             through the hooks its caller passed"
+        );
+        assert_eq!(
+            narrow
+                .run
+                .events()
+                .iter()
+                .filter(|event| matches!(&event.body,
+                    TopologyEventBody::CandidatePrepared { data } if data.key == TaskKey(0)))
+                .count(),
+            1,
+            "beta's retry settled as its candidate: {appended:?}"
+        );
+    }
+
     fn a_shutdown_injected_once_the_tear_stands(
         planted: impl Fn() -> bool + 'static,
         injected: std::rc::Rc<std::cell::Cell<Option<usize>>>,

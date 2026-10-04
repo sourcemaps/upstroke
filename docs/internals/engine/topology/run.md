@@ -1175,8 +1175,11 @@ drives it too, as the width-1 side of its comparison.
 **The dispatch, the retry start, the settlement, the hard block and the run-end
 closure are generic over their [`Operator`]** (follow-up B, repair rounds 3 and 6,
 R1 and I2-2). `step` runs each through [`Stepping`], over its own run, seams and
-hooks, and the coordinator runs the same function with itself as the operator
-(`run::tests::both_drivers_run_each_transition_through_the_one_generic_function`).
+hooks, and the coordinator runs the same function with itself as the operator.
+`run::tests::both_drivers_run_each_transition_through_the_one_generic_function`
+reads every call of each of the five in both drivers and checks its operator;
+`coordinator::tests::every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`
+checks it in behaviour, for every append `step` makes.
 A transition holds no borrow of the run across a manager call: it takes the run
 for each of its own steps and lends the operator's registry hooks to the
 manager, so that on the coordinator a registry access's waits answer its
