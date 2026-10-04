@@ -56,7 +56,9 @@ its figures are under `~/orch-pr11/logs/pr11_fub_impl5/`, cited as `impl5/…`. 
 `pr11_fub_impl6`'s (`claude-opus-5-5`, `max`), spawned on `a58c2ce3` after the delta review of repair rounds 3 to 5; its
 figures are under `~/orch-pr11/logs/pr11_fub_impl6/`, cited as `impl6/…`. **Its repair round 7** (§9.17) is
 `pr11_fub_impl7`'s (`claude-opus-5-5`, `max`), spawned on `a337efa7` after `test (winguest)` failed round 6's integration
-witness there; its figures are under `~/orch-pr11/logs/pr11_fub_impl7/`, cited as `impl7/…`.
+witness there; its figures are under `~/orch-pr11/logs/pr11_fub_impl7/`, cited as `impl7/…`. **Its repair round 8**
+(§9.18) is `pr11_fub_impl8`'s (`claude-opus-5-5`, `max`), spawned on `519cfc9e` after the delta review of repair rounds
+6 and 7; its figures are under `~/orch-pr11/logs/pr11_fub_impl8/`, cited as `impl8/…`.
 
 ## 0. Status
 
@@ -70,7 +72,7 @@ witness there; its figures are under `~/orch-pr11/logs/pr11_fub_impl7/`, cited a
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. |
 
 ## 1. Design
 
@@ -3304,8 +3306,9 @@ the attempt. Only B1′ needs it.
 - Suite 2's third failure is a frozen recovery test: `engine::topology::recover::tests::`
   `an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges`,
   "and no process holds the run". It passed alone three times on the same tree (`ne-suite/alone-recover-{1,2,3}.log`).
-  It is a single observation of the run's lease (`recover/tests.rs:7120-7122`), the class
-  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` names (§4.10).
+  It is a single observation of `rundir::is_running` (`recover/tests.rs:7120-7122`), which answers true for this
+  process's own claim on the run, the primary lock, the cleanup lease and an inspection failure alike. A lease copy a
+  sibling's fork inherited is one way to fail it; what answered here was not established (repair round 8, §9.18.4).
 - Every frozen module's tests pass in suite 3 (`frozen-census.txt`): recover 226, integrate 20, repair 5, finalize 5,
   fold 192, `events::log` 47. So do the legacy engine's 188 and `src/workspace.rs`'s 47, and every instrument census.
 
@@ -3689,12 +3692,12 @@ These are §3.12's, with the following added.
 - **A legacy snapshot's drop waits up to the deadline under contention** (§4.4).
 - **Kept pins accumulate,** one per refused legacy attempt, until the operator removes them (§4.5).
 - **`UpstrokeError` gains a public variant,** `RegistryRefused`.
-- **The lease flake.** The frozen recovery test that reddened suite 2 asserts, in one observation, that no process
-  holds the run after a resume (`src/engine/topology/recover/tests.rs:7120-7122`). A sibling test's fork inheriting the
-  run's lease descriptor answers it held for about a millisecond: the class
-  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` names
-  (`findings/P2_correctness_202609131202_a-cancelled-job-hides-which-assertion-failed.md`). It passed alone three
-  times (§4.3), and this change touches no lease.
+- **A frozen recovery test's red.** The test that reddened suite 2 asserts, in one observation, that no process holds
+  the run after a resume (`src/engine/topology/recover/tests.rs:7120-7122`). A copy of the run's lease descriptor that
+  a sibling test's fork inherited answers that observation held for as long as the copy lasts, and so do the primary
+  lock, this process's claim and an inspection failure. Which answered was not established, so it is not attributed to
+  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` (repair round 8, §9.18.4). It passed alone three times
+  (§4.3), and this change touches no lease.
 
 **Sequencing.**
 - Corrected B1′ and B-PRESERVE land in #329's implementation only if the owner takes them before it; otherwise in a
@@ -4303,9 +4306,11 @@ Compiling line names it.
   - Both suites fail the two non-frozen tests every round since round 4 has moved (§3.6). The second,
     `an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup`, now gets `RegistryRefused` after the
     deadline, carrying the same Git text.
-  - Suite 3's third failure is a frozen recovery test's cleanup-lease observation: "still has a process of its own
-    alive … holds the run's cleanup lease". It passed alone three times (`alone-recover-{1,2,3}.log`). That is the class
-    `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` names (§4.10).
+  - Suite 3's third failure is a frozen recovery test's cleanup-lease observation, in
+    `a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it`: "still has a process of its
+    own alive … holds the run's cleanup lease". It passed alone three times (`alone-recover-{1,2,3}.log`). Its refusal
+    is the one `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` records from other tests: a fingerprint
+    match, whose holder was not identified (repair round 8, §9.18.3).
   - Suite 4's third failure is a real-Docker test: "still running after 200 observations". It passed alone three times
     (`alone-docker-{1,2,3}.log`). That is the class
     `findings/P3_correctness_202609121234_the-docker-termination-poll-counts-yields-not-time.md` names.
@@ -4369,7 +4374,8 @@ These are §3.12's and §4.10's topology risks, with the following changed.
 - **Filters run after the takeover** (R11).
 - **`UpstrokeError` gains a public variant**, `RegistryRefused`, and the crate gains one `pub(crate)` function and one
   `pub(crate)` enum.
-- **The lease and Docker flakes** reddened one suite each on the prototype, and each passed alone three times (§5.8).
+- **A lease refusal and a Docker failure** reddened one suite each on the prototype, and each passed alone three times
+  (§5.8).
   This change touches neither a lease nor a container.
 
 **Sequencing.**
@@ -7593,12 +7599,14 @@ and the file says so. `h1-reverted`'s list names the head check twice, so its co
   `RegistryRefused` is constructed only in `src/workspace_manager.rs` (`impl6/legacy/legacy-activation-f92db934.txt`);
 - at this round's head, the ten gates; the body records them.
 
-**Observed once, not this round's:** in one whole-suite run before the commits (`impl6/stage/s1/test.log`), the frozen
+**An unexplained failure, recorded at repair round 8 (§9.18.2).** One whole library suite before the commits, stage s1
+(`impl6/stage/s1/test.log`), was filtered: 3,087 passed, 1 failed, 130 ignored and 23 filtered out, the `real_docker`
+tests. In it the frozen
 `recover::tests::unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing` failed
-its "no process holds the run" assertion just after it dropped a resume's handle. It passed alone
-(`impl6/stage/s1/recover-rerun.log`), and in the later whole-suite runs. Its cause was not established. This round
-touches neither the frozen test nor the cleanup lease, and spawns no process anywhere new. It is not chased here, and
-the handover reports it to the orchestrator.
+its "no process holds the run" observation just after it dropped a resume's handle. It passed alone
+(`impl6/stage/s1/recover-rerun.log`), and in the next suites, stage s2 and this round's test gate, both unfiltered. None
+of that, nor the unchanged test, establishes its provenance or its cause. It is a candidate regression of undetermined
+provenance, filed with its G6 obligation as `PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING`.
 
 **Not verified here:** the Windows and macOS legs, the guest, and CI's stable 1.99.0. CI is the truth for them.
 
@@ -7756,12 +7764,15 @@ this wake was never the question.
 - at `c3bde5fd`, the Windows target was linted and type-checked on 1.85 with `-D warnings`, the macOS target was
   linted, and the Linux target was type-checked on 1.85 with `-D warnings`: all four passed
   (`impl7/platform/code-c3bde5fd/`);
-- the whole suite on a CRLF copy of `c3bde5fd`: the library passed 3,115, failed 1 and ignored 130, and the binary
-  passed 10. The one failure is the frozen
-  `recover::tests::a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it`, refused on its
-  run's cleanup lease: the mechanism of the filed `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`, whose
-  file quotes the same refusal. The same executable then passed it alone 5 of 5, and the whole library suite with
-  3,116 passed and 0 failed (`impl7/crlf/ATTRIBUTION.md`);
+- the whole suite on a CRLF copy of `c3bde5fd`, with `--skip real_docker`: the library passed 3,115, failed 1 and
+  ignored 130, with 23 filtered out, and the binary passed 10. The one failure is the frozen
+  `recover::tests::a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it`, its resume
+  refused on the run's cleanup lease. The same executable then passed it alone 5 of 5, and the library suite again with
+  the same filter, 3,116 passed, 0 failed and 23 filtered out (`impl7/crlf/suite-crlf-c3bde5fd/`, `impl7/crlf/rerun/`).
+  Its refusal is the one the filed `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` records in other tests:
+  a fingerprint match, its cause in this sighting unproven. Repair round 8 files it as
+  `PR329-A-CREATION-PREFIX-RESUME-REFUSED-ON-A-HELD-CLEANUP-LEASE`, and supersedes `impl7/crlf/ATTRIBUTION.md`'s
+  attribution (§9.18.3);
 - the legacy and activation check matches round 6's, but for one test line in `coordinator.rs` moved by this round's
   added lines (`impl7/legacy/vs-round6-c3bde5fd.txt`);
 - §9.4's cites re-pinned to this head, and a W7 row;
@@ -7769,3 +7780,164 @@ this wake was never the question.
 
 **Not verified here:** the guest itself, meaning whether the repaired witness passes there and how long its waits last.
 CI is the truth for that, and for the macOS leg and CI's stable 1.99.0.
+
+### 9.18 Repair round 8: the delta review's I3-1 and I3-2, two sightings recorded as found
+
+**Who and why.** `pr11_fub_impl8` (`claude-opus-5-5`, `max`), spawned by `orch_pr11` on `519cfc9e` after the delta
+review of repair rounds 6 and 7. Its brief is `~/orch-pr11/briefs/pr11_fub_impl8.md`, and I3-1 and I3-2 are its whole
+scope. Its figures are under `~/orch-pr11/logs/pr11_fub_impl8/`, cited as `impl8/…`. It changes no source file, no test
+and no frozen file: only this record, two new files under `findings/`, and the body. It adopts no owner decision, and
+H1 stays proposed and not adopted.
+
+**The commit, on `519cfc9e`:** the two findings, this text, the corrections it lists (§9.18.4), and the header's and
+§0's sentences; then the body.
+
+#### 9.18.1 The delta review
+
+- **The lenses.** Two `gpt-6-astra` lenses at `max` on `cameron-codex`, regular and regression, on `519cfc9e` and the
+  delta `a58c2ce3..519cfc9e`, after CI there was green on every leg. Both returned CHANGES_REQUIRED, with the same two
+  P3 evidence-contract findings, and no P1, no P2 and no production defect. The texts are
+  `~/orch-pr11/reviews/review-329-i3-{regular,regression}-519cfc9e.review.md`, and the triage is
+  `~/orch-pr11/reviews/review-329-i3-triage.md`.
+- **What held**, by the triage: I2-1 to I2-7 as repaired, round 7's prober repair within its stated limits, the frozen
+  set (H1 alone, +16/−4), the legacy path and activation, and the new coordinator tests on the native legs.
+- **The two items.**
+  - **I3-1:** round 6's record and body set an unexplained failure of a frozen recovery test outside the round,
+    without establishing its provenance.
+  - **I3-2:** round 7's record and body promoted a lease refusal's match with PR281's fingerprint into a proven cause,
+    and left its filtering unsaid.
+
+#### 9.18.2 I3-1: round 6's recovery failure, recorded as found
+
+**The sighting** (`impl6/stage/s1/`; the filter and the tree are read in `impl8/sightings/s1-filter-and-tree.txt`):
+- **What ran.** Round 6's stage s1: the whole library suite, on this box, of the round's first staged tree. By its test
+  list and its time that is `0edfc509`'s tree: none of the 24 coordinator tests that `22d70ef6` adds ran in it, and its
+  log ends 30 s before `0edfc509` was committed. The tree itself was not saved.
+- **It was filtered.** 3,087 passed, 1 failed, 130 ignored and 23 filtered out. The 23 are exactly the tests whose
+  names contain `real_docker`, which s2 ran, so a `--skip real_docker` filter; s1's command line was not saved. The
+  binary's tests have no result line in that log.
+- **What failed.** `recover::tests::unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`,
+  at `recover/tests.rs:7120`, with "two-crash: and no process holds the run". Its helper,
+  `the_runs_first_resume_by_an_incarnation_that_then_dies`, asserts in one observation that `rundir::is_running`
+  answers false once the first resume's handle is dropped.
+- **What ran after it** (`impl8/sightings/later-runs.txt`). The same executable passed the test alone, once
+  (`stage/s1/recover-rerun.log`). **The next two suites were unfiltered and green:** stage s2, with 3,135 passed, 0
+  failed, 130 ignored and 0 filtered out, and the binary's 10 (`impl6/stage/s2/test.log`); and round 6's test gate at
+  `a337efa7`, with 3,137, 0 and 130, 0 filtered out, and 10 (`impl6/gates/final-a337efa7/03-test.log`). It also
+  passed in the four later suites of rounds 6 and 7 that the file lists.
+
+**What it is: an unexplained candidate regression of undetermined provenance.**
+- **Its provenance is not established.** An isolated pass, later green suites and an unchanged frozen witness show
+  neither that the failure predates this change nor its cause. This change alters what runs beside the test: a timer
+  thread per coordinator, registry waits, concurrent fixtures. That can move the test's overlap with process and lease
+  operations elsewhere in the suite. It is a possible influence, not a cause in evidence.
+- **The assertion names no holder.** `rundir::is_running` (`src/rundir.rs:2356`, master's) answers true in five cases
+  (`impl8/sightings/is-running-at-519cfc9e.txt`): this process's own claim on the run; a lock file it cannot open; a
+  holder of the primary lock; a primary lock it cannot inspect; and, with the primary lock free, a cleanup lease that
+  is held or cannot be observed. So the assertion does not tell the primary lock, the cleanup lease and an inspection
+  failure apart.
+- **No filed finding is this one's.** No finding names this test or this message (`impl8/sightings/ledger-search.txt`).
+  `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` records other witnesses and other messages.
+- **The same assertion has failed in two other tests** (`impl8/sightings/SIGHTINGS.txt`):
+  - in follow-up A's regression suite at A's head, a tree without this change. That lens produced the same message on
+    A's merge base by construction, with a parked fork holding a copy of the run's cleanup lease (A's record, §5.2);
+  - in design round 5's prototype (§4.3).
+
+  Neither is this witness, neither ran it before this change, and neither identifies what answered here. So they
+  classify nothing here.
+
+**Filed** as `PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING` (P2, `correctness`, `deferred`, provenance
+`undetermined`), in `findings/P2_correctness_202610040608_a-dropped-resumes-run-still-read-as-running.md`.
+
+**Its final-range G6 obligation**, carried in the file:
+- keep this sighting separately;
+- count any recurrence of this witness failing its `is_running` observation as red;
+- classify it `pre_existing` only on a reproduction before this change, or on causal evidence of what held the run.
+
+#### 9.18.3 I3-2: round 7's lease refusal, a fingerprint
+
+**The sighting** (`impl7/crlf/`):
+- **What ran.** The whole suite on a CRLF copy of `c3bde5fd`, on this box:
+  `cargo test --all-targets --all-features --no-fail-fast -- --skip real_docker`, as `impl7/tools/scratch-run.py` runs
+  the spec `impl7/crlf/suite-crlf-c3bde5fd/spec.json`.
+- **It was filtered.** The library passed 3,115, failed 1 and ignored 130, with 23 filtered out; the binary passed 10.
+  The same executable then passed the test alone 5 of 5, and the library suite again with the same filter: 3,116
+  passed, 0 failed, 130 ignored and 23 filtered out (`impl7/crlf/rerun/`). **Neither suite was unfiltered.**
+- **What failed.** `recover::tests::a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it`,
+  at `recover/tests.rs:17809`. The fixture's first resume, which waits for no lease, refused: "… still has a process of
+  its own alive … and that process holds the run's cleanup lease; refusing overlapping engine ownership".
+  `WorktreeLock::acquire_in_hooked` (`src/rundir.rs:1906`) gives that refusal when its one observation of a run's
+  cleanup lease reads held. An observation that cannot be made reads held too (`observe_cleanup_hold`,
+  `src/rundir.rs:2140`).
+
+**What it is: a PR281-compatible fingerprint, its causation in this sighting unproven.**
+- **A fingerprint, not a cause.** `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN` records this refusal from
+  other recovery tests' resumes, not from this one. It attributes them, by construction and not per sighting, to a
+  copy of the run's lease descriptor that a sibling's fork inherited during a ref write, and says that which fork held
+  it in each natural sighting is not identified. Five isolated passes and a green rerun prove no mechanism here.
+- **The same test has failed with the same refusal twice before** (`impl8/sightings/SIGHTINGS.txt`):
+  - in G5's S1 at `d724fb16`, a tree before PR11 and this change, unfiltered (`reviews/2026-09-25-gate-G5.md`, F16
+    and §2.1);
+  - in design round 6's prototype of this change (§5.8, qualified there).
+
+  The test's text is the same at `d724fb16`, master and this head
+  (`impl8/sightings/creation-test-body-d724fb16-vs-519cfc9e.txt`). So the fingerprint predates this change. What held
+  the lease is identified in none of the three, so this sighting's provenance stays undetermined.
+- **It classifies nothing else**, I3-1's failure included: that is a different assertion, whose observation reads more
+  than the lease.
+- **Round 7's evidence file is left as written.** `impl7/crlf/ATTRIBUTION.md`'s attribution, and its grouping of this
+  sighting with round 6's, are superseded here.
+
+**Filed** as `PR329-A-CREATION-PREFIX-RESUME-REFUSED-ON-A-HELD-CLEANUP-LEASE` (P2, `correctness`, `deferred`,
+provenance `undetermined`), in `findings/P2_correctness_202610040608_a-creation-prefix-resume-refused-on-a-held-cleanup-lease.md`.
+
+**Its final-range G6 obligation**, carried in the file: count every occurrence matching this fingerprint as red. A
+match is not a cause, and it classifies no other failure.
+
+#### 9.18.4 How each is recorded, and the sweep
+
+**Why two findings, and not ledger rows alone.** `MAINTAINING.md` step 5 gives every open finding its own file. Its
+lane table has this `fix-p0p1` lane fix P0 and P1 before ready, and a finding a lane need not fix is filed and
+deferred: one file under `findings/`, with a `deferred` ledger row. `findings/PROCESS.md` §7 defers to that.
+- **I3-1's sighting** matches no filed finding, so it is a new one.
+- **I3-2's sighting** matches PR281's fingerprint, but its cause is unproven, so it is not recorded as PR281
+  recurring. Filing it on its own also keeps PR281's file, another finding's, outside this round's writes
+  (`findings/PROCESS.md` §4).
+- **Both are P2**, as PR281 is, and neither is graded down.
+- **Neither carries a reproduction.** Each sighting is one failure in one suite, after which its test passed alone and
+  in the next suites, and both tests pass in this round's test gate. This round, whose scope is text and evidence, ran
+  neither for itself. So step 5's rule for a witnessed finding does not apply, and both are deferred with their G6
+  obligations.
+- **I3-1 and I3-2 themselves**, the record's and the body's sentences, are fixed here, with `fixed` ledger rows:
+  `FUB-I3-S1EXCLUSION` and `FUB-I3-CRLFFINGERPRINT`.
+
+**The sweep** (`impl8/sweep/`). The record and the body were searched for every sentence that set either sighting
+aside, attributed it beyond a fingerprint, or did either to a sibling sighting of the same shape. Each one found was
+corrected:
+
+| Where | What it said | What it says now |
+|---|---|---|
+| §4.3 | design round 5's red of the same assertion, read as an observation of the lease alone and given to PR281's class | an `is_running` observation that a lease copy is one way to fail; what answered not established |
+| §4.10 | the same red, labelled a known intermittent, its holder stated as a sibling's inherited lease | the same qualification, and no attribution to PR281 |
+| §5.8 | design round 6's lease refusal, given to PR281's class | the test named (it is I3-2's witness), a fingerprint match, its holder not identified |
+| §5.10 | the lease and Docker reds, labelled as known intermittents | called a refusal and a failure |
+| §9.16.11 | I3-1's sighting, set outside round 6 | as §9.18.2 |
+| §9.17.5 | I3-2's sighting, given PR281's cause, its filtering unsaid | as §9.18.3, with the filtering |
+| the body | the same two sightings, as §9.16.11 and §9.17.5 had them; round 7's proof line silent on its failure | as here |
+
+**What is not changed:** the facts each of those places records, and the evidence files of earlier rounds, which stay
+as their sessions wrote them.
+
+#### 9.18.5 The frozen proof, and what else ran
+
+- **The frozen proof** (`impl8/frozen/`, `impl8/tools/frozen-proof-r8.sh`): this round's own frozen change is none, 34
+  of 34 files byte-identical; `integrate.rs` is blob `bf62256e`, H1 alone, +16/−4 against master; and parts 1 and 2
+  are round 7's, line for line.
+- **No source file changes:** the round's diff is this record and the two findings.
+- **CI at `519cfc9e` was green on every leg:** "CI" run 37178335687, all ten of its jobs, and "Pull request policy" run
+  37178335706. The two runs created two seconds earlier on that head, 37178334080 and 37178334129, ended cancelled
+  (`impl8/ci/`).
+- **At this round's head, the ten gates;** the body records them.
+
+**Not verified here:** either sighting's cause, and whether either recurs. No run was made to reproduce either in this
+round; the test gate's one whole suite passed both.
