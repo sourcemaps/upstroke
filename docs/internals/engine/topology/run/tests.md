@@ -147,6 +147,70 @@ on a total.
 Calls, not definitions — neither is defined here, but the filter is the
 one the barrier census learned to use and costs nothing.
 
+## `const DRIVEN_TRANSITIONS: [(&str, usize, usize); 5] = [`
+
+The five transitions both drivers run, with how many times each driver calls
+each: `step` settles twice (the retry arm and the dispatch arm) and closes the
+run twice (its closure arm, and its hard block falling through with the
+operator it was handed); the coordinator closes the run twice (idle, and a
+halt's `finish`).
+
+## `fn transition_calls(code: &str, transition: &str) -> Vec<(String, bool)> {`
+
+Every call of `transition` in blanked production code, as its first argument
+with its whitespace collapsed — so a call rustfmt splits after its parenthesis
+reads as one that it does not — and whether it was called as a method. A name
+that ends a longer identifier is not a call of it, and the generic definition
+(`transition<O`) is not one either.
+
+## `fn transition_bypasses(run: &str, coordinator: &str) -> Vec<String> {`
+
+What the census reports: a transition not defined exactly once generic over
+its operator, a driver that calls it another number of times than
+[`DRIVEN_TRANSITIONS`] says, or any one call whose operator is not the
+driver's own — `&mut self.stepping(seams, hooks)` or the operator a generic
+transition was handed in `run.rs`, `self` in `coordinator.rs`.
+
+## `fn driver_sources() -> (String, String) {`
+
+The two drivers' production code, blanked, with their line endings normalised.
+
+## `fn both_drivers_run_each_transition_through_the_one_generic_function() {`
+
+**Both drivers run each transition through the one generic function** (R-T,
+follow-up B's repair round 3; every call site since repair round 6, I2-4).
+`begin_dispatch`, `begin_retry`, `settle_judged`, `close_run` and `hard_block`
+are each defined once, generic over the operator that runs them, and **every
+call** of each, in both drivers, hands it the driver's own operator: the
+width-1 `step` its [`Stepping`], the coordinator itself. Until repair round 6
+the census asked only that one such call exist, so one settlement handed a
+foreign operator beside a correct one passed it, and the whole suite with it
+(the delta review's R9). Its domain is the drivers' production code, which
+the census checks reaches the functions it must (`step`, `idle`, `finish`,
+`registry_pause`).
+`coordinator::tests::every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`
+is the behavioural witness, and
+`coordinator::tests::the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`
+the control.
+
+## `fn the_r_t_census_reports_one_call_that_bypasses_its_driver() {`
+
+The census's positive control (standards §12): the real sources pass it; the
+reviews' two spellings of the single-call mutation — the retry arm's
+settlement handed a `Stepping` with fresh `NoTopologyHooks`, written as a
+literal or through `stepping` — are each reported once, under either
+spelling; so is the coordinator's settlement handed a `Stepping` of its own,
+and a closure called as the run's own method.
+
+## `fn driver_sources() -> (String, String) {` › `let read = |file: &str| {`
+
+Line endings are normalised before the source is blanked. rustfmt splits the
+`step`'s call of `begin_dispatch` after its parenthesis, so that needle spells
+a line break, and a checkout with Windows line endings holds `\r\n` there:
+without the normalisation the census fails a source that satisfies it. It did
+on `test (winguest)` at `f9c88fdb` (follow-up B's R8), while every Linux and
+macOS leg passed.
+
 ## `fn the_frozen_pool_table_is_read_through_one_seam() {`
 
 **The frozen pool table is read through one seam.**
@@ -244,6 +308,20 @@ claim (2).
 So this census keeps a real and narrower job: the two *literals* name an
 authority rather than inventing a value. It is not a witness that the value
 arriving at them is right.
+
+**Its domain is asserted** (follow-up B's repair round 6, the delta review's
+census audit). Until then it read the first `AttemptStarted4` literal of each
+file, so a second literal in either file, or a third arm in another, went
+unread while the test said "both arms". It now walks every production source
+of the crate (whole-file test modules skipped), requires that exactly these
+two files construct the event, once each, and reads every literal it finds;
+the counter's own fixture shows a second literal counted and the definition
+not.
+
+## `fn attempt_started_constructions(code: &str) -> Vec<usize> {`
+
+Where `code` constructs `AttemptStarted4`: every `AttemptStarted4 {` that is
+not the struct's definition.
 
 ## `fn the_settled_notes_separate_the_successful_and_the_failed_settlement() {`
 

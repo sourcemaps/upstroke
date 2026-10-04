@@ -104,6 +104,27 @@ Carries its own whole sentence, because prefixing these with a
 command's name (`cannot resume …` on a `status` lookup) misdescribes
 what the operator was actually doing.
 
+## `RegistryRefused { message: String },`
+
+A worktree-registry access that did not complete:
+`workspace_manager::tolerant_registry_access` attempted it again until its
+deadline, or its caller could not decide whether another attempt was safe, or
+this process's own registry lock stayed held until the deadline. The store a
+writer in another checkout leaves half-written, a registration a dead process
+left torn, and a registration nobody is writing all end here, and none of them
+is Git state. Displayed as its message, which names the store, the deadline,
+the attempt count and the last failure's text, like [`Self::Refused`].
+
+It is a variant of its own, and not `Refused`, so that a caller can tell a
+registry refusal by its type: `engine::topology::run::verified` maps only
+`Git` to `Verified::Unavailable`, so this one ends the command resumably and
+appends nothing, and the legacy engine's proposed preservation (follow-up D,
+not in force) keys on it (`reviews/2026-10-01-pr11-follow-up-b-record.md`
+§5.5, §7.6). It is never
+`Git`: registry state that reached a verification's Git arm spent a valid
+candidate's deferrals and parked it
+(`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`).
+
 ## `#[error(transparent)]`
 
 Non-fatal diagnostics do not replace or hide the operation's refusal.
