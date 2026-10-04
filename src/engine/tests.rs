@@ -9909,7 +9909,7 @@ fn v1_role_probe(role: &str) {
         "GIT_NO_REPLACE_OBJECTS is not in this role's environment".to_owned(),
     );
     if role == "gate" && spec.lines().any(|line| line == "worktree true") {
-        let set = probe_git(
+        let set = probe_git_past_another_registrations_write(
             &here,
             &["config", "--worktree", "core.useReplaceRefs", "true"],
         );
@@ -10746,6 +10746,121 @@ fn v1_sibling_run_helper() {
     )
     .expect("a sibling run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+}
+
+fn probe_git_past_another_registrations_write(dir: &Path, args: &[&str]) -> Result<String, String> {
+    past_another_registrations_write(
+        dir,
+        std::time::Instant::now() + Duration::from_secs(10),
+        &mut || probe_git(dir, args),
+    )
+}
+
+fn past_another_registrations_write(
+    dir: &Path,
+    deadline: std::time::Instant,
+    probe: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<String, String> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        let read = probe();
+        let torn = read
+            .as_ref()
+            .err()
+            .is_some_and(|error| anothers_empty_commondir_in(error, dir));
+        let now = std::time::Instant::now();
+        if !torn || now >= deadline {
+            return read;
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(Duration::from_millis(50));
+    }
+}
+
+fn anothers_empty_commondir_in(error: &str, dir: &Path) -> bool {
+    let own = dir
+        .file_name()
+        .map(std::ffi::OsStr::as_encoded_bytes)
+        .unwrap_or_default();
+    let Some(registration) = error
+        .strip_prefix("fatal: failed to read ")
+        .and_then(|rest| rest.strip_suffix("/commondir: Success"))
+    else {
+        return false;
+    };
+    let mut components = registration.rsplit('/');
+    let id = components.next().unwrap_or_default();
+    !error.contains('\n')
+        && components.next() == Some("worktrees")
+        && !id.is_empty()
+        && !id.as_bytes().starts_with(own)
+}
+
+#[test]
+fn a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir() {
+    let dir = Path::new("/r/store/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA");
+    let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2-01BBBBBBBBBBBBBBBBBBBBBBBB\
+                 /commondir: Success";
+    let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1-01AAAAAAAAAAAAAAAAAAAAAAAA\
+               /commondir: Success";
+    let far = || std::time::Instant::now() + Duration::from_secs(60);
+    let attempt = |deadline: std::time::Instant,
+                   script: Vec<Result<String, String>>|
+     -> (Result<String, String>, usize) {
+        let mut script = script.into_iter();
+        let mut probes = 0;
+        let read = past_another_registrations_write(dir, deadline, &mut || {
+            probes += 1;
+            script
+                .next()
+                .unwrap_or_else(|| Err("probed past the script".to_owned()))
+        });
+        (read, probes)
+    };
+    let set = Ok(String::new());
+
+    assert_eq!(
+        attempt(
+            far(),
+            vec![Err(other.to_owned()), Err(other.to_owned()), set.clone()]
+        ),
+        (set.clone(), 3),
+        "past two tears of another registration"
+    );
+    for (error, why) in [
+        (own, "its own registration"),
+        (
+            "fatal: failed to read /r/.git/worktrees/w/commondir: No such file or directory",
+            "a removal's",
+        ),
+        (
+            "fatal: failed to read '/r/.git/worktrees/w/locked'",
+            "a lock's",
+        ),
+        (
+            "fatal: --worktree cannot be used with multiple working trees",
+            "another refusal",
+        ),
+    ] {
+        assert_eq!(
+            attempt(far(), vec![Err(error.to_owned()), set.clone()]),
+            (Err(error.to_owned()), 1),
+            "{why}, at once"
+        );
+    }
+    assert_eq!(
+        attempt(
+            std::time::Instant::now(),
+            vec![Err(other.to_owned()), set.clone()]
+        ),
+        (Err(other.to_owned()), 1),
+        "a deadline already past"
+    );
+    assert_eq!(
+        attempt(far(), vec![set.clone()]),
+        (set, 1),
+        "a success, at once"
+    );
 }
 
 #[test]

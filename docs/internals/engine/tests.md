@@ -2735,7 +2735,11 @@ and none panics: the witness wants the whole record, not the first failure.
   presence is the regression this policy replaced.
 - `worktree-true` (gates, when the spec says `worktree true`): the role sets
   `core.useReplaceRefs = true` in its own snapshot's worktree configuration
-  first, so every read below it has to beat that scope too.
+  first, so every read below it has to beat that scope too. It sets it through
+  `probe_git_past_another_registrations_write` (proposed and conditional,
+  B-W924-R2, its section below): the setting reads every registration of the
+  repository first, so beside a sibling run's add in flight it can die on that
+  sibling's empty `commondir`.
 - `include`: `git config -z --show-origin --get core.useReplaceRefs` answers
   `false` from the include file, in the directory the role was started in. The
   include is present and in force while the role runs, not only when the run
@@ -2854,6 +2858,45 @@ was still running in. The sibling
 checkouts are created with `--no-replace-objects -c core.useReplaceRefs=false`,
 because a checkout written through the commit replacement differs from what its
 HEAD records and the run refuses it as dirty, correctly.
+
+## `fn probe_git_past_another_registrations_write(dir: &Path, args: &[&str]) -> Result<String, String> {`
+
+*Proposed and conditional: B-W924-R2, not adopted (the follow-up B record's
+§9.25).* The gate probe's `git config --worktree core.useReplaceRefs true`
+enumerates the repository's registrations before it writes anything
+(`location_options_init` calls `get_worktrees()` first), so in the siblings
+witness it can die reading the other sibling's add in flight, at its empty
+`commondir`. The B-W924 diagnosis's half-forced runs saw it do so: that probe was
+the first reader to meet the held write and exited 128, and a later attempt of
+the same run met the add itself (what ended the first attempt was not observed
+directly). The product's snapshot commands now run again past
+such a read (B-W924-R1, `src/workspace.rs`), and this probe runs again on the
+same terms: another registration's `commondir` read at zero bytes, the gate's own
+snapshot never, one millisecond's sleep doubling to fifty, ten seconds. Every
+other answer is the probe's own, and the check and its record are unchanged: a
+setting that never lands still records `worktree-true FAIL` with Git's message.
+It sits after the siblings' helpers so that the witness's own lines keep their
+numbers. It reads its own copy of the rule, so that either change can be taken
+without the other.
+
+## `fn past_another_registrations_write(`
+
+The loop, against an injected probe and deadline, so that its decision runs
+without Git (the test below).
+
+## `fn anothers_empty_commondir_in(error: &str, dir: &Path) -> bool {`
+
+The rule, on the probe's trimmed standard error: Git's `fatal: failed to read `,
+a path whose last components are `worktrees`, a registration's name and
+`commondir`, then `: Success`, on one line; and the name not the gate's own
+snapshot directory's, nor that with anything after it.
+
+## `fn a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir() {`
+
+The loop against a scripted probe: past two tears of another registration to the
+setting; its own registration's, a removal's, a lock's and an unrelated refusal
+returned at once; a deadline already past returns the first tear; a success
+at once.
 
 ## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
 
