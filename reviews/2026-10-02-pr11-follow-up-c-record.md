@@ -43,6 +43,9 @@ same model and effort, a fresh session on this branch at `30026823`), after desi
 assessment of the unit to build (`~/orch-pr11/c-impl/UNIT.md`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl/`,
 cited as `c6/…`. Repair round 2 (§6.9), after CI on `1fc0c911`, is `pr11_fuc_impl2`'s (the same model and effort, a fresh
 session on this branch at `1fc0c911`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl2/`, cited as `c6r2/…`.
+Repair round 3 (§6.10), after the implementation review of `83516466`, is `pr11_fuc_impl3`'s (the same model and effort,
+a fresh session on this branch at `83516466`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl3/`, cited as
+`c6r3/…`.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -65,7 +68,7 @@ signal no process (§5, opening).
 
 | Phase | State |
 |---|---|
-| Implementation (§6) | **IMPLEMENTED, NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head, merged in at `e46b71d3`, and uses #329's targeted removal and tolerant registry access as they are. No frozen file changes, and D4 did not trigger (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition) and O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. |
+| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1) AND REPAIRED IN ROUND 3 (§6.10); THE REPAIR NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head, merged in at `e46b71d3`, and uses #329's targeted removal and tolerant registry access as they are. No frozen file changes, and D4 did not trigger (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition) and O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. |
 | Design, round 5 (§5) | Reviewed by design review round 5 on `30026823` (`~/orch-pr11/reviews/review-330-d5-triage.md`), whose items against U §6 takes. Round 5 read: **PROPOSED — the last design round before the owner's consolidated question; the owner's decisions D1 to D5 (§5.9).** It answers design review round 4, whose three lenses returned CHANGES_REQUIRED on `12375c7e` with one P1: Git's shared rerere state crosses U's instance boundary. Every engine Git command now runs with rerere disabled, executed on 2.43.0 and 2.55.0 for its effect: no engine pick reads or writes `rr-cache` (§5.2). The common git dir is censused path by path, by plain listings and trace2 on both versions, and the census adds `worktree.useRelativePaths=false` (§5.3). Terminal finalization's last step sweeps every earlier incarnation's instance in non-frozen manager code, and the window after it is R-UR, P3, with E-FUC-3's stated exception (§5.4). R-REF is the owner's decision D5 and blocks G6 until it is made (§5.5). This head changes no production code. |
 | Design, round 4 (§4) | Superseded in part by §5; §5.11 lists what it replaces. Round 4 read: **PROPOSED — U repaired, retention withdrawn, Q frozen; the owner's decisions D1 to D4 (§4.15).** It answers design review round 3, whose three lenses returned CHANGES_REQUIRED on `a0464f43` with one P1, in U's tag, and the looping signal raised the third time (§4.1). The production incarnation id now carries host randomness through the standard library's `RandomState`, and the tag is 60 bits of a hash of it (§4.2). Every walk discovers other incarnations' instances no intent names, executed again with saved evidence on 2.43.0 and 2.55.0 (§4.3). A dead instance that cannot be removed refuses the command, so Q1's order and the outcome equations stand (§4.5). The frozen oracles' replacements are specified fixture by fixture (§4.6). R-REF is regraded and filed (§4.8), Q's open items are restated (§4.9), and R-GU is analysed from DESC's side and filed by #329 (§4.11). This head changes no production code. |
 | Design, round 3 (§3) | Superseded in part by §4; §4.17 lists what it replaces. Round 3 read: **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
@@ -3691,7 +3694,8 @@ access, its targeted removal and its deletion of every engine prune.
   every instance's intent in one execution of its site. A removal that fails refuses resumably: nothing is retained.
   The acted-through walk runs at each instance's own paths (`acted_through_instance_paths`).
 - **The torn-registration plan** reads every instance of every slot, so an earlier incarnation's torn add is repaired
-  with its slot.
+  whichever instance of its slot it is in, and the repair removes that torn instance alone (corrected at repair round
+  3: it removed every instance of the slot, a live successor's included; §6.10).
 - **The final sweep** (§5.4). `remove_execution_root` first runs `sweep_earlier_instances`: every earlier instance found
   by directory or registration is removed through its kind's removal site, under the finalizer's
   `WriterProof::NoWriterAlive`, bound to its own registration. The R18 site itself is unchanged.
@@ -3933,7 +3937,7 @@ As §5.8 leaves them, with the implementation's changes:
 | **FUC-D5-GITINDEXFILE** | Unchanged; filed with `FUB-D9-ENV`, whose protocol route this change's binding closes | O3 or O3-R |
 | **The two frozen oracles** | Replaced and demonstrated (R-O1 to R-O3, M-O1, M-O2) | closed |
 | **RERERE, CONFIG** | The switches built (T-RR1, T-RR2, T-CFG1) | closed |
-| **Q's items** (PGIDREUSE, the sentinel fallback, observation identity) | Q is not built; under U they do not arise | O5, if the owner chooses Q |
+| **Q's items** (PGIDREUSE, the sentinel fallback, observation identity) | Q is not built; under U they do not arise. Filed at repair round 3, each guarded on O5 selecting Q (§6.10) | O5, if the owner chooses Q |
 
 ### 6.7 Findings at this touch
 
@@ -3949,22 +3953,23 @@ As §5.8 leaves them, with the implementation's changes:
 - **Updated, kept open:** the DESC finding, with what this change closes and why it stays open.
 - **Deleted as fixed:** `PR128-RESIDUE-UNREACHABLE-OBJECTS-IGNORES-THE-EXIT-STATUS`, by
   `a_failed_fsck_is_an_error_naming_the_command_and_never_an_empty_listing` and its mutation.
-- **Not filed:** Q's three open items. Their rows are `rejected` as not relevant to this change as built: Q's machinery
-  does not exist in the code, and under U they do not arise (§3.3.3, §4.9, §5.8). They come back with their texts if the
-  owner chooses Q at O5.
+- **Filed at repair round 3** (corrected at repair round 3; §6.10): Q's three open items, `FUC-D2-PGIDREUSE` (P1),
+  `FUC-D3-SENTINELFALLBACK` (P2) and `FUC-D3-OBSERVE` (P2), each with its original severity and `reviewed_sha` and a
+  guard conditional on the owner's O5 selecting Q. Q's machinery does not exist in the code, and under U they do not
+  arise (§3.3.3, §4.9, §5.8). This section first left them unfiled, their rows `rejected` as not relevant to this change
+  as built; the implementation review held that every open finding of the design reviews is filed (C-I3).
 
 ### 6.8 Notes for the owner and the reviewers
 
-- **E-FUC-3's item 3, `at_run_end.NoRunFinished`, says more than the code does on one point.** When a fresh process's
-  resume recreates an open generation (`verify_or_recreate`, `src/engine/topology/dispatch.rs:251-252`), its removal
-  takes every instance's checkout and registration, and `create_worktree` writes the resuming incarnation's own intent
-  before its add (`dispatch.rs:192-193`). The earlier incarnation's intent of that generation stays until the slot's
-  next intent removal: the generation's retirement, or terminal finalization's scrub. It names the same logical slot, so
-  no walk counts the slot twice, and its instance's checkout and registration are already gone. The amendment's "on
-  resume every earlier incarnation's instance and intent is reclaimed" is true of the instances; of the intents, it is
-  true of every slot the resume reclaims, not of an open generation it recreates. The owner may adopt the amendment as
-  written and take a follow-up that removes the slot's intents on the recreate path (`dispatch.rs` is not frozen), or
-  narrow the clause.
+- **E-FUC-3's item 3, `at_run_end.NoRunFinished`, holds as written** (corrected at repair round 3; §6.10). When a
+  fresh process's resume recreates an open generation (`verify_or_recreate`, `src/engine/topology/dispatch.rs`), it
+  removes every instance's checkout and registration, then every instance's intent, and only then writes the resuming
+  incarnation's own intent and adds its instance (`create_worktree`). So "on resume every earlier incarnation's instance
+  and intent is reclaimed" is true of the intents too, for an open generation the resume recreates as for every slot it
+  reclaims, before any admission, as §4.5 requires: one intent of the generation after each of three resumes, where
+  `83516466` left 2, 3 and 4. This bullet first said the earlier intent stayed until the slot's next intent removal and
+  offered the owner a follow-up or a narrowed clause; the implementation review held that neither was right (C-I2), and
+  the erratum is neither narrowed nor deferred.
 - **The final sweep's proof.** Its removals pass `WriterProof::NoWriterAlive`, the proof terminal finalization's own
   scrub already passes for every slot (`finalize.rs:240-259`), and run inside `remove_execution_root`, before the root's
   emptiness check, so the frozen finalizer's call (`finalize.rs:163`) is unchanged. A dead incarnation's orphaned Git
@@ -4070,3 +4075,206 @@ four paths (`c6r2/frozen/frozen-proof-3e891d55.txt`). No legacy module or activa
   - #329 merged.
 - **No other merge permission is needed.**
 - **Corrected in place**, each marked "corrected at repair round 2": §1.9, §2.7.4, §3.3.6 and §6.1.
+
+### 6.10 Repair round 3: the implementation review's C-I1 to C-I5
+
+**What this subsection is.** The work of `pr11_fuc_impl3` (`claude-opus-5-5`, `max`), a fresh repairer the PR11
+orchestrator spawned on this branch at `83516466` under `~/orch-pr11/briefs/pr11_fuc_impl3.md`. Its scope is the
+orchestrator's triage of the implementation review of `83516466` (`~/orch-pr11/reviews/review-330-i1-triage.md`), items
+C-I1 to C-I5, and nothing else. Its evidence is under `~/orch-pr11/logs/pr11_fuc_impl3/`, cited as `c6r3/…`.
+- **Not in this round, by the brief.** #329's newer head is not merged: C takes B's final repaired head in a later step,
+  with history intact. E-FUC-3 and O4 stay unadopted, the packet is untouched, accounting is unchanged, O7's method
+  stays stopped, and no frozen file changes (below).
+- **The commits.** `a417333e` (`fix(workspace)`, C-I1 and C-I2), `c961ab44` (`test(workspace)`, C-I4 and C-I5, in
+  `src/workspace_manager/tests.rs` alone), and this record's commit with the three findings (C-I3). The two code commits
+  were split from one working tree, and the split was proved by recomposition: the second's `tests.rs` hashes to the
+  working tree's, and the range's diffstat is the tree's (`c6r3/commits/split-B.txt`).
+
+**CI on `83516466`** (`c6r3/ci/summary-37152638617.txt`, `c6r3/ci/runs-at-83516466.txt`): run 37152638617, green on
+every leg.
+- `lint`, `lint (windows)`, `lint (macos)`, the three `msrv (Rust 1.85, …)` legs and `upstroke-ci`: success.
+- `test (ubuntu-latest)`: the library passed 3,098 and ignored 132. `test (winguest)`: 2,870 passed and 88 ignored, the
+  closing-handle control round 2 fixed among them. `test (macos-latest)`: 3,029 passed and 104 ignored.
+- The pull-request policy run 37152638625: success. Two runs at the same head (37152638412, 37152638423) were cancelled
+  by the body edit that followed the push.
+
+**The review** (`~/orch-pr11/reviews/review-330-i1-{regular,regression}-83516466.review.md`, hashed in
+`SHA256SUMS-330-i1-lenses`; their witnesses in `330-i1-witnesses/`, hashed in `SHA256SUMS-330-i1-witnesses`). Both
+lenses returned CHANGES_REQUIRED, with one P1. The triage combines them into five items, each carrying a witness or a
+filing or standards duty, so each is fixed.
+
+#### C-I1 (P1): a torn instance's repair removes that instance alone
+
+- **Reproduced first** (`c6r3/witness/r3-wit-regular-at-83516466/`). The regular lens's witness patch over `83516466`
+  (`review330-witness.patch`, sha256 `95a951a7…`, the orchestrator's copy: `c6r3/witness/inputs.sha256`):
+  `review330_torn_dead_instance_repair_preserves_the_live_instance` fails, printing `dead_registration=false
+  live_checkout=false live_registration=false paid_edits=false`, and its control with a whole earlier registration
+  passes.
+- **The cause.** `torn_plan` reported a logical slot when any instance of it was torn, and `repair_torn_registrations`
+  then ran `remove_worktree_proving` on that slot, which removes every instance. The sequence: the successor runs
+  `alpha` and writes its paid edits; a dead incarnation's late add recreates its own instance of `alpha`, with no
+  intent, and is left torn; the successor retires the unrelated slot `beta`, and `beta`'s intent removal, revalidating
+  through Git's enumeration, runs the repair, which removed the successor's instance of `alpha` with the dead one.
+  Distinct names did not keep the successor's output: the repair crossed the instance boundary.
+- **The fix** (`a417333e`, `src/workspace_manager.rs`). The plan, `instances_with_torn_registrations` (formerly
+  `slots_with_torn_registrations`) over `torn_plan`, names each torn instance by its slot and its tag, and every torn
+  instance of a slot, not the first only. The repair removes each through `remove_instance_proving`: that instance's
+  registration bound by the removal's scan, in a tolerant registry access with no hold, then its checkout and that
+  registration removed by `remove_bound` inside one execution of the slot's removal site. No other instance is bound or
+  touched. The final sweep removes each earlier instance through the same helper, in the same order as before (the
+  binding under `WriterProof::NoWriterAlive`, then the funnel). A slot's retirement, `remove_worktree_proving`, and
+  terminal finalization still remove every instance, as U requires. The docs of the repair, its plan, `remove_intent`,
+  `verify_worktree` and the registry lock say so, and DESIGN §15 gains the sentence.
+- **The test:** `a_torn_earlier_instances_repair_leaves_the_successors_live_instance_of_its_slot`, two shapes in turn.
+  First a whole earlier registration, the control: nothing is repaired, and `beta`'s retirement touches no instance of
+  `alpha`. Then a torn one: the repair removes the dead instance's checkout and registration, and the successor's paid
+  edits, registration and intent stay, its instance still verifies, and Git enumerates again.
+- **Red on its first-bad shape** (`c6r3/mutation/r3-firstbad-83516466-code/`): this head's tests over `83516466`'s
+  `src/workspace_manager.rs` and `src/engine/topology/dispatch.rs`
+  (`c6r3/mutation/inputs/firstbad-83516466-code.patch`). It fails at "torn: PAID EDITS LOST: the successor's checkout
+  was removed", after its whole shape, the control, passed. All three of the row's tests are red there: this one, the
+  C-I2 test and P-1.
+- **Killed by its mutation** `m-torn-whole-slot`, the repair removing the whole slot again
+  (`c6r3/mutation/m-torn-whole-slot/`): killed, 1 red
+  (`a_torn_earlier_instances_repair_leaves_the_successors_live_instance_of_its_slot`), 59 passed.
+
+#### C-I2 (P2): a resume's recreate reclaims every earlier intent before its replacement
+
+- **Reproduced first** (`c6r3/witness/r3-wit-regression-at-83516466/`). The regression lens's probe over `83516466`
+  (`probe.rs`, sha256 `5016e113…`, appended as `c6r3/witness/regression-probe.patch`): three fresh incarnations resuming
+  one open generation through `verify_or_recreate` leave 2, 3 and 4 intents (`left: [2, 3, 4]`, `right: [1, 1, 1]`). The
+  regular lens's witness at the same head reports 1, 2 and 3 earlier intents surviving.
+- **The cause.** `verify_or_recreate` (`src/engine/topology/dispatch.rs`) removed every instance's checkout and
+  registration (`remove_worktree`) and then created the replacement (`create_worktree`: this incarnation's intent, then
+  its add). Under per-incarnation instances an intent is its creator's own file, so each resume left the earlier
+  incarnations' intents of the generation in place, against E-FUC-3's item 3 ("on resume every earlier incarnation's
+  instance and intent is reclaimed") and §4.5's reclamation of every durable record of a dead instance before admission.
+  §6.8 had disclosed it and offered the owner a follow-up or a narrowed clause; the review held that neither was right.
+- **The fix** (`a417333e`). The recreate removes every instance's intent (`remove_intent`) between the removal of the
+  worktrees and the creation: the walks' own reclaim of the slot, worktree then intent, followed by intent then add. In
+  a live process the only intent is its own, which is removed and written again. Recovery's `recreate_open_no_attempt`
+  runs it before `run_resumed`, so the reclaim precedes admission. `docs/internals/engine/topology/dispatch.md` replaces
+  "The intent is re-written rather than removed and re-written" with the reason, and DESIGN §15 says that a resume
+  reclaims each open generation's earlier instances, intents included. E-FUC-3 is neither narrowed nor deferred, and
+  §6.8 is corrected in place.
+- **The tests.** `every_resume_that_recreates_an_open_generation_leaves_one_intent_its_own`: the dispatching
+  incarnation's instance with its intent, then three fresh incarnations through the production `verify_or_recreate`; the
+  counts are asserted first, 1, 1, 1, then that each resume's census holds only its own instance and intent, and that
+  nothing of the dispatching incarnation's instance is left. P-1
+  (`p1_after_every_walk_only_the_current_incarnations_instances_remain`) recreates its open generation through
+  `verify_or_recreate`, as recovery does, and reclaims every other slot as the walks do; it had simulated the resume by
+  the walks' reclaim of the open slot too, which removes intents. The census (`instance_census`) gains a third half, the
+  intents directory, which `assert_only_own_instances` reads, and P-2's final check reads it as well.
+- **Red on its first-bad shape** (`c6r3/mutation/r3-firstbad-83516466-code/`):
+  `every_resume_that_recreates_an_open_generation_leaves_one_intent_its_own` fails with `left: [2, 3, 4]`, `right: [1,
+  1, 1]`, and P-1 fails after the second incarnation's walk, the first incarnation's intent of the open generation
+  (`tasks.k0-g1_<its tag>.intent`) left beside the second's.
+- **Killed by its mutation** `m-recreate-keeps-intents`, the `remove_intent` call deleted
+  (`c6r3/mutation/m-recreate-keeps-intents/`): killed, 2 red
+  (`every_resume_that_recreates_an_open_generation_leaves_one_intent_its_own`,
+  `p1_after_every_walk_only_the_current_incarnations_instances_remain`), 53 passed.
+
+#### C-I3 (P2): Q's three open findings, filed
+
+Each in `findings/README.md`'s form, with its original severity, `reviewed_sha` and location (those of its ledger row),
+`deferred`, and a guard conditional on the owner's O5 selecting Q; Q is not implemented:
+- `FUC-D2-PGIDREUSE` (P1, `a9be94bc`):
+  `findings/P1_correctness_202610040118_a-delayed-git-child-joins-a-reused-writer-group-under-q.md`;
+- `FUC-D3-SENTINELFALLBACK` (P2, `a0464f43`):
+  `findings/P2_liveness_202610040118_the-sentinels-sigkill-fallback-leaves-its-zombie-in-the-writer-group-under-q.md`;
+- `FUC-D3-OBSERVE` (P2, `a0464f43`):
+  `findings/P2_correctness_202610040118_q-reads-the-resources-of-the-checkout-this-process-last-held.md`.
+
+Their ledger rows change from `rejected` to `deferred` and map to these files. Each file's failure sequence is its
+design lens's, and its remedy is §4.9's.
+
+#### C-I4 (P2): the DESC witnesses' shell words
+
+- **Reproduced first**, at `83516466`, under three temporary directories of this session's
+  (`c6r3/witness/r3-c-i4-{space,apostrophe-only,apostrophe}-at-83516466/`): `…/temp with spaces`, `…/apos'trophe` and
+  `…/it's temp`. Under each, both DESC witnesses fail before they measure isolation: the helper route at "the filter
+  started its helper", the filter route at "the dead add's checkout reaching its filter did not happen within 60s".
+- **The cause.** Git hands a filter's command to the shell, and `filtered_commits` installed `sh <script path>`
+  unquoted, so a space split the path and an apostrophe left a quote open; both scripts also assigned their directory as
+  `dir='<path>'`, which an apostrophe ends.
+- **The fix** (`c961ab44`): `sh_quoted` renders a path as one POSIX shell word, single-quoted with each `'` closed,
+  escaped and reopened (`'\''`), and both the filter's command and both scripts' `dir=` take it. Git's filter interface
+  takes shell text, so the path is handed to it as one quoted word rather than spliced raw (standards §9).
+- **This change's tests pass under each directory** (`c6r3/mutation/r3-control-{space,apostrophe,both}/`): 55, 55 and 55
+  passed, none failed, the DESC witnesses, P-1 to P-3, both new tests, naming's, `ulid`'s and `seams`' among them.
+- **Each half is necessary**, each mutation run under the directory that bites it:
+  - `m-filter-unquoted-space`, the filter's command unquoted, under the space: killed, both DESC witnesses red;
+  - `m-quote-no-escape-apostrophe`, `sh_quoted` without the escape, under the apostrophe: killed, both DESC witnesses
+    red;
+  - `m-dir-unescaped-apostrophe`, both scripts' `dir='<path>'` back (`c6r3/mutation/inputs/dir-unescaped.patch`), under
+    the apostrophe: killed, both DESC witnesses red.
+- **They still fail on their first-bad shapes there.** Every incarnation rendering one tag (`m-tag-shared`), under the
+  space and the apostrophe: both witnesses are red under each (`c6r3/mutation/m-tag-shared-space/`,
+  `c6r3/mutation/m-tag-shared-apostrophe/`), each fails at "PAID EDITS LOST: the dead incarnation's writer reached the
+  successor's checkout", the defect it witnesses, and no longer before its filter starts. And at base, #329's code with
+  this head's tests laid over it (`c6r3/tools/basewit-c.py`, round 1's form; its test-only shim now answers the tag by
+  reference), under all three directories (`c6r3/basewit/desc-at-base-{space,apostrophe,both}/`): both fail at the same
+  assertion under each, "PAID EDITS LOST" (`c6r3/basewit/summary.txt`).
+
+#### C-I5 (P3): no unannotated `unreachable!`
+
+`instance_kill_child` ended in `unreachable!`, which standards §7 denies in tests without a per-site `#[expect]`. It now
+fails with `panic!`, naming the premise ("the add's funnel returned past the kill armed at its … phase"), as
+`dispatch_kill_child` does. P-2's oracle is unchanged: it requires each child's death by abort (`died_by_abort`), so a
+kill that stopped killing still fails it, the child now exiting by the panic. Executed: with the child's
+`Injection::Kill` made `Injection::Proceed` (`m-kill-child-proceeds`, `c6r3/mutation/m-kill-child-proceeds/`), killed, 1
+red (`p2_instances_of_killed_incarnations_in_other_processes_are_reclaimed_by_the_resume`), 0 passed: "the inc-a child
+died by abort at its before phase", the child having exited 101 (`unix_wait_status(25856)`). P-2 passes in every control
+above.
+
+#### Round 1's mutations, run again on this head
+
+The rows round 1 ran (§6.2) whose tests this round changes or adds to: the torn plan and the final sweep, the census,
+P-1, P-2, the DESC witnesses and R-O1 to R-O3. Each is round 1's exact substitution, which still matches once
+(`c6r3/tools/r3-campaign.py`), run over this round's tests:
+
+| Mutation | Red on this head | Of them, this round's new tests | Log |
+|---|---|---|---|
+| `m-tag-shared` | 13 of 55 | the C-I1 test, the C-I2 test | `c6r3/mutation/m-tag-shared/` |
+| `m-disc-none` | 2 of 55 | neither | `c6r3/mutation/m-disc-none/` |
+| `m-disc-no-registry` | 2 of 55 | neither | `c6r3/mutation/m-disc-no-registry/` |
+| `m-disc-no-namespace` | 1 of 55 | neither | `c6r3/mutation/m-disc-no-namespace/` |
+| `m-own-not-excluded` | 3 of 60 | neither | `c6r3/mutation/m-own-not-excluded/` |
+| `m-remove-own-only` | 13 of 55 | the C-I1 test, the C-I2 test | `c6r3/mutation/m-remove-own-only/` |
+| `m-intent-own-only` | 10 of 55 | the C-I2 test | `c6r3/mutation/m-intent-own-only/` |
+| `m-retain` | 1 of 55 | neither | `c6r3/mutation/m-retain/` |
+| `m-o1-stranded-registration` | 15 of 60 | the C-I2 test | `c6r3/mutation/m-o1-stranded-registration/` |
+| `m-o2-earlier-registration-left` | 14 of 60 | the C-I1 test, the C-I2 test | `c6r3/mutation/m-o2-earlier-registration-left/` |
+| `m-fin-no-sweep` | 2 of 55 | neither | `c6r3/mutation/m-fin-no-sweep/` |
+| `m-torn-own-only` | 2 of 60 | the C-I1 test | `c6r3/mutation/m-torn-own-only/` |
+
+Every row is killed. The failing tests of every row of this round are listed in `c6r3/mutation/campaign-r3-summary.txt`.
+
+**The reviewers' witnesses on this head** (`c6r3/mutation/r3-reviewer-witness-final/`,
+`c6r3/mutation/r3-regression-probe-final/`): the regular lens's three tests pass (3 passed: the resume reclaims every
+earlier intent, the torn repair keeps the live instance, and the control), and the regression lens's probe passes (1
+passed, its counts 1, 1, 1).
+
+**The control on this head** (`c6r3/mutation/r3-control/`): the same tests with the frozen finalize tests, 60 passed,
+none failed.
+
+#### The frozen set, the platforms and the gates
+
+- **The frozen proof is zero at `c961ab44`** (`c6r3/frozen/frozen-proof-c961ab44.txt`): 34 of 34 byte-identical against
+  master `5c222ff2` and against #329's head `54a1ff14`; Part 2 is master's four paths (+241 −74). This record's commit
+  changes no frozen path, and the pull request's body gives the proof at its head. No legacy module or activation
+  constant changed (`c6r3/frozen/legacy-activation-c961ab44.txt`); `src/engine/topology/dispatch.rs`, which is not
+  frozen, is the one production file beyond round 1's. D4 did not trigger: no frozen test changed, and the frozen
+  finalize tests pass in the control above; the whole suite's run is the gates'.
+- **Windows and macOS are compiled and linted here, never run** (`c6r3/platform/at-c961ab44/`): `cargo clippy
+  --all-targets --all-features -- -D warnings` for `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, and `cargo check
+  --locked --all-targets --all-features` for `x86_64-pc-windows-msvc` on stable and on 1.85.0 with `-D warnings` passed
+  inside the wrapper (`rustflags-arrival.txt`: it arrives), rc 0 each, with the host's 1.85.0 check under the same flag.
+  The two new tests are not platform-gated, so they run on every CI leg; `sh_quoted` and the DESC witnesses are
+  `cfg(unix)`. CI is the truth for Windows and macOS.
+- **The ten gates** run at the head that carries this record; the pull request's body gives them.
+
+#### Corrected in place
+
+§0, the header, §6.1 (the torn plan), §6.6 (Q's row), §6.7 (Q's findings, filed) and §6.8 (E-FUC-3's item 3, which now
+holds as written), each marked "corrected at repair round 3".
