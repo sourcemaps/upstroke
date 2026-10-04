@@ -451,23 +451,6 @@ pub trait IntegrationRefs {
     /// [`UpstrokeError::Refused`] for either.
     fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError>;
 
-    /// [`Self::assert_publishable`], any registry list it makes waiting out
-    /// its pauses through `hooks` (`EffectHooks::registry_pause`): the form a
-    /// dispatch's head check takes on the topology coordinator (the follow-up
-    /// B record's §9.13). The default ignores `hooks`.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::assert_publishable`].
-    fn assert_publishable_pausing(
-        &self,
-        hooks: &mut dyn crate::workspace_manager::EffectHooks,
-        refname: &str,
-    ) -> Result<(), UpstrokeError> {
-        let _ = hooks;
-        self.assert_publishable(refname)
-    }
-
     /// The ref's current direct target, or `None` when nothing is there.
     ///
     /// # Errors
@@ -495,14 +478,6 @@ pub trait IntegrationRefs {
 }
 
 impl IntegrationRefs for crate::workspace_manager::WorkspaceManager {
-    fn assert_publishable_pausing(
-        &self,
-        hooks: &mut dyn crate::workspace_manager::EffectHooks,
-        refname: &str,
-    ) -> Result<(), UpstrokeError> {
-        crate::workspace_manager::WorkspaceManager::assert_publishable_pausing(self, hooks, refname)
-    }
-
     fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {
         Self::assert_publishable(self, refname)
     }

@@ -329,6 +329,14 @@ it refuses rather than paying for work on a foreign head — the posture
 take, down to `assert_publishable` preceding the read. The ref is neither
 moved nor recreated here.
 
+**Its `refs` are its caller's to choose.** The topology run's dispatch passes
+`run::PausingRefs`, whose `assert_publishable` waits out its registry list
+through the operator's registry hooks, so on the topology coordinator the
+check's waits answer its messages; this function is master's, unchanged
+(follow-up B's repair round 6, I2-7, which withdrew the split round 3 had
+proposed here as hunk H2: `reviews/2026-10-01-pr11-follow-up-b-record.md`
+§9.16).
+
 **What a replay sees.** Nothing: the base a task was dispatched at is
 `task_dispatched.base_sha`, which is durable, and the fold reads it from
 the log. `TopologyRun::continue_open` resumes an open generation at the
@@ -344,15 +352,6 @@ replayed to before.
 authorize ([`Refusal::DispatchHeadForeign`]), and for a symbolic or
 checked-out ref (`assert_publishable`); a Git error reading it.
 
-
-## `pub fn dispatch_head_at(`
-
-[`dispatch_head`]'s check, given the authorized head its caller computed and the hooks the check's
-registry access waits through. The coordinator's dispatch computes the head from the run's `started`
-and `events`, releases its borrow of the run, and lends itself as the hooks, so the check's waits
-answer its messages. Proposed at follow-up B's repair round 3 as hunk H2, conditional on the owner's
-freeze ruling and not adopted (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13).
-[`dispatch_head`] keeps its signature and waits by sleeping.
 
 ## `pub struct Authorized {`
 

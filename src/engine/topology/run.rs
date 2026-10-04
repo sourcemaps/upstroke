@@ -14,8 +14,8 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, SequenceId,
-    SessionId, TopologyEvent,
+    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, RunStarted4,
+    SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -191,6 +191,52 @@ impl<O: Operator + ?Sized> DispatchJournal for OperatorJournal<'_, O> {
     }
 }
 
+struct PausingRefs<'a, 'h> {
+    manager: &'a WorkspaceManager,
+    hooks: std::cell::Cell<Option<&'h mut dyn crate::workspace_manager::EffectHooks>>,
+}
+
+impl<'a, 'h> PausingRefs<'a, 'h> {
+    fn new(
+        manager: &'a WorkspaceManager,
+        hooks: &'h mut dyn crate::workspace_manager::EffectHooks,
+    ) -> Self {
+        Self {
+            manager,
+            hooks: std::cell::Cell::new(Some(hooks)),
+        }
+    }
+}
+
+impl super::create::IntegrationRefs for PausingRefs<'_, '_> {
+    fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {
+        let hooks = self.hooks.take().ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "the dispatch's head check asked whether `{refname}` is publishable from inside \
+                 that same check, and its hooks are lent once; nothing was dispatched"
+            ),
+        })?;
+        let checked = self
+            .manager
+            .assert_publishable_pausing(&mut *hooks, refname);
+        self.hooks.set(Some(hooks));
+        checked
+    }
+
+    fn direct_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
+        self.manager.direct_ref_target(refname)
+    }
+
+    fn create_zero_old(
+        &self,
+        hooks: &mut dyn crate::workspace_manager::EffectHooks,
+        refname: &str,
+        new: &str,
+    ) -> Result<(), UpstrokeError> {
+        super::create::IntegrationRefs::create_zero_old(self.manager, hooks, refname, new)
+    }
+}
+
 pub(super) fn begin_dispatch<O: Operator + ?Sized>(
     operator: &mut O,
     manager: &WorkspaceManager,
@@ -213,12 +259,11 @@ fn dispatch_ready<O: Operator + ?Sized>(
     key: TaskKey,
     generation: GenerationId,
 ) -> Result<Dispatched, UpstrokeError> {
-    let (kind, authorized, refname) = operator.driven().dispatch_inputs(key)?;
-    let base = integrate::dispatch_head_at(
-        manager,
-        operator.registry().effects(),
-        authorized,
-        &refname,
+    let (kind, started, published) = operator.driven().dispatch_inputs(key)?;
+    let base = integrate::dispatch_head(
+        &PausingRefs::new(manager, operator.registry().effects()),
+        &started,
+        &published,
         key,
     )?;
     let request = DispatchRequest {
@@ -1231,11 +1276,18 @@ impl TopologyRun {
     fn dispatch_inputs(
         &self,
         key: TaskKey,
-    ) -> Result<(DispatchKind, integrate::AuthorizedHead, String), UpstrokeError> {
+    ) -> Result<(DispatchKind, RunStarted4, Vec<TopologyEvent>), UpstrokeError> {
         let kind = self.dispatch_kind(key)?;
-        let authorized = integrate::authorized_head(&self.handle.started, &self.handle.events);
-        let refname = self.handle.started.integration_ref.as_str().to_owned();
-        Ok((kind, authorized, refname))
+        let published = self
+            .handle
+            .events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.body, TopologyEventBody::TaskMerged { .. }))
+            .cloned()
+            .into_iter()
+            .collect();
+        Ok((kind, self.handle.started.clone(), published))
     }
 
     fn reserve_dispatch(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {

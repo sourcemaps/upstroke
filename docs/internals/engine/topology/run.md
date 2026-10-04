@@ -1220,10 +1220,11 @@ The first three clauses of the ready-dispatch branch: reserve, dispatch,
 convert.
 
 **The head is read before the reservation, through the frozen
-`integrate::dispatch_head_at`** (the follow-up B record's §9.13, H2, proposed
-and not adopted): the run's inputs are taken owned first
-([`TopologyRun::dispatch_inputs`]), so the head's registry access holds no
-borrow of the run and waits through the operator's registry hooks. The
+`integrate::dispatch_head` as master has it, over a [`PausingRefs`]** (the
+follow-up B record's §9.16, I2-7, which withdrew round 3's H2): the run's inputs
+are taken owned first ([`TopologyRun::dispatch_inputs`]), so the head's
+registry access holds no borrow of the run, and the adapter's
+`assert_publishable` waits through the operator's registry hooks. The
 reservation, the dispatch through [`dispatch_through`] with an
 `OperatorJournal`, and the conversion or cancellation
 ([`TopologyRun::dispatch_settled`]) each take the run for themselves.
@@ -1944,8 +1945,13 @@ is no rung above it to escalate onto.
 ## `impl TopologyRun` › `fn dispatch_inputs(`
 
 What a first dispatch of `key` asks for, ordinary or repair, before its head is
-read: the kind, the authorized head and the integration ref, owned, so that the
-head's registry access holds no borrow of the run.
+read: the kind, the run's start record and the log's last `task_merged`, owned,
+so that the head's registry access holds no borrow of the run. Those two are the
+whole of what the frozen `integrate::authorized_head` reads — the last
+`task_merged` in the log, or the start record's base when there is none — so the
+frozen `dispatch_head` derives the same authorized head from them as from the
+whole log; the start record is small, and one event is copied rather than the
+log (§6).
 `dispatch_kind` decides which: an entry with a lineage is a repair,
 dispatched inside its root's lineage lease from the candidate the
 latest `merge_rejected` registering it names (`rejected_source`), which
@@ -1966,7 +1972,7 @@ was the same commit as the integration head at every dispatch of a run
 that could not publish, and stopped being it the moment this slice made
 publication real: a task dispatched after its dependency merged got a
 worktree without the dependency's merged work in it
-(`PR8-R7-DISPATCH-BASE`). [`super::integrate::dispatch_head_at`] answers with
+(`PR8-R7-DISPATCH-BASE`). [`super::integrate::dispatch_head`] answers with
 the head the log's latest publication put there, having first confirmed
 the integration ref is at it, so a foreign head refuses here — before the
 reservation is taken, before `task_dispatched` is appended and before any
@@ -2205,6 +2211,26 @@ registry hooks.
 A dispatch's journal over its operator: each append through the run with the
 operator's own hooks, undischarged ([`TopologyRun::emit_undischarged`]), and the
 operator's registry hooks lent to the manager.
+
+## `struct PausingRefs<'a, 'h> {`
+
+The `integrate::IntegrationRefs` the dispatch's head check is handed (the
+follow-up B record's §9.16, I2-7): the manager, and the operator's registry
+hooks, lent for the check. The frozen `integrate::dispatch_head` asks
+`assert_publishable` with `&self`, and the wait inside it needs the hooks
+mutably, so they sit in a `Cell` (§6): taken for the one call and put back.
+The check asks once; a second, re-entrant ask would find the cell empty and is
+refused, never a panic. `direct_target` and `create_zero_old` are the manager's.
+
+## `impl<'a, 'h> PausingRefs<'a, 'h>` › `fn new(`
+
+The adapter over `manager`, with `hooks` lent until the check returns.
+
+## `impl super::create::IntegrationRefs for PausingRefs<'_, '_>` › `fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {`
+
+The manager's `assert_publishable_pausing` with the lent hooks: a registry list
+another process's write fails is attempted again through the operator's waits,
+which on the coordinator answer its messages.
 
 ## `pub(super) struct DrivenJournal<'d, D: ?Sized>(pub &'d mut D);`
 

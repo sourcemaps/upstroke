@@ -256,24 +256,10 @@ pub fn dispatch_head(
     events: &[TopologyEvent],
     key: TaskKey,
 ) -> Result<CommitSha, UpstrokeError> {
-    dispatch_head_at(
-        refs,
-        &mut crate::workspace_manager::NoHooks,
-        authorized_head(started, events),
-        started.integration_ref.as_str(),
-        key,
-    )
-}
-
-pub fn dispatch_head_at(
-    refs: &dyn IntegrationRefs,
-    hooks: &mut dyn crate::workspace_manager::EffectHooks,
-    authorized: AuthorizedHead,
-    refname: &str,
-    key: TaskKey,
-) -> Result<CommitSha, UpstrokeError> {
+    let authorized = authorized_head(started, events);
     let authority = authorized.describe();
-    refs.assert_publishable_pausing(hooks, refname)?;
+    let refname = started.integration_ref.as_str();
+    refs.assert_publishable(refname)?;
     match refs.direct_target(refname)? {
         Some(found) if found == authorized.head.0 => Ok(authorized.head),
         Some(found) => Err(Refusal::DispatchHeadForeign {

@@ -1745,8 +1745,9 @@ The predicate of a task's `task_dispatched`.
 
 ## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_head_check_waits_on_a_torn_registration() {`
 
-Census A1: the dispatch's head check (`integrate::dispatch_head_at`, H2), the first access of every
-dispatch.
+Census A1: the dispatch's head check, the first access of every dispatch: the frozen
+`integrate::dispatch_head` over `run::PausingRefs` since follow-up B's repair round 6 (I2-7), which
+withdrew round 3's split `dispatch_head_at` (H2).
 
 ## `mod tests` › `fn a_pipeline_is_granted_while_a_dispatchs_revalidation_waits_on_a_torn_registration() {`
 
