@@ -38,7 +38,8 @@ branch. Round 2 (§2) is `pr11_fud_design2`'s; its figures are under `~/orch-pr1
 under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`. Its repair round 2 (§5.16) is `pr11_fud_impl2`'s; its
 figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`. Its implementation round 3 (§5.17), which
 implements R-D1's preservation design, is `pr11_fud_impl3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_impl3/`,
-cited as `fudi3/…`.
+cited as `fudi3/…`. Its repair round 4 (§5.18) is `pr11_fud_impl4`'s; its figures are under
+`~/orch-pr11/logs/pr11_fud_impl4/`, cited as `fudi4/…`.
 
 ## 0. Status
 
@@ -51,6 +52,7 @@ cited as `fudi3/…`.
 | Implementation (§5) | **Implemented on this branch as a draft, and PROPOSED — conditional on the owner's decision O8 (decision B), and not granted.** D's reviewed proposal at `9b2262f4`, on #329's head `54a1ff14` merged in (not rebased), with design review round 4's applicable fixes (the PR11 decision appendix's §10.3 and §11 D rows). C-SIDE (O1) and ENV-1's widening (O3) are isolated and not implemented. **Not merge-ready:** it waits on O8's adoption and on #329 merged (O9, O14, O11). Every new test is red on its first-bad shape and killed by a mutation (§5.6, §5.7). The implementation is not yet reviewed. |
 | Implementation, repair round 2 (§5.16) | **The early review's E1 to E4 repaired**, on the same terms: draft, PROPOSED, conditional on O8, not merge-ready. Two lenses read `20e27724` before CI was green on every leg, so their review is early evidence and clears nothing for the merge. E1 corrects the moved-`HEAD` safety claim: the resume's branch check guards the checkout only while `HEAD` differs from the head the event log records, and the executed loss is R-D1's, which stays open at P1 for a preserving mechanism or the owner. E2 narrows R-D7 to refusals that recur after a successful reclaim. E3 rewrites T-L5 so that no Git child it observes runs inside the access's deadline. E4 recounts the Windows path budget with `ScratchTree::acquire`'s prefix. CI at `20e27724` failed only on #329's own test, routed to #329. |
 | Implementation, round 3 (§5.17) | **R-D1's preservation design, round 4, implemented as a draft, and PROPOSED — conditional on O8, exactly as D's own texts.** The proposal `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (sha256 `f9e81c07…5415`; its regression lens PASSED, its required regular verdict UNMET, its routing held): part K (a kept pin written whatever `HEAD` is), part G4 (the resume's guarded exact discard of the attempt in flight, behind a kept pin and a copy that same resume made durable) and part N (an attempt error after the worker ran, and a publication failure, keep the checkout and pin it), with the design's three instrument rows. B's published head `55029628` is merged **provisionally**, not as B's final head. N1 and N2 are filed. Not merge-ready, unreviewed, and R-D1's preservation is the owner's through O8. |
+| Implementation, repair round 4 (§5.18) | **The hosted-Linux failure of T-R10 at `202c0805` repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** CI run 37202558686 failed one test on the runner's Git 2.55.0. T-R10's operator `fetch --prune` ran Git's automatic maintenance, whose `geometric` default (from Git 2.54) can prune the planted torn registration before the operator's repair, in a race. It is a test defect: F2's fetch now runs with automatic maintenance off, and nothing it asserts changes. The cause is executed on a Git 2.55.0 stand-in, red before, green after, and red again under a mutation; round 3's other 69 tests do not depend on it. No production code, finding, instrument, cost or limit changes; #329's `55029628` stays merged provisionally. Unreviewed. |
 
 ## 1. Design
 
@@ -3816,3 +3818,251 @@ record's commit changes no code, and the pull request body cites the same proof 
 - CI at this round's head is not waited on; the orchestrator reads native CI.
 
 The pull request body records the head the ten gates passed at, with the logs under `fudi3/gates/`.
+
+### 5.18 Repair round 4: the hosted-Linux failure of T-R10 at `202c0805`
+
+> **On §5's terms, as §5.17 left them:** a draft, PROPOSED, conditional on the owner's decision O8, and not merge-ready.
+> Its merge waits on O8's adoption, on #329 merged (O9, O14, O11), on the integration of #329's *final* head (the merge
+> of `55029628` stays PROVISIONAL), and on the required reviews: **the regular review of R-D1's design is unmet**, and
+> nothing here substitutes for it. Nothing here adopts an owner decision, a contract or a freeze. The round adds two
+> commits on `202c0805`, the test fix `6bdd02c3` and this record's commit, with no rebase, and no `reviewed_sha` is
+> re-stamped.
+
+**Who and on what.** `pr11_fud_impl4` (`claude-opus-5-5`, `max`), a fresh repair session `orch_pr11` spawned on
+2026-10-04 on `202c0805`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl4.md`; round 1's to 3's briefs and
+`~/orch-pr11/d-impl/UNIT.md` bind where it does not change them. Two notes of the orchestrator's came with it:
+`~/orch-pr11/answers/pr11_fud_impl4-0.md`, a boundary correction (§5.18.8), and `pr11_fud_impl4-0b.md`, which names a
+permitted Git 2.55.0 build and a lead to test, not a cause. Its figures are under `~/orch-pr11/logs/pr11_fud_impl4/`,
+cited as `fudi4/…`. The stopped round-2 regular review of R-D1's design was not read, opened, run or used, and nothing
+here retries, rewords, reroutes or relabels it. Two broad searches of this round could have enumerated its parent
+directory, as §5.18.8 records.
+
+#### 5.18.1 What failed
+
+- **CI run 37202558686 at `202c0805`** (`fudi4/ci/jobs-37202558686.tsv`): `test (ubuntu-latest)` (job 111437892233)
+  failed, and with it the `upstroke-ci` rollup; every other job passed. The policy run 37202558600 passed. The two cancelled runs at
+  that head, 37202557270 and 37202557276, were superseded by the body edit (`fudi4/ci/runs-202c0805.json`).
+- **The failing job** ran on the image ubuntu-24.04, version 20260927.320.1, with rustc 1.99.0 and **Git 2.55.0** (the
+  checkout step's own `git version`). It tested the merge `5527bf0c` of `202c0805` into master `5c222ff2`. Its log is
+  `~/orch-pr11/logs/orch-ci/331-202c0805/failed-job-111437892233-ubuntu.log`, sha256 `26e608b6…`. The lib ran 3,224
+  passed, 1 failed and 137 ignored, in 485.95 s.
+- **The one failure was T-R10,** `a_kept_pin_removed_before_the_resume_is_written_again_from_the_checkout`. It panicked
+  at `src/engine/tests.rs:10920:52`, in `repair_the_torn_registration`: "the operator removes the residue", `NotFound`.
+  The operator's repair found no residue to remove. The panic does not name the arm.
+- **The other test legs** (`fudi4/ci/job-111437892309.log`, `job-111437892265.log`): `test (macos-latest)` ran Git
+  2.55.0 (`/opt/homebrew/bin/git`), and T-R10 passed there; `test (winguest)` ran Git 2.50.1.windows.1, and T-R10
+  passed. This box's ten gates had passed at `202c0805` on Git 2.43.0 (`fudi3/gates/final-202c0805/`).
+
+#### 5.18.2 The cause
+
+**T-R10's own fixture.** Its F2 arm prunes the kept pin with the operator's
+`git fetch -q --prune <remote> +refs/upstroke/*:refs/upstroke/*`. The torn registration the run refused on is still in
+place then: the operator repairs it only after the fetch. By default, every `git fetch` ends by running Git's automatic
+maintenance, `git maintenance run --auto`, detached. What that maintenance does depends on Git's version.
+The Git facts are from Git 2.55.0's source, excerpted in `fudi4/stand-in/git-2.55.0-source-excerpts.txt`:
+- **From Git 2.54, unscheduled maintenance takes the `geometric` strategy.** Git 2.54.0's release notes say so:
+  "\"git maintenance\" starts using the \"geometric\" strategy by default". The strategy includes the `worktree-prune`
+  task, which runs `git worktree prune --expire 3.months.ago` once one registration is prunable.
+- **The planted torn registration is prunable.** Its `gitdir` names a checkout that does not exist, and it has no
+  `index` and no `locked` (`should_prune_worktree`: "gitdir file points to non-existent location").
+  `git worktree prune --dry-run --verbose` says so on Git 2.43.0, 2.50.1 and 2.55.0 alike (`fudi4/stand-in/mechanism.txt`).
+- **Before 2.54 the default is the `gc` strategy,** whose `gc --auto` does nothing below its thresholds, so the fetch
+  leaves the registration alone (measured on Git 2.43.0 and 2.50.1, below).
+
+So on Git 2.55.0 the fetch's maintenance prunes the registration, in a detached process that races the test's next
+steps. Where the prune wins, the operator's repair finds nothing and panics; where the repair wins, the prune finds
+nothing. **On the hosted runner the repair found nothing,** the signature the stand-in gives when the prune wins. On
+macOS's Git 2.55.0, T-R10 passed in the same run, as the race allows; whether its maintenance pruned there is not
+established. Windows's Git 2.50.1 does not prune.
+
+**Git alone** (`fudi4/stand-in/mechanism.sh`, `mechanism.txt`): a repository with the same residue and the same fetch.
+On Git 2.43.0 and 2.50.1 the registration survives the fetch; on 2.55.0 it is gone. With
+`-c maintenance.auto=false -c gc.auto=0`, or with `--no-auto-maintenance`, it survives on all three. In every case the
+fetch still prunes the pin.
+
+**Through the engine, on a stand-in** (`fudi4/repro/`, `fudi4/tools/run-one.sh`): this box's Linux (Ubuntu 24.04.4,
+kernel 6.8, `fudi4/stand-in/box.txt`) with the permitted Git 2.55.0 build
+`~/orch-pr11/logs/pr11_fub_design7/gits/2.55.0/bin/git`. It reports `git version 2.55.0` and was built from Git's
+verified source tarball (`fudi4/stand-in/git-2.55.0-build.txt`). It has no system configuration, and this box's global
+configuration sets no `maintenance.*`, `gc.*` or `worktree.*` key (`fudi4/stand-in/box-git-config.txt`). T-R10 as
+committed at `202c0805` ran one test per run, through `upstroke-build`:
+- on Git 2.55.0 with the maintenance detached, as on the runner, **red in 5 of 10 runs**, each with the CI's panic at
+  `src/engine/tests.rs:10920:52` (`base-255-detach-summary.txt`, `base-255-detach-failures.txt`), and in 3 of 6
+  traced runs;
+- on Git 2.55.0 with the maintenance synchronous, **red in 10 of 10**, with the same panic (`base-255-sync-summary.txt`).
+  Git's own `GIT_TEST_MAINT_AUTO_DETACH=false` does that, and it changes nothing but whether the maintenance detaches;
+- on this box's Git 2.43.0, green (`base-243-1.log`).
+
+**The trace of a red run** (`GIT_TRACE2_EVENT`, one file per Git process: `fudi4/repro/trace-255-detach-1/`, its census
+`trace-255-detach-1-census.txt`, `fudi4/tools/trace2_census.py`):
+- The only `git worktree prune --expire 3.months.ago` ran under the maintenance that F2's `git fetch -q --prune`
+  started. That was the only maintenance to run a task.
+- The engine's 385 top-level Git processes all carry the four `AUTO_MAINTENANCE_REFUSED` settings, and none started
+  maintenance.
+- The fixture's commits started maintenance that ran no task.
+
+**What the stand-in can and cannot show.** It runs the hosted leg's code path where it matters: the same Git release's
+maintenance, strategy and prune, through the same test and the actual engine, on Linux. It cannot reproduce the
+runner's scheduling or file system, or whatever `/home/runner/.gitconfig` holds: the job log shows that the file
+exists, not what is in it. The runner's failure has the signature the stand-in gives with its maintenance on. The
+detached race's rate, 5 of 10, is this box's, not the runner's.
+
+**Not D's code.** The engine removed and moved nothing. Its Git children carry `maintenance.auto=false` (R-G), and none
+started maintenance, here or in §5.18.5's sweeps. With the fetch's maintenance off, the operator's repair finds the
+residue in all 30 runs on Git 2.55.0 (§5.18.4), as it does on Git 2.43.0.
+
+**A note on the residue, observed and not changed.** Git's own `git worktree add` writes `locked` ("initializing")
+before `gitdir` and `commondir` (2.55.0's `builtin/worktree.c`, in the excerpts). So a registration that Git's own add
+leaves torn after it wrote `gitdir` carries `locked`, and `should_prune_worktree` skips it. The planted residue has no
+`locked`, as D's tests have always planted it. The residue's shape is the design's, and this round leaves it alone.
+
+#### 5.18.3 A test defect
+
+The defect is an assumption T-R10's fixture makes about its environment: that the operator's own Git leaves the planted
+residue in place between the fetch and the repair. The assumption held on Git 2.43.0 and 2.50.1, and fails from 2.54.
+- **Not the engine's:** the failure comes before the resume, in the test's own repair step, and nothing of the
+  engine's removed the residue.
+- **Not a flake:** the cause is executed. With the race taken out the test is red 10 of 10, and the fix is shown by a
+  mutation (§5.18.4).
+- **Not B's:** T-R10, its F2 arm and `repair_the_torn_registration` are D's code.
+
+#### 5.18.4 The fix, and its witness
+
+**The fix** (`6bdd02c3`, test code and its notes only). F2's fetch runs with `-c maintenance.auto=false -c gc.auto=0`.
+Those are two of the four settings `git_command` gives every legacy Git child (`AUTO_MAINTENANCE_REFUSED`). Git's
+automatic maintenance never starts, so the residue stays until the operator's repair, as it does on Git 2.43.0. What
+the repair finds no longer depends on Git's maintenance policy.
+- **What F2 tests is unchanged.** The kept pin is still pruned by `fetch --prune` with a refspec covering
+  `refs/upstroke/*`, as round 1's proposal defines F2 (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL-e9f78041.md`).
+- **No assertion changes,** and the update-ref arm is untouched.
+- `src/engine/tests.rs` carries no comment (§13). The notes of `engine/tests` say why the settings are there.
+
+**Red before and green after, on the Git 2.55.0 stand-in** (`fudi4/repro/`):
+- at `202c0805`, red 10 of 10 with synchronous maintenance and 5 of 10 detached (§5.18.2);
+- at `6bdd02c3`, green 10 of 10 synchronous (`fix-255-sync-summary.txt`) and 20 of 20 detached
+  (`fix-255-detach-summary.txt`), and green 3 of 3 on Git 2.43.0 (`fix-243-summary.txt`);
+- in a traced green run (`trace-fix-255-sync-census.txt`), F2's fetch starts no maintenance, and no maintenance runs a
+  task.
+
+**The mutation that brings it back**, `m-f2-maintenance`, removes the two settings, leaving F2's fetch as it was at
+`202c0805`. It runs through `fudi4/tools/campaign.py`, which is round 3's campaign with IMPL at `6bdd02c3`. On Git 2.55.0
+with synchronous maintenance, T-R10 is red with the CI's panic (`src/engine/tests.rs:10920:52`, `NotFound`). On Git
+2.43.0 it is green.
+
+**T-R10 still asserts what its row requires** (`fudi4/mutation/<shape>@git-2.43.0/` and `@git-2.55.0-sync/`). Each
+shape is a `git archive` scratch tree of `6bdd02c3` whose Compiling line names it, and T-R10 ran alone in it:
+
+| Shape | Git 2.43.0 | Git 2.55.0, maintenance synchronous | Round 3's campaign (§5.17.4), Git 2.43.0 |
+|---|---|---|---|
+| `control` | green | green | green |
+| `m-f2-maintenance` | green | **red** ("the operator removes the residue, NotFound") | — |
+| `base-firstbad` | **red** ("the resume wrote the pin again") | **red** ("the resume wrote the pin again") | red |
+| `base-r1` | green | green | green |
+| `m-add-returns` | **red** ("update-ref: a registry refusal, never …") | **red** ("update-ref: a registry refusal, never …") | red |
+| `m-discard` | **red** ("update-ref: a registry refusal, never …") | **red** ("update-ref: a registry refusal, never …") | red |
+| `m-g-after-discard` | **red** ("update-ref: from the checkout, which held the output") | **red** ("update-ref: from the checkout, which held the output") | red |
+| `m-g-none` | **red** ("the resume wrote the pin again") | **red** ("the resume wrote the pin again") | red |
+| `m-removepin` | **red** ("the resume wrote the pin again") | **red** ("the resume wrote the pin again") | red |
+
+Every call into the engine is bounded (`bounded_run` and `bounded_resume`, 300 s).
+
+#### 5.18.5 The siblings
+
+**Every other test of round 3, and the engine path they share** (`fudi4/sweep/`; `fudi4/tools/sweep.sh`,
+`sweep_summary.py`, `overlap.py`, `engine_path.py`). The sweep covered round 3's 70 tests
+(`fudi4/sweep/round3-test-paths.txt`): 69 in `src/engine/tests.rs`, 7 of them children their parents run, and T-K1. Each
+ran alone, on the Git 2.55.0 stand-in, with a trace, at `202c0805` and at `6bdd02c3`, with the maintenance synchronous
+and detached:
+
+| | `202c0805`, synchronous | `202c0805`, detached | `6bdd02c3`, synchronous | `6bdd02c3`, detached |
+|---|---|---|---|---|
+| Green | 69 of 70 (T-R10 red) | 70 of 70 (T-R10's repair won its race) | 70 of 70 | 70 of 70 |
+| Automatic maintenance processes | 168 | 168 | 167 | 167 |
+| Of them, that ran a task | 1: `worktree-prune`, under T-R10's F2 fetch | 1: the same | 0 | 0 |
+| Engine Git processes started while one ran | — | 0 | — | 0 |
+| The engine's top-level Git processes (all four settings) / maintenance under them | 17,212 / 0 | 17,375 / 0 | 17,375 / 0 | 17,373 / 0 |
+
+**Fixed on this cause: T-R10 alone.** In no other round-3 test did a maintenance its fixture started find anything to
+do: none ran a task, in either mode.
+
+**The rest, with the evidence** (`*/SUMMARY.txt`, `fudi4/sweep/ENGINE-PATH.txt`, `ENGINE-PATH-fix.txt`, `OVERLAP.txt`).
+The other maintenance-capable Git commands in round 3's tests are all the fixtures' own, and no maintenance they
+started ran a task, in either mode:
+- `commit -q -m seed` and `commit -q -m fixture`, 155 times per sweep: master's `temp_engine_repo` and `seed`, before
+  the engine runs and before any residue is planted;
+- `restore_the_pin_from`'s `git fetch <copy> <pin>:<pin>`, 9 times, after the residue is repaired;
+- `git gc -q --prune=now` (`forget_every_unreferenced_object`), 8 times: an explicit gc, synchronous on every Git and
+  intended by its tests, at a point where no registration is prunable;
+- the nested repositories' commits, twice: their maintenance runs inside the nested repository;
+- F2's `git push`, once: its maintenance runs in the bare remote, which holds no registration.
+
+Each of those maintenance processes lasted at most 2.5 ms in the detached sweeps, and no engine Git process started
+while one ran. They stay as they are: the evidence shows the assumption holds for them, and master's helpers lie
+outside D's append-only touch.
+
+**The engine path.** In all four sweeps, every top-level Git process of the engine carries the four settings, and none
+started maintenance. That is R-G's switches at work, and `every_git_child_of_this_module_runs_with_automatic_maintenance_off`
+guards them.
+
+**Not swept:** the tests outside round 3, #329's among them. CI's two Git 2.55.0 legs ran them once each: on Linux the
+lib passed 3,224 and failed only T-R10, and on macOS it passed 3,153 and failed none (`fudi4/ci/job-111437892309.log`).
+
+#### 5.18.6 What this round leaves as it was
+
+- **B stays a PROVISIONAL integration** at `55029628`. N1 and N2, the three instrument rows, the O8 texts, `design/15`
+  and every cost and limit of §5.17.7 are unchanged, in behaviour and in text.
+- **No production code changes.** No finding file changes: the CI failure is the ledger's `FUD-CI4-MAINTPRUNE`, fixed.
+- **Beyond §5.17.7's statement of what is proven:** round 3's 70 tests now also ran on Git 2.55.0, on this box's Linux.
+  That is a second Git on one platform, and not native-platform proof.
+
+#### 5.18.7 The frozen effects
+
+`fudi4/tools/frozen-proof4.sh` is round 3's proof with this round's base, `202c0805`. It ran at the code commit
+`6bdd02c3` (`fudi4/frozen/frozen-proof-6bdd02c3.txt`). This record's commit changes no code, and the pull request body
+cites the same proof at the head it is pushed at.
+- **G6's frozen set:** **zero delta from #329's provisional head `55029628`,** 34 of 34 byte-identical. From master,
+  33 of 34: `src/engine/topology/integrate.rs` differs by +16 −4, #329's H1, as in §5.17.8. This round's delta over the
+  set is zero.
+- **Against G5's range `d724fb16`:** unchanged from §5.17.8, five files, +257 −78. E-G6-1's rule, executed and not
+  adopted, fails on #329's H1 alone.
+- **The PR5-frozen legacy section:** from `55029628`, exactly D's five differ.
+- **D's O8 five-file set:**
+  - **this round** (`202c0805..6bdd02c3`): only `src/engine/tests.rs` changes, +4 −0 (blob `f8c1963f…`).
+    `src/workspace.rs`, `src/engine/coordinator.rs` and `src/engine/resume.rs` keep their round-3 blobs, and
+    **`src/engine/attempt.rs` is unchanged** (`51534706…`);
+  - **cumulative from master** (the same from `55029628` and from `54a1ff14`): `src/workspace.rs` +1,537 −82,
+    `src/engine/attempt.rs` +53 −10, `src/engine/coordinator.rs` +116 −10, `src/engine/resume.rs` +138 −4, and
+    `src/engine/tests.rs` +4,844 −0.
+- **Append-only** (`fudi4/frozen/append-only-6bdd02c3.txt`): against master, `src/engine/tests.rs` is master's blob with
+  bytes appended, and `src/workspace.rs`'s test module is unchanged from round 3. Against `202c0805`, the four lines go
+  inside T-R10, in D's own appended region.
+- **Schema 4:** `TOPOLOGY_ACTIVATION` is `Inactive`, and no topology path changes.
+- **Every other path this round changes:** `docs/internals/engine/tests.md`, and this record.
+
+#### 5.18.8 The boundary event
+
+The orchestrator's `~/orch-pr11/answers/pr11_fud_impl4-0.md` (13:07:33Z) carries the supervisor's correction. Before
+it, while looking for a Git 2.55.0 build, this round ran two broad traversals. They are preserved, with each command,
+its start and end times and its output files, in `fudi4/boundary/` (`commands.md`):
+- **`find / -maxdepth 6 -type f -name git -perm -u+x`** ran from 13:04:37Z to 13:05:17Z. It could have enumerated the
+  immediate entries of `~/orch-pr11/reviews/rd1r2-witnesses/` (depth 6 below `/`), but nothing below them.
+- **`find /home/ubuntu /srv /opt -xdev -type f -name git -perm -u+x`** started at 13:05:23Z, and this round stopped it
+  at 13:07:44Z. It could have enumerated all of that directory, at every depth, and the stopped review's rollouts
+  wherever they lie under `/home/ubuntu`. Its second command, a walk of `~/orch-pr11` to depth 4, never started.
+
+Neither result is read as an absence: a walk with a name filter still enumerated what it walked. Of the 40 paths the
+first printed, none names the directory. All 40 were discarded, none was used, and the stopped artifacts were not
+opened to audit the exposure. The Git 2.55.0 build used is the one the orchestrator's second note names. A shallow
+clone of Git's `v2.55.0` tag, made before the correction, served only to read Git's source (`fudi4/git-source/`).
+
+#### 5.18.9 Platforms, what waits, and the CI history
+
+- **Platforms:** every figure here is Linux, on this box's Git 2.43.0 and the Git 2.55.0 stand-in. Windows and macOS
+  are CI's.
+- **What waits** is as §5.17.11 has it: O8, #329's final head, the required reviews (the regular review of R-D1's
+  design unmet), and N1's and N2's G6 classification.
+- **CI at `202c0805`:** run 37202558686 failed `test (ubuntu-latest)` on T-R10 (§5.18.1). Every other job passed, among
+  them `test (macos-latest)` and `test (winguest)`. Policy run 37202558600 passed.
+- **CI at this round's head is not waited on;** the orchestrator reads native CI.
+
+The pull request body records the head the ten gates passed at, with the logs under `fudi4/gates/`.
