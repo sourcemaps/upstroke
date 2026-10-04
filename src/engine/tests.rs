@@ -13527,6 +13527,10 @@ fn a_kept_pin_removed_before_the_resume_is_written_again_from_the_checkout() {
             git_in(
                 &repo,
                 &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
                     "fetch",
                     "-q",
                     "--prune",

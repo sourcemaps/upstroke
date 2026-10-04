@@ -3086,6 +3086,14 @@ arm, its pin failing too), T-R7 (C1, C2, C4), T-R8 (C3), T-R9 (E1, and E2 with a
 `update-ref`), T-R10 (F1, F2: `update-ref -d`, and a `fetch --prune` from a bare remote), T-R11 (X3) and T-R12 (X2, the
 control). Each pinned output is checked by its tree, and the warning's restore is followed where the case resumes.
 
+F2's fetch runs with `-c maintenance.auto=false -c gc.auto=0`, two of the four settings the engine's own Git children
+carry (`AUTO_MAINTENANCE_REFUSED`, `src/workspace.rs`). From Git 2.54 a fetch's automatic maintenance takes the
+`geometric` strategy, whose `worktree-prune` task removes the torn registration: its `gitdir` names a checkout that does
+not exist, and it has no index. The maintenance detaches, so it races the operator's repair, and where it wins the
+repair finds nothing to remove. That is how T-R10 failed on the hosted runner's Git 2.55.0. Without the two settings,
+Git's maintenance policy, not the engine, would decide what the repair finds. F2's case, the pin pruned by
+`fetch --prune`, is unchanged.
+
 ## `fn a_foreign_index_reset_during_the_resumes_capture_cannot_change_the_kept_tree() {`
 
 The tests of round 2's cases: T-RD1-1 (another client's `reset` before the capture's `write-tree`, Unix), T-RD1-2
