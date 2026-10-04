@@ -853,18 +853,27 @@ topology module can reach descends from it, where the facade is neither. The \
 allow is the lint it already was and the move widens nothing: the same calls, \
 under one recorded allow instead of two.
 
-AMENDED ONCE, on the owner's decision to close the static and deadline residue \
-of `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: \
-when `run_attempt` fails after recording a refused candidate, the coordinator \
-does not discard the checkout; it pins that candidate — the branch ref, parent \
-and tree captured before the refusal, never the index as it stands at the \
-refusal — through `Workspace::prepare_commit_from_candidate` at the attempt's \
-`prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`, one new constant, and \
-returns a registry refusal (`UpstrokeError::RegistryRefused`) that names the \
-pin, or the pin's failure. Every other attempt error discards the checkout as \
-before. The new arm calls only `prepared_pin_ref` and \
-`Workspace::prepare_commit_from_candidate`, both of which the module already \
-calls, and nothing else in the module moves."""
+AMENDED ONCE, on the owner's decision to close the static and deadline \
+residue of \
+`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`, \
+with `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT` and \
+`PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`: when \
+`run_attempt` fails after recording a refused candidate, the coordinator does \
+not discard the checkout; it pins that candidate — the branch ref, parent and \
+tree captured before the refusal, never the index as it stands at the refusal \
+— through `Workspace::prepare_commit_from_candidate` at the attempt's \
+`prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`, which it imports from \
+`crate::workspace`, whatever `HEAD` is by then, and returns a registry \
+refusal (`UpstrokeError::RegistryRefused`) that names the pin, or the pin's \
+failure. Every other attempt error keeps the checkout too: it pins what the \
+checkout holds through `Workspace::pin_checkout` at the same name and returns \
+the error with a warning naming the pin or its failure. A reviewed candidate \
+whose publication fails — its prepared commit refused, its branch not the \
+run's, or its successful settlement not appended — is pinned the same way \
+through `Workspace::prepare_commit_from_candidate` and kept, and nothing is \
+published. One new private function makes the pins of those arms and adds the \
+warning. Of the workspace the module now also calls `pin_checkout`, and \
+nothing else in the module moves."""
 shrinks_when = "PR7-PR11 route the legacy coordinator's teardown through the RunDir husk funnels, which need the ownership proof this slice adds."
 
 # PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
@@ -882,20 +891,30 @@ the run entry points and for the reason `src/engine/coordinator.rs`'s row \
 states: `resume_contained` calls `resume_harness_inner_on`, denied by path, \
 and the five are denied by path themselves.
 
-AMENDED ONCE, on the owner's decision to close the same finding's static and \
-deadline residue: for every attempt the replayed log records — each task's \
-attempts from the first to the last one started — the resume also asks, \
-through `Workspace::prepared_pin_target`, whether the coordinator kept that \
-attempt's candidate at its `prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`, a \
-pin no resume removes; it discards the checkout's uncommitted paths exactly as \
-before, so the attempt runs again from a clean tree, and one warning names \
-every kept pin it found with the commands that take its output back as the \
-repository records it, deletions included, each carrying the replacement \
-controls the legacy workspace's Git children carry (`--no-replace-objects -c \
+AMENDED ONCE, on the owner's decision to close the same findings: for every \
+attempt the replayed log records — each task's attempts from the first to the \
+last one started — the resume also asks, through \
+`Workspace::prepared_pin_target`, whether that attempt's output is kept at \
+its `prepared_pin_ref` followed by `KEPT_PIN_SUFFIX`, a pin no resume \
+removes. When the checkout holds uncommitted paths and the log records an \
+attempt in flight, the resume removes them only through \
+`Workspace::discard_into_kept_pin`, with that attempt's kept pin and the \
+run's public directory, where the pin's copies are, which removes only what \
+that pin and a copy of it the resume itself has made durable hold, putting a \
+missing pin back from its copy first, and leaves the rest; when that refuses, \
+the resume refuses and discards nothing else. With no attempt in flight it \
+discards exactly as before. One warning names every kept pin it found with \
+the commands that take its output back as the repository records it, \
+deletions included, each carrying the replacement controls the legacy \
+workspace's Git children carry (`--no-replace-objects -c \
 core.useReplaceRefs=false`), and says that removing a pin stops the warning \
-naming it. Of the workspace it calls only `prepared_pin_target`, which it \
-already calls; of the event log it reads the replayed state and changes \
-nothing; and nothing else in the module moves."""
+naming it; others name the copy, with the `git fetch` that restores the pin \
+from it, a pin the resume put back from its copy, and what stayed in the \
+checkout. Its refusal on a branch moved from the head the log records names \
+the `git update-ref` that moves the branch back without touching the \
+checkout. Of the workspace it calls `prepared_pin_target`, which it already \
+calls, and `discard_into_kept_pin`; of the event log it reads the replayed \
+state and changes nothing; and nothing else in the module moves."""
 shrinks_when = "the schema-4 coordinator asks questions through RunDir.WriteQuestionPayload directly, at which point this call site goes."
 
 # PROPOSED, conditional on the owner's decision O8 (decision B), and not granted: the
@@ -968,8 +987,10 @@ than 2.41 by name, the floor the owner raised on 2026-09-28 because Git 2.40's \
 `merge-tree` ignores the setting, and the `check-attr --source` refusal states \
 the same floor. Every other behaviour of the module stays frozen. The second \
 amendment, to close \
-`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` on \
-the owner's decision to unfreeze the module for this one change, is two things \
+`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`, \
+with `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT` and \
+`PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`, on the \
+owner's decision to unfreeze the module for this one change, is three things \
 and no more. First, the three Git children that enumerate the repository's \
 worktree registry — `switch_branch`'s `git switch`, `add_gate_worktree`'s `git \
 worktree add`, and `cleanup_gate_workspace`'s `git worktree remove` together \
@@ -995,7 +1016,39 @@ maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c \
 maintenance.autoDetach=false` from one new constant, so no Git child of the \
 module, and no Git process one of them starts, runs Git's automatic \
 maintenance, and none of them prunes a registration another checkout is \
-writing. The test module gains the regression tests for both. Every other \
+writing. Third, a legacy attempt's kept output. The suffix of a kept pin's \
+name, `KEPT_PIN_SUFFIX`, is defined here, and `prepare_commit_from_candidate` \
+observes and compares `HEAD` with the captured branch and parent only for a \
+pin whose name does not end with it: a kept pin, which nothing publishes, is \
+written from the parent and tree it is given whatever `HEAD` is, with every \
+other check, the create-only write and its verification as before. \
+`pin_checkout` and `discard_into_kept_pin` capture the checkout into a \
+private index file in the checkout's own Git directory, which they name to \
+Git through `GIT_INDEX_FILE` — the module's two private-hooks builders set it \
+only for a workspace value carrying such a file, and with it \
+`core.splitIndex=false` and `splitIndex.sharedIndexExpire=never`, so that no \
+write of the private index writes or unlinks a shared index of the checkout's \
+— and remove: `read-tree`, `add -A --ignore-errors`, then `add -A -f` of \
+whatever stands where `HEAD` has a path the capture lacks, `update-index`, \
+`write-tree` and `diff-tree`, each on the private index, so that none of them \
+reads the checkout's own index. The first pins that capture at the kept name \
+and discards nothing. The second reads the attempt's copies in the run's \
+public directory and puts a missing kept pin back from its copy with `git \
+bundle unbundle` and a create-only `update-ref`, refusing when a pin and a \
+copy disagree; it writes the kept pin when there is none, or checks it — \
+upstroke's kept commit of the attempt, holding the bytes of every path the \
+checkout changed and of everything in the discard's way, a new path it never \
+held and a submodule path being left in place — and writes a new copy of it \
+with `git bundle create` under a new name, checks its head with `git bundle \
+list-heads`, fsyncs it, renames it into place and fsyncs its directory, \
+whatever copies the attempt already has, relying on no copy it did not make \
+durable itself; then it reverts exactly the captured changes, rewriting or \
+removing only the capture's own paths with `read-tree -m -u` and writing \
+`HEAD`'s other paths with `checkout-index` only where nothing stands, and \
+resets the checkout's index with `read-tree --reset`, refusing, with nothing \
+it does not hold removed, when any step fails, when a reverted path is not \
+`HEAD`'s afterwards, or when `HEAD` moved. The test module gains the \
+regression tests for all three. Every other \
 behaviour of the module stays frozen. The schema-4 equivalents live behind \
 funnels in `crate::workspace_manager`, and nothing here calls a funnel: the \
 constant is read, and the tolerant access is called, which takes no site."""
@@ -1229,10 +1282,18 @@ and their seams, which are denied by path since 2026-09-20 \
 allowed.
 
 AMENDED ONCE, on the owner's decision to close \
-`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`: the \
-file gains appended regression tests, and no existing test changes. They drive \
-the same entry points through a worktree registry another process has torn. \
-One of them makes that registration as a topology slot, through \
+`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`, \
+with the two findings found beside it: the file gains appended regression \
+tests, and no existing test changes. They drive the same entry points through \
+a worktree registry another process has torn, a run branch another Git client \
+moved, a kept pin that cannot be written, was removed or was moved from its \
+copy, a copy cut short, a copy left under its final name with its durability \
+unproven, content in the discard's way or written after its capture, a \
+configuration a condition chooses, a split index, the checkout's fsmonitor, \
+an attempt that fails for another reason or whose publication fails, and a \
+run whose process exits right after its capture, which one of them starts as \
+a child of the test binary, as the existing interrupted-run tests do. One of \
+them makes that registration as a topology slot, through \
 `crate::workspace_manager`'s funnels and its test fixture's torn-registration \
 shape, under the same allow."""
 shrinks_when = "the legacy engine goes; these tests go with it."

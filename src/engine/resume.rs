@@ -21,9 +21,9 @@ use crate::rundir::{self, RunLock, RunPaths, WorktreeLock};
 use crate::runner::Runner;
 use crate::runner::host::{Contained, HostRunner, contain_write_command};
 use crate::util;
-use crate::workspace::Workspace;
+use crate::workspace::{KEPT_PIN_SUFFIX, KeptCopies, KeptPin, Workspace};
 
-use super::coordinator::{KEPT_PIN_SUFFIX, Run, prepared_pin_ref};
+use super::coordinator::{Run, prepared_pin_ref};
 use super::options::{Harness, ResumeOptions, RunOptions};
 use super::preflight::{
     Preflight, Recorded, RecordedRouting, chain_summaries, normalized_plan_bytes,
@@ -535,8 +535,10 @@ pub(super) fn resume_harness_inner_on(
             "`{}` is at {head}, but this run's record ends at {recorded_head}. Something \
              committed, reset, or rebased the branch after the run stopped, so replaying the \
              log would describe work that is no longer what is on the branch. Move the branch \
-             back to {recorded_head}, or start a new run.",
-            started.branch
+             back to {recorded_head} — `git update-ref refs/heads/{} {recorded_head}` moves it \
+             and leaves the checkout, which may hold an interrupted attempt's output, as it \
+             is — or start a new run.",
+            started.branch, started.branch
         )));
     }
 
@@ -559,6 +561,63 @@ pub(super) fn resume_harness_inner_on(
         }
     }
 
+    let discarded = workspace.uncommitted_summary()?;
+    let in_flight = replayed.state.interrupted_attempts();
+    let mut guarded = None;
+    if !discarded.is_empty() {
+        match in_flight.as_slice() {
+            [] => {}
+            [attempt] => {
+                let Some(task_index) = replayed.state.index_of(&attempt.task) else {
+                    return Err(refuse(format!(
+                        "the attempt in flight names task `{}`, which this run's plan does not \
+                         have; nothing was discarded",
+                        attempt.task
+                    )));
+                };
+                let number = attempt.flight.attempt;
+                let pin_ref = format!(
+                    "{}{KEPT_PIN_SUFFIX}",
+                    prepared_pin_ref(&run_id, task_index, number)
+                );
+                let branch_ref = format!("refs/heads/{}", started.branch);
+                let message = format!("[upstroke] kept: {} attempt {number}", attempt.task);
+                let stem = format!("kept-{task_index}-{number}");
+                let copies = KeptCopies {
+                    directory: &paths.public,
+                    stem: &stem,
+                };
+                let pin = KeptPin {
+                    branch_ref: &branch_ref,
+                    message: &message,
+                    pin_ref: &pin_ref,
+                };
+                let held = workspace
+                    .discard_into_kept_pin(&pin, &head, &copies)
+                    .map_err(|error| {
+                        refuse(format!(
+                            "attempt {number} of `{}` left {} uncommitted path(s) in this \
+                             checkout, and keeping them before the discard stopped: {error}. \
+                             Nothing that `{pin_ref}` and its copy in {} do not hold was \
+                             discarded. Resume once that is fixed, and the resume completes \
+                             the discard.",
+                            attempt.task,
+                            discarded.len(),
+                            paths.public.display()
+                        ))
+                    })?;
+                guarded = Some((attempt.task.clone(), number, pin_ref, held));
+            }
+            more => {
+                return Err(refuse(format!(
+                    "the log records {} attempts in flight, and the legacy coordinator runs one \
+                     at a time; nothing was discarded",
+                    more.len()
+                )));
+            }
+        }
+    }
+
     let mut kept = Vec::new();
     for (task_index, progress) in replayed.state.progress.iter().enumerate() {
         for attempt in 1..=progress.attempts {
@@ -572,19 +631,28 @@ pub(super) fn resume_harness_inner_on(
         }
     }
 
-    let discarded = workspace.uncommitted_summary()?;
+    let discarded: Vec<String> = match &guarded {
+        Some((.., held)) => discarded
+            .into_iter()
+            .filter(|path| !held.left_in_place.contains(path))
+            .collect(),
+        None => discarded,
+    };
     if !discarded.is_empty() {
         warnings.push(format!(
             "discarded {} uncommitted path(s) left by the interrupted run: {}",
             discarded.len(),
             discarded.join(", ")
         ));
-        workspace.discard_uncommitted()?;
+        if guarded.is_none() {
+            workspace.discard_uncommitted()?;
+        }
     }
     if !kept.is_empty() {
         warnings.push(format!(
-            "the worker output of the attempt(s) a worktree-registry refusal stopped is kept, and \
-             no resume removes it: {}. Each pin is a commit on the HEAD its output was captured \
+            "the worker output of the attempt(s) a worktree-registry refusal, an error or an \
+             interruption stopped before settlement is kept, and no resume removes it: {}. Each \
+             pin is a commit on the HEAD its output was captured \
              on. To take the output back as the repository records it — its index exactly, its \
              working files through the checkout's own end-of-line and filter conversions, so \
              compare their bytes before relying on them — deletions included, and not as \
@@ -594,10 +662,45 @@ pub(super) fn resume_harness_inner_on(
              `git --no-replace-objects -c core.useReplaceRefs=false cherry-pick --no-commit \
              <pin>`, and before removing the pin check what it staged (`git diff --cached`), \
              because a configured merge driver can make it succeed having applied none of the \
-             kept change. `git update-ref -d <pin>` removes the pin, and every later resume then \
-             stops naming it",
+             kept change. A pin whose parent is neither HEAD nor one of its ancestors was captured \
+             while another Git client had moved the branch: the restore still takes back exactly \
+             the tree it holds. `git update-ref -d <pin>` removes the pin, and every later resume \
+             then stops naming it",
             kept.join(", ")
         ));
+    }
+    if let Some((task, number, pin_ref, held)) = &guarded {
+        if let (Some(_), Some(copy)) = (&held.kept, &held.copy) {
+            let shown = copy
+                .strip_prefix(workspace.root())
+                .unwrap_or(copy.as_path());
+            if let Some(from) = &held.restored_from {
+                warnings.push(format!(
+                    "`{pin_ref}` was missing when the resume found what attempt {number} of \
+                     `{task}` left, and it was put back from its copy {} before anything was \
+                     discarded",
+                    from.display()
+                ));
+            }
+            warnings.push(format!(
+                "what attempt {number} of `{task}` left is kept at `{pin_ref}`, and copied outside \
+                 every ref to {}: should that pin ever be removed, \
+                 `git fetch {} {pin_ref}:{pin_ref}` from the checkout's root puts it back",
+                copy.display(),
+                shown.display()
+            ));
+        }
+        if !held.left_in_place.is_empty() {
+            warnings.push(format!(
+                "after the discard, {} uncommitted path(s) remain in this checkout that \
+                 `{pin_ref}` does not hold: files no capture could take, files an ignore rule \
+                 covered when the leftovers were captured, files written after that capture, or \
+                 new files the pin never held. Nothing removed them, and `{task}` runs again with \
+                 them in the checkout: {}",
+                held.left_in_place.len(),
+                held.left_in_place.join(", ")
+            ));
+        }
     }
 
     let sleeper = harness.sleeper.unwrap_or(&RealSleeper);

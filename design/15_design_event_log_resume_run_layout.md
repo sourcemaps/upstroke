@@ -265,11 +265,21 @@ holds nothing to lose, so it is made again and the add is attempted again; anyth
 as a registry refusal, so the add's own failure never comes back as Git state. When a snapshot's registry access
 refuses after the worker's output was captured, the coordinator does not discard the checkout: it pins the
 captured candidate — the branch, parent and tree captured before the refusal, never the index as it stands
-then — as a commit at the attempt's prepared pin followed by `-kept`, and its refusal names that pin. Of the
-schema-3 pins, a kept pin is the one without a successful settlement that is not orphan residue. Every resume
-discards the checkout's copy as before, so the attempt runs again from a clean tree. When it reaches its lookup — a
-resume that refuses earlier, at its reclaim, names none, and one whose later step fails returns that error without
-its warnings — it looks for a kept pin at every attempt the run's log records, and names each one it finds with the
+then — as a commit at the attempt's prepared pin followed by `-kept`, whatever `HEAD` is by then, since nothing
+publishes a kept pin, and its refusal names that pin. Every other attempt error after its worker ran, and a reviewed
+candidate whose publication fails, keeps the checkout the same way: what the checkout holds, or the reviewed
+candidate, is pinned at that name, and the error names the pin. Of the schema-3 pins, a kept pin is the one without a
+successful settlement that is not orphan residue. A resume removes the checkout's copy of the attempt in flight only
+once that attempt's kept pin holds it and a durable copy of the pin that the resume itself has written,
+`kept-<task index>-<attempt>-<ULID>.bundle` in the run's public directory, holds it too: it captures the checkout
+into a private index that changes nothing else of the repository, puts a missing pin back from a copy, writes the pin
+when there is none or checks that it holds every changed path and everything in the discard's way, writes and syncs a
+new copy, and reverts exactly those changes, writing nothing where anything stands; what it did not capture, a new
+file the pin never held and a submodule stay, named. When it cannot, it refuses and removes nothing else. With no
+attempt in flight it discards as before. When it reaches its lookup — a resume that refuses earlier, at its reclaim,
+names none, and one whose later step fails returns that error without its warnings — it looks for a kept pin at every
+attempt the run's log records, and names each one it finds, and the copy of the one it kept, with the `git fetch`
+that restores the pin from it, with the
 commands that take its output back as the repository records it — the index exactly, the working files through the
 checkout's own conversions — deletions included: with replacement objects refused, as every legacy Git command
 refuses them. It never removes a kept pin; the operator does, and a removed pin is named no more. Every legacy Git

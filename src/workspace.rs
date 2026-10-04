@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(clippy::disallowed_macros)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -20,6 +21,7 @@ use crate::workspace_manager::{
 
 pub struct Workspace {
     root: PathBuf,
+    private_index: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,17 @@ pub(crate) const REVIEW_DIFF_FLAGS: &[&str] = &[
     "--no-ext-diff",
     "--no-textconv",
     "--no-color",
+];
+
+pub(crate) const KEPT_PIN_SUFFIX: &str = "-kept";
+
+const CAPTURE_CONTROLS: [&str; 2] = ["-c", "core.sparseCheckout=false"];
+
+const PRIVATE_INDEX_CONTROLS: [&str; 4] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "splitIndex.sharedIndexExpire=never",
 ];
 
 const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];
@@ -68,6 +81,7 @@ impl Workspace {
     pub fn open(root: &Path) -> Result<Self, UpstrokeError> {
         let probe = Self {
             root: root.to_path_buf(),
+            private_index: None,
         };
         let inside = probe.git(&["rev-parse", "--is-inside-work-tree"])?;
         if inside.trim() != "true" {
@@ -82,6 +96,7 @@ impl Workspace {
             } else {
                 toplevel
             },
+            private_index: None,
         })
     }
 
@@ -199,15 +214,19 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        git_command(&self.root)
+        let mut command = git_command(&self.root);
+        command
             .arg("-c")
             .arg(hooks_config)
-            .args(["-c", "core.fsmonitor=false"])
-            .args(args)
-            .output()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })
+            .args(["-c", "core.fsmonitor=false"]);
+        if let Some(index) = &self.private_index {
+            command
+                .args(PRIVATE_INDEX_CONTROLS)
+                .env("GIT_INDEX_FILE", index);
+        }
+        command.args(args).output().map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git: {e}"),
+        })
     }
 
     fn git_output_with_private_hooks(&self, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
@@ -242,18 +261,24 @@ impl Workspace {
         let hooks = PrivateHooksDir::create()?;
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(&hooks.path);
-        let mut child = git_command(&self.root)
+        let mut command = git_command(&self.root);
+        command
             .arg("-c")
             .arg(hooks_config)
-            .args(["-c", "core.fsmonitor=false"])
+            .args(["-c", "core.fsmonitor=false"]);
+        if let Some(index) = &self.private_index {
+            command
+                .args(PRIVATE_INDEX_CONTROLS)
+                .env("GIT_INDEX_FILE", index);
+        }
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| UpstrokeError::Git {
-                message: format!("failed to run git: {e}"),
-            })?;
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| UpstrokeError::Git {
+            message: format!("failed to run git: {e}"),
+        })?;
         let mut stdin = child.stdin.take().ok_or_else(|| UpstrokeError::Git {
             message: format!("git {} did not open stdin", args.join(" ")),
         })?;
@@ -866,6 +891,7 @@ impl Workspace {
 
         let workspace = Workspace {
             root: pending.path.clone(),
+            private_index: None,
         };
         Ok(pending.finish(workspace))
     }
@@ -990,14 +1016,16 @@ impl Workspace {
         self.validate_branch_ref(branch_ref)?;
         self.validate_commit_oid(parent_oid)?;
         self.validate_tree_oid(tree_oid)?;
-        let observed_branch_ref = self.current_branch_ref()?;
-        let observed_parent = self.head_sha_full()?;
-        if observed_branch_ref != branch_ref || observed_parent != parent_oid {
-            return Err(UpstrokeError::Git {
-                message: format!(
-                    "HEAD moved from captured branch {branch_ref} at {parent_oid} to {observed_branch_ref} at {observed_parent}; refusing to prepare it"
-                ),
-            });
+        if !pin_ref.ends_with(KEPT_PIN_SUFFIX) {
+            let observed_branch_ref = self.current_branch_ref()?;
+            let observed_parent = self.head_sha_full()?;
+            if observed_branch_ref != branch_ref || observed_parent != parent_oid {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "HEAD moved from captured branch {branch_ref} at {parent_oid} to {observed_branch_ref} at {observed_parent}; refusing to prepare it"
+                    ),
+                });
+            }
         }
         if message.trim().is_empty() || message.contains('\r') || message.contains('\n') {
             return Err(UpstrokeError::Git {
@@ -1269,6 +1297,804 @@ impl Workspace {
         self.git_with_private_hooks(&["reset", "-q", "--hard", "HEAD"])?;
         self.git_with_private_hooks(&["clean", "-qfd"]).map(|_| ())
     }
+
+    pub(crate) fn pin_checkout(
+        &self,
+        pin: &KeptPin<'_>,
+    ) -> Result<Option<PreparedCommit>, UpstrokeError> {
+        let head = self.head_sha_full()?;
+        let head_tree = self.commit_tree_oid(&head)?;
+        let capture = self.capture_checkout(&head, &head_tree, true)?;
+        let pinned = if capture.tree == head_tree {
+            Ok(None)
+        } else {
+            self.prepare_commit_from_candidate(
+                pin.branch_ref,
+                &head,
+                &capture.tree,
+                pin.message,
+                pin.pin_ref,
+            )
+            .map(Some)
+        };
+        capture.remove();
+        pinned
+    }
+
+    pub(crate) fn discard_into_kept_pin(
+        &self,
+        pin: &KeptPin<'_>,
+        head: &str,
+        copies: &KeptCopies<'_>,
+    ) -> Result<KeptDiscard, UpstrokeError> {
+        let head_tree = self.commit_tree_oid(head)?;
+        let capture = self.capture_checkout(head, &head_tree, true)?;
+        let held = self.discard_held(&capture, pin, head, &head_tree, copies);
+        capture.remove();
+        let mut discard = held?;
+        discard.left_in_place = self.uncommitted_summary()?;
+        Ok(discard)
+    }
+
+    fn discard_held(
+        &self,
+        capture: &CheckoutCapture,
+        pin: &KeptPin<'_>,
+        head: &str,
+        head_tree: &str,
+        copies: &KeptCopies<'_>,
+    ) -> Result<KeptDiscard, UpstrokeError> {
+        let mut discard = KeptDiscard {
+            kept: None,
+            copy: None,
+            restored_from: None,
+            left_in_place: Vec::new(),
+        };
+        if capture.tree == head_tree {
+            self.git_with_private_hooks(&["read-tree", "--reset", head])?;
+            return Ok(discard);
+        }
+        let changes = capture.view.changed_paths(head_tree, &capture.tree)?;
+        let mut found = self.attempt_copies(copies, pin.pin_ref)?.into_iter();
+        let first = found.next();
+        let different = first
+            .as_ref()
+            .and_then(|(_, commit)| found.find(|(_, named)| named != commit));
+        if let (Some((copy, commit)), Some((other, named))) = (&first, different) {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copies {} and {} of `{}` name different commits, {commit} and {named}",
+                    copy.display(),
+                    other.display(),
+                    pin.pin_ref
+                ),
+            });
+        }
+        let (commit, mut left) = match (self.prepared_pin_target(pin.pin_ref)?, first) {
+            (None, None) => (
+                self.prepare_commit_from_candidate(
+                    pin.branch_ref,
+                    head,
+                    &capture.tree,
+                    pin.message,
+                    pin.pin_ref,
+                )?
+                .commit_sha,
+                Vec::new(),
+            ),
+            (None, Some((copy, commit))) => {
+                self.restore_pin(&copy, &commit, pin)?;
+                discard.restored_from = Some(copy);
+                let unheld = self.held_by_pin(&changes, capture, pin, &commit)?;
+                (commit, unheld)
+            }
+            (Some(target), Some((copy, commit))) => {
+                if target != commit {
+                    return Err(UpstrokeError::Git {
+                        message: format!(
+                            "`{}` names {target}, but its copy {} names {commit}",
+                            pin.pin_ref,
+                            copy.display()
+                        ),
+                    });
+                }
+                let unheld = self.held_by_pin(&changes, capture, pin, &commit)?;
+                (commit, unheld)
+            }
+            (Some(target), None) => {
+                let unheld = self.held_by_pin(&changes, capture, pin, &target)?;
+                (target, unheld)
+            }
+        };
+        left.extend(
+            changes
+                .iter()
+                .filter(|change| change.submodule)
+                .map(|change| change.path.clone()),
+        );
+        let copy = self.copy_pin(copies, pin.pin_ref, head, &commit)?;
+        let reverted = if left.is_empty() {
+            capture.tree.clone()
+        } else {
+            self.leave_out(capture, &changes, &left)?
+        };
+        self.refuse_unsafe_checkout_tree(head_tree)?;
+        let refused = self
+            .revert(capture, head, head_tree, &reverted)
+            .map_err(|error| stopped_part_way(pin.pin_ref, &error.to_string()))?;
+        self.git_with_private_hooks(&["read-tree", "--reset", head])?;
+        self.check_reverted(pin.pin_ref, head, head_tree, &reverted, refused)?;
+        discard.kept = Some(commit);
+        discard.copy = Some(copy);
+        Ok(discard)
+    }
+
+    fn held_by_pin(
+        &self,
+        changes: &[TreeChange],
+        capture: &CheckoutCapture,
+        pin: &KeptPin<'_>,
+        commit: &str,
+    ) -> Result<Vec<Vec<u8>>, UpstrokeError> {
+        let pin_tree = self.commit_tree_oid(commit)?;
+        let upstrokes = match self.parent_sha(commit)? {
+            Some(parent_sha) => self.prepared_commit_matches(&PreparedCommit {
+                branch_ref: pin.branch_ref.to_owned(),
+                parent_sha,
+                tree_sha: pin_tree.clone(),
+                commit_sha: commit.to_owned(),
+                message: pin.message.to_owned(),
+                pin_ref: pin.pin_ref.to_owned(),
+            })?,
+            None => false,
+        };
+        if !upstrokes {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "`{}` is not upstroke's kept commit of this attempt",
+                    pin.pin_ref
+                ),
+            });
+        }
+        let differs: BTreeMap<Vec<u8>, u8> = capture
+            .view
+            .changed_paths(&capture.tree, &pin_tree)?
+            .into_iter()
+            .map(|change| (change.path, change.status))
+            .collect();
+        let mut conflicts = Vec::new();
+        let mut in_the_way = Vec::new();
+        let mut unheld = Vec::new();
+        for change in changes.iter().filter(|change| !change.submodule) {
+            match (change.status, differs.get(&change.path).copied()) {
+                (b'D', _) | (_, None) => {}
+                (b'A', Some(b'D')) if capture.footprint_holds(&change.path) => {
+                    in_the_way.push(change.path.clone());
+                }
+                (b'A', Some(b'D')) => unheld.push(change.path.clone()),
+                _ => conflicts.push(change.path.clone()),
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the checkout holds {} path(s) that `{}` holds otherwise: {}",
+                    conflicts.len(),
+                    pin.pin_ref,
+                    rendered_paths(&conflicts)
+                ),
+            });
+        }
+        if !in_the_way.is_empty() {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the discard would have to remove {} to put back what HEAD holds there, and \
+                     `{}` does not hold them; move them out of the way",
+                    rendered_paths(&in_the_way),
+                    pin.pin_ref
+                ),
+            });
+        }
+        Ok(unheld)
+    }
+
+    fn leave_out(
+        &self,
+        capture: &CheckoutCapture,
+        changes: &[TreeChange],
+        paths: &[Vec<u8>],
+    ) -> Result<String, UpstrokeError> {
+        let mut input = Vec::new();
+        for change in changes.iter().filter(|change| paths.contains(&change.path)) {
+            input.extend_from_slice(&change.old_mode);
+            input.push(b' ');
+            input.extend_from_slice(&change.old_oid);
+            input.push(b'\t');
+            input.extend_from_slice(&change.path);
+            input.push(0);
+        }
+        capture
+            .view
+            .git_output_with_input(&controlled(&["update-index", "-z", "--index-info"]), input)?;
+        capture.view.private_tree()
+    }
+
+    fn attempt_copies(
+        &self,
+        copies: &KeptCopies<'_>,
+        pin_ref: &str,
+    ) -> Result<Vec<(PathBuf, String)>, UpstrokeError> {
+        let entries = match fs::read_dir(copies.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: copies.directory.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: copies.directory.to_path_buf(),
+                source,
+            })?;
+            if let Some(name) = entry
+                .file_name()
+                .to_str()
+                .filter(|name| is_attempt_copy(name, copies.stem))
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        let mut found = Vec::new();
+        for name in names {
+            let copy = copies.directory.join(name);
+            let relative = self.relative_to_root(&copy)?;
+            let Ok(heads) = self.git(&["bundle", "list-heads", &relative]) else {
+                continue;
+            };
+            let mut lines = heads.lines();
+            let only = match (lines.next(), lines.next()) {
+                (Some(line), None) => line.split_once(' '),
+                _ => None,
+            };
+            if let Some((oid, _)) =
+                only.filter(|(oid, named)| *named == pin_ref && valid_object_id(oid))
+            {
+                found.push((copy, oid.to_owned()));
+            }
+        }
+        Ok(found)
+    }
+
+    fn restore_pin(
+        &self,
+        copy: &Path,
+        commit: &str,
+        pin: &KeptPin<'_>,
+    ) -> Result<(), UpstrokeError> {
+        let relative = self.relative_to_root(copy)?;
+        self.git_output_with_private_hooks(&["bundle", "unbundle", &relative])?;
+        let tree = self.commit_tree_oid(commit)?;
+        let upstrokes = match self.parent_sha(commit)? {
+            Some(parent_sha) => self.prepared_commit_matches(&PreparedCommit {
+                branch_ref: pin.branch_ref.to_owned(),
+                parent_sha,
+                tree_sha: tree,
+                commit_sha: commit.to_owned(),
+                message: pin.message.to_owned(),
+                pin_ref: pin.pin_ref.to_owned(),
+            })?,
+            None => false,
+        };
+        if !upstrokes {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copy {} names {commit}, which is not upstroke's kept commit of this attempt",
+                    copy.display()
+                ),
+            });
+        }
+        let zero = "0".repeat(commit.len());
+        self.prepared_update_ref(&[
+            "update-ref",
+            "--no-deref",
+            "-m",
+            "upstroke: restore kept pin from its copy",
+            pin.pin_ref,
+            commit,
+            &zero,
+        ])?;
+        if self.prepared_pin_target(pin.pin_ref)?.as_deref() != Some(commit) {
+            return Err(UpstrokeError::Git {
+                message: format!("`{}` did not become {commit} again", pin.pin_ref),
+            });
+        }
+        Ok(())
+    }
+
+    fn copy_pin(
+        &self,
+        copies: &KeptCopies<'_>,
+        pin_ref: &str,
+        head: &str,
+        commit: &str,
+    ) -> Result<PathBuf, UpstrokeError> {
+        let name = format!("{}-{}", copies.stem, crate::ulid::ulid());
+        let partial = copies.directory.join(format!("{name}.partial"));
+        let copy = copies.directory.join(format!("{name}.bundle"));
+        let written = self.write_copy(&partial, &copy, pin_ref, head, commit);
+        if written.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        written.map(|()| copy)
+    }
+
+    fn write_copy(
+        &self,
+        partial: &Path,
+        copy: &Path,
+        pin_ref: &str,
+        head: &str,
+        commit: &str,
+    ) -> Result<(), UpstrokeError> {
+        let relative = self.relative_to_root(partial)?;
+        let base = format!("^{head}");
+        self.git_output_with_private_hooks(&["bundle", "create", &relative, pin_ref, &base])?;
+        let heads = self.git(&["bundle", "list-heads", &relative])?;
+        if heads.trim() != format!("{commit} {pin_ref}") {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the copy of `{pin_ref}` at {} names `{}`, not {commit}",
+                    partial.display(),
+                    heads.trim()
+                ),
+            });
+        }
+        let written = OpenOptions::new()
+            .write(true)
+            .open(partial)
+            .map_err(|source| UpstrokeError::Io {
+                path: partial.to_path_buf(),
+                source,
+            })?;
+        written.sync_all().map_err(|source| UpstrokeError::Io {
+            path: partial.to_path_buf(),
+            source,
+        })?;
+        fs::rename(partial, copy).map_err(|source| UpstrokeError::Io {
+            path: copy.to_path_buf(),
+            source,
+        })?;
+        sync_parent(copy)
+    }
+
+    fn relative_to_root(&self, path: &Path) -> Result<String, UpstrokeError> {
+        let outside = || UpstrokeError::Git {
+            message: format!(
+                "the kept pin's copy {} is not under a UTF-8 path inside the checkout",
+                path.display()
+            ),
+        };
+        let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(outside());
+        };
+        let canonical = |at: &Path| {
+            fs::canonicalize(at).map_err(|source| UpstrokeError::Io {
+                path: at.to_path_buf(),
+                source,
+            })
+        };
+        let root = canonical(&self.root)?;
+        let directory = canonical(directory)?;
+        let inside = directory.strip_prefix(&root).map_err(|_| outside())?;
+        let mut relative = String::new();
+        for component in inside.components() {
+            relative.push_str(component.as_os_str().to_str().ok_or_else(outside)?);
+            relative.push('/');
+        }
+        relative.push_str(name.to_str().ok_or_else(outside)?);
+        Ok(relative)
+    }
+
+    fn revert(
+        &self,
+        capture: &CheckoutCapture,
+        head: &str,
+        head_tree: &str,
+        reverted: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        let restored: Vec<TreeChange> = capture
+            .view
+            .changed_paths(head_tree, reverted)?
+            .into_iter()
+            .filter(|change| change.status == b'D')
+            .collect();
+        let target = self.tree_without(head, &restored)?;
+        capture.view.git_with_private_hooks(&controlled(&[
+            "read-tree",
+            "-m",
+            "-u",
+            reverted,
+            &target,
+        ]))?;
+        if restored.is_empty() {
+            return Ok(None);
+        }
+        let mut entries = Vec::new();
+        let mut paths = Vec::new();
+        for change in &restored {
+            entries.extend_from_slice(&change.old_mode);
+            entries.push(b' ');
+            entries.extend_from_slice(&change.old_oid);
+            entries.push(b'\t');
+            entries.extend_from_slice(&change.path);
+            entries.push(0);
+            paths.extend_from_slice(&change.path);
+            paths.push(0);
+        }
+        capture.view.git_output_with_input(
+            &controlled(&["update-index", "-z", "--index-info"]),
+            entries,
+        )?;
+        Ok(capture
+            .view
+            .git_output_with_input(&controlled(&["checkout-index", "-z", "--stdin"]), paths)
+            .err()
+            .map(|error| error.to_string()))
+    }
+
+    fn tree_without(&self, head: &str, without: &[TreeChange]) -> Result<String, UpstrokeError> {
+        let view = self.with_private_index(self.private_index_file("-tree")?);
+        let built = view.tree_of(head, without);
+        view.remove_private_index();
+        built
+    }
+
+    fn tree_of(&self, head: &str, without: &[TreeChange]) -> Result<String, UpstrokeError> {
+        self.git_output_with_private_hooks(&controlled(&["read-tree", head]))?;
+        if !without.is_empty() {
+            let mut paths = Vec::new();
+            for change in without {
+                paths.extend_from_slice(&change.path);
+                paths.push(0);
+            }
+            self.git_output_with_input(
+                &controlled(&["update-index", "--force-remove", "-z", "--stdin"]),
+                paths,
+            )?;
+        }
+        self.private_tree()
+    }
+
+    fn check_reverted(
+        &self,
+        pin_ref: &str,
+        head: &str,
+        head_tree: &str,
+        reverted: &str,
+        refused: Option<String>,
+    ) -> Result<(), UpstrokeError> {
+        let after = self.capture_checkout(head, head_tree, false)?;
+        let still = after.view.changed_paths(head_tree, &after.tree);
+        let changed = after.view.changed_paths(head_tree, reverted);
+        after.remove();
+        let still: BTreeSet<Vec<u8>> = still?.into_iter().map(|change| change.path).collect();
+        let unreverted: Vec<Vec<u8>> = changed?
+            .into_iter()
+            .filter(|change| !change.submodule && still.contains(&change.path))
+            .map(|change| change.path)
+            .collect();
+        if !unreverted.is_empty() || refused.is_some() {
+            return Err(stopped_part_way(
+                pin_ref,
+                &format!(
+                    "{} not reverted{}",
+                    rendered_paths(&unreverted),
+                    refused
+                        .map(|refusal| format!("; {refusal}"))
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+        let now = self.head_sha_full()?;
+        if now != head {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "the run branch moved from {head} to {now} during the discard; what the discard removed is kept at `{pin_ref}` and its copy"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn capture_checkout(
+        &self,
+        base: &str,
+        base_tree: &str,
+        footprint: bool,
+    ) -> Result<CheckoutCapture, UpstrokeError> {
+        self.refuse_worktree_filters_before("git add")?;
+        let mut capture = CheckoutCapture {
+            view: self.with_private_index(self.private_index_file("")?),
+            tree: String::new(),
+            footprint: Vec::new(),
+        };
+        match self.fill_capture(&mut capture, base, base_tree, footprint) {
+            Ok(()) => Ok(capture),
+            Err(error) => {
+                capture.remove();
+                Err(error)
+            }
+        }
+    }
+
+    fn fill_capture(
+        &self,
+        capture: &mut CheckoutCapture,
+        base: &str,
+        base_tree: &str,
+        footprint: bool,
+    ) -> Result<(), UpstrokeError> {
+        capture
+            .view
+            .git_output_with_private_hooks(&controlled(&["read-tree", base]))?;
+        let added = capture.view.run_git_with_private_hooks(&controlled(&[
+            "add",
+            "-A",
+            "--ignore-errors",
+        ]))?;
+        if !matches!(added.status.code(), Some(0 | 1)) {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "git add -A --ignore-errors failed: {}",
+                    String::from_utf8_lossy(&added.stderr).trim()
+                ),
+            });
+        }
+        capture.tree = capture.view.private_tree()?;
+        if !footprint {
+            return Ok(());
+        }
+        let missing: Vec<Vec<u8>> = capture
+            .view
+            .changed_paths(base_tree, &capture.tree)?
+            .into_iter()
+            .filter(|change| change.status == b'D')
+            .map(|change| change.path)
+            .collect();
+        capture.footprint = self.in_the_way(&missing);
+        if capture.footprint.is_empty() {
+            return Ok(());
+        }
+        let mut input = Vec::new();
+        for path in &capture.footprint {
+            input.extend_from_slice(path);
+            input.push(0);
+        }
+        capture.view.git_output_with_input(
+            &controlled(&[
+                "--literal-pathspecs",
+                "add",
+                "-A",
+                "-f",
+                "--ignore-errors",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ]),
+            input,
+        )?;
+        capture.tree = capture.view.private_tree()?;
+        Ok(())
+    }
+
+    fn in_the_way(&self, missing: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut found: Vec<Vec<u8>> = Vec::new();
+        for path in missing {
+            let ends = path
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'/')
+                .map(|(at, _)| at)
+                .chain(std::iter::once(path.len()));
+            for end in ends {
+                let Some(lead) = path.get(..end) else {
+                    break;
+                };
+                let Some(on_disk) = self.checkout_path(lead) else {
+                    break;
+                };
+                let Ok(metadata) = fs::symlink_metadata(&on_disk) else {
+                    break;
+                };
+                if end == path.len() || !metadata.is_dir() {
+                    if !found.iter().any(|known| known.as_slice() == lead) {
+                        found.push(lead.to_vec());
+                    }
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    fn checkout_path(&self, path: &[u8]) -> Option<PathBuf> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            Some(self.root.join(std::ffi::OsStr::from_bytes(path)))
+        }
+        #[cfg(not(unix))]
+        {
+            std::str::from_utf8(path)
+                .ok()
+                .map(|path| self.root.join(path))
+        }
+    }
+
+    fn private_index_file(&self, role: &str) -> Result<PathBuf, UpstrokeError> {
+        Ok(self.worktree_git_dir()?.join(format!(
+            "upstroke-kept-{}-{}{role}.index",
+            std::process::id(),
+            crate::ulid::ulid()
+        )))
+    }
+
+    fn with_private_index(&self, index: PathBuf) -> Self {
+        Self {
+            root: self.root.clone(),
+            private_index: Some(index),
+        }
+    }
+
+    fn remove_private_index(&self) {
+        if let Some(index) = &self.private_index {
+            let _ = fs::remove_file(index);
+        }
+    }
+
+    fn private_tree(&self) -> Result<String, UpstrokeError> {
+        let tree = self
+            .git_with_private_hooks(&controlled(&["write-tree"]))?
+            .trim()
+            .to_owned();
+        self.validate_tree_oid(&tree)?;
+        Ok(tree)
+    }
+
+    fn commit_tree_oid(&self, commit: &str) -> Result<String, UpstrokeError> {
+        let revision = format!("{commit}^{{tree}}");
+        let tree = self
+            .git(&["rev-parse", "--verify", &revision])?
+            .trim()
+            .to_owned();
+        self.validate_tree_oid(&tree)?;
+        Ok(tree)
+    }
+
+    fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<TreeChange>, UpstrokeError> {
+        let output = self.git_output_with_private_hooks(&controlled(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--raw",
+            "--ignore-submodules=none",
+            from,
+            to,
+        ]))?;
+        let mut fields = output
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        let mut changed = Vec::new();
+        while let Some(record) = fields.next() {
+            let mut parts = record
+                .strip_prefix(b":")
+                .unwrap_or(record)
+                .split(|byte| *byte == b' ');
+            let (Some(old_mode), Some(new_mode), Some(old_oid), Some(status), Some(path)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                record.last().copied(),
+                fields.next(),
+            ) else {
+                return Err(UpstrokeError::Git {
+                    message: "git diff-tree returned a malformed raw record".to_owned(),
+                });
+            };
+            changed.push(TreeChange {
+                path: path.to_vec(),
+                status,
+                submodule: old_mode == b"160000" || new_mode == b"160000",
+                old_mode: old_mode.to_vec(),
+                old_oid: old_oid.to_vec(),
+            });
+        }
+        Ok(changed)
+    }
+}
+
+pub(crate) struct KeptPin<'a> {
+    pub(crate) branch_ref: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) pin_ref: &'a str,
+}
+
+pub(crate) struct KeptCopies<'a> {
+    pub(crate) directory: &'a Path,
+    pub(crate) stem: &'a str,
+}
+
+pub(crate) struct KeptDiscard {
+    pub(crate) kept: Option<String>,
+    pub(crate) copy: Option<PathBuf>,
+    pub(crate) restored_from: Option<PathBuf>,
+    pub(crate) left_in_place: Vec<String>,
+}
+
+struct CheckoutCapture {
+    view: Workspace,
+    tree: String,
+    footprint: Vec<Vec<u8>>,
+}
+
+struct TreeChange {
+    path: Vec<u8>,
+    status: u8,
+    submodule: bool,
+    old_mode: Vec<u8>,
+    old_oid: Vec<u8>,
+}
+
+impl CheckoutCapture {
+    fn footprint_holds(&self, path: &[u8]) -> bool {
+        self.footprint.iter().any(|way| {
+            path.strip_prefix(way.as_slice())
+                .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'/'))
+        })
+    }
+
+    fn remove(&self) {
+        self.view.remove_private_index();
+    }
+}
+
+fn controlled<'a>(command: &[&'a str]) -> Vec<&'a str> {
+    let mut args: Vec<&'a str> = CAPTURE_CONTROLS.to_vec();
+    args.extend_from_slice(command);
+    args
+}
+
+fn is_attempt_copy(name: &str, stem: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".bundle"))
+        .is_some_and(|ulid| {
+            ulid.len() == 26
+                && ulid
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+        })
+}
+
+fn stopped_part_way(pin_ref: &str, detail: &str) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "the discard of what `{pin_ref}` and its copy hold stopped part-way: {detail}"
+        ),
+    }
+}
+
+fn rendered_paths(paths: &[Vec<u8>]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{}`", String::from_utf8_lossy(path)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const GIT_FLOOR: (u32, u32) = (2, 41);
@@ -1647,6 +2473,7 @@ fn cleanup_gate_workspace(
 fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {
     let probe = Workspace {
         root: root.to_path_buf(),
+        private_index: None,
     };
     let common = probe.git_path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     fs::canonicalize(&common).map_err(|source| UpstrokeError::Io {
@@ -4440,6 +5267,70 @@ mod tests {
                 "an empty destination this access cannot remove: {answer:?}"
             );
             assert!(still_there, "and it stays where it is");
+        }
+    }
+
+    #[test]
+    fn a_kept_pin_is_written_whatever_head_is_and_a_publication_pin_is_not() {
+        for shape in [
+            "moved",
+            "detached",
+            "other-branch",
+            "branch-deleted",
+            "branch-symbolic",
+        ] {
+            let (_tree, repo) = temp_repo(&format!("k1-{shape}"));
+            run_git(&repo, &["switch", "-q", "-c", "upstroke/run-k1"]);
+            fs::write(repo.join("agent-output.txt"), "paid output\n").expect("an output");
+            let workspace = Workspace::open(&repo).expect("the workspace");
+            let candidate = workspace.capture_candidate().expect("a capture");
+            let parent = candidate.parent_oid.clone();
+            let branch_ref = candidate.branch_ref.clone();
+            match shape {
+                "moved" => {
+                    let moved = String::from_utf8(run_git(
+                        &repo,
+                        &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "moved"],
+                    ))
+                    .expect("an object id");
+                    run_git(&repo, &["update-ref", &branch_ref, moved.trim()]);
+                }
+                "detached" => {
+                    run_git(&repo, &["checkout", "-q", "--detach"]);
+                }
+                "other-branch" => {
+                    run_git(&repo, &["switch", "-q", "-c", "other"]);
+                }
+                "branch-deleted" => {
+                    run_git(&repo, &["update-ref", "-d", &branch_ref]);
+                }
+                _ => {
+                    run_git(&repo, &["branch", "-q", "victim", &parent]);
+                    run_git(&repo, &["symbolic-ref", &branch_ref, "refs/heads/victim"]);
+                }
+            }
+            let kept = workspace
+                .prepare_commit_from_candidate(
+                    &branch_ref,
+                    &parent,
+                    &candidate.tree_oid,
+                    "[upstroke] kept: t1 attempt 1",
+                    "refs/upstroke/prepared/k1/0-1-kept",
+                )
+                .unwrap_or_else(|error| panic!("{shape}: the kept pin is written: {error:?}"));
+            assert_eq!(kept.parent_sha, parent, "{shape}: on the captured parent");
+            assert_eq!(
+                kept.tree_sha, candidate.tree_oid,
+                "{shape}: with the captured tree"
+            );
+            let published = workspace.prepare_commit_from_candidate(
+                &branch_ref,
+                &parent,
+                &candidate.tree_oid,
+                "[upstroke] t1: Implement the widget",
+                "refs/upstroke/prepared/k1/0-1",
+            );
+            assert!(published.is_err(), "{shape}: a publication pin is refused");
         }
     }
 }

@@ -1295,7 +1295,13 @@ effect_free = [
 # processes read the recorded graph through, staging it beside the file and
 # renaming it into place, outside any RunDir site. Its only callers are the two
 # conductor entry points, `run_harness` and `resume_harness`, which are denied
-# already.
+# already. `Workspace::pin_checkout` and `Workspace::discard_into_kept_pin` are
+# effectful for the same reason: each has Git write a private index file into
+# the checkout's own Git directory and removes it, and the second reads the run's
+# public directory for the kept pin's copies, has `git bundle create` write a new
+# one there, and fsyncs and renames it into place, all outside any RunDir site.
+# Their only callers are the legacy coordinator and resume, which allow the
+# denial at module level.
 [[module]]
 path = "src/workspace.rs"
 crate_path = "upstroke::workspace"
@@ -1310,6 +1316,8 @@ effectful = [
     "Workspace::prepared_pin_target",
     "Workspace::ensure_run_exclusions",
     "Workspace::recorded_objects_scope",
+    "Workspace::pin_checkout",
+    "Workspace::discard_into_kept_pin",
 ]
 effectful_unnameable = [
     "drop",

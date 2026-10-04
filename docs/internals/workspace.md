@@ -44,13 +44,18 @@ and not granted**: follow-up D (#331, a draft), to close
 `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and R-G. The
 row's text in `effects/allowlist.toml` gives it exactly, marked there as proposed, and
 the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
-Implementation section) is why. It is two things. The three Git children that
+Implementation section) is why. It is three things. The three Git children that
 enumerate the shared worktree registry — `switch_branch`'s `git switch`,
 `add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s
 `git worktree remove` with the `git worktree list` that decides it — each run as one
 attempt of `crate::workspace_manager::tolerant_registry_access`, follow-up B's
-(#329); and `git_command` refuses Git's automatic maintenance. Their sections below
-say how. Nothing it adds is in force until the owner adopts O8 and the pull request
+(#329); `git_command` refuses Git's automatic maintenance; and, from R-D1's
+preservation design (`~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md`, round 4,
+sha256 `f9e81c07…`, D's implementation round 3, its record §5.17), a legacy attempt's
+output is kept: a kept pin is written whatever `HEAD` is (part K), `pin_checkout` pins
+what the checkout holds (part N's capture), and `discard_into_kept_pin` removes the
+checkout's copy only once a kept pin and a copy of it the same process made durable
+both hold it (part G4). Their sections below say how. Nothing it adds is in force until the owner adopts O8 and the pull request
 merges. The module still calls no funnel of the manager: the access takes no site.
 
 The section "may only shrink after PR5 (the test compares against the frozen
@@ -85,6 +90,40 @@ rather than against Git's defaults. A configured `diff.external`
 escape codes; `textconv` substitutes a rendered form for the bytes. Any of
 those corrupts every downstream check that reads the diff — and
 `capture_diff_is_immune_to_user_diff_config` is the test that says so.
+
+## `pub(crate) const KEPT_PIN_SUFFIX: &str = "-kept";`
+
+The kept pin of a legacy attempt is the attempt's prepared-pin name with this appended:
+`refs/upstroke/prepared/<run>/<task index>-<attempt>-kept`. It is unique per run, task and
+attempt, because an attempt number is never reused in a run, and no prepared-commit path
+names it: the resume's orphan removal names `prepared_pin_ref` exactly, the schema-3
+settlement check builds the exact expected pin, and the topology's pins live under
+`refs/upstroke/runs/`. Defined here since R-D1's part K, which `prepare_commit_from_candidate`
+reads; the coordinator and the resume import it. No engine path removes a kept pin; the
+operator does (R-D7).
+
+## `const CAPTURE_CONTROLS: [&str; 2] = ["-c", "core.sparseCheckout=false"];`
+
+Passed ahead of every subcommand of the kept-output capture and revert (`controlled`), so
+that a sparse checkout configured since the resume's own refusal of one
+(`refuse_sparse_checkout`) cannot narrow what the capture takes or what the revert writes.
+
+## `const PRIVATE_INDEX_CONTROLS: [&str; 4] = [`
+
+R-D1 round 4's RD3-1 (the proposal's §4.6): `-c core.splitIndex=false -c
+splitIndex.sharedIndexExpire=never`, passed by the two private-hooks builders with
+`GIT_INDEX_FILE` on a workspace value that carries a private index file, and on no other.
+The private index file sits in the checkout's own Git directory and takes the checkout's
+configuration by design, so under `core.splitIndex=true` Git would write it split — a new
+`sharedindex.*` beside the checkout's own — and every split write unlinks each other shared
+index of that directory older than `splitIndex.sharedIndexExpire`, the one the checkout's
+own index names included. Round 3's capture did exactly that (RD3-1: `git status` exit 128
+afterwards). The first control writes the private index whole, so no split write runs for
+it; the second makes whatever still splits it — an inherited `GIT_TEST_SPLIT_INDEX` —
+unlink nothing, leaving orphan shared index files that Git's next split write of the
+checkout's own index removes (a disclosed cost, the variable O3's class). Both are
+command-scope settings, like `core.fsmonitor=false`: they decide how the private file is laid
+out and what its writes may unlink, never what the capture takes.
 
 ## `const REPLACE_REFS_REFUSED: [&str; 2] = ["-c", "core.useReplaceRefs=false"];`
 
@@ -229,6 +268,21 @@ refuses before any role starts. An altered file is replaced, never adopted.
 Decode one path printed by Git without requiring Unix path bytes to be
 UTF-8. Git appends a platform line ending; remove only that delimiter,
 never legal leading or trailing path bytes.
+
+## `pub struct Workspace` › `private_index: Option<PathBuf>,`
+
+`None` for every workspace the engine opens (`open`'s two values, the gate workspace's, and
+`canonical_common_dir`'s probe). `Some` only on a *view* of the same checkout that
+`with_private_index` makes for the kept-output capture, the revert's second index and the
+post-check: its two private-hooks builders — `run_git_with_private_hooks` (and through it
+`git_with_private_hooks` and `git_output_with_private_hooks`) and `git_output_with_input` —
+then set `GIT_INDEX_FILE` to that file, with `PRIVATE_INDEX_CONTROLS`, ahead of the
+subcommand. Git names an index file only through that variable, never by an argument or a
+configuration key, and another Git directory reads another configuration (the proposal's
+§4.2-§4.3), so this is the one faithful private capture. The plain builder (`git`,
+`git_output`, `git_path`) never sets it. The two `.env(` it adds are the payload census's row
+for this module, five to seven (`src/runner/contract.rs`), an additional conditional proposal
+with O8's texts.
 
 ## `impl Workspace` › `pub(crate) fn run_git_with_private_hooks(`
 
@@ -466,6 +520,14 @@ veto, and the verification below then fails as Git state: that is R-D9, inside
 Prepare and pin a commit from the exact candidate identities already
 used by gates and review. This never rereads the mutable index.
 
+R-D1's part K (proposed, conditional on O8): `HEAD` is observed and compared with the
+captured branch and parent only for a pin whose name does not end with `KEPT_PIN_SUFFIX`. A
+kept pin, which nothing publishes, is written from the parent and tree it is given whatever
+`HEAD` is — moved, detached, on another branch, unborn or symbolic — with every other
+check, the create-only write and its verification as before; a publication pin still refuses
+a moved `HEAD` (T-K1). Without K, a branch another client moved and moved back (A1, A1h), or
+moved after the capture (A2, A2h), refused the pin and the output went with the next discard.
+
 ## `impl Workspace` › `pub fn commit(&self, message: &str) -> Result<String, UpstrokeError> {`
 
 Commit whatever `capture_diff` staged. §14: commit-per-task,
@@ -488,6 +550,174 @@ untracked (ignored files survive). This is both the §14 rollback on a
 failed attempt and the post-commit scrub that keeps gate side-effects
 (build artifacts, lockfile churn) from leaking into the next task's
 captured diff.
+
+## `impl Workspace` › `pub(crate) fn pin_checkout(`
+
+Part N's pin (the coordinator's `kept_on_error`, for an attempt error after the worker ran):
+the checkout captured into a private index (`capture_checkout`, footprint included) and pinned
+at the kept name through `prepare_commit_from_candidate` under K. `Ok(None)` when the capture
+is `HEAD`'s tree: nothing to keep. It discards nothing.
+
+## `impl Workspace` › `pub(crate) fn discard_into_kept_pin(`
+
+Part G4, the resume's guarded exact discard of the attempt in flight (the proposal's §5.2):
+the capture, then `discard_held`, then the private index removed whatever happened, then
+`uncommitted_summary` for what stayed (`KeptDiscard::left_in_place`). It removes nothing a
+kept pin of upstroke's and a copy of it this same process made durable do not both hold, and
+refuses, discarding nothing it does not hold, when any step fails.
+
+## `impl Workspace` › `fn discard_held(`
+
+The order is the guarantee. A capture equal to `HEAD`'s tree resets only the checkout's
+index. Otherwise: the attempt's copies are read before any pin is written (`attempt_copies`);
+copies naming different commits refuse, naming both; then the pin — none and no copy:
+written from the capture under K; none and a copy: put back from the copy (`restore_pin`,
+recorded as `restored_from`) and checked; a pin and a copy: they must name the same commit,
+else refuse naming both (RD2-1m); a pin alone: checked (`held_by_pin`). Submodule paths and
+new paths the pin never held are left in place (`leave_out`). Then a fresh copy, written and
+made durable by this resume whatever copies the attempt already has (`copy_pin`; round 4's
+RD3-2: a copy found is never relied on for durability), the discard's own filter check on
+`HEAD`'s tree, the two-phase revert, the index reset, and the post-check.
+
+## `impl Workspace` › `fn held_by_pin(`
+
+An existing pin must be upstroke's kept commit of the attempt (`prepared_commit_matches`
+with the commit's own parent and tree, and the kept message), else "is not upstroke's kept
+commit of this attempt" (C3). Then containment, not equality (after a part-way discard every
+path is `HEAD`'s or the pin's, so the next resume finishes with no operator step, G-RESET): a
+path the checkout deleted is allowed; a path where the capture and the pin agree is held; a
+path new in the capture and absent from the pin is left in place — unless it is in the
+discard's way (`CheckoutCapture::footprint_holds`), which refuses ("move them out of the
+way", RD2-2p); anything else refuses, naming the paths (X3).
+
+## `impl Workspace` › `fn leave_out(`
+
+The paths left in place take `HEAD`'s entry in the capture's private index (`update-index
+-z --index-info` from `diff-tree`'s old side; a path `HEAD` lacks reads `000000 <zeros>` and
+leaves the index), so neither phase of the revert ever touches them; `write-tree` gives R.
+
+## `impl Workspace` › `fn attempt_copies(`
+
+The run's public directory, read once: names `kept-<task>-<attempt>-` + 26 ULID characters
++ `.bundle` (`is_attempt_copy`), sorted, each kept only if `git bundle list-heads` names
+exactly one head, a full object id at the kept name. A `.partial`, a copy whose `list-heads`
+fails, or any other name is never a copy.
+
+## `impl Workspace` › `fn restore_pin(`
+
+`git bundle unbundle` (whose `index-pack` checks the whole pack, so a copy cut short fails
+here, where `list-heads` and `verify` pass it), the commit checked as upstroke's kept commit
+of the attempt, and a create-only `update-ref --no-deref` with the message "upstroke:
+restore kept pin from its copy", verified.
+
+## `impl Workspace` › `fn copy_pin(`
+
+A new name every time — `<stem>-<ULID>` — so no copy is ever written over and the first
+complete copy survives every later resume. On failure the `.partial` is removed if it is
+still there; a final name whose directory fsync failed stays, never relied on (R-D7 lists it).
+
+## `impl Workspace` › `fn write_copy(`
+
+`git bundle create <partial> <pin> ^<head>` (Git fsyncs no bundle, under any `core.fsync`;
+the proposal's §2.3), its one head checked with `list-heads`, then the module's own
+durability idiom: `File::sync_all` with write access (`fsync`, `F_FULLFSYNC` on macOS,
+`FlushFileBuffers` on Windows), `rename` to the final name, `sync_parent` (the directory's
+`fsync` on Unix, nothing on Windows). Each failure refuses before anything is removed.
+Whether the calls are those system calls, and what a successful fsync means on a disk, is
+reasoned; the order was traced on Linux (record §5.17).
+
+## `impl Workspace` › `fn relative_to_root(`
+
+The copy's path relative to the checkout's root, computed from canonical paths and spelled
+with `/`, so that every Git child names it by an argument relative to `-C <root>`. A copy
+outside the checkout, or under a name that is not UTF-8, refuses.
+
+## `impl Workspace` › `fn revert(`
+
+Phase A, `read-tree -m -u R T` on the capture's index, T being `HEAD`'s tree less the paths R
+lacks (`tree_without`): every path of T is a path of R, so it creates nothing, and rewrites
+or removes only R's own paths, each after Git's up-to-date check; no untracked or ignored
+file is in its way. Phase B, for the paths R lacks: their `HEAD` entries into the capture's
+index and `checkout-index -z --stdin` with no `-f`, which writes only where nothing stands
+(`O_EXCL`) and refuses elsewhere; its refusal is returned, not raised, for the post-check to
+name. The instant between Git's up-to-date check of a file and its unlink is the disclosed
+phase-A window (the proposal's §9.3).
+
+## `impl Workspace` › `fn tree_without(`
+
+T on a second private index file (`-tree`), removed whatever happened; no work tree is
+touched (`tree_of`: `read-tree`, `update-index --force-remove`, `write-tree`).
+
+## `impl Workspace` › `fn check_reverted(`
+
+A second capture, with no footprint, on its own private index: every path R changed from
+`HEAD` must be back at `HEAD` and phase B must have refused nothing, else "stopped part-way",
+naming the paths and phase B's refusal; then `HEAD` must not have moved ("the run branch moved
+… during the discard", X19). The next resume finishes a part-way discard.
+
+## `impl Workspace` › `fn capture_checkout(`
+
+The checkout's own filter refusal first (`refuse_worktree_filters_before("git add")`, as the
+coordinator's capture does), then a view with a fresh private index file
+(`private_index_file`) filled by `fill_capture`; the file is removed on any failure.
+
+## `impl Workspace` › `fn fill_capture(`
+
+`read-tree <head>`, `add -A --ignore-errors` (exit 0 or 1; a path `add` cannot take is left
+out, never fatal), `write-tree`; then the footprint (the proposal's §3.2): the paths `HEAD` has
+and the capture lacks, walked by `in_the_way`; what stands in the revert's way is added again
+with `--literal-pathspecs add -A -f --ignore-errors --pathspec-from-file=-
+--pathspec-file-nul`, NUL-separated on standard input, and the tree written again. Every
+child names the private index, so none reads the checkout's own index, and every `diff-tree`
+it runs reads the capture's (round 4).
+
+## `impl Workspace` › `fn in_the_way(&self, missing: &[Vec<u8>]) -> Vec<Vec<u8>> {`
+
+For each missing path, its first leading component that exists and is not a directory (a
+symbolic link counts as not a directory), or else the path itself if anything is there:
+`symlink_metadata` only, nothing changes. A path this platform cannot name is skipped, and
+phase B then refuses for it.
+
+## `impl Workspace` › `fn checkout_path(&self, path: &[u8]) -> Option<PathBuf> {`
+
+A path Git printed, as bytes, joined to the root: any bytes on Unix, UTF-8 only elsewhere.
+
+## `impl Workspace` › `fn private_index_file(&self, role: &str) -> Result<PathBuf, UpstrokeError> {`
+
+`<git dir>/upstroke-kept-<pid>-<ULID><role>.index` in the checkout's own Git directory (for a
+linked checkout, its entry under the common directory's `worktrees/`): Git reads no unknown
+file there, and a crash leaves it inert (R-D7).
+
+## `impl Workspace` › `fn with_private_index(&self, index: PathBuf) -> Self {`
+
+A view of this same checkout with only its index file changed: the module's builders read
+the root from the value they are given, so the view owns a copy of it.
+
+## `impl Workspace` › `fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<TreeChange>, UpstrokeError> {`
+
+`diff-tree -r -z --no-renames --raw --ignore-submodules=none` through the private-hooks
+builder with `controlled`, on the value it is called on: the capture's view (or the
+post-check's), so it reads that private index and never the checkout's. Round 2's and round
+3's ran it through the plain builder on the checkout's index, which ran the checkout's
+fsmonitor hook and, on Git 2.55.0, started its daemon (RD3-1f). Each record keeps `HEAD`'s
+side's mode and object id (`TreeChange`), which `leave_out` and phase B write back.
+
+## `pub(crate) struct KeptPin<'a> {`
+
+The kept pin's branch ref, message and name, built by the coordinator and the resume from
+the attempt's prepared pin. `KeptCopies` is the run's public directory and the stem
+`kept-<task index>-<attempt>`; `KeptDiscard` what a guarded discard did: the kept commit, the
+copy it wrote, the copy a missing pin was put back from (`restored_from`), and what stayed.
+
+## `impl CheckoutCapture` › `fn footprint_holds(&self, path: &[u8]) -> bool {`
+
+Whether `path` is a footprint path or under one: what the capture took only because it stood
+in the revert's way.
+
+## `fn is_attempt_copy(name: &str, stem: &str) -> bool {`
+
+`<stem>-<26 characters of 0-9 and A-Z>.bundle` exactly: a ULID name, so a `.partial` or a
+name another tool made is never read as a copy.
 
 ## `enum SnapshotStoreMode` › `EphemeralUnderRoot,`
 
@@ -940,3 +1170,11 @@ a file, a file in its place, a link to an empty directory (Unix), and an empty o
 under a parent nothing can write (Unix) are `Undecidable`, and each is left as it was.
 The read-only parent's case refuses to run, rather than passing vacuously, where the
 mode bit does not bind (root, or `CAP_DAC_OVERRIDE`).
+
+## `fn a_kept_pin_is_written_whatever_head_is_and_a_publication_pin_is_not() {`
+
+T-K1 (R-D1's part K): one capture, then `HEAD` moved, detached, on another branch, its branch
+deleted, or its branch ref made symbolic. A pin at a `-kept` name is written on the captured
+parent with the captured tree; a pin at a publication name refuses. Red under `k-headcheck`,
+under `m-k-observe-only` (detached, deleted and symbolic rows) and, for the publication half,
+under `m-k-all`.

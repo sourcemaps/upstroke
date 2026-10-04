@@ -30,7 +30,7 @@ use crate::topology::effects::EventSite;
 use crate::ulid;
 use crate::util;
 use crate::validate::Analysis;
-use crate::workspace::Workspace;
+use crate::workspace::{KEPT_PIN_SUFFIX, KeptPin, Workspace};
 
 use super::attempt::{AttemptCx, RetryBrief, Reviewer, pool_option, run_attempt};
 #[cfg(test)]
@@ -278,10 +278,34 @@ pub(super) fn run_harness_inner_with_id(
     Ok((report, run.state))
 }
 
-pub(super) const KEPT_PIN_SUFFIX: &str = "-kept";
-
 pub(super) fn prepared_pin_ref(run_id: &str, task_index: usize, attempt: u32) -> String {
     format!("refs/upstroke/prepared/{run_id}/{task_index}-{attempt}")
+}
+
+fn kept_on_error(
+    workspace: &Workspace,
+    pin: &KeptPin<'_>,
+    candidate: Option<(&str, &str, &str)>,
+    what: &str,
+    error: UpstrokeError,
+) -> UpstrokeError {
+    let pinned = match candidate {
+        Some((branch_ref, parent, tree)) => workspace
+            .prepare_commit_from_candidate(branch_ref, parent, tree, pin.message, pin.pin_ref)
+            .map(Some),
+        None => workspace.pin_checkout(pin),
+    };
+    match pinned {
+        Ok(Some(_)) => error.with_warnings(vec![format!(
+            "{what} is kept in this checkout and pinned at `{}`",
+            pin.pin_ref
+        )]),
+        Ok(None) => error,
+        Err(pin_error) => error.with_warnings(vec![format!(
+            "{what} is kept in this checkout, and pinning it at `{}` failed: {pin_error}",
+            pin.pin_ref
+        )]),
+    }
 }
 
 pub(super) struct Run<'a> {
@@ -574,8 +598,24 @@ impl Run<'_> {
                                 },
                             });
                         }
-                        let _ = workspace.discard_uncommitted();
-                        return Err(error);
+                        let kept = format!(
+                            "{}{KEPT_PIN_SUFFIX}",
+                            prepared_pin_ref(&self.run_id, index, attempt)
+                        );
+                        let message = format!("[upstroke] kept: {task_id} attempt {attempt}");
+                        let branch_ref = format!("refs/heads/{}", self.branch);
+                        let pin = KeptPin {
+                            branch_ref: &branch_ref,
+                            message: &message,
+                            pin_ref: &kept,
+                        };
+                        return Err(kept_on_error(
+                            workspace,
+                            &pin,
+                            None,
+                            &format!("the worker's output for attempt {attempt} of `{task_id}`"),
+                            error,
+                        ));
                     }
                 }
             };
@@ -682,18 +722,40 @@ impl Run<'_> {
                 }
             }
 
+            let kept = format!(
+                "{}{KEPT_PIN_SUFFIX}",
+                prepared_pin_ref(&self.run_id, index, attempt)
+            );
+            let kept_message = format!("[upstroke] kept: {task_id} attempt {attempt}");
+            let recorded_branch_ref = format!("refs/heads/{}", self.branch);
+            let kept_pin = KeptPin {
+                branch_ref: &recorded_branch_ref,
+                message: &kept_message,
+                pin_ref: &kept,
+            };
+            let candidate = Some((
+                result.candidate_branch_ref.as_str(),
+                result.candidate_parent.as_str(),
+                result.candidate_tree.as_str(),
+            ));
+            let reviewed = format!("the reviewed candidate of attempt {attempt} of `{task_id}`");
             let prepared_commit = if result.failure.is_none() {
                 let message = format!("[upstroke] {}: {}", task.id, task.title);
                 let pin_ref = prepared_pin_ref(&self.run_id, index, attempt);
-                let recorded_branch_ref = format!("refs/heads/{}", self.branch);
                 if result.candidate_branch_ref != recorded_branch_ref {
-                    let _ = self.workspace.discard_uncommitted();
-                    return Err(UpstrokeError::Git {
+                    let error = UpstrokeError::Git {
                         message: format!(
                             "candidate was captured from `{}`, not recorded run branch `{recorded_branch_ref}`; refusing publication",
                             result.candidate_branch_ref
                         ),
-                    });
+                    };
+                    return Err(kept_on_error(
+                        self.workspace,
+                        &kept_pin,
+                        candidate,
+                        &reviewed,
+                        error,
+                    ));
                 }
                 match self.workspace.prepare_commit_from_candidate(
                     &result.candidate_branch_ref,
@@ -704,8 +766,13 @@ impl Run<'_> {
                 ) {
                     Ok(prepared) => Some(prepared),
                     Err(error) => {
-                        let _ = self.workspace.discard_uncommitted();
-                        return Err(error);
+                        return Err(kept_on_error(
+                            self.workspace,
+                            &kept_pin,
+                            candidate,
+                            &reviewed,
+                            error,
+                        ));
                     }
                 }
             } else {
@@ -735,6 +802,15 @@ impl Run<'_> {
                 )),
             });
             if let Err(error) = settlement {
+                if prepared_commit.is_some() {
+                    return Err(kept_on_error(
+                        self.workspace,
+                        &kept_pin,
+                        candidate,
+                        &reviewed,
+                        error,
+                    ));
+                }
                 if let Err(cleanup) = self.workspace.discard_uncommitted() {
                     return Err(UpstrokeError::Git {
                         message: format!(

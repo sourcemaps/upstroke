@@ -212,15 +212,23 @@ A fresh run has no signals of its own yet, and §13's other sources are
 not read in v0.1 — so this snapshot is honestly a record of how little
 was known when the run started.
 
-## `pub(super) const KEPT_PIN_SUFFIX: &str = "-kept";`
+## `fn kept_on_error(`
 
-The kept pin of a registry-refused attempt is the attempt's prepared-pin name with
-this appended: `refs/upstroke/prepared/<run>/<task index>-<attempt>-kept`. It is
-unique per run, task and attempt, because an attempt number is never reused in a
-run, and no prepared-commit path names it: the resume's orphan removal names
-`prepared_pin_ref` exactly, the schema-3 settlement check builds the exact expected
-pin, and the topology's pins live under `refs/upstroke/runs/`. The resume reads it
-(`src/engine/resume.rs`) and never removes it; the operator does.
+R-D1's part N (proposed, conditional on O8; `PR331-AN-ATTEMPT-ERROR-AFTER-THE-WORKER-RAN-DISCARDS-ITS-OUTPUT`
+and `PR331-A-REVIEWED-CANDIDATE-IS-DISCARDED-WHEN-ITS-PUBLICATION-FAILS`): every arm that
+discarded the checkout after the worker ran now keeps it and pins what it holds at the
+attempt's kept pin — the prepared pin followed by `KEPT_PIN_SUFFIX`, which this module
+imports from `crate::workspace` since part K moved it there — and returns the error
+unchanged, with a warning naming the pin or the pin's failure (`UpstrokeError::with_warnings`).
+With a captured candidate (N2's three publication arms) it pins that candidate — its branch,
+parent and tree, never the live index — through `prepare_commit_from_candidate`; without one
+(N1's attempt error) it pins the checkout through `Workspace::pin_checkout`, which captures it
+into a private index. Both are written whatever `HEAD` is (part K). `Ok(None)` from
+`pin_checkout` (nothing to keep) returns the error with no warning. Nothing publishes a kept
+pin and no engine path removes one; the resume's guarded discard (part G4,
+`src/engine/resume.rs`) removes the checkout's copy only once the pin and a durable copy of it
+hold it. A new run refuses over the kept checkout as over any uncommitted work, until a resume
+or the operator acts — a disclosed cost (the proposal's §9.1).
 
 ## `pub(super) struct Run<'a>` › `pub(super) log: EventLog,`
 
@@ -531,16 +539,19 @@ parent and tree captured before the refusal, never the index as it stands now �
 through `prepare_commit_from_candidate` at the attempt's prepared pin followed by
 `KEPT_PIN_SUFFIX`, and returns a registry refusal that names the pin, or says that
 pinning it failed (`HEAD` moved after the capture, or the ref store could not be
-written; R-D1). `prepare_commit_from_candidate` refuses when `HEAD` moved from the
-captured branch and parent, writes a hook-free commit with upstroke's identity and
-pins it with a create-only `update-ref`. Every other attempt error discards the
-checkout, as before. The arm calls `prepared_pin_ref` and
-`prepare_commit_from_candidate`, both of which this module already called.
+written; R-D1). `prepare_commit_from_candidate` writes a hook-free commit with
+upstroke's identity and pins it with a create-only `update-ref`; since R-D1's part K it
+does so for a kept pin whatever `HEAD` is, so a branch moved after the capture no longer
+refuses the pin, and only a store, name or lock that refuses the write does (C1 to C4, B1
+to B5). Every other attempt error keeps the checkout too (part N, `kept_on_error` below).
+The arm calls `prepared_pin_ref` and `prepare_commit_from_candidate`, both of which this
+module already called.
 
-The pin keeps the output on every later invocation: the resume discards the
-checkout's copy so the attempt runs again from a clean tree, and names the pin with
-the commands that take its output back (`src/engine/resume.rs`). A new run instead
-of a resume refuses over the kept output as it refuses over any uncommitted work.
+The pin keeps the output on every later invocation: the resume removes the checkout's
+copy only through its guarded discard, which checks that pin, writes a durable copy of it
+and reverts exactly the captured changes, and names the pin with the commands that take
+its output back (`src/engine/resume.rs`). A new run instead of a resume refuses over the
+kept output as it refuses over any uncommitted work.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let next = result.failure.as_ref().map(|failure| {`
 
