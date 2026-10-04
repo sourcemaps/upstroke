@@ -469,6 +469,7 @@ impl Workspace {
         tolerant_registry_access(
             &canonical_common_dir(&self.root)?,
             RegistryHold::Unheld,
+            &mut legacy_registry_pause,
             &mut || Again::Attempt,
             &mut || {
                 self.git_with_private_hooks(&[
@@ -906,6 +907,7 @@ impl Workspace {
         tolerant_registry_access(
             &canonical_common_dir(&self.root)?,
             RegistryHold::Shared,
+            &mut legacy_registry_pause,
             &mut || legacy_add_veto(path),
             &mut || {
                 let output = git_command(&self.root)
@@ -1591,6 +1593,7 @@ fn cleanup_gate_workspace(
     tolerant_registry_access(
         &canonical_common_dir(source_root)?,
         RegistryHold::Unheld,
+        &mut legacy_registry_pause,
         &mut || Again::Attempt,
         &mut || {
             let removal = git_command(source_root)
@@ -1650,6 +1653,11 @@ fn canonical_common_dir(root: &Path) -> Result<PathBuf, UpstrokeError> {
         path: common.clone(),
         source,
     })
+}
+
+fn legacy_registry_pause(pause: std::time::Duration) -> Result<(), UpstrokeError> {
+    std::thread::sleep(pause);
+    Ok(())
 }
 
 fn legacy_add_veto(path: &Path) -> Again {

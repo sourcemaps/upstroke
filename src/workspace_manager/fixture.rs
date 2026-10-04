@@ -60,8 +60,10 @@ thread_local! {
     static REMOVAL_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static MARKER_READ_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+    static SLEPT_PAUSES: Cell<u64> = const { Cell::new(0) };
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
+    static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -185,6 +187,172 @@ pub(crate) fn note_marker_read_attempt(attempt: u32) {
     });
 }
 
+// -----------------------------------------------------------------------
+// Acting just before one registry access
+// -----------------------------------------------------------------------
+
+/// What a test does just before one registry access of its own thread, given
+/// the access's common git dir: plant a registration the access will meet.
+pub(crate) type AccessAct = Box<dyn FnOnce(&Path)>;
+
+/// The armed act and how many accesses on this thread are still to start
+/// before it runs (1: the next).
+struct AccessPlant {
+    skip: usize,
+    act: AccessAct,
+}
+
+/// An act armed before one registry access of this thread, disarmed by
+/// dropping it, so a test that unwinds leaves nothing for whatever runs next
+/// on this thread.
+pub(crate) struct AccessPlanting {
+    /// Not `Send`: the armed act is this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for AccessPlanting {
+    fn drop(&mut self) {
+        ACCESS_PLANT.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Run `act` on this thread just before the `nth` registry access that starts
+/// on it from now (1: the next one), before that access's first attempt.
+///
+/// Thread-local for the reason the removal observer is: the suite runs tests
+/// in parallel, and a pipeline's accesses run on its own thread, so only the
+/// accesses of the thread that armed it are counted — the coordinator's, when
+/// a test arms it from a hook the coordinator calls.
+pub(crate) fn before_registry_access(nth: usize, act: AccessAct) -> AccessPlanting {
+    ACCESS_PLANT.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(AccessPlant {
+                skip: nth.max(1),
+                act,
+            });
+        }
+    });
+    AccessPlanting {
+        _not_send: PhantomData,
+    }
+}
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four seccomp instructions, installed the way
+/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
+/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
+/// an isolated child's thread, or a thread a test starts for it, alone.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(number),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            1_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// One more wait of a registry access slept on this thread (`super::sleep_for`).
+/// Called from `super::note_slept_pause`.
+pub(crate) fn note_slept_pause() {
+    SLEPT_PAUSES.with(|slept| slept.set(slept.get().saturating_add(1)));
+}
+
+/// How many waits of a registry access have slept on this thread. A test reads
+/// it before and after a topology coordinator's call, on the coordinator's own
+/// thread: no difference means that no wait of an access the coordinator made
+/// slept there (the record's §9.16, I2-2).
+pub(crate) fn slept_pauses() -> u64 {
+    SLEPT_PAUSES.with(Cell::get)
+}
+
+/// A registry access over `common_git_dir` is about to make its first attempt
+/// on this thread: run the armed act when it is this access's turn. Called
+/// from `super::note_access_start`; the act runs with nothing borrowed.
+pub(crate) fn note_access_start(common_git_dir: &Path) {
+    let due = ACCESS_PLANT.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return None;
+        };
+        match slot.as_mut() {
+            Some(plant) if plant.skip > 1 => {
+                plant.skip -= 1;
+                None
+            }
+            Some(_) => slot.take().map(|plant| plant.act),
+            None => None,
+        }
+    });
+    if let Some(act) = due {
+        act(common_git_dir);
+    }
+}
+
 /// A scratch tree for one fixture, guarded by the token that authorises its
 /// deletion.
 ///
@@ -279,6 +447,16 @@ pub(crate) fn tear_registration(manager: &WorkspaceManager, worktree: &Path) -> 
         .expect("the lock the add holds until it finishes");
     fs::write(admin.join("commondir"), []).expect("the file the add opened and never wrote");
     admin
+}
+
+/// `path` as Git writes it into a registration's `gitdir` and a checkout's
+/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
+/// with `.git` still on (the path's own bytes elsewhere).
+pub(crate) fn as_git_writes_it(path: &Path) -> String {
+    String::from_utf8(
+        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
+    )
+    .expect("a fixture's path is UTF-8")
 }
 
 /// A real repository, a real private root, and a manager over both.
@@ -3306,7 +3484,7 @@ impl Drop for LinkedChild {
 
 /// Say `line` on this process's stderr: through [`say_on_stderr`] on Unix,
 /// and one unretried write on Windows, where this file names no print macro.
-fn say(line: &str) {
+pub(crate) fn say(line: &str) {
     #[cfg(unix)]
     say_on_stderr(&format!("{line}\n"));
     #[cfg(windows)]

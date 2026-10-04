@@ -985,9 +985,11 @@ a directory that is not empty, anything that is not a directory, or metadata \
 it cannot read — refuses at once as a registry refusal, so the add's own \
 failure is never returned as Git state. The other two are attempted again \
 whatever failed. One private helper resolves the canonical common git dir as \
-`recorded_objects_scope` does, through `git_command`, and private functions \
-make the destination again and decide the add's veto, which reads only the \
-destination and starts no Git child. Second, `git_command`, the one builder \
+`recorded_objects_scope` does, through `git_command`; private functions make \
+the destination again and decide the add's veto, which reads only the \
+destination and starts no Git child; and one more sleeps out, on the calling \
+thread, each pause the three accesses wait between their attempts. Second, \
+`git_command`, the one builder \
 every Git child of the module starts from, also passes `-c \
 maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c \
 maintenance.autoDetach=false` from one new constant, so no Git child of the \

@@ -538,6 +538,18 @@ through `git_command`, then `fs::canonicalize`: the two steps
 of its key (the manager's `common_git_dir` is the same). The tests read the access's
 `CONTENDED_ATTEMPTS` handshake under the same spelling.
 
+## `fn legacy_registry_pause(pause: std::time::Duration) -> Result<(), UpstrokeError> {`
+
+The pause each of the three legacy registry accesses waits out between its attempts: a
+sleep on the calling thread, always `Ok`. Follow-up B's head `55029628` (#329: its repair
+round 3's R1, `eef97e41`, and round 6's I2-1, `22d70ef6`) takes the wait out of
+`tolerant_registry_access` and has every caller hand it one (`pause_for`, whose error ends
+the access), the manager's own calls passing their hooks'
+`EffectHooks::registry_pause`, whose default is this same sleep. The legacy module has no
+hooks, so it passes this function, and its accesses wait as they did when the access
+slept inside itself. Part of follow-up D's draft (#331), proposed, conditional on the
+owner's decision O8, adapted to B's provisional head by the merge that took it.
+
 ## `fn legacy_add_veto(path: &Path) -> Again {`
 
 The snapshot add's veto: the removal predicate, described by what it observes

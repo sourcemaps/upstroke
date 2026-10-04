@@ -84,9 +84,16 @@ owner's decision.*
   deferrals, or parked the candidate at `max_defers`.
 
 **Every registry access is attempted again.** Every registry access the workspace manager makes is
-one attempt: a list together with the parse of its output, an add, or one of the manager's scans.
+one attempt: a list together with the parse of its output and, where the manager compares the
+worktrees it lists, the resolution of each path the list names; an add; or one of the manager's
+scans.
 - A failed attempt is attempted again, after a short backoff, until the access's deadline. Nothing
   reads the store, Git's message or a file's timestamps to decide why it failed.
+- A listed path that cannot be read fails its attempt, as a list Git could not finish does. On
+  Windows a checkout that another removal has deleted while some handle on it is still open answers
+  "access denied" to every open until the last such handle closes, and nothing in the error tells it
+  from a path the filesystem denies. A path the resolution reads and refuses, such as a link with
+  nothing behind it, is refused at once.
 - An add first makes its destination as an empty directory. Git takes a destination over only after
   its own registry steps, and on any later failure removes it with its junk. So a failed add whose
   destination is still an empty directory the access can remove holds nothing to lose, and is attempted
@@ -96,18 +103,24 @@ one attempt: a list together with the parse of its output, an add, or one of the
   The access refuses at once, resumably, as a registry refusal, and never returns that failure as Git
   state. So a verification whose snapshot cannot be made, for a path, a filter or a missing object,
   stops resumably and spends no deferral, and the run stops at it again until the cause is repaired.
-- A destination that cannot be made, or that is not an empty directory when the access begins, is the
-  add's own failure. It is returned as Git state at once and no Git command runs, so the registry's
-  state cannot reach that answer.
+- After a successful prevalidation — the add's gate, whose list of the registry is an access of its
+  own — a destination that cannot be made, or that is not an empty directory when the add's access
+  begins, is the add's own failure. It is returned as Git state at once, before `git worktree add`
+  runs, so the registry's state cannot reach that answer. A store the gate's list fails on refuses as
+  the registry's first, whatever is at the destination.
 - What outlasts the deadline, ten seconds, refuses resumably, as a registry refusal, never as Git
   state a verification could defer or park a candidate on: contention, a registration a dead writer
-  left torn, and any other fault of the store, such as a store nothing can write or a registration
-  Git cannot list. A failure the access cannot decide, such as a destination holding something the
-  add did not leave, refuses at once.
+  left torn, and any other fault of the store, such as a store nothing can write, a registration
+  Git cannot list, or a listed path that stays unreadable. A failure the access cannot decide, such
+  as a destination holding something the add did not leave, refuses at once.
 - The deadline covers the access's waits, its retries and the start of every attempt; the attempt
   after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
   the last Git command already running, which a filter, a large checkout or a slow filesystem can
   extend, nor the short decision after it.
+- On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
+  that answers one that ends the command, such as a shutdown, ends the access there, with no further
+  attempt, and the transition it waited in: nothing further is appended, published or spawned for
+  it, and the run is resumable (the follow-up B record's §9.16).
 
 **Within one process.** The registry lock no longer serialises registry access: retrying makes each
 access safe against another's half-done work, whichever process or thread does it. The lock is held
