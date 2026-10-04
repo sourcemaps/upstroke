@@ -39,6 +39,13 @@ the include file its role processes read that graph through. And
 `ensure_execution_prerequisites` refuses a Git older than 2.41 by name. This
 module reads that constant and calls none of the manager's funnels.
 
+**A second amendment is proposed, not adopted:** B-W924-R1, conditional on the
+owner's ruling (the follow-up B record, `reviews/2026-10-01-pr11-follow-up-b-record.md`,
+§9.25). The snapshot path's three registry commands run again past another
+registration's empty `commondir` (`output_past_anothers_empty_commondir`, its
+section below), and nothing else in the module changes. Until that ruling the
+allowlist row still records one amendment.
+
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.
 
@@ -440,6 +447,98 @@ Use the exact stable store whose synced intents resume will reclaim.
 no registration remains, these exact private paths are safe to remove
 even if a partially failed add populated only part of either one.
 
+## `const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);`
+
+How long one registry command of the snapshot path is run again past another
+registration's empty `commondir`: until ten seconds after its first attempt
+began, in every build. Between attempts it sleeps one millisecond, doubling to
+`REGISTRY_TEAR_BACKOFF_CEILING`, fifty. They are the values the topology's
+tolerant access gives the same writer (`crate::workspace_manager`), which this
+module neither reads nor calls. Unlike that access's deadline, this one has no
+shorter twin under test, so the legacy witnesses run the product's.
+
+## `fn output_past_anothers_empty_commondir(`
+
+*Proposed and conditional: B-W924-R1, not adopted (the follow-up B record's
+§9.25).*
+
+**What it repairs.** Every checkout of a repository registers its linked
+worktrees in one store, `<common git dir>/worktrees/`, and Git writes a
+registration one file at a time. `git worktree add` makes the registration's
+directory, then `locked`, `gitdir` and `commondir`, each opened with `O_TRUNC`
+and then written, so between the open and the write the new `commondir` is
+empty. Every enumeration of the store reads each registration's `commondir`,
+and one that reads it empty dies: `fatal: failed to read
+<common>/worktrees/<id>/commondir: Success`, exit 128 (an empty read leaves the
+errno Git's own ref code set to 0 before it, and `Success` is that 0's text).
+Two legacy runs in two linked checkouts of one repository, each adding gate and
+review snapshots, can meet each other's adds so. B-W924, the CI failure at
+`9bcfb3f3`, carries that message; its diagnosis forced the interleaving through
+the target's own processes and reproduced the failure's fingerprint, and did not
+establish that CI's run took that schedule (the record's §9.25 states both).
+
+**What it does.** It runs the command the caller hands it, and runs it again
+while the command dies with exactly that one line, naming another registration's
+`commondir` (`read_anothers_empty_commondir`), the caller agrees
+(`may_repeat`), and the deadline has not passed
+(`output_past_anothers_empty_commondir_until`). The attempt after a sleep the
+deadline cut short is made, and is the last. It returns the first attempt that
+ends any other way, unchanged, and at the deadline the last attempt, which
+fails as the first would have: Git's own message, naming the registration it
+read. A command that cannot be started is returned at once.
+
+**Its three callers,** each a command that read the store before it changed
+anything, and that reads another registration's `commondir` once:
+- `add_gate_worktree`'s `git worktree add`, which enumerates the store at the
+  head of `add_worktree`, before it makes the registration's directory. It is
+  run again only while the destination is still the empty directory the
+  snapshot made (`is_an_empty_directory`), so a destination something else has
+  touched returns the add's first failure.
+- `cleanup_gate_workspace`'s `git worktree remove --force`, which enumerates
+  the store before it deletes anything. Its exit status is not the cleanup's
+  answer; the list after it is.
+- `worktree_is_registered`'s `git worktree list --porcelain -z`, which writes
+  nothing.
+
+Each passes its own registration's name, the snapshot directory's, as `own`,
+so a failure on its own registration is never run again: that one is no
+other process's write in flight.
+
+**What it costs.** On a success, and on any other failure, nothing: no
+further command and no read. Past another's write in flight, the time that
+write takes, and up to fifty milliseconds of sleep after it. Past a
+registration that stays empty, a writer that stalls or died, each command
+waits ten seconds and then fails as before, so a snapshot whose add fails so,
+followed by its own cleanup's removal and list, fails up to thirty seconds later
+than the module did before this amendment.
+
+**Where it does not engage.** The text it reads is Git's English message with
+`Success` for errno 0, glibc's rendering. A translated Git, or a C library that
+renders errno 0 otherwise, gets the module's earlier behaviour: the first
+failure, at once. It deletes, repairs and prunes nothing, turns no failure into
+a success, and leaves every other Git command of the module as it was:
+`switch_branch`'s `git switch` among them.
+
+## `fn read_anothers_empty_commondir(output: &Output, own: &std::ffi::OsStr) -> bool {`
+
+The one failure the snapshot path runs a registry command again for. All of:
+exit 128, Git's death; standard error exactly one line, ended by its newline;
+that line `fatal: failed to read `, a path, `/commondir: Success`; the path's
+last two components `worktrees` and a registration's name; and that name not
+`own`, nor `own` with anything after it, which is how Git names a
+registration whose name was taken. An empty `own` matches every name, so a
+caller that cannot name its own registration never runs a command again.
+`Success` keeps out a removal (`No such file or directory`), a file Git cannot
+read (`Is a directory`, `Permission denied`) and every other errno; the
+`commondir` suffix keeps out `gitdir` and `locked`.
+
+## `fn is_an_empty_directory(path: &Path) -> bool {`
+
+The add's own condition for another attempt: its destination is a directory,
+not a link, holding nothing. A command that died enumerating the store left
+it so; anything else at the destination is not this function's to explain, and
+the add's first failure is returned.
+
 ## `fn sparse_checkout_is_refused_before_worker_spend()` › `run_git(&repo, &["update-index", "--skip-worktree", "README.md"]);`
 
 Set these in separate commands: update-index applies only the final
@@ -698,3 +797,96 @@ type. The production region calls no function of another crate module but
 `crate::ulid::ulid`. What it reads as production and a compiler would not: a
 `#[cfg(test)]` item outside the test module. One that builds a `Command` fails
 the census rather than hiding from it.
+
+## `enum Served {`
+
+*B-W924-R1's witnesses, SYNTHETIC CONTROLS (the follow-up B record's §9.25).*
+What a planted registration's `commondir` gives the next reader:
+`Served::Torn`, zero bytes, or `Served::Whole`, `../..` and a newline.
+
+## `fn make_fifo(path: &Path) -> std::io::Result<()> {`
+
+`mkfifo` the command, so that the witnesses name no `libc` item for it.
+
+## `fn serving_commondir<T>(`
+
+Plants another checkout's registration's `commondir` as a FIFO and serves it:
+each Git that opens it for reading blocks until the server has opened it for
+writing, gets the next reading the script names, and reads end of file when the
+server closes it. Git writes a regular file, never a FIFO; this is how a test
+makes exactly the reads it names empty, and every later read whole, with no
+timing. Each reading goes through a FIFO of its own: before a reader is
+released, a fresh FIFO, or after the last reading a whole regular file, is
+renamed over the path, so a reader that is slow to close its end cannot take
+the next reading too, and no reader is left waiting on a FIFO nobody serves.
+(The first version opened the same FIFO again for each reading, and in a loaded
+suite one `git worktree remove` still holding its end took all three of the
+cleanup witness's readings.) The four commands it serves each open another
+registration's `commondir` once, on Git 2.43.0 and 2.55.0. When the act returns,
+the server is stopped and, if it is still waiting for a reader, released by a
+reader the test opens without blocking; a server that fails releases any reader
+waiting on its FIFO and puts the whole file in place; the act's panic is carried
+out after both. Linux-only, as its tests are: the repair reads glibc's
+`Success`.
+
+## `fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {`
+
+A durable snapshot added while another checkout's registration reads empty
+once: the add's first attempt reads the tear and dies, the attempt after it
+reads the registration whole, and the snapshot is made, registered, and
+reclaimed by its drop. With the repair reverted, the add fails as the CI
+witness did: `git worktree add failed: fatal: failed to read …/commondir:
+Success`.
+
+## `fn a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir()`
+
+A snapshot's drop while another registration reads empty, whole, then empty:
+the removal reads the tear, runs again and removes the snapshot, and the list
+after it reads the tear and runs again. The registration, the directory, its
+hooks and its intent are all gone. Without the removal's repair the list finds
+the snapshot still registered; without the list's, the cleanup stops before its
+intent is removed.
+
+## `fn an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once() {`
+
+The snapshot's own registration's `commondir` emptied: the cleanup fails at once
+with Git's message naming it, far inside the deadline. A registration this
+process made and finished is no write in flight, and is never waited on.
+
+## `fn another_registrations_commondir_git_cannot_read_is_returned_at_once() {`
+
+Another registration's `commondir` a directory: Git dies reading it, `Is a
+directory`, and the add returns that at once. Only an empty read is waited on.
+
+## `fn another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error() {`
+
+Another registration's `commondir` left empty: `add_gate_worktree`, called
+directly so that the snapshot's cleanup after it is not timed with it, runs
+until its deadline and no more than five seconds past it, then returns Git's
+message naming the registration, and the destination is still empty. Bounded:
+if the add has not returned at three deadlines, the test writes the
+`commondir` whole so that the add ends, and fails.
+
+## `fn a_destination_no_longer_empty_returns_the_adds_first_error() {`
+
+The add's destination written to while Git is blocked reading the tear: the
+add is not run again, and its first failure is returned unchanged. Run again,
+it would fail on the destination instead.
+
+## `fn only_another_registrations_empty_commondir_reads_as_attempted_again() {`
+
+The predicate against Git's own exit statuses, 128 for a death, 129 for a
+usage refusal and 0, with each standard error it must and must not accept: the
+two spellings of the store Git prints, relative and absolute, accepted; its own
+name and Git's numbered spelling of it, a removal, an unreadable file, a lock, a
+`gitdir`, a path outside the store, no name, a second line, two lines each a
+death, an unfinished line and an `error:` refused; and any status but 128, and an unknown own name.
+
+## `fn a_registry_command_is_attempted_again_only_while_its_answer_allows() {`
+
+The loop against a scripted command: past two tears to the success, with the
+caller asked once per tear; any other failure, a caller that answers no and a
+deadline already past each return the first attempt; at a deadline thirty
+milliseconds away it runs more than once and returns the tear as the last
+attempt read it, at or after the deadline; and a command that cannot start
+returns its error at once.
