@@ -58,7 +58,9 @@ figures are under `~/orch-pr11/logs/pr11_fub_impl6/`, cited as `impl6/…`. **It
 `pr11_fub_impl7`'s (`claude-opus-5-5`, `max`), spawned on `a337efa7` after `test (winguest)` failed round 6's integration
 witness there; its figures are under `~/orch-pr11/logs/pr11_fub_impl7/`, cited as `impl7/…`. **Its repair round 8**
 (§9.18) is `pr11_fub_impl8`'s (`claude-opus-5-5`, `max`), spawned on `519cfc9e` after the delta review of repair rounds
-6 and 7; its figures are under `~/orch-pr11/logs/pr11_fub_impl8/`, cited as `impl8/…`.
+6 and 7; its figures are under `~/orch-pr11/logs/pr11_fub_impl8/`, cited as `impl8/…`. **Its repair round 9** (§9.19)
+is `pr11_fub_impl9`'s (`claude-opus-5-5`, `max`), spawned on `ce55ca91` after the delta review of repair round 8; its
+figures are under `~/orch-pr11/logs/pr11_fub_impl9/`, cited as `impl9/…`.
 
 ## 0. Status
 
@@ -72,7 +74,7 @@ witness there; its figures are under `~/orch-pr11/logs/pr11_fub_impl7/`, cited a
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. **Repair round 9** (§9.19) answers the delta review of round 8 (two `gpt-6-astra` lenses at `max` on `ce55ca91`: the regression lens PASS, the regular lens one P3). §9.18.4's conclusion that step 5's rule for a witnessed finding did not apply to round 8's two findings is withdrawn. In its place stand round 8's text-only scope and the deferred investigation, and whether those findings, each carrying an archived failing test, must be fixed before B's merge or are carried by their guards is left to B's merge triage, neither asserted nor waived. It changes no source file and no finding. |
 
 ## 1. Design
 
@@ -7898,16 +7900,24 @@ match is not a cause, and it classifies no other failure.
 
 **Why two findings, and not ledger rows alone.** `MAINTAINING.md` step 5 gives every open finding its own file. Its
 lane table has this `fix-p0p1` lane fix P0 and P1 before ready, and a finding a lane need not fix is filed and
-deferred: one file under `findings/`, with a `deferred` ledger row. `findings/PROCESS.md` §7 defers to that.
+deferred: one file under `findings/`, with a `deferred` ledger row. `findings/PROCESS.md` §7 defers to that. Both
+also say that a witnessed defect, a finding carrying a failing test, a reproduction or a mutation witness, is fixed
+whatever its label. Each file records an open finding, filed `deferred`; which rule settles each at B's merge is not
+decided here (corrected at repair round 9, §9.19).
 - **I3-1's sighting** matches no filed finding, so it is a new one.
 - **I3-2's sighting** matches PR281's fingerprint, but its cause is unproven, so it is not recorded as PR281
   recurring. Filing it on its own also keeps PR281's file, another finding's, outside this round's writes
   (`findings/PROCESS.md` §4).
 - **Both are P2**, as PR281 is, and neither is graded down.
-- **Neither carries a reproduction.** Each sighting is one failure in one suite, after which its test passed alone and
-  in the next suites, and both tests pass in this round's test gate. This round, whose scope is text and evidence, ran
-  neither for itself. So step 5's rule for a witnessed finding does not apply, and both are deferred with their G6
-  obligations.
+- **What each carries, and what this round did not do** (corrected at repair round 9, §9.19). Each finding carries an
+  archived failing-test witness: one failure in one filtered whole suite, after which its test passed alone, in later
+  suites and in this round's test gate. Those passes do not invalidate an intermittent failure, and step 5's rule does
+  not need the current repairer to reproduce a witness (the review of `ce55ca91`, I4-1). This round's scope was text
+  and evidence: it ran neither witness to reproduce its failure and investigated neither cause. The investigation each
+  file sets out is deferred: make a red name its holder, then run the witness over the whole suite, with and without
+  this change for I3-1's, and after PR281's change for I3-2's. Whether step 5 requires either finding to be fixed before
+  B's merge, or the guards its file states carry it, is for B's merge triage, under `MAINTAINING.md` and the
+  supervisor. This record neither asserts nor waives it.
 - **I3-1 and I3-2 themselves**, the record's and the body's sentences, are fixed here, with `fixed` ledger rows:
   `FUB-I3-S1EXCLUSION` and `FUB-I3-CRLFFINGERPRINT`.
 
@@ -7940,4 +7950,79 @@ as their sessions wrote them.
 - **At this round's head, the ten gates;** the body records them.
 
 **Not verified here:** either sighting's cause, and whether either recurs. No run was made to reproduce either in this
-round; the test gate's one whole suite passed both.
+round; the test gate's one whole suite passed both, which leaves both archived failures standing (corrected at repair
+round 9, §9.19).
+
+### 9.19 Repair round 9: the delta review's I4-1, the witnessed-finding exemption withdrawn
+
+**Who and why.** `pr11_fub_impl9` (`claude-opus-5-5`, `max`), spawned by `orch_pr11` on `ce55ca91` after the delta
+review of repair round 8. Its brief is `~/orch-pr11/briefs/pr11_fub_impl9.md`, and I4-1 is its whole scope. Its figures
+are under `~/orch-pr11/logs/pr11_fub_impl9/`, cited as `impl9/…`. It changes no source file, no test, no frozen file and
+no finding: only this record and the body. It adopts no owner decision, and H1 stays proposed and not adopted.
+
+**The commit, on `ce55ca91`:** this text, the corrections it lists (§9.19.2), and the header's and §0's sentences; then
+the body.
+
+#### 9.19.1 The delta review
+
+- **The lenses.** Two `gpt-6-astra` lenses at `max` on `cameron-codex`, regular and regression, on `ce55ca91` and the
+  delta `519cfc9e..ce55ca91`, after CI there was green on every leg. They ran from 06:56:30Z and 06:56:32Z to 07:04:30Z
+  and 07:01:24Z on 2026-10-04. The regression lens returned PASS with no findings. The regular lens returned
+  CHANGES_REQUIRED with one P3, and no P1 and no P2. The texts are
+  `~/orch-pr11/reviews/review-329-i4-{regular,regression}-ce55ca91.review.md`, and the triage is
+  `~/orch-pr11/reviews/review-329-i4-triage.md`.
+- **What held**, by the triage: I3-1 and I3-2 as round 8 recorded them; both findings' form, pin, provenance and G6
+  guards; the sightings' history; and the scope, with `src/` unchanged, the 34 frozen files unchanged and H1 +16/−4,
+  the body and branch validators passing, and the 91 earlier ledger rows byte-identical.
+- **I4-1 (P3).** §9.18.4 concluded that "step 5's rule for a witnessed finding does not apply", because round 8
+  reproduced neither failure and both tests passed afterwards. `MAINTAINING.md` step 5 covers a finding carrying a
+  failing test, a reproduction or a mutation witness on its own terms. It does not need the current repairer to
+  reproduce it, and passing reruns do not invalidate an intermittent failure: the saved failures remain evidence.
+- **A question the triage records and does not decide.** Each of the two findings carries an archived failing-test
+  witness. Whether they must be fixed before B's merge, or are carried by the guards they state (PR281's change, and
+  final-range G6), is for B's merge triage, under `MAINTAINING.md` and the supervisor, to whom the triage flags it.
+
+#### 9.19.2 The repair, and the sweep
+
+**The exemption is removed, and nothing is decided in its place.** §9.18.4's fourth bullet now states what each finding
+carries, round 8's text-only scope and the deferred investigation, and leaves the question to B's merge triage. It
+neither declares step 5's rule for a witnessed finding inapplicable nor says how it applies. Both findings stay as
+filed, byte for byte: `deferred`, with their guards and G6 obligations.
+
+**The sweep** (`impl9/sweep/`). Every paragraph, list item and table row of the record and the body that mentions
+either sighting, either finding or either test, and every statement of what B's merge waits on or of what stays open,
+was read for the exemption, stated or implied: that a pass after the failure, or a round that did not reproduce it,
+takes a finding outside step 5's rule, or that the findings' deferral settles them. Each one found was corrected:
+
+| Where | What it said | What it says now |
+|---|---|---|
+| §0, the implementation's row | what the merge waits on, and round 8's two findings, each filed with its G6 obligation | the same, and round 9's sentence: the question is left to B's merge triage, neither asserted nor waived |
+| §9.18.4, the lead | the lane paragraph's first half: a finding a lane need not fix is filed and deferred | its second half too, which `findings/PROCESS.md` §7 shares: a witnessed defect is fixed whatever its label; which rule settles each finding is not decided |
+| §9.18.4, the fourth bullet | "Neither carries a reproduction": the later passes, and round 8 running neither, so step 5's rule did not apply and both were deferred | each carries an archived failing-test witness, which the passes do not invalidate; round 8's text-only scope and the deferred investigation; the question left to B's merge triage, neither asserted nor waived |
+| §9.18.5, "Not verified here" | the test gate's pass of both, beside "no run was made to reproduce either" | the same facts, and that the pass leaves both archived failures standing |
+| the body, the merge dependencies | the four owner decisions B's merge waits on, then that filing or deferring clears no P1 and no G6 guarantee, and nothing of the two findings | the same, and that a deferral does not settle the two findings: the question is B's merge triage's |
+| the body, "What stays open" | the two findings, filed with their G6 obligations | the same, and the question |
+| the body, the test gate | "Both sightings' tests passed in it" | the same at this head, and that the pass leaves both archived failures standing |
+
+**Read and left as written** (`impl9/sweep/CLASSIFICATION.txt`): the places that record a pass as a fact and draw
+nothing from it, among them §9.16.11's and §9.18.2's later runs, each of which says those runs establish neither
+provenance nor cause; the design rounds' prototype reds in §4.3, §4.10, §5.8 and §5.10, which were never findings and
+which round 8 qualified; §9.11's list of what the merge waits on, written at the implementation before either finding
+existed, as it was before H1, and completed by §0; and the two finding files, which this round does not change.
+
+**What is not changed:** both findings, byte for byte; every earlier ledger row, byte for byte, with one row added for
+I4-1, `FUB-I4-WITNESSEXEMPTION`; the facts §9.18 records; and the evidence files of earlier rounds.
+
+#### 9.19.3 The frozen proof, and what else ran
+
+- **The frozen proof** (`impl9/frozen/`, `impl9/tools/frozen-proof-r9.sh`): this round's own frozen change is none, 34
+  of 34 files byte-identical; `integrate.rs` is blob `bf62256e`, H1 alone, +16/−4 against master; and parts 1 and 2
+  are round 8's, line for line.
+- **No source file changes:** the round's diff is this record alone.
+- **CI at `ce55ca91` was green on every leg:** "CI" run 37183255786, all ten of its jobs, and "Pull request policy" run
+  37183255917. The two runs created two seconds earlier on that head, 37183254413 and 37183254417, ended cancelled
+  (`impl9/ci/`).
+- **At this round's head, the ten gates;** the body records them.
+
+**Not verified here:** either sighting's cause, whether either recurs, and how step 5's rule applies to the two
+findings, which is B's merge triage's. No run was made to reproduce either in this round.
