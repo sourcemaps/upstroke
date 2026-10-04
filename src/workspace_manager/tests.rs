@@ -5120,11 +5120,20 @@ fn hooks_routing_census(sources: &[&str]) -> RoutingCensus {
     }
 }
 
+/// The path under `src/` of this module's child `name`, built from path
+/// components: `workspace_manager/<name>.rs`.
+fn child_module_path(name: &str) -> PathBuf {
+    Path::new("workspace_manager")
+        .join(name)
+        .with_extension("rs")
+}
+
 /// This module's production files, `src/workspace_manager.rs` and every child
 /// it declares outside a test-only item, as `(path under src/, text)`.
-fn this_modules_sources() -> Vec<(String, String)> {
+fn this_modules_sources() -> Vec<(PathBuf, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let parent = fs::read_to_string(root.join("workspace_manager.rs"))
+    let parent_file = PathBuf::from("workspace_manager.rs");
+    let parent = fs::read_to_string(root.join(&parent_file))
         .expect("this module's source")
         .replace("\r\n", "\n");
     let code = crate::effects::production_code(&parent);
@@ -5145,11 +5154,11 @@ fn this_modules_sources() -> Vec<(String, String)> {
             (!name.is_empty() && rest[name.len()..].trim_start().starts_with(';')).then_some(name)
         })
         .collect();
-    std::iter::once(("workspace_manager.rs".to_owned(), parent))
+    std::iter::once((parent_file, parent))
         .chain(children.into_iter().map(|child| {
-            let file = format!("workspace_manager/{child}.rs");
+            let file = child_module_path(&child);
             let text = fs::read_to_string(root.join(&file))
-                .unwrap_or_else(|error| panic!("the declared child {file}: {error}"));
+                .unwrap_or_else(|error| panic!("the declared child {}: {error}", file.display()));
             (file, text)
         }))
         .collect()
@@ -5164,16 +5173,20 @@ fn this_modules_sources() -> Vec<(String, String)> {
 #[test]
 fn no_function_that_takes_hooks_reaches_a_registry_wait_that_sleeps_by_default() {
     let sources = this_modules_sources();
-    let files: BTreeSet<&str> = sources.iter().map(|(file, _)| file.as_str()).collect();
+    let files: BTreeSet<&Path> = sources.iter().map(|(file, _)| file.as_path()).collect();
+    assert!(
+        files.contains(Path::new("workspace_manager.rs")),
+        "the census reads the parent: {files:?}"
+    );
     for child in ["hooks", "worktree", "snapshot_ref", "object", "residue"] {
         assert!(
-            files.contains(format!("workspace_manager/{child}.rs").as_str()),
+            files.contains(child_module_path(child).as_path()),
             "the census reads the declared child `{child}`: {files:?}"
         );
     }
     assert!(
-        !files.contains("workspace_manager/tests.rs")
-            && !files.contains("workspace_manager/fixture.rs"),
+        !files.contains(child_module_path("tests").as_path())
+            && !files.contains(child_module_path("fixture").as_path()),
         "a test-only child is not production code: {files:?}"
     );
     let texts: Vec<&str> = sources.iter().map(|(_, text)| text.as_str()).collect();
@@ -5232,7 +5245,7 @@ fn the_hooks_routing_census_reports_a_swap_that_drops_its_hooks() {
     let texts: Vec<String> = sources
         .iter()
         .map(|(file, text)| {
-            if file == "workspace_manager.rs" {
+            if file == Path::new("workspace_manager.rs") {
                 assert_eq!(
                     text.matches(routed).count(),
                     1,
