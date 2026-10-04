@@ -1670,6 +1670,15 @@ pub(crate) enum Again {
 #[cfg(not(test))]
 const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The deadline of a registry access over `common_git_dir`: always
+/// [`REGISTRY_ACCESS_DEADLINE`] in a production build. The `#[cfg(test)]`
+/// twin, at the bottom of this file for the reason [`note_removal_attempt`]
+/// gives, lets a test give its own repository's accesses another deadline.
+#[cfg(not(test))]
+const fn registry_access_deadline(_common_git_dir: &Path) -> std::time::Duration {
+    REGISTRY_ACCESS_DEADLINE
+}
+
 /// The longest backoff sleep between two attempts of one registry access; the
 /// first is one millisecond, and each doubles up to this.
 const REGISTRY_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1839,7 +1848,8 @@ pub(crate) fn tolerant_registry_access<T>(
     attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
 ) -> Result<T, UpstrokeError> {
     note_access_start(common_git_dir);
-    let deadline = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let limit = registry_access_deadline(common_git_dir);
+    let deadline = std::time::Instant::now() + limit;
     let store = common_git_dir.join("worktrees");
     let mut pause = std::time::Duration::from_millis(1);
     let mut attempts: u32 = 0;
@@ -1853,7 +1863,13 @@ pub(crate) fn tolerant_registry_access<T>(
             &mut *attempt,
         )?
         else {
-            return Err(registry_lock_refusal(&store, hold, attempts, last.as_ref()));
+            return Err(registry_lock_refusal(
+                &store,
+                hold,
+                limit,
+                attempts,
+                last.as_ref(),
+            ));
         };
         attempts = attempts.saturating_add(1);
         let failure = match outcome {
@@ -1880,7 +1896,7 @@ pub(crate) fn tolerant_registry_access<T>(
             return Err(UpstrokeError::RegistryRefused {
                 message: format!(
                     "the worktree registry {} kept this access from completing until its \
-                     deadline ({REGISTRY_ACCESS_DEADLINE:?}): {attempts} attempt(s), the last \
+                     deadline ({limit:?}): {attempts} attempt(s), the last \
                      failed with: {failure}",
                     store.display()
                 ),
@@ -1897,6 +1913,7 @@ pub(crate) fn tolerant_registry_access<T>(
 fn registry_lock_refusal(
     store: &Path,
     hold: RegistryHold,
+    limit: std::time::Duration,
     attempts: u32,
     last: Option<&UpstrokeError>,
 ) -> UpstrokeError {
@@ -1911,7 +1928,7 @@ fn registry_lock_refusal(
     UpstrokeError::RegistryRefused {
         message: format!(
             "this process's registry lock for the worktree registry {} stayed held by {holder} \
-             until the access's deadline ({REGISTRY_ACCESS_DEADLINE:?}); {before}",
+             until the access's deadline ({limit:?}); {before}",
             store.display()
         ),
     }
@@ -7173,9 +7190,8 @@ static CONTENDED_HOLDS: std::sync::Mutex<
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Hold the next `Attempt` answer of an access over `common_git_dir` until the
-/// returned sender sends or is dropped ([`note_contended`]). Unix only, as its
-/// one caller is.
-#[cfg(all(test, unix))]
+/// returned sender sends or is dropped ([`note_contended`]).
+#[cfg(test)]
 pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sender<()> {
     let (release, released) = std::sync::mpsc::channel();
     CONTENDED_HOLDS
@@ -7206,6 +7222,72 @@ fn note_slept_pause() {
 /// `#[cfg(not(test))]` twin.
 #[cfg(test)]
 const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The deadlines tests have given the registry accesses over one common git
+/// dir, exactly as the caller passes it, each with the number of live guards
+/// that hold it ([`RegistryDeadline`]). Keyed per repository, as
+/// [`CONTENDED_ATTEMPTS`] is, so a deadline one test sets reaches no other
+/// test's accesses, on whichever thread they run.
+#[cfg(test)]
+static REGISTRY_DEADLINES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Duration, usize)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The `#[cfg(test)]` half of the deadline seam: [`REGISTRY_ACCESS_DEADLINE`],
+/// unless a live [`RegistryDeadline`] gives `common_git_dir` another. See the
+/// `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn registry_access_deadline(common_git_dir: &Path) -> std::time::Duration {
+    REGISTRY_DEADLINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .map_or(REGISTRY_ACCESS_DEADLINE, |(deadline, _)| *deadline)
+}
+
+/// While this guard lives, every registry access over its common git dir that
+/// begins waits to the guard's deadline rather than to
+/// [`REGISTRY_ACCESS_DEADLINE`]. For a test whose own act ends the access's
+/// wait once the code under test reaches the point the test is about -- a
+/// prober that finishes its tear, a scheduler that injects a shutdown -- so
+/// that the access does not refuse first on how long the platform takes to
+/// get there. Guards over one directory nest; its entry goes when the last
+/// drops.
+#[cfg(test)]
+pub(crate) struct RegistryDeadline {
+    common_git_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl RegistryDeadline {
+    pub(crate) fn hold(common_git_dir: &Path, deadline: std::time::Duration) -> Self {
+        let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table
+            .entry(common_git_dir.to_path_buf())
+            .or_insert((deadline, 0));
+        *held = (deadline, held.1.saturating_add(1));
+        Self {
+            common_git_dir: common_git_dir.to_path_buf(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryDeadline {
+    fn drop(&mut self) {
+        let mut table = REGISTRY_DEADLINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.common_git_dir) {
+            held.1 = held.1.saturating_sub(1);
+            if held.1 == 0 {
+                table.remove(&self.common_git_dir);
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

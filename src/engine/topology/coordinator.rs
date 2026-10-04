@@ -4573,6 +4573,8 @@ mod tests {
 
     type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);
 
+    const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);
+
     struct TearHeld {
         inner: crate::engine::topology::seams::HarnessTopologyHooks,
         at: TearAt,
@@ -4581,6 +4583,7 @@ mod tests {
         planting: Option<crate::workspace_manager::fixture::AccessPlanting>,
         armed: bool,
         also: Option<FoldAct>,
+        _deadline: crate::workspace_manager::RegistryDeadline,
     }
 
     impl TearHeld {
@@ -4610,6 +4613,10 @@ mod tests {
                 planting: None,
                 armed: false,
                 also: None,
+                _deadline: crate::workspace_manager::RegistryDeadline::hold(
+                    wide.env.fixture.manager.common_git_dir(),
+                    WITNESS_REGISTRY_DEADLINE,
+                ),
             }
         }
 
@@ -5779,9 +5786,12 @@ mod tests {
             drop(scheduler);
             hooks.finish().expect("the tear was planted");
             drop(hooks);
-            let at_shutdown = injected
-                .get()
-                .expect("the shutdown was injected while the tear stood");
+            let Some(at_shutdown) = injected.get() else {
+                panic!(
+                    "the shutdown was injected while the tear stood: it was not, and the command \
+                     ended on {error}"
+                );
+            };
             let warnings = wide.run.warnings().join("\n");
             assert!(
                 error.to_string().contains("shut"),
@@ -5913,6 +5923,50 @@ mod tests {
                     "{:?}",
                     kinds_of(events)
                 );
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-intent-slow",
+            StoppedInItsWait {
+                at: TearAt::Fold(task_dispatched_of(1)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let wide = two_held(tag);
+                let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+                let before = crate::workspace_manager::contended_attempts(&common);
+                let release = crate::workspace_manager::hold_next_contended(&common);
+                std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + BOUND;
+                    while crate::workspace_manager::contended_attempts(&common) == before
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    std::thread::sleep(Duration::from_millis(700));
+                    let _ = release.send(());
+                });
+                wide
+            },
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
                 assert_eq!(
                     of_key(events, "attempt_started", 1),
                     0,

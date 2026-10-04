@@ -1823,13 +1823,27 @@ and says what it did not see. A prober that took a cancel for progress fails her
 An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
 retry, a file at a destination before an add.
 
+## `mod tests` › `const WITNESS_REGISTRY_DEADLINE: Duration = Duration::from_secs(10);`
+
+The registry access deadline a tear witness gives its own repository
+(`crate::workspace_manager::RegistryDeadline`): the production deadline's ten seconds rather than
+the suite's 500 ms. Every such witness ends its access's wait itself -- its prober finishes the
+tear, or its scheduler injects a shutdown -- once the coordinator reaches the point the witness is
+about, and how many Git processes run before that point is the platform's to say: on the Windows
+leg under the suite's load the three before a dispatch's intent witness could inject its shutdown
+took longer than 500 ms, and the access refused first. Fix P (P-all), follow-up C's round 5, in this
+change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's.
+
 ## `mod tests` › `struct TearHeld {`
 
 The run's hooks with one tear planted on the coordinator's thread at a `TearAt`, its prober owned
 and joined, and an optional `FoldAct`. `finish` cancels and joins the prober and hands back what it
 returned: `Ok` only when it finished the tear after what it waited for. The drop does the same for a
 prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
-never saw anything and the access refused at its deadline.
+never saw anything and the access refused at its deadline. While it lives it holds a
+`RegistryDeadline` giving its repository's accesses `WITNESS_REGISTRY_DEADLINE`, so every tear
+witness's access waits to the production length, whatever the platform's Git costs before the
+witness's own act ends the wait (fix P).
 
 
 ## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
@@ -2150,7 +2164,9 @@ its wait), no wait may have slept on the coordinator's thread, **nothing may be 
 shutdown**, the integration ref must be where the log authorizes it, the invocations must balance,
 and the run must be reopened once the coordinator is gone; `check` adds what the transition must not
 have done. At `a58c2ce3`, and with the stop undone, the access passes once the tear is finished and
-the transition appends on.
+the transition appends on. When no shutdown was injected, its panic keeps the message
+"the shutdown was injected while the tear stood" and adds what the command ended on, so a
+recurrence says which path it took (fix P).
 
 ## `mod tests` › `fn two_held(tag: &str) -> Wide {`
 
@@ -2189,6 +2205,18 @@ it, and no worker of it reached the runner, so its pipeline was never spawned.
 
 Dispatch after its `task_dispatched`: the intent's access meets the tear; no `attempt_started` for
 the task, and no pipeline.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {`
+
+The dispatch's intent witness above, with its access slow to come back to its wait: the access's
+first failed attempt is held (`workspace_manager::hold_next_contended`) for 700 ms, longer than the
+suite's 500 ms registry deadline, before its deadline check, as three slow Git processes held it on
+the Windows leg (the coordinator's grant to the waiting pipeline runs the scaffold runner's
+`git rev-parse`, and the access's second attempt is another `git worktree list`). Its repository
+waits to `WITNESS_REGISTRY_DEADLINE`, so the access still reaches its wait, the shutdown is still
+injected there, and the dispatch still starts no attempt. With the deadline seam undone it fails
+with the Windows leg's message. Fix P; the Windows reading is a Linux stand-in's, not a measured
+cause of the guest's failure.
 
 ## `mod tests` › `fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {`
 
