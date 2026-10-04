@@ -5156,9 +5156,10 @@ mod tests {
     /// torn as a killed `git worktree add` leaves it. The repair's plan names
     /// that instance by its tag, and the removal that takes it meets a foreign
     /// registration torn at its own start; a pipeline is served while it
-    /// waits. At the merge of #329's final head (`905ed0c8`) the instance's
-    /// removal slept on the coordinator's thread, no pipeline was served, and
-    /// the access refused at its deadline.
+    /// waits. At `905ed0c8`, the provisional merge of #329's head `ce55ca91`
+    /// (not #329's final head), the instance's removal slept on the
+    /// coordinator's thread, no pipeline was served, and the access refused
+    /// at its deadline.
     fn served_while_an_earlier_instances_repair_waits(
         tag: &str,
         failing: &[(u32, u32)],
