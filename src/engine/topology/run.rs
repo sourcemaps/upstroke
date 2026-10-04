@@ -55,6 +55,7 @@ pub struct RunEmitter<'a> {
     pub identity: &'a RunIdentity,
     pub state: EmitState<'a>,
     pub clock: &'a dyn TimeSource,
+    pub stopped: Option<&'a str>,
 }
 
 impl EventEmitter for RunEmitter<'_> {
@@ -63,6 +64,11 @@ impl EventEmitter for RunEmitter<'_> {
         body: TopologyEventBody,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), EmitFailure> {
+        if let Some(why) = self.stopped {
+            return Err(EmitFailure::Clean(UpstrokeError::Refused {
+                message: format!("nothing further is appended in this process: {why}"),
+            }));
+        }
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
         Ok(())
     }
@@ -188,6 +194,25 @@ impl<O: Operator + ?Sized> DispatchJournal for OperatorJournal<'_, O> {
 
     fn hooks(&mut self) -> &mut dyn TopologyHooks {
         self.0.registry()
+    }
+}
+
+impl<O: Operator + ?Sized> IntegrationJournal for OperatorJournal<'_, O> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit(body, seams, hooks)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.0.driven().fold()
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.0.parts().0.convert_integration(key)
     }
 }
 
@@ -433,6 +458,189 @@ fn promote_candidate<O: Operator + ?Sized>(
         })?
     };
     reclaim_after_creation(manager, operator.registry(), site.slot, created)?;
+    Ok(())
+}
+
+pub(super) fn hard_block<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    questions: &[QuestionId],
+) -> Result<Progress, UpstrokeError> {
+    for id in questions {
+        let asked = operator.driven().open_question(id)?;
+        let answer = match seams.answers.resolve(&asked.question)? {
+            Answer::Unanswered => continue,
+            answer => answer,
+        };
+        let answer4 = operator.driven().answer_for(id, &asked, answer, seams)?;
+        let (run, seams, hooks) = operator.parts();
+        return run.ingest_answer(id, asked.key, answer4, seams, hooks);
+    }
+    close_run(operator, seams, &closure::Cancelled::none())
+}
+
+pub(super) fn close_run<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    cancelled: &closure::Cancelled,
+) -> Result<Progress, UpstrokeError> {
+    let manager = seams.manager;
+    let (outcome, interrupted) = {
+        let fold = operator.driven().fold();
+        let outcome = closure::ending_outcome(fold)?;
+        let interrupted = closure::settleable(fold, &outcome, cancelled)?;
+        (outcome, interrupted)
+    };
+    for interrupted in interrupted {
+        {
+            let (run, seams, hooks) = operator.parts();
+            run.emit(interrupted.interrupted(), seams, hooks)?;
+        }
+        reclaim_interrupted(operator, manager, &interrupted)?;
+    }
+    complete_promotions(operator, manager)?;
+    complete_publication(operator, manager)?;
+
+    let reason = GenerationCloseReason::RunEnding {
+        outcome: outcome.clone(),
+    };
+    let mut closed = 0;
+    for key in closure::closable(operator.driven().fold()) {
+        let slot = {
+            let (run, seams, hooks) = operator.parts();
+            let event = close_generation(run.fold(), key, reason.clone())?;
+            let slot = task_slot(key, event.generation);
+            run.emit(
+                TopologyEventBody::GenerationClosed { data: event },
+                seams,
+                hooks,
+            )?;
+            run.retained.remove(&key);
+            slot
+        };
+        super::dispatch::scrub(manager, operator.registry(), &slot)?;
+        closed += 1;
+    }
+
+    {
+        let run = operator.parts().0;
+        if run.broker.halves().0.cancel_any() {
+            run.warnings.push(
+                "run-end closure found a provisional reservation still held and cancelled it"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let (fold, events, run_id) = {
+        let (run, seams, hooks) = operator.parts();
+        closure::confirm_derived(run.fold(), &outcome)?;
+        let finished = closure::run_finished(run.fold(), outcome.clone());
+        run.emit(
+            TopologyEventBody::RunFinished { data: finished },
+            seams,
+            hooks,
+        )?;
+        run.finished_record()
+    };
+    let finalized = finalize::finalize(
+        &finalize::Finalize {
+            manager,
+            public: &seams.paths.public,
+            private: &seams.paths.private,
+            run_id: &run_id,
+            fold: &fold,
+            events: &events,
+        },
+        operator.registry(),
+    )?;
+    Ok(Progress::Finished {
+        outcome,
+        closed,
+        report_written: finalized.report_written,
+        execution_root_removed: finalized.execution_root_removed,
+    })
+}
+
+fn reclaim_interrupted<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    interrupted: &closure::InFlight,
+) -> Result<(), UpstrokeError> {
+    match interrupted {
+        closure::InFlight::Attempt {
+            key,
+            generation,
+            attempt,
+            ..
+        } => {
+            operator.parts().0.retained.remove(key);
+            reclaim_snapshots_of(
+                manager,
+                operator.registry(),
+                JudgeNames::Attempt {
+                    key: key.0,
+                    generation: generation.0,
+                    attempt: attempt.0,
+                },
+            )?;
+            super::dispatch::scrub(manager, operator.registry(), &task_slot(*key, *generation))
+        }
+        closure::InFlight::Verification { sequence, pin, .. } => {
+            let hooks = operator.registry();
+            if let Some((pin, proposed)) = pin {
+                integrate::prune_pin(hooks, manager, pin, proposed)?;
+            }
+            let staging = integrate::staging_slot(*sequence);
+            manager.remove_worktree(hooks.effects(), &staging)?;
+            manager.remove_intent(hooks.effects(), &staging)?;
+            reclaim_snapshots_of(
+                manager,
+                hooks,
+                JudgeNames::Integration {
+                    sequence: u64::from(sequence.0),
+                },
+            )
+        }
+    }
+}
+
+fn complete_promotions<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let (run_id, promoting) = {
+        let run = operator.driven();
+        (run.identity.run_id.clone(), closure::promoting(run.fold()))
+    };
+    for key in promoting {
+        let Some(promoting) =
+            super::candidate::recovery_for(manager, &run_id, operator.driven().fold(), key)?
+                .promotion
+        else {
+            continue;
+        };
+        let slot = task_slot(key, promoting.candidate().generation);
+        let referenced = create_candidates_ref(manager, operator.registry(), promoting)?;
+        let created = {
+            let (run, seams, hooks) = operator.parts();
+            run.with_journal(seams, hooks, |journal| {
+                append_candidate_created(journal, referenced)
+            })?
+        };
+        reclaim_after_creation(manager, operator.registry(), &slot, created)?;
+    }
+    Ok(())
+}
+
+fn complete_publication<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let Some(authorized) = integrate::Authorized::from_fold(operator.driven().fold())? else {
+        return Ok(());
+    };
+    integrate::publish(&mut OperatorJournal(operator), manager, authorized)?;
     Ok(())
 }
 
@@ -1001,6 +1209,7 @@ pub struct TopologyRun {
     deferral: Deferral,
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
+    stopped: Option<String>,
 }
 
 impl TopologyRun {
@@ -1025,6 +1234,7 @@ impl TopologyRun {
             deferral: Deferral::default_backoff(),
             retained: BTreeMap::new(),
             brief,
+            stopped: None,
         }
     }
 
@@ -1073,6 +1283,20 @@ impl TopologyRun {
 
     pub(super) fn warn(&mut self, warning: String) {
         self.warnings.push(warning);
+    }
+
+    pub(super) fn stop(&mut self, why: String) {
+        if self.stopped.is_none() {
+            self.stopped = Some(why);
+        }
+    }
+
+    pub(super) fn reopen(&mut self) {
+        self.stopped = None;
+    }
+
+    pub(super) fn stopped(&self) -> Option<&str> {
+        self.stopped.as_deref()
     }
 
     #[must_use]
@@ -1147,8 +1371,14 @@ impl TopologyRun {
                 let judged = self.judge_inline(&job, seams, hooks)?;
                 settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)
             }
-            Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
-            Admitted::Closure(_) => self.close_run(&closure::Cancelled::none(), seams, hooks),
+            Admitted::HardBlock { questions } => {
+                hard_block(&mut self.stepping(seams, hooks), seams, &questions)
+            }
+            Admitted::Closure(_) => close_run(
+                &mut self.stepping(seams, hooks),
+                seams,
+                &closure::Cancelled::none(),
+            ),
         }
     }
 
@@ -1340,6 +1570,7 @@ impl TopologyRun {
                         warnings: &mut self.warnings,
                     },
                     clock: seams.clock,
+                    stopped: self.stopped.as_deref(),
                 },
                 hooks,
                 invocations,
@@ -1435,24 +1666,6 @@ impl TopologyRun {
         }
         self.broker = PermitBroker::for_pipelines(limits);
         Ok(())
-    }
-
-    pub(super) fn hard_block(
-        &mut self,
-        questions: &[QuestionId],
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        for id in questions {
-            let asked = self.open_question(id)?;
-            let answer = match seams.answers.resolve(&asked.question)? {
-                Answer::Unanswered => continue,
-                answer => answer,
-            };
-            let answer4 = self.answer_for(id, &asked, answer, seams)?;
-            return self.ingest_answer(id, asked.key, answer4, seams, hooks);
-        }
-        self.close_run(&closure::Cancelled::none(), seams, hooks)
     }
 
     fn answer_for(
@@ -1725,149 +1938,12 @@ impl TopologyRun {
         Ok(())
     }
 
-    pub(super) fn close_run(
-        &mut self,
-        cancelled: &closure::Cancelled,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        let outcome = closure::ending_outcome(&self.handle.fold)?;
-        for interrupted in closure::settleable(&self.handle.fold, &outcome, cancelled)? {
-            self.emit(interrupted.interrupted(), seams, hooks)?;
-            self.reclaim_interrupted(&interrupted, seams, hooks)?;
-        }
-        self.complete_promotions(seams, hooks)?;
-        self.complete_publication(seams, hooks)?;
-
-        let reason = GenerationCloseReason::RunEnding {
-            outcome: outcome.clone(),
-        };
-        let mut closed = 0;
-        for key in closure::closable(&self.handle.fold) {
-            let event = close_generation(&self.handle.fold, key, reason.clone())?;
-            let slot = task_slot(key, event.generation);
-            self.emit(
-                TopologyEventBody::GenerationClosed { data: event },
-                seams,
-                hooks,
-            )?;
-            self.retained.remove(&key);
-            super::dispatch::scrub(seams.manager, hooks, &slot)?;
-            closed += 1;
-        }
-
-        if self.broker.halves().0.cancel_any() {
-            self.warnings.push(
-                "run-end closure found a provisional reservation still held and cancelled it"
-                    .to_owned(),
-            );
-        }
-
-        closure::confirm_derived(&self.handle.fold, &outcome)?;
-        let finished = closure::run_finished(&self.handle.fold, outcome.clone());
-        self.emit(
-            TopologyEventBody::RunFinished { data: finished },
-            seams,
-            hooks,
-        )?;
-
-        let finalized = finalize::finalize(
-            &finalize::Finalize {
-                manager: seams.manager,
-                public: &seams.paths.public,
-                private: &seams.paths.private,
-                run_id: &self.identity.run_id,
-                fold: &self.handle.fold,
-                events: &self.handle.events,
-            },
-            hooks,
-        )?;
-        Ok(Progress::Finished {
-            outcome,
-            closed,
-            report_written: finalized.report_written,
-            execution_root_removed: finalized.execution_root_removed,
-        })
-    }
-
-    fn reclaim_interrupted(
-        &mut self,
-        interrupted: &closure::InFlight,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        match interrupted {
-            closure::InFlight::Attempt {
-                key,
-                generation,
-                attempt,
-                ..
-            } => {
-                self.retained.remove(key);
-                reclaim_snapshots_of(
-                    seams.manager,
-                    hooks,
-                    JudgeNames::Attempt {
-                        key: key.0,
-                        generation: generation.0,
-                        attempt: attempt.0,
-                    },
-                )?;
-                super::dispatch::scrub(seams.manager, hooks, &task_slot(*key, *generation))
-            }
-            closure::InFlight::Verification { sequence, pin, .. } => {
-                if let Some((pin, proposed)) = pin {
-                    integrate::prune_pin(hooks, seams.manager, pin, proposed)?;
-                }
-                let staging = integrate::staging_slot(*sequence);
-                seams.manager.remove_worktree(hooks.effects(), &staging)?;
-                seams.manager.remove_intent(hooks.effects(), &staging)?;
-                reclaim_snapshots_of(
-                    seams.manager,
-                    hooks,
-                    JudgeNames::Integration {
-                        sequence: u64::from(sequence.0),
-                    },
-                )
-            }
-        }
-    }
-
-    fn complete_promotions(
-        &mut self,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        let run_id = self.identity.run_id.clone();
-        for key in closure::promoting(&self.handle.fold) {
-            let Some(promoting) =
-                super::candidate::recovery_for(seams.manager, &run_id, &self.handle.fold, key)?
-                    .promotion
-            else {
-                continue;
-            };
-            let slot = task_slot(key, promoting.candidate().generation);
-            let referenced = create_candidates_ref(seams.manager, hooks, promoting)?;
-            let created = self.with_journal(seams, hooks, |journal| {
-                append_candidate_created(journal, referenced)
-            })?;
-            reclaim_after_creation(seams.manager, hooks, &slot, created)?;
-        }
-        Ok(())
-    }
-
-    fn complete_publication(
-        &mut self,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        let Some(authorized) = integrate::Authorized::from_fold(&self.handle.fold)? else {
-            return Ok(());
-        };
-        self.with_journal(seams, hooks, |journal| {
-            integrate::publish(journal, seams.manager, authorized)
-        })?;
-        Ok(())
+    fn finished_record(&self) -> (TopologyFold, Vec<TopologyEvent>, String) {
+        (
+            self.handle.fold.clone(),
+            self.handle.events.clone(),
+            self.identity.run_id.clone(),
+        )
     }
 
     fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {
@@ -1937,6 +2013,7 @@ impl TopologyRun {
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
+                stopped: self.stopped.as_deref(),
             };
             AttemptContext {
                 manager: seams.manager,
@@ -2113,6 +2190,7 @@ impl TopologyRun {
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
+                stopped: self.stopped.as_deref(),
             },
             hooks,
             invocations,
@@ -2297,6 +2375,7 @@ impl TopologyRun {
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
+            stopped: self.stopped.as_deref(),
         };
         emitter.emit(body, hooks)
     }

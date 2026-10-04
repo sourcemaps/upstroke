@@ -117,6 +117,10 @@ scans.
   after a backoff the deadline cut short is made, at the deadline, and is the last. It does not bound
   the last Git command already running, which a filter, a large checkout or a slow filesystem can
   extend, nor the short decision after it.
+- On the topology coordinator a wait answers the coordinator's messages instead of sleeping. A wait
+  that answers one that ends the command, such as a shutdown, ends the access there, with no further
+  attempt, and the transition it waited in: nothing further is appended, published or spawned for
+  it, and the run is resumable (the follow-up B record's §9.16).
 
 **Within one process.** The registry lock no longer serialises registry access: retrying makes each
 access safe against another's half-done work, whichever process or thread does it. The lock is held

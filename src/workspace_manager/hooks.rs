@@ -93,8 +93,15 @@ pub trait EffectHooks {
     /// coordinator answers its messages for the length of the wait instead
     /// (`engine::topology::coordinator`), so that no wait of an access it makes
     /// keeps a pipeline from its grants (the record's §9.13, R1).
-    fn registry_pause(&mut self, pause: std::time::Duration) {
-        std::thread::sleep(pause);
+    ///
+    /// # Errors
+    ///
+    /// The default never errs. An `Err` ends the access at once with that
+    /// error, before any further attempt: the coordinator's answer once a
+    /// message it answered during the wait has ended its command, so that the
+    /// transition waiting on the access stops there (the record's §9.16, I2-1).
+    fn registry_pause(&mut self, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        super::sleep_for(pause)
     }
 }
 

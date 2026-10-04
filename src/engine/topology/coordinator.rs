@@ -222,6 +222,9 @@ impl TopologyRun {
             .name()
             .unwrap_or("upstroke-coordinator")
             .to_owned();
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let timer = Timer::start(outbox.clone())?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .max_blocking_threads(usize::try_from(width).unwrap_or(usize::MAX))
@@ -233,8 +236,6 @@ impl TopologyRun {
                      spawned or appended"
                 ),
             })?;
-        let (outbox, inbox) = mpsc::unbounded_channel();
-        let (injector, injected) = mpsc::unbounded_channel();
         let ledger = hooks.effects().durability_ledger();
         let mut coordinator = Coordinator {
             run: self,
@@ -263,6 +264,7 @@ impl TopologyRun {
             ledger,
             refusal: None,
             handles: Vec::new(),
+            timer,
             inbox,
             outbox,
             injected,
@@ -271,6 +273,8 @@ impl TopologyRun {
         };
         let outcome = coordinator.drive();
         coordinator.join();
+        drop(coordinator);
+        self.reopen();
         outcome
     }
 }
@@ -438,15 +442,25 @@ impl SnapshotGate {
 // settles against; the pipeline takes its own copy.
 //
 // A registry access the coordinator makes waits only for messages (R-F, R-R;
-// the follow-up B record's §9.13): the coordinator lends itself as the
-// transition's hooks, and each wait of the access — a backoff, or a turn of its
-// wait for R-X — is `registry_pause`, which answers messages until a wake a
-// timer thread it owns and joins sends into its own inbox. Inside the wait it
-// applies grants, ends, snapshot requests and a shutdown, which append nothing,
-// and defers a completion until the transition returns, so nothing is appended
-// and nothing is selected inside another transition (R-S); under an observer it
-// keeps the canonical buffer and releases an invocation at quiescence, and an
-// observer's append inside the wait is refused. A stale wake is dropped.
+// the follow-up B record's §9.13 and §9.16): the coordinator lends itself as the
+// transition's hooks — a dispatch, a continuation, a retry, a settlement, an
+// integration, the run-end closure and its finalization — and each wait of the
+// access — a backoff, or a turn of its wait for R-X — is `registry_pause`, which
+// answers messages until the wake its `Timer` sends into its own inbox. The timer
+// is one thread, started with the coordinator before it acts, so no wait needs a
+// thread it may not get. Inside the wait it applies grants, ends, snapshot
+// requests and a shutdown, which append nothing, and defers a completion until
+// the transition returns, so nothing is appended and nothing is selected inside
+// another transition (R-S); under an observer it keeps the canonical buffer and
+// releases an invocation at quiescence, and an observer's append inside the wait
+// is refused. A stale wake is dropped. A wait that ends with an interrupt
+// recorded — a shutdown it answered, or an error that ends the command — stops
+// the run and returns an error: the access stops before another attempt, the
+// run's emitter refuses every further append, and every further effect made
+// through the coordinator's hooks is refused at its `Before`, so the transition
+// publishes, appends and spawns nothing further whatever it does with the error.
+// A wait that begins with an interrupt recorded does not wait. The run reopens
+// when the coordinator is gone.
 struct Coordinator<'s> {
     run: &'s mut TopologyRun,
     seams: &'s RunSeams<'s>,
@@ -471,6 +485,7 @@ struct Coordinator<'s> {
     ledger: crate::util::DurabilityLedger,
     refusal: Option<String>,
     handles: Vec<tokio::task::JoinHandle<()>>,
+    timer: Timer,
     inbox: mpsc::UnboundedReceiver<ToCoordinator>,
     outbox: mpsc::UnboundedSender<ToCoordinator>,
     injected: mpsc::UnboundedReceiver<ToCoordinator>,
@@ -669,11 +684,12 @@ impl Coordinator<'_> {
         match self.run.admitted()? {
             Admitted::Backoff => self.run.back_off(self.seams, self.hooks),
             Admitted::HardBlock { questions } => {
-                self.run.hard_block(&questions, self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::hard_block(self, seams, &questions)
             }
             Admitted::Closure(_) => {
-                self.run
-                    .close_run(&closure::Cancelled::none(), self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::close_run(self, seams, &closure::Cancelled::none())
             }
             other => Err(UpstrokeError::Refused {
                 message: format!(
@@ -1695,7 +1711,8 @@ impl Coordinator<'_> {
         match self.interrupt.take() {
             Some(Interrupt::Halt) if unresolved.is_empty() => {
                 let cancelled = std::mem::take(&mut self.cancelled_work);
-                self.run.close_run(&cancelled, self.seams, self.hooks)
+                let seams = self.seams;
+                super::run::close_run(self, seams, &cancelled)
             }
             Some(Interrupt::Halt) => Err(UpstrokeError::Refused {
                 message: format!(
@@ -1754,6 +1771,9 @@ impl Coordinator<'_> {
                     .warn(format!("a pipeline's thread ended abnormally: {error}"));
             }
         }
+        if let Some(panicked) = self.timer.stop() {
+            self.run.warn(panicked);
+        }
     }
 }
 
@@ -1809,6 +1829,17 @@ impl crate::workspace_manager::EffectHooks for Coordinator<'_> {
         site: crate::topology::effects::EffectSiteId,
         phase: crate::topology::effects::HookPhase,
     ) -> crate::topology::effects::Injection {
+        if let Some(why) = self.run.stopped().map(str::to_owned) {
+            if let crate::topology::effects::HookPhase::Point {
+                mode: crate::topology::effects::InjectionMode::Kill,
+                ..
+            } = phase
+            {
+                return crate::topology::effects::Injection::Proceed;
+            }
+            self.refusal = Some(format!("nothing further is done in this process: {why}"));
+            return crate::topology::effects::Injection::Error;
+        }
         let effects = self.hooks.effects();
         let answer = effects.phase(site, phase);
         let cause = if answer == crate::topology::effects::Injection::Proceed {
@@ -1828,32 +1859,28 @@ impl crate::workspace_manager::EffectHooks for Coordinator<'_> {
         self.refusal.clone()
     }
 
-    fn registry_pause(&mut self, pause: std::time::Duration) {
-        self.wakes = self.wakes.wrapping_add(1);
-        let token = self.wakes;
-        let outbox = self.outbox.clone();
-        let timer = std::thread::Builder::new().spawn(move || {
-            std::thread::sleep(pause);
-            let _ = outbox.send(ToCoordinator::Wake { token });
-        });
-        let timer = match timer {
-            Ok(timer) => timer,
-            Err(error) => {
-                self.run.warn(format!(
-                    "a registry access's wait could not start its timer ({error}), so the \
-                     coordinator slept for it and answered no message meanwhile"
-                ));
-                std::thread::sleep(pause);
-                return;
+    fn registry_pause(&mut self, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        if self.interrupt.is_none() {
+            self.wakes = self.wakes.wrapping_add(1);
+            let token = self.wakes;
+            let waited = match self.timer.wake(token, pause) {
+                Ok(()) => self.answer_until_woken(token),
+                Err(refusal) => Err(refusal),
+            };
+            if let Err(error) = waited {
+                self.fail(error);
             }
+        }
+        let Some(interrupt) = &self.interrupt else {
+            return Ok(());
         };
-        if let Err(error) = self.answer_until_woken(token) {
-            self.fail(error);
-        }
-        if timer.join().is_err() {
-            self.run
-                .warn("a registry access's wait timer panicked".to_owned());
-        }
+        let stopped = format!(
+            "a registry access's wait inside a transition met {}, so the access stopped there \
+             and its transition appends, publishes and spawns nothing further",
+            interrupt.describe()
+        );
+        self.run.stop(stopped.clone());
+        Err(UpstrokeError::Refused { message: stopped })
     }
 }
 
@@ -1931,6 +1958,90 @@ impl Registrar for Client {
                 pipeline: self.pipeline,
             });
         }
+    }
+}
+
+// The coordinator's wait timer (the record's §9.16, I2-3 and I2-5). Owner: the
+// coordinator, which starts it before it builds its runtime and stops and joins
+// it when it ends; the thread holds a clone of the coordinator's own outbox.
+// Protocol: one request at a time — a wait does not nest — carries a token and a
+// length; the thread sleeps the length and then sends `Wake { token }` into the
+// inbox. The sleep runs under `catch_unwind`, so a sleep that unwinds is still
+// answered and the thread goes on serving: the thread's only calls are the wait
+// for the next request, the sleep and the send, it ends only when the
+// coordinator drops its sender, and so every request it accepted is answered
+// within its length. A request it can no longer accept is the coordinator's
+// typed refusal, never a sleep. The join reports a sleep that unwound, or a
+// thread that did, as a warning.
+struct Timer {
+    requests: Option<std::sync::mpsc::Sender<(u64, std::time::Duration)>>,
+    thread: Option<std::thread::JoinHandle<u32>>,
+}
+
+impl Timer {
+    fn start(outbox: mpsc::UnboundedSender<ToCoordinator>) -> Result<Self, UpstrokeError> {
+        Self::starting(outbox, std::thread::sleep)
+    }
+
+    fn starting(
+        outbox: mpsc::UnboundedSender<ToCoordinator>,
+        sleep: fn(std::time::Duration),
+    ) -> Result<Self, UpstrokeError> {
+        let (requests, waits) = std::sync::mpsc::channel::<(u64, std::time::Duration)>();
+        let thread = std::thread::Builder::new()
+            .name("upstroke-coordinator-timer".to_owned())
+            .spawn(move || {
+                let mut unwound: u32 = 0;
+                while let Ok((token, pause)) = waits.recv() {
+                    if std::panic::catch_unwind(|| sleep(pause)).is_err() {
+                        unwound = unwound.saturating_add(1);
+                    }
+                    let _ = outbox.send(ToCoordinator::Wake { token });
+                }
+                unwound
+            })
+            .map_err(|error| UpstrokeError::Refused {
+                message: format!(
+                    "the coordinator's wait timer could not be started ({error}), so no registry \
+                     access's wait could be answered without sleeping on the coordinator; \
+                     nothing was spawned or appended, and the run is resumable"
+                ),
+            })?;
+        Ok(Self {
+            requests: Some(requests),
+            thread: Some(thread),
+        })
+    }
+
+    fn wake(&self, token: u64, pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.requests
+            .as_ref()
+            .and_then(|requests| requests.send((token, pause)).ok())
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: "the coordinator's wait timer has stopped, so a registry access's wait \
+                          could not be timed; the access stopped rather than sleep on the \
+                          coordinator, and the command ends resumably"
+                    .to_owned(),
+            })
+    }
+
+    fn stop(&mut self) -> Option<String> {
+        self.requests = None;
+        let thread = self.thread.take()?;
+        match thread.join() {
+            Ok(0) => None,
+            Ok(unwound) => Some(format!(
+                "the coordinator's wait timer unwound inside {unwound} of its sleeps and answered \
+                 each wait all the same"
+            )),
+            Err(_) => Some("the coordinator's wait timer's thread panicked".to_owned()),
+        }
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -3363,6 +3474,7 @@ mod tests {
                 ledger: crate::util::DurabilityLedger::off(),
                 refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,
@@ -4264,6 +4376,7 @@ mod tests {
         Entered,
         Ended,
         Contended,
+        Never,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4283,6 +4396,19 @@ mod tests {
     }
 
     impl Plant {
+        fn finish_tear(&self) {
+            if self.torn == Torn::GitdirMissing {
+                self.whole();
+            }
+            crate::workspace_manager::fixture::write_file(
+                &self.admin.join("commondir"),
+                b"../..\n",
+            );
+            if self.torn == Torn::GitdirMissing {
+                crate::workspace_manager::fixture::remove_file(&self.admin.join("locked"));
+            }
+        }
+
         fn whole(&self) {
             let checkout = self.admin.join("foreign-checkout").join(".git");
             crate::workspace_manager::fixture::write_file(
@@ -4315,30 +4441,29 @@ mod tests {
                     );
                 }
             }
+            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+            if self.wakes == Wakes::Never {
+                let handle = std::thread::spawn(move || {
+                    let _ = cancelled.recv_timeout(BOUND);
+                    Ok(())
+                });
+                return Prober { cancel, handle };
+            }
             let (wakes, common) = (self.wakes, self.common.clone());
             let progress = move |runner: &RecordingRunner| match wakes {
                 Wakes::Entered => runner.ran().len(),
                 Wakes::Ended => runner.endings().len(),
                 Wakes::Contended => crate::workspace_manager::contended_attempts(&common),
+                Wakes::Never => 0,
             };
             let before = progress(&self.runner);
             let (admin, runner, finishing) =
                 (self.admin.clone(), Arc::clone(&self.runner), self.clone());
-            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
             let handle = std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + BOUND;
                 loop {
                     if progress(&runner) > before {
-                        if finishing.torn == Torn::GitdirMissing {
-                            finishing.whole();
-                        }
-                        crate::workspace_manager::fixture::write_file(
-                            &admin.join("commondir"),
-                            b"../..\n",
-                        );
-                        if finishing.torn == Torn::GitdirMissing {
-                            crate::workspace_manager::fixture::remove_file(&admin.join("locked"));
-                        }
+                        finishing.finish_tear();
                         return Ok(());
                     }
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -4510,30 +4635,39 @@ mod tests {
     }
 
     fn served_through(tag: &str, tasks: &[WideTask], at: TearAt) {
-        let mut wide = Wide::started_with(
-            tag,
-            tasks,
-            2,
-            WidePlans::default(),
-            RecordingRunner::new().answering(wide_responder(tasks, &[])),
-        );
-        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
-        let before = crate::workspace_manager::contended_attempts(&common);
-        let mut hooks = TearHeld::new(&wide, "foreign-held", at);
-        let pipelines = wide.env.pipelines();
-        let progress = wide
-            .run
-            .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
-            .expect("the access is passed once the coordinator granted a pipeline meanwhile");
-        hooks
-            .finish()
-            .expect("an invocation reached the runner while the access waited on the tear");
-        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
-        assert!(
-            crate::workspace_manager::contended_attempts(&common) > before,
-            "the access failed on the tear first"
-        );
-        assert!(wide.run.invocations_balance());
+        let (what, tag, tasks) = (tag.to_owned(), tag.to_owned(), tasks.to_vec());
+        bounded(&what, move || {
+            let mut wide = Wide::started_with(
+                &tag,
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            let pipelines = wide.env.pipelines();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
+                .expect("the access is passed once the coordinator granted a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            assert!(wide.run.invocations_balance());
+        });
     }
 
     fn attempt_started_of(key: u32) -> fn(&TopologyEventBody) -> bool {
@@ -4617,54 +4751,62 @@ mod tests {
         })
     }
 
-    fn served_while_alpha_waits(tag: &str, failing: &[(u32, u32)], at: TearAt) -> Wide {
-        served_while_alpha_waits_with(tag, failing, at, RunOutcome::Complete, |_, _| {})
+    fn served_while_alpha_waits(tag: &str, failing: &'static [(u32, u32)], at: TearAt) {
+        served_while_alpha_waits_with(tag, failing, at, RunOutcome::Complete, |_, _| {});
     }
 
     fn served_while_alpha_waits_with(
         tag: &str,
-        failing: &[(u32, u32)],
+        failing: &'static [(u32, u32)],
         at: TearAt,
         outcome: RunOutcome,
-        prepare: impl FnOnce(&Wide, &mut TearHeld),
-    ) -> Wide {
-        let tasks = two_independent();
-        let plans = WidePlans {
-            gates: 2,
-            ..WidePlans::default()
-        };
-        let mut wide = Wide::started_with(tag, &tasks, 2, plans, holding(&tasks, failing));
-        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
-        let before = crate::workspace_manager::contended_attempts(&common);
-        let mut hooks = TearHeld::new(&wide, "foreign-held", at);
-        prepare(&wide, &mut hooks);
-        let pipelines = wide.env.pipelines();
-        let runner = Arc::clone(&wide.env.runner);
-        let mut scheduler = Scheduler::scripted(
-            &runner,
-            Box::new(beta_settles_while_alpha_holds_its_first_gate),
-        );
-        let progress = wide
-            .run
-            .run_concurrently(
-                &wide.env.seams(),
-                &pipelines,
-                &mut hooks,
-                Some(&mut scheduler),
-            )
-            .expect("the access is passed once the coordinator served a pipeline meanwhile");
-        drop(scheduler);
-        hooks
-            .finish()
-            .expect("an invocation reached the runner while the access waited on the tear");
-        drop(hooks);
-        assert_eq!(outcome_of(&progress), outcome);
-        assert!(
-            crate::workspace_manager::contended_attempts(&common) > before,
-            "the access failed on the tear first"
-        );
-        assert!(wide.run.invocations_balance());
-        wide
+        prepare: impl FnOnce(&Wide, &mut TearHeld) + Send + 'static,
+    ) {
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            prepare(&wide, &mut hooks);
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(
+                &runner,
+                Box::new(beta_settles_while_alpha_holds_its_first_gate),
+            );
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), outcome);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            assert!(wide.run.invocations_balance());
+        });
     }
 
     fn candidate_prepared_of_beta(body: &TopologyEventBody) -> bool {
@@ -4791,69 +4933,82 @@ mod tests {
         torn: Torn,
         residue: bool,
     ) {
-        let tasks = two_independent();
-        let plans = WidePlans {
-            gates: 2,
-            ..WidePlans::default()
-        };
-        let mut wide = Wide::started_with(tag, &tasks, 2, plans, holding(&tasks, failing));
-        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
-        let leftover = common.join("worktrees").join("residue");
-        let mut hooks = TearHeld::new(&wide, "foreign-held", at);
-        hooks.tearing(torn);
-        if residue {
-            let slot = crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
-            wide.env
-                .fixture
-                .manager
-                .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
-                .expect("the residue's intent");
-            let checkout = wide.env.fixture.manager.slot_path(&slot).join(".git");
-            let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
-            let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
-            hooks.also = Some((
-                when,
-                Box::new(move || {
-                    crate::workspace_manager::fixture::write_file(
-                        &admin.join("HEAD"),
-                        format!("{head}\n").as_bytes(),
-                    );
-                    crate::workspace_manager::fixture::write_file(
-                        &admin.join("gitdir"),
-                        format!(
-                            "{}\n",
-                            crate::workspace_manager::fixture::as_git_writes_it(&checkout)
-                        )
-                        .as_bytes(),
-                    );
-                    crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
-                }),
-            ));
-        }
-        let planted = hooks.planted();
-        let pipelines = wide.env.pipelines();
-        let runner = Arc::clone(&wide.env.runner);
-        let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
-        let progress = wide
-            .run
-            .run_concurrently(
-                &wide.env.seams(),
-                &pipelines,
-                &mut hooks,
-                Some(&mut scheduler),
-            )
-            .expect("the access is passed once the coordinator served a pipeline meanwhile");
-        drop(scheduler);
-        hooks
-            .finish()
-            .expect("an invocation reached the runner while the access waited on the tear");
-        drop(hooks);
-        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
-        assert!(
-            !leftover.exists(),
-            "the repair removed the dead add's residue"
-        );
-        assert!(wide.run.invocations_balance());
+        let (what, tag, failing) = (tag.to_owned(), tag.to_owned(), failing.to_vec());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, &failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let leftover = common.join("worktrees").join("residue");
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            hooks.tearing(torn);
+            if residue {
+                let slot =
+                    crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
+                wide.env
+                    .fixture
+                    .manager
+                    .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+                    .expect("the residue's intent");
+                let checkout = wide.env.fixture.manager.slot_path(&slot).join(".git");
+                let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
+                let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
+                hooks.also = Some((
+                    when,
+                    Box::new(move || {
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("HEAD"),
+                            format!("{head}\n").as_bytes(),
+                        );
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("gitdir"),
+                            format!(
+                                "{}\n",
+                                crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                            )
+                            .as_bytes(),
+                        );
+                        crate::workspace_manager::fixture::write_file(
+                            &admin.join("commondir"),
+                            b"",
+                        );
+                    }),
+                ));
+            }
+            let planted = hooks.planted();
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                !leftover.exists(),
+                "the repair removed the dead add's residue"
+            );
+            assert!(wide.run.invocations_balance());
+        });
     }
 
     #[test]
@@ -4952,7 +5107,7 @@ mod tests {
             &[(0, 1)],
             TearAt::Fold(generation_closed_of_beta),
             RunOutcome::Complete,
-            |wide, hooks| {
+            move |wide, hooks| {
                 hooks.tearing(torn);
                 let slot = wide.env.fixture.manager.slot_path(
                     &crate::engine::topology::dispatch::task_slot(TaskKey(0), GenerationId(0)),
@@ -4994,7 +5149,7 @@ mod tests {
             &[(0, 1), (0, 2)],
             TearAt::Fold(closing_attempt_finished_of_beta),
             RunOutcome::Parked,
-            |_, hooks| hooks.tearing(torn),
+            move |_, hooks| hooks.tearing(torn),
         );
     }
 
@@ -5037,59 +5192,68 @@ mod tests {
         torn: Torn,
         order: fn(&Quiescent<'_>) -> Option<Release>,
     ) {
-        let tasks = [
-            WideTask::independent("beta"),
-            WideTask::independent("alpha"),
-            if conflicting {
-                WideTask::hinted("gamma", &["src/gamma/"], "src/beta/work.txt")
-            } else {
-                WideTask::independent("gamma")
-            },
-        ];
-        let mut wide =
-            Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]));
-        let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
-        let before = crate::workspace_manager::contended_attempts(&common);
-        let mut hooks = TearHeld::waking(&wide, "foreign-held", at, Wakes::Ended);
-        hooks.tearing(torn);
-        let pipelines = wide.env.pipelines();
-        let runner = Arc::clone(&wide.env.runner);
-        let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
-        let progress = wide
-            .run
-            .run_concurrently(
-                &wide.env.seams(),
-                &pipelines,
-                &mut hooks,
-                Some(&mut scheduler),
-            )
-            .expect("the access is passed once the coordinator served a pipeline meanwhile");
-        drop(scheduler);
-        hooks
-            .finish()
-            .expect("an invocation left the runner while the access waited on the tear");
-        drop(hooks);
-        assert_eq!(
-            outcome_of(&progress),
-            if conflicting {
-                RunOutcome::Parked
-            } else {
-                RunOutcome::Complete
-            },
-            "a conflict's repair leaves the scaffold's conflict unresolved and parks"
-        );
-        assert!(
-            crate::workspace_manager::contended_attempts(&common) > before,
-            "the access failed on the tear first"
-        );
-        let events = wide.env.durable_events();
-        assert_eq!(
-            count(&events, "merge_rejected"),
-            usize::from(conflicting),
-            "{:?}",
-            kinds_of(&events)
-        );
-        assert!(wide.run.invocations_balance());
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let tasks = [
+                WideTask::independent("beta"),
+                WideTask::independent("alpha"),
+                if conflicting {
+                    WideTask::hinted("gamma", &["src/gamma/"], "src/beta/work.txt")
+                } else {
+                    WideTask::independent("gamma")
+                },
+            ];
+            let mut wide =
+                Wide::started_with(&tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(&wide, "foreign-held", at, Wakes::Ended);
+            hooks.tearing(torn);
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation left the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(
+                outcome_of(&progress),
+                if conflicting {
+                    RunOutcome::Parked
+                } else {
+                    RunOutcome::Complete
+                },
+                "a conflict's repair leaves the scaffold's conflict unresolved and parks"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the access failed on the tear first"
+            );
+            let events = wide.env.durable_events();
+            assert_eq!(
+                count(&events, "merge_rejected"),
+                usize::from(conflicting),
+                "{:?}",
+                kinds_of(&events)
+            );
+            assert!(wide.run.invocations_balance());
+        });
     }
 
     fn candidate_created_of_gamma(body: &TopologyEventBody) -> bool {
@@ -5209,130 +5373,1525 @@ mod tests {
     #[test]
     fn a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration()
      {
-        let tasks = [
-            WideTask::independent("alpha"),
-            WideTask::independent("beta"),
-        ];
-        let mut wide = Wide::durable(
-            "registry-served-continued",
-            &tasks,
-            2,
-            WidePlans::default(),
-            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
-        );
-        let beta_slot =
-            wide.env
-                .fixture
-                .manager
-                .slot_path(&crate::engine::topology::dispatch::task_slot(
-                    TaskKey(1),
-                    GenerationId(0),
-                ));
-        let blocked = beta_slot.clone();
-        let mut breaking = TearHeld::new(&wide, "foreign-unused", TearAt::Fold(|_| false));
-        breaking.also = Some((
-            task_dispatched_of(1),
-            Box::new(move || {
-                crate::workspace_manager::fixture::write_file(
-                    &blocked,
-                    b"a file where beta's checkout goes\n",
-                );
-            }),
-        ));
-        let pipelines = wide.env.pipelines();
-        let error = wide
-            .run
-            .run_concurrently(&wide.env.seams(), &pipelines, &mut breaking, None)
-            .expect_err("beta's add meets a file at its destination after `task_dispatched`");
-        drop(breaking);
-        assert!(
-            matches!(&error, UpstrokeError::Git { message } if message.contains("already exists")),
-            "{error:?}"
-        );
-        crate::workspace_manager::fixture::remove_file(&beta_slot);
-        let (_, mut resumed) = wide
-            .resume(
-                "inc-2",
+        let what = "a_pipeline_is_granted_while_a_continued_dispatchs_worktree_check_waits_on_a_torn_registration";
+        bounded(what, move || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::durable(
+                "registry-served-continued",
+                &tasks,
+                2,
+                WidePlans::default(),
                 RecordingRunner::new().answering(wide_responder(&tasks, &[])),
-                crate::engine::topology::select::Ceiling::unlimited(),
-            )
-            .expect("the next process resumes with beta's generation open and no attempt");
-        let common = resumed.env.fixture.manager.common_git_dir().to_path_buf();
-        let before = crate::workspace_manager::contended_attempts(&common);
-        let mut hooks = TearHeld::new(
-            &resumed,
-            "foreign-held",
-            TearAt::Access(attempt_started_of(0), 1),
-        );
-        let pipelines = resumed.env.pipelines();
-        let progress = resumed
-            .run
-            .run_concurrently(&resumed.env.seams(), &pipelines, &mut hooks, None)
-            .expect("the continuation's access is passed once alpha was granted meanwhile");
-        hooks
-            .finish()
-            .expect("an invocation reached the runner while the continuation waited on the tear");
-        drop(hooks);
-        assert_eq!(outcome_of(&progress), RunOutcome::Complete);
-        assert!(
-            crate::workspace_manager::contended_attempts(&common) > before,
-            "the continuation's access failed on the tear first"
-        );
-        let events = resumed.env.durable_events();
-        let dispatched_beta = events
-            .iter()
-            .filter(|event| {
-                matches!(&event.body, TopologyEventBody::TaskDispatched { data } if data.key == TaskKey(1))
-            })
-            .count();
-        assert_eq!(
-            dispatched_beta,
-            1,
-            "beta's generation was continued, not dispatched again: {:?}",
-            kinds_of(&events)
-        );
-        assert!(resumed.run.invocations_balance());
+            );
+            let beta_slot =
+                wide.env
+                    .fixture
+                    .manager
+                    .slot_path(&crate::engine::topology::dispatch::task_slot(
+                        TaskKey(1),
+                        GenerationId(0),
+                    ));
+            let blocked = beta_slot.clone();
+            let mut breaking = TearHeld::new(&wide, "foreign-unused", TearAt::Fold(|_| false));
+            breaking.also = Some((
+                task_dispatched_of(1),
+                Box::new(move || {
+                    crate::workspace_manager::fixture::write_file(
+                        &blocked,
+                        b"a file where beta's checkout goes\n",
+                    );
+                }),
+            ));
+            let pipelines = wide.env.pipelines();
+            let error = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut breaking, None)
+                .expect_err("beta's add meets a file at its destination after `task_dispatched`");
+            drop(breaking);
+            assert!(
+                matches!(&error, UpstrokeError::Git { message } if message.contains("already exists")),
+                "{error:?}"
+            );
+            crate::workspace_manager::fixture::remove_file(&beta_slot);
+            let (_, mut resumed) = wide
+                .resume(
+                    "inc-2",
+                    RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                    crate::engine::topology::select::Ceiling::unlimited(),
+                )
+                .expect("the next process resumes with beta's generation open and no attempt");
+            let common = resumed.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::new(
+                &resumed,
+                "foreign-held",
+                TearAt::Access(attempt_started_of(0), 1),
+            );
+            let pipelines = resumed.env.pipelines();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = resumed
+                .run
+                .run_concurrently(&resumed.env.seams(), &pipelines, &mut hooks, None)
+                .expect("the continuation's access is passed once alpha was granted meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            hooks.finish().expect(
+                "an invocation reached the runner while the continuation waited on the tear",
+            );
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the continuation's access failed on the tear first"
+            );
+            let events = resumed.env.durable_events();
+            let dispatched_beta = events
+                .iter()
+                .filter(|event| {
+                    matches!(&event.body, TopologyEventBody::TaskDispatched { data } if data.key == TaskKey(1))
+                })
+                .count();
+            assert_eq!(
+                dispatched_beta,
+                1,
+                "beta's generation was continued, not dispatched again: {:?}",
+                kinds_of(&events)
+            );
+            assert!(resumed.run.invocations_balance());
+        });
     }
 
     #[test]
     fn the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping() {
-        let tasks = two_independent();
-        let mut narrow = Wide::started_with(
-            "registry-width-one",
-            &tasks,
-            1,
-            WidePlans::default(),
-            RecordingRunner::new().answering(wide_responder(&tasks, &[])),
-        );
-        let common = narrow.env.fixture.manager.common_git_dir().to_path_buf();
-        let before = crate::workspace_manager::contended_attempts(&common);
-        let mut hooks = TearHeld::waking(
-            &narrow,
-            "foreign-held",
-            TearAt::Fold(task_dispatched_of(1)),
-            Wakes::Contended,
-        );
-        let seams = narrow.env.seams();
-        let mut steps = 0_u32;
-        let outcome = loop {
-            steps += 1;
-            assert!(steps < 200, "the width-1 loop did not finish");
-            if let Progress::Finished { outcome, .. } =
-                narrow.run.step(&seams, &mut hooks).expect("a step")
-            {
-                break outcome;
+        let what = "the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping";
+        bounded(what, move || {
+            let tasks = two_independent();
+            let mut narrow = Wide::started_with(
+                "registry-width-one",
+                &tasks,
+                1,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let common = narrow.env.fixture.manager.common_git_dir().to_path_buf();
+            let before = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(
+                &narrow,
+                "foreign-held",
+                TearAt::Fold(task_dispatched_of(1)),
+                Wakes::Contended,
+            );
+            let seams = narrow.env.seams();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let mut steps = 0_u32;
+            let outcome = loop {
+                steps += 1;
+                assert!(steps < 200, "the width-1 loop did not finish");
+                if let Progress::Finished { outcome, .. } =
+                    narrow.run.step(&seams, &mut hooks).expect("a step")
+                {
+                    break outcome;
+                }
+            };
+            hooks
+                .finish()
+                .expect("the dispatch's access failed on the tear, and only then was it finished");
+            drop(hooks);
+            assert_eq!(outcome, RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::fixture::slept_pauses() > slept,
+                "the width-1 access waited by sleeping on its own thread"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > before,
+                "the width-1 dispatch's intent met the tear and was attempted again"
+            );
+            assert!(narrow.run.invocations_balance());
+        });
+    }
+
+    fn a_shutdown_injected_once_the_tear_stands(
+        planted: impl Fn() -> bool + 'static,
+        injected: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        finish: Option<Plant>,
+        mut order: Script<'static>,
+    ) -> Script<'static> {
+        Box::new(move |view: &Quiescent<'_>| {
+            if injected.get().is_none() && planted() {
+                injected.set(Some(view.run.events().len()));
+                assert!(view.injector.inject(ToCoordinator::Shutdown));
+                if let Some(plant) = &finish {
+                    plant.finish_tear();
+                }
+                return Some(Release::Injected);
             }
-        };
-        hooks
-            .finish()
-            .expect("the dispatch's access failed on the tear, and only then was it finished");
-        drop(hooks);
-        assert_eq!(outcome, RunOutcome::Complete);
-        assert!(
-            crate::workspace_manager::contended_attempts(&common) > before,
-            "the width-1 dispatch's intent met the tear and was attempted again"
+            order(view)
+        })
+    }
+
+    fn published_as_the_log_authorizes(wide: &Wide) {
+        let started = wide.run.fold().started().expect("a started run").clone();
+        let authorized =
+            crate::engine::topology::integrate::authorized_head(&started, wide.run.events());
+        assert_eq!(
+            wide.env
+                .fixture
+                .manager
+                .direct_ref_target(started.integration_ref.as_str())
+                .expect("the integration ref reads"),
+            Some(authorized.head.0),
+            "the integration ref is where the log authorizes it, so nothing was published after \
+             the shutdown"
         );
-        assert!(narrow.run.invocations_balance());
+    }
+
+    struct StoppedInItsWait {
+        at: TearAt,
+        torn: Torn,
+        finish_at_shutdown: bool,
+    }
+
+    fn stopped_in_its_wait(
+        tag: &str,
+        stop: StoppedInItsWait,
+        build: impl FnOnce(&str) -> Wide + Send + 'static,
+        order: impl FnOnce(&TearHeld) -> Script<'static> + Send + 'static,
+        check: impl FnOnce(&Wide, usize) + Send + 'static,
+    ) {
+        let (what, tag) = (tag.to_owned(), tag.to_owned());
+        bounded(&what, move || {
+            let mut wide = build(&tag);
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let mut hooks = TearHeld::waking(&wide, "foreign-held", stop.at, Wakes::Never);
+            hooks.tearing(stop.torn);
+            let injected = std::rc::Rc::new(std::cell::Cell::new(None));
+            let script = a_shutdown_injected_once_the_tear_stands(
+                hooks.planted(),
+                std::rc::Rc::clone(&injected),
+                stop.finish_at_shutdown.then(|| hooks.plant.clone()),
+                order(&hooks),
+            );
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, script);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let error = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect_err("a shutdown answered inside the access's wait ends the command");
+            drop(scheduler);
+            hooks.finish().expect("the tear was planted");
+            drop(hooks);
+            let at_shutdown = injected
+                .get()
+                .expect("the shutdown was injected while the tear stood");
+            let warnings = wide.run.warnings().join("\n");
+            assert!(
+                error.to_string().contains("shut"),
+                "the command ends on the shutdown: {error}"
+            );
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first, so the shutdown came inside its wait"
+            );
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            let events = wide.run.events();
+            assert_eq!(
+                events.len(),
+                at_shutdown,
+                "nothing was appended after the wait answered the shutdown: {:?}",
+                kinds_of(events.get(at_shutdown..).unwrap_or_default())
+            );
+            published_as_the_log_authorizes(&wide);
+            assert!(wide.run.invocations_balance(), "{warnings}");
+            assert!(
+                wide.run.stopped().is_none(),
+                "the run reopens when its coordinator is gone"
+            );
+            check(&wide, at_shutdown);
+        });
+    }
+
+    fn two_held(tag: &str) -> Wide {
+        let tasks = two_independent();
+        Wide::started_with(tag, &tasks, 2, WidePlans::default(), holding(&tasks, &[]))
+    }
+
+    fn two_held_gated(failing: &'static [(u32, u32)]) -> impl FnOnce(&str) -> Wide + Send {
+        move |tag| {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            Wide::started_with(tag, &tasks, 2, plans, holding(&tasks, failing))
+        }
+    }
+
+    fn first_invoking(view: &Quiescent<'_>) -> Option<Release> {
+        let mut invoking = view.invoking.clone();
+        invoking.sort();
+        invoking.first().cloned().map(Release::Invocation)
+    }
+
+    fn first_released(_: &TearHeld) -> Script<'static> {
+        Box::new(first_invoking)
+    }
+
+    fn beta_settles_first(_: &TearHeld) -> Script<'static> {
+        Box::new(beta_settles_while_alpha_holds_its_first_gate)
+    }
+
+    fn workers_of(wide: &Wide, key: u32) -> usize {
+        wide.env
+            .runner
+            .ran()
+            .iter()
+            .filter(|ran| worker(&ran.invocation) == Some(TaskKey(key)))
+            .count()
+    }
+
+    fn of_key(events: &[TopologyEvent], kind: &str, key: u32) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                event.body.kind() == kind
+                    && serde_json::to_value(&event.body)
+                        .ok()
+                        .as_ref()
+                        .and_then(key_of)
+                        == Some(u64::from(key))
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_dispatchs_head_check_dispatches_and_spawns_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-head",
+            StoppedInItsWait {
+                at: TearAt::Fold(attempt_started_of(0)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "task_dispatched", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-intent",
+            StoppedInItsWait {
+                at: TearAt::Fold(task_dispatched_of(1)),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "task_dispatched", 1),
+                    1,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the stopped dispatch"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_continued_dispatchs_wait_starts_no_attempt() {
+        stopped_in_its_wait(
+            "shutdown-wait-continued",
+            StoppedInItsWait {
+                at: TearAt::Access(attempt_started_of(0), 1),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("alpha"),
+                    WideTask::independent("beta"),
+                ];
+                let mut wide = Wide::durable(
+                    tag,
+                    &tasks,
+                    2,
+                    WidePlans::default(),
+                    RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+                );
+                let beta_slot = wide.env.fixture.manager.slot_path(
+                    &crate::engine::topology::dispatch::task_slot(TaskKey(1), GenerationId(0)),
+                );
+                let blocked = beta_slot.clone();
+                let mut breaking = TearHeld::new(&wide, "foreign-unused", TearAt::Fold(|_| false));
+                breaking.also = Some((
+                    task_dispatched_of(1),
+                    Box::new(move || {
+                        crate::workspace_manager::fixture::write_file(
+                            &blocked,
+                            b"a file where beta's checkout goes\n",
+                        );
+                    }),
+                ));
+                let pipelines = wide.env.pipelines();
+                let error = wide
+                    .run
+                    .run_concurrently(&wide.env.seams(), &pipelines, &mut breaking, None)
+                    .expect_err(
+                        "beta's add meets a file at its destination after `task_dispatched`",
+                    );
+                drop(breaking);
+                assert!(
+                    matches!(&error, UpstrokeError::Git { message } if message.contains("already exists")),
+                    "{error:?}"
+                );
+                crate::workspace_manager::fixture::remove_file(&beta_slot);
+                let (_, resumed) = wide
+                    .resume(
+                        "inc-2",
+                        holding(&tasks, &[]),
+                        crate::engine::topology::select::Ceiling::unlimited(),
+                    )
+                    .expect("the next process resumes with beta's generation open and no attempt");
+                resumed
+            },
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 1),
+                    0,
+                    "the continuation started no attempt: {:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    workers_of(wide, 1),
+                    0,
+                    "no pipeline was spawned for the continuation"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_retrys_wait_starts_no_retry() {
+        stopped_in_its_wait(
+            "shutdown-wait-retry",
+            StoppedInItsWait {
+                at: TearAt::Fold(retained_attempt_finished_of_beta),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[(0, 1)]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 0),
+                    1,
+                    "beta's retry was not started: {:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_settlements_wait_promotes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-settle",
+            StoppedInItsWait {
+                at: TearAt::Access(attempt_started_of(1), 1),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "candidate_prepared", 0),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(
+                    of_key(events, "attempt_finished", 0),
+                    0,
+                    "{:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_verifications_wait_starts_no_retry() {
+        stopped_in_its_wait(
+            "shutdown-wait-verify",
+            StoppedInItsWait {
+                at: TearAt::Access(retained_attempt_finished_of_beta, 2),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[(0, 1)]),
+            |hooks| alpha_waits_for_the_tear(hooks.planted()),
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    of_key(events, "attempt_started", 0),
+                    1,
+                    "the verified retry was not started: {:?}",
+                    kinds_of(events)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_repairs_wait_starts_no_repair_attempt() {
+        stopped_in_its_wait(
+            "shutdown-wait-repair",
+            StoppedInItsWait {
+                at: TearAt::Access(repair_dispatched, 4),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("beta"),
+                    WideTask::independent("alpha"),
+                    WideTask::hinted("gamma", &["src/gamma/"], "src/beta/work.txt"),
+                ];
+                Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]))
+            },
+            |_| Box::new(alpha_waits_for_gammas_integration),
+            |wide, _| {
+                let events = wide.run.events();
+                let repairs: Vec<u32> = events
+                    .iter()
+                    .filter_map(|event| match &event.body {
+                        TopologyEventBody::TaskDispatched { data }
+                            if data.source_candidate.is_some() =>
+                        {
+                            Some(data.key.0)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(repairs.len(), 1, "{:?}", kinds_of(events));
+                for key in repairs {
+                    assert_eq!(
+                        of_key(events, "attempt_started", key),
+                        0,
+                        "the repair started no attempt: {:?}",
+                        kinds_of(events)
+                    );
+                    assert_eq!(workers_of(wide, key), 0);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_an_integrations_decision_prepares_and_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-decide",
+            StoppedInItsWait {
+                at: TearAt::Access(candidate_created_of_beta, 3),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 0, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_publications_wait_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-publish",
+            StoppedInItsWait {
+                at: TearAt::Fold(merge_prepared_of_beta),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 1, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {
+        stopped_in_its_wait(
+            "shutdown-wait-pick",
+            StoppedInItsWait {
+                at: TearAt::Access(candidate_created_of_gamma, 7),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            |tag| {
+                let tasks = [
+                    WideTask::independent("beta"),
+                    WideTask::independent("alpha"),
+                    WideTask::independent("gamma"),
+                ];
+                Wide::started_with(tag, &tasks, 3, WidePlans::default(), holding(&tasks, &[]))
+            },
+            |_| Box::new(alpha_waits_for_gammas_integration),
+            |wide, at_shutdown| {
+                let events = wide.run.events();
+                let after = events.get(at_shutdown..).unwrap_or_default();
+                assert_eq!(count(after, "merge_verification_started"), 0);
+                assert_eq!(count(after, "merge_rejected"), 0);
+            },
+        );
+    }
+
+    fn run_finished(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::RunFinished { .. })
+    }
+
+    fn attempt_interrupted(body: &TopologyEventBody) -> bool {
+        matches!(body, TopologyEventBody::AttemptInterrupted { .. })
+    }
+
+    fn gamma_halts_while_alpha_gates(view: &Quiescent<'_>) -> Option<Release> {
+        let alpha_gating = view.invoking.iter().any(|invocation| {
+            attempt_key(invocation) == Some(0)
+                && matches!(role_of(invocation), Some(AttemptRole::Gate(_)))
+        });
+        if alpha_gating {
+            released(view, |invocation| worker(invocation) == Some(TaskKey(2)))
+        } else {
+            released(view, |invocation| worker(invocation) == Some(TaskKey(0)))
+        }
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_closures_wait_closes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-closure",
+            StoppedInItsWait {
+                at: TearAt::Fold(attempt_interrupted),
+                torn: Torn::GitdirMissing,
+                finish_at_shutdown: true,
+            },
+            halting_on_gamma,
+            |_| Box::new(gamma_halts_while_alpha_gates),
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(
+                    count(events, "attempt_interrupted"),
+                    1,
+                    "{:?}",
+                    kinds_of(events)
+                );
+                assert_eq!(count(events, "run_finished"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_finalizations_wait_finalizes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-finalize",
+            StoppedInItsWait {
+                at: TearAt::Fold(run_finished),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the finalization stopped before it removed the execution root"
+                );
+            },
+        );
+    }
+
+    fn coordinator_of<'s>(
+        run: &'s mut TopologyRun,
+        seams: &'s RunSeams<'s>,
+        hooks: &'s mut dyn TopologyHooks,
+        pipelines: &'s PipelineSeams,
+        live: BTreeMap<PipelineId, Live>,
+    ) -> Coordinator<'s> {
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (injector, injected) = mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("a runtime");
+        Coordinator {
+            run,
+            seams,
+            hooks,
+            pipelines,
+            observer: None,
+            leases: Vec::new(),
+            live,
+            replies: BTreeMap::new(),
+            gate: SnapshotGate::default(),
+            next: 1,
+            in_verify: None,
+            arrived: None,
+            abandoned: None,
+            interrupt: None,
+            cancelled_work: closure::Cancelled::none(),
+            unresolved: Vec::new(),
+            buffer: Vec::new(),
+            arrivals: 0,
+            deferred: VecDeque::new(),
+            wakes: 0,
+            ledger: crate::util::DurabilityLedger::off(),
+            refusal: None,
+            handles: Vec::new(),
+            timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
+            inbox,
+            outbox,
+            injected,
+            injector: Injector(injector),
+            runtime,
+        }
+    }
+
+    fn plant_commondir_empty(wide: &Wide, name: &str) -> PathBuf {
+        let admin = wide
+            .env
+            .fixture
+            .manager
+            .common_git_dir()
+            .join("worktrees")
+            .join(name);
+        crate::workspace_manager::fixture::write_file(
+            &admin.join("HEAD"),
+            format!("{}\n", wide.env.fixture.head).as_bytes(),
+        );
+        crate::workspace_manager::fixture::write_file(
+            &admin.join("gitdir"),
+            format!(
+                "{}\n",
+                crate::workspace_manager::fixture::as_git_writes_it(&admin.join("checkout/.git"))
+            )
+            .as_bytes(),
+        );
+        crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
+        admin
+    }
+
+    #[test]
+    fn a_shutdown_answered_during_a_registry_pause_dispatches_nothing_and_appends_nothing() {
+        bounded("the review's dispatch witness", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::started_with(
+                "shutdown-in-pause-dispatch",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let alpha = crate::engine::topology::run::begin_dispatch(
+                &mut crate::engine::topology::run::Stepping {
+                    run: &mut wide.run,
+                    seams: &seams,
+                    hooks: &mut hooks,
+                },
+                seams.manager,
+                TaskKey(0),
+                GenerationId(0),
+                false,
+            )
+            .expect("alpha starts first");
+            let cancel = Cancellation::new();
+            let watched = cancel.clone();
+            let live = BTreeMap::from([(
+                PipelineId(1),
+                Live {
+                    identity: attempt_identity(0),
+                    cancel,
+                    cancelled: false,
+                    busy: Busy::Running,
+                    running: None,
+                    job: Some(alpha),
+                },
+            )]);
+            let pipelines = wide.env.pipelines();
+            let admin = plant_commondir_empty(&wide, "shutdown-held");
+            let repair = std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !watched.is_cancelled() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let seen = watched.is_cancelled();
+                crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"../..\n");
+                seen
+            });
+            let before = wide.run.events().len();
+            let (was_shutdown, result) = {
+                let mut coordinator =
+                    coordinator_of(&mut wide.run, &seams, &mut hooks, &pipelines, live);
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let result = crate::engine::topology::run::begin_dispatch(
+                    &mut coordinator,
+                    seams.manager,
+                    TaskKey(1),
+                    GenerationId(0),
+                    false,
+                );
+                (
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                    result,
+                )
+            };
+            assert!(
+                repair.join().expect("the owned repair thread finishes"),
+                "the coordinator processed the shutdown inside the registry pause"
+            );
+            let appended = kinds_of(&wide.run.events()[before..]);
+            assert!(was_shutdown, "the shutdown was handled mid-pause");
+            assert!(
+                result.is_err() && appended.is_empty(),
+                "a handled shutdown must not dispatch beta or append: {appended:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {
+        bounded("the admission's dispatch", || {
+            let tasks = [
+                WideTask::independent("alpha"),
+                WideTask::independent("beta"),
+            ];
+            let mut wide = Wide::started_with(
+                "shutdown-in-pause-admission",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            plant_commondir_empty(&wide, "admission-held");
+            let before = wide.run.events().len();
+            let (shutdown, spawned, admitted) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let admitted = coordinator.admit();
+                (
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                    (coordinator.live.len(), coordinator.handles.len()),
+                    admitted,
+                )
+            };
+            assert!(shutdown, "the admission's wait answered the shutdown");
+            assert_eq!(
+                spawned,
+                (0, 0),
+                "no pipeline was spawned after the shutdown"
+            );
+            let error = admitted.expect_err("the stopped dispatch ends the admission pass");
+            assert!(error.to_string().contains("met a shutdown"), "{error}");
+            assert!(
+                wide.run.events()[before..].is_empty(),
+                "{:?}",
+                kinds_of(&wide.run.events()[before..])
+            );
+            assert!(
+                wide.env.runner.ran().is_empty(),
+                "no worker reached the runner"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate() {
+        bounded("the review's integration witness", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "shutdown-in-wait-integration",
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let progress = wide
+                .run
+                .step(&seams, &mut hooks)
+                .expect("prepare one candidate");
+            assert!(
+                matches!(progress, Progress::Settled { accepted: true, .. }),
+                "{progress:?}"
+            );
+            let Admitted::Integrate { candidate } =
+                wide.run.admitted().expect("select a candidate")
+            else {
+                panic!("expected an integration");
+            };
+            let before = wide.run.events().len();
+            let plant = Plant {
+                admin: seams
+                    .manager
+                    .common_git_dir()
+                    .join("worktrees")
+                    .join("review-shutdown-tear"),
+                head: wide.env.fixture.head.clone(),
+                runner: Arc::clone(&wide.env.runner),
+                wakes: Wakes::Contended,
+                common: seams.manager.common_git_dir().to_path_buf(),
+                torn: Torn::CommondirEmpty,
+            };
+            let prober = plant.tear();
+            let pipelines = wide.env.pipelines();
+            let (result, shutdown) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("queue the shutdown before the registry wait");
+                let result = coordinator.integrate(*candidate);
+                (
+                    result,
+                    matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                )
+            };
+            let _ = prober.cancel.send(());
+            prober
+                .handle
+                .join()
+                .expect("the prober joined")
+                .expect("the access reached contention");
+            assert!(shutdown, "the shutdown was consumed in the wait");
+            let appended = &wide.run.events()[before..];
+            assert!(
+                appended.is_empty(),
+                "result={result:?}; events appended after the wait consumed Shutdown: {:?}",
+                kinds_of(appended)
+            );
+            assert!(
+                matches!(result, Ok(false)),
+                "the interrupted integration ends the admission pass: {result:?}"
+            );
+            published_as_the_log_authorizes(&wide);
+        });
+    }
+
+    #[test]
+    fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {
+        bounded("a dispatch after a stopped wait", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "stopped-then-dispatch",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let before = wide.run.events().len();
+            let (stopped, dispatched) = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                );
+                let dispatched = crate::engine::topology::run::begin_dispatch(
+                    &mut coordinator,
+                    seams.manager,
+                    TaskKey(0),
+                    GenerationId(0),
+                    false,
+                );
+                (stopped, dispatched)
+            };
+            let stopped = stopped.expect_err("a wait that answered a shutdown ends in an error");
+            assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+            let refused = dispatched.expect_err("the stopped run appends nothing for a dispatch");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("nothing further is appended in this process"),
+                "the run's emitter refused the dispatch's first append: {refused}"
+            );
+            assert!(
+                wide.run.events()[before..].is_empty(),
+                "{:?}",
+                kinds_of(&wide.run.events()[before..])
+            );
+            assert!(wide.run.stopped().is_some());
+            wide.run.reopen();
+        });
+    }
+
+    #[test]
+    fn a_publication_begun_after_a_wait_answered_a_shutdown_moves_no_ref() {
+        bounded("a publication after a stopped wait", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "stopped-then-publish",
+                &tasks,
+                2,
+                WidePlans::default(),
+                RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            wide.run
+                .step(&seams, &mut hooks)
+                .expect("prepare one candidate");
+            let Admitted::Integrate { candidate } =
+                wide.run.admitted().expect("select a candidate")
+            else {
+                panic!("expected an integration");
+            };
+            let request = wide
+                .run
+                .integration_request(&candidate)
+                .expect("an integration request");
+            let authorized = crate::engine::topology::integrate::Authorized {
+                sequence: request.sequence,
+                key: candidate.key,
+                expected_head: request.authorized.head.clone(),
+                proposed_sha: candidate.commit_sha.clone(),
+                satisfies: request.satisfies.clone(),
+                lease_release: request.lease_release.clone(),
+                integration_ref: request.integration_ref.clone(),
+                pin: None,
+                staging: None,
+            };
+            let before = wide.run.events().len();
+            let pipelines = wide.env.pipelines();
+            let published = {
+                let mut coordinator = coordinator_of(
+                    &mut wide.run,
+                    &seams,
+                    &mut hooks,
+                    &pipelines,
+                    BTreeMap::new(),
+                );
+                coordinator
+                    .outbox
+                    .send(ToCoordinator::Shutdown)
+                    .expect("shutdown reaches inbox");
+                let _ = crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                );
+                crate::engine::topology::integrate::publish(
+                    &mut DrivenJournal(&mut coordinator),
+                    seams.manager,
+                    authorized,
+                )
+            };
+            let refused = published.expect_err("the stopped run publishes nothing");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("nothing further is done in this process"),
+                "the compare-and-swap was refused at its `before` hook: {refused}"
+            );
+            assert!(wide.run.events()[before..].is_empty());
+            published_as_the_log_authorizes(&wide);
+            wide.run.reopen();
+        });
+    }
+
+    struct CountsRawPauses {
+        inner: crate::engine::topology::seams::HarnessTopologyHooks,
+        ledger: crate::util::DurabilityLedger,
+        poisoned_cause: Option<String>,
+        raw: usize,
+    }
+
+    impl CountsRawPauses {
+        fn over(wide: &Wide) -> Self {
+            let mut inner = wide.env.hooks();
+            let ledger = inner.effects().durability_ledger();
+            Self {
+                inner,
+                ledger,
+                poisoned_cause: None,
+                raw: 0,
+            }
+        }
+    }
+
+    impl crate::workspace_manager::EffectHooks for CountsRawPauses {
+        fn phase(
+            &mut self,
+            site: crate::topology::effects::EffectSiteId,
+            phase: crate::topology::effects::HookPhase,
+        ) -> crate::topology::effects::Injection {
+            let effects = self.inner.effects();
+            let answer = effects.phase(site, phase);
+            self.poisoned_cause = effects.refusal_cause();
+            answer
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            self.poisoned_cause.clone()
+        }
+
+        fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+            self.ledger.clone()
+        }
+
+        fn registry_pause(&mut self, pause: Duration) -> Result<(), UpstrokeError> {
+            self.raw += 1;
+            self.inner.effects().registry_pause(pause)
+        }
+    }
+
+    struct RawPausesUnder {
+        counting: CountsRawPauses,
+        tear: TearHeld,
+    }
+
+    impl TopologyHooks for RawPausesUnder {
+        fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+            &mut self.counting
+        }
+
+        fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+            self.tear.rundir()
+        }
+
+        fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+            self.tear.events()
+        }
+
+        fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+            self.tear.container()
+        }
+
+        fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+            TopologyHooks::spawn(&mut self.tear)
+        }
+
+        fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+            self.tear.folded(fold, events);
+        }
+    }
+
+    fn waits_through_the_coordinator(
+        what: &'static str,
+        build: impl FnOnce() -> Wide + Send + 'static,
+        at: TearAt,
+        torn: Torn,
+        order: fn(&Quiescent<'_>) -> Option<Release>,
+        outcome: RunOutcome,
+    ) {
+        bounded(what, move || {
+            let mut wide = build();
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let mut tear = TearHeld::waking(&wide, "foreign-held", at, Wakes::Contended);
+            tear.tearing(torn);
+            let mut hooks = RawPausesUnder {
+                counting: CountsRawPauses::over(&wide),
+                tear,
+            };
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, Box::new(order));
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once its tear is finished");
+            drop(scheduler);
+            hooks
+                .tear
+                .finish()
+                .expect("the access failed on the tear, and only then was it finished");
+            assert_eq!(outcome_of(&progress), outcome);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first"
+            );
+            assert_eq!(
+                hooks.counting.raw, 0,
+                "the coordinator's caller's raw pause was never used: every wait went through \
+                 the coordinator"
+            );
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+        });
+    }
+
+    #[test]
+    fn a_finalizations_registry_wait_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a finalization meeting a tear",
+            || two_held("waits-finalization"),
+            TearAt::Fold(run_finished),
+            Torn::CommondirEmpty,
+            first_invoking,
+            RunOutcome::Complete,
+        );
+    }
+
+    #[test]
+    fn a_closures_registry_wait_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a halt's closure meeting a tear",
+            || halting_on_gamma("waits-closure"),
+            TearAt::Fold(attempt_interrupted),
+            Torn::GitdirMissing,
+            gamma_halts_while_alpha_gates,
+            RunOutcome::Halted,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wait_answers_a_queued_shutdown_when_no_thread_can_be_started() {
+        bounded("a wait under thread exhaustion", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "wait-thread-exhaustion",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .outbox
+                .send(ToCoordinator::Shutdown)
+                .expect("shutdown is queued");
+            crate::workspace_manager::fixture::refuse_syscall_on_this_thread(
+                libc::SYS_clone3,
+                libc::EAGAIN,
+            );
+            let refused = std::thread::Builder::new()
+                .spawn(|| ())
+                .map(|thread| thread.join().is_ok())
+                .expect_err("no thread can be started on this thread any more");
+            assert_eq!(refused.raw_os_error(), Some(libc::EAGAIN), "{refused}");
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_millis(30),
+            );
+            assert!(
+                matches!(coordinator.interrupt, Some(Interrupt::Shutdown)),
+                "the wait answered the queued shutdown"
+            );
+            assert_eq!(coordinator.inbox.len(), 0, "nothing was left unanswered");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "the coordinator never slept for the wait"
+            );
+            assert!(
+                stopped
+                    .expect_err("the wait that answered a shutdown ends in an error")
+                    .to_string()
+                    .contains("met a shutdown")
+            );
+            assert!(
+                !coordinator
+                    .run
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("slept")),
+                "{:?}",
+                coordinator.run.warnings()
+            );
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_coordinator_whose_timer_cannot_start_refuses_before_it_appends_anything() {
+        bounded("a coordinator under thread exhaustion", || {
+            let tasks = two_independent();
+            let mut wide = Wide::started_with(
+                "timer-thread-exhaustion",
+                &tasks,
+                2,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let pipelines = wide.env.pipelines();
+            let before = wide.run.events().len();
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            crate::workspace_manager::fixture::refuse_syscall_on_this_thread(
+                libc::SYS_clone3,
+                libc::EAGAIN,
+            );
+            let error = wide
+                .run
+                .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
+                .expect_err("a coordinator that cannot start its timer refuses");
+            assert!(
+                matches!(&error, UpstrokeError::Refused { message }
+                    if message.contains("wait timer could not be started")
+                        && message.contains("nothing was spawned or appended")),
+                "{error:?}"
+            );
+            assert_eq!(wide.run.events().len(), before, "nothing was appended");
+            assert!(wide.env.runner.ran().is_empty(), "nothing was spawned");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "nothing slept"
+            );
+        });
+    }
+
+    fn unwinding_sleep(_: Duration) {
+        panic!("the timer's sleep unwinds, as a timer thread that dies would");
+    }
+
+    #[test]
+    fn a_wait_whose_timer_unwinds_is_still_woken_and_the_timer_serves_the_next() {
+        bounded("a wait whose timer unwinds", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "timer-unwinds",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator.timer = Timer::starting(coordinator.outbox.clone(), unwinding_sleep)
+                .expect("the wait timer starts");
+            for wait in 1..=2 {
+                crate::workspace_manager::EffectHooks::registry_pause(
+                    &mut coordinator,
+                    Duration::from_millis(5),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("wait {wait} was answered by its wake and nothing else: {error}")
+                });
+            }
+            assert!(coordinator.interrupt.is_none());
+            coordinator.join();
+            assert!(
+                coordinator
+                    .run
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains("unwound inside 2 of its sleeps")),
+                "{:?}",
+                coordinator.run.warnings()
+            );
+        });
+    }
+
+    #[test]
+    fn a_wait_that_begins_after_a_shutdown_does_not_wait() {
+        bounded("a wait after a shutdown", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "wait-after-shutdown",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            coordinator
+                .handle(Origin::Pipeline, ToCoordinator::Shutdown)
+                .expect("the shutdown is applied");
+            let started = std::time::Instant::now();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_secs(60),
+            )
+            .expect_err("a wait that begins after a shutdown stops at once");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the wait did not wait out its length"
+            );
+            assert!(stopped.to_string().contains("met a shutdown"), "{stopped}");
+            assert_eq!(coordinator.wakes, 0, "no wake was asked for");
+        });
+    }
+
+    #[test]
+    fn a_wait_after_its_timer_has_stopped_refuses_at_once_and_never_sleeps() {
+        bounded("a wait with no timer", || {
+            let tasks = [WideTask::independent("alpha")];
+            let mut wide = Wide::started_with(
+                "timer-stopped",
+                &tasks,
+                1,
+                WidePlans::default(),
+                holding(&tasks, &[]),
+            );
+            let mut hooks = wide.env.hooks();
+            let seams = wide.env.seams();
+            let pipelines = wide.env.pipelines();
+            let mut coordinator = coordinator_of(
+                &mut wide.run,
+                &seams,
+                &mut hooks,
+                &pipelines,
+                BTreeMap::new(),
+            );
+            assert_eq!(coordinator.timer.stop(), None);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let started = std::time::Instant::now();
+            let stopped = crate::workspace_manager::EffectHooks::registry_pause(
+                &mut coordinator,
+                Duration::from_secs(60),
+            )
+            .expect_err("a wait that cannot be timed refuses");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the wait did not wait out its length"
+            );
+            assert_eq!(crate::workspace_manager::fixture::slept_pauses(), slept);
+            assert!(
+                matches!(&coordinator.interrupt, Some(Interrupt::Failed(UpstrokeError::Refused { message }))
+                    if message.contains("wait timer has stopped")),
+                "the command ends on the typed refusal"
+            );
+            assert!(
+                stopped
+                    .to_string()
+                    .contains("an error that ends the command"),
+                "{stopped}"
+            );
+        });
     }
 
     #[cfg(unix)]
@@ -8836,7 +10395,7 @@ mod tests {
         replay_equals_live(&wide);
     }
 
-    fn bounded(what: &'static str, body: impl FnOnce() + Send + 'static) {
+    fn bounded(what: &str, body: impl FnOnce() + Send + 'static) {
         let name = std::thread::current()
             .name()
             .unwrap_or("coordinator-bounded")
@@ -9482,6 +11041,7 @@ mod tests {
                 ledger: crate::util::DurabilityLedger::off(),
                 refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,
@@ -9847,6 +11407,7 @@ mod tests {
                 ledger: crate::util::DurabilityLedger::off(),
                 refusal: None,
                 handles: Vec::new(),
+                timer: Timer::start(outbox.clone()).expect("the wait timer starts"),
                 inbox,
                 outbox,
                 injected,

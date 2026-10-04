@@ -7382,11 +7382,11 @@ impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
         None
     }
 
-    fn registry_pause(&mut self, _pause: std::time::Duration) {
+    fn registry_pause(&mut self, _pause: std::time::Duration) -> Result<(), UpstrokeError> {
         self.pauses += 1;
         match fs::remove_file(&self.link) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => panic!(
                 "end the sibling's removal at {}: {error}",
                 self.link.display()
@@ -15169,7 +15169,7 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || {
             asked += 1;
             Again::Return
@@ -15202,7 +15202,7 @@ fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15248,7 +15248,7 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15279,7 +15279,7 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Undecidable {
             why: "the destination now holds a file".to_owned(),
         },
@@ -15317,7 +15317,7 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15351,7 +15351,7 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || answers.next().unwrap_or(Again::Return),
         &mut || {
             made += 1;
@@ -15378,7 +15378,7 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
-        &mut std::thread::sleep,
+        &mut crate::workspace_manager::sleep_for,
         &mut || {
             std::thread::sleep(blocked);
             Again::Attempt
@@ -15439,7 +15439,7 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
         let result = tolerant_registry_access(
             &key,
             hold,
-            &mut std::thread::sleep,
+            &mut crate::workspace_manager::sleep_for,
             &mut || Again::Attempt,
             &mut || {
                 made += 1;
@@ -17187,82 +17187,6 @@ fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry
 // The bounded `LinkedChild` (PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE)
 // ---------------------------------------------------------------------------
 
-/// Refuse the syscall `number` for this thread and every process it forks,
-/// answering `errno` instead: four seccomp instructions, installed the way
-/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
-/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
-/// an isolated child's thread alone.
-#[cfg(target_os = "linux")]
-fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
-    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
-        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
-        jt,
-        jf,
-        k,
-    };
-    let word = |value: libc::c_long| {
-        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
-    };
-    let mut program = [
-        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
-        instruction(
-            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
-            0,
-            1,
-            word(number),
-        ),
-        instruction(
-            libc::BPF_RET | libc::BPF_K,
-            0,
-            0,
-            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
-        ),
-        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
-    ];
-    let filter = libc::sock_fprog {
-        len: u16::try_from(program.len()).expect("the program fits the count"),
-        filter: program.as_mut_ptr(),
-    };
-    // SAFETY: `prctl` takes its five arguments by value and reads through no
-    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
-    // remaining four are 1, 0, 0 and 0.
-    let allowed = unsafe {
-        libc::syscall(
-            libc::SYS_prctl,
-            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
-            1_i64,
-            0_i64,
-            0_i64,
-            0_i64,
-        )
-    };
-    assert_eq!(
-        allowed,
-        0,
-        "PR_SET_NO_NEW_PRIVS: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
-    // argument and the instructions behind that program's own pointer; both
-    // live for the call and the kernel copies them.
-    let installed = unsafe {
-        libc::syscall(
-            libc::SYS_prctl,
-            libc::c_long::from(libc::PR_SET_SECCOMP),
-            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
-            std::ptr::from_ref(&filter),
-            0_i64,
-            0_i64,
-        )
-    };
-    assert_eq!(
-        installed,
-        0,
-        "PR_SET_SECCOMP: {}",
-        std::io::Error::last_os_error()
-    );
-}
-
 /// The linked child the next test's kill cannot end: it ignores its link
 /// closing, as a child busy elsewhere does, and ends when its parent does, or
 /// after a minute.
@@ -17297,7 +17221,7 @@ fn linked_child_whose_kill_is_refused_child() {
         &stderr,
     );
     line_from(&lines, "B329_WAITING", &stderr);
-    refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+    super::fixture::refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
     let panic_text = |panic: Box<dyn std::any::Any + Send>| {
         panic
             .downcast_ref::<String>()

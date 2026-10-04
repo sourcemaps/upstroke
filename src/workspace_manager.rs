@@ -1693,48 +1693,73 @@ fn note_access_start(_common_git_dir: &Path) {}
 
 /// Run `attempt` under R-X as `hold` says, waiting for R-X by a `try_read` or
 /// `try_write` loop that waits outside it through `pause_for` and gives up at
-/// `deadline`. `None` when R-X stayed held elsewhere in this process until
-/// then, and then no attempt ran. R-X is released when the attempt returns.
+/// `deadline`. `Ok(None)` when R-X stayed held elsewhere in this process until
+/// then, and then no attempt ran; the error of a wait that `pause_for` ended
+/// (the topology coordinator's, once its command is ending), and then no
+/// attempt ran either. R-X is released when the attempt returns.
 fn with_registry<T>(
     common_git_dir: &Path,
     hold: RegistryHold,
     deadline: std::time::Instant,
-    pause_for: &mut dyn FnMut(std::time::Duration),
+    pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
-) -> Option<Result<T, UpstrokeError>> {
+) -> Result<Option<Result<T, UpstrokeError>>, UpstrokeError> {
     if hold == RegistryHold::Unheld {
-        return Some(attempt());
+        return Ok(Some(attempt()));
     }
     let registry = registry_lock_of(common_git_dir);
     let mut pause = std::time::Duration::from_millis(1);
     loop {
         match hold {
-            RegistryHold::Unheld => return Some(attempt()),
+            RegistryHold::Unheld => return Ok(Some(attempt())),
             RegistryHold::Shared => match registry.try_read() {
-                Ok(_held) => return Some(attempt()),
+                Ok(_held) => return Ok(Some(attempt())),
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                     let _held = poisoned.into_inner();
-                    return Some(attempt());
+                    return Ok(Some(attempt()));
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {}
             },
             RegistryHold::Exclusive => match registry.try_write() {
-                Ok(_held) => return Some(attempt()),
+                Ok(_held) => return Ok(Some(attempt())),
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                     let _held = poisoned.into_inner();
-                    return Some(attempt());
+                    return Ok(Some(attempt()));
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {}
             },
         }
         let now = std::time::Instant::now();
         if now >= deadline {
-            return None;
+            return Ok(None);
         }
-        pause_for(pause.min(deadline.saturating_duration_since(now)));
+        pause_for(pause.min(deadline.saturating_duration_since(now)))?;
         pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
     }
 }
+
+/// One wait of a registry access, slept on the calling thread: what
+/// [`EffectHooks::registry_pause`] does by default, and what an access made
+/// with no hooks waits by. A `pause_for`'s `Result` carries a wait that a
+/// caller's own pause ends early (the topology coordinator's, once its command
+/// is ending); a sleep never ends early, so this is always `Ok`.
+///
+/// # Errors
+///
+/// None.
+fn sleep_for(pause: std::time::Duration) -> Result<(), UpstrokeError> {
+    note_slept_pause();
+    std::thread::sleep(pause);
+    Ok(())
+}
+
+/// Record that a wait of a registry access slept on this thread, so that a
+/// test can tell a topology coordinator whose waits answered its messages from
+/// one that slept on its own thread (the record's §9.16, I2-2). A no-op in a
+/// production build; the `#[cfg(test)]` twin sits beside [`note_contended`]'s.
+#[cfg(not(test))]
+#[inline]
+fn note_slept_pause() {}
 
 /// Run one registry access as a series of attempts: the tolerant registry
 /// access (the working record `reviews/2026-10-01-pr11-follow-up-b-record.md`,
@@ -1776,6 +1801,12 @@ fn with_registry<T>(
 /// length, by the time the coordinator takes to answer a message; the
 /// deadline and every check against it are unchanged.
 ///
+/// **A wait that ends the access.** A `pause_for` that returns an error ends
+/// the access at once with that error: no attempt follows it. A sleep never
+/// does. The topology coordinator's does once a message it answered during the
+/// wait has ended its command — a shutdown, or an error that ends it — so the
+/// transition waiting on the access stops there (the record's §9.16, I2-1).
+///
 /// **The bound, end to end.** One deadline, [`REGISTRY_ACCESS_DEADLINE`] after
 /// the call begins. Every wait for R-X and every backoff sleep ends by it, and
 /// no attempt starts after it but the final one, which starts at it. Nothing
@@ -1785,10 +1816,11 @@ fn with_registry<T>(
 /// veto after it, and bounds neither.
 ///
 /// **What it returns:** `Ok` from the first successful attempt; the failed
-/// attempt's own error, unchanged, when `again` answers `Return`; otherwise
-/// [`UpstrokeError::RegistryRefused`], whose message names the store, the
-/// deadline, the attempt count, the last failure's text and, for a veto that
-/// could not decide, why — resumable, and never `UpstrokeError::Git`.
+/// attempt's own error, unchanged, when `again` answers `Return`; the error of
+/// a wait `pause_for` ended; otherwise [`UpstrokeError::RegistryRefused`],
+/// whose message names the store, the deadline, the attempt count, the last
+/// failure's text and, for a veto that could not decide, why — resumable, and
+/// never `UpstrokeError::Git`.
 ///
 /// `common_git_dir` is the canonical common git directory, as
 /// [`WorkspaceManager::common_git_dir`] holds it: R-X's key, and the store a
@@ -1797,12 +1829,12 @@ fn with_registry<T>(
 ///
 /// # Errors
 ///
-/// The attempt's own error when `again` answers `Return`, and
-/// [`UpstrokeError::RegistryRefused`] as above.
+/// The attempt's own error when `again` answers `Return`, the error of a wait
+/// `pause_for` ended, and [`UpstrokeError::RegistryRefused`] as above.
 pub(crate) fn tolerant_registry_access<T>(
     common_git_dir: &Path,
     hold: RegistryHold,
-    pause_for: &mut dyn FnMut(std::time::Duration),
+    pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     again: &mut dyn FnMut() -> Again,
     attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
 ) -> Result<T, UpstrokeError> {
@@ -1819,7 +1851,8 @@ pub(crate) fn tolerant_registry_access<T>(
             deadline,
             &mut *pause_for,
             &mut *attempt,
-        ) else {
+        )?
+        else {
             return Err(registry_lock_refusal(&store, hold, attempts, last.as_ref()));
         };
         attempts = attempts.saturating_add(1);
@@ -1853,7 +1886,7 @@ pub(crate) fn tolerant_registry_access<T>(
                 ),
             });
         }
-        pause_for(pause.min(deadline.saturating_duration_since(now)));
+        pause_for(pause.min(deadline.saturating_duration_since(now)))?;
         pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
         last = Some(failure);
     }
@@ -2159,7 +2192,7 @@ impl WorkspaceManager {
     /// [`UpstrokeError::RegistryRefused`] when the list, or a path it names,
     /// could not be read by the access's deadline.
     pub fn revalidate(&self) -> Result<(), UpstrokeError> {
-        self.revalidate_with(&mut std::thread::sleep)
+        self.revalidate_with(&mut sleep_for)
     }
 
     /// [`Self::revalidate`], its registry list waiting out its pauses through
@@ -2176,7 +2209,7 @@ impl WorkspaceManager {
 
     fn revalidate_with(
         &self,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<(), UpstrokeError> {
         self.revalidate_chain(&self.execution_root)?;
         let root = canonical_prefix(&self.execution_root)?;
@@ -3270,14 +3303,14 @@ impl WorkspaceManager {
         path: &Path,
         expected: &Quiescence,
     ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
-        self.quiescence_with(path, expected, &mut std::thread::sleep)
+        self.quiescence_with(path, expected, &mut sleep_for)
     }
 
     fn quiescence_with(
         &self,
         path: &Path,
         expected: &Quiescence,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<Result<(), VerifyFailure>, UpstrokeError> {
         let Some(record) = self.worktree_record(path, pause_for)? else {
             return Ok(Err(VerifyFailure::NotRegistered));
@@ -5634,12 +5667,12 @@ impl WorkspaceManager {
     /// [`UpstrokeError::RegistryRefused`] when no attempt succeeded by the
     /// access's deadline.
     pub fn worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
-        self.worktree_records_with(&mut std::thread::sleep)
+        self.worktree_records_with(&mut sleep_for)
     }
 
     fn worktree_records_with(
         &self,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
         tolerant_registry_access(
             &self.common_git_dir,
@@ -5698,7 +5731,7 @@ impl WorkspaceManager {
     /// when no attempt completed by the access's deadline.
     fn visit_resolved_records<T>(
         &self,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
         visit: &dyn Fn(WorktreeRecord, &Path) -> Option<T>,
     ) -> Result<Option<T>, UpstrokeError> {
         tolerant_registry_access(
@@ -5725,7 +5758,7 @@ impl WorkspaceManager {
     fn worktree_record(
         &self,
         path: &Path,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<Option<WorktreeRecord>, UpstrokeError> {
         let wanted = canonical_prefix(path)?;
         self.visit_resolved_records(pause_for, &|record, resolved| {
@@ -6022,7 +6055,7 @@ impl WorkspaceManager {
     fn slots_with_torn_registrations(
         &self,
         excluding: Option<&Slot>,
-        pause_for: &mut dyn FnMut(std::time::Duration),
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
     ) -> Result<Vec<Slot>, UpstrokeError> {
         tolerant_registry_access(
             &self.common_git_dir,
@@ -7149,6 +7182,14 @@ pub(crate) fn hold_next_contended(common_git_dir: &Path) -> std::sync::mpsc::Sen
 #[inline]
 fn note_access_start(common_git_dir: &Path) {
     fixture::note_access_start(common_git_dir);
+}
+
+/// The `#[cfg(test)]` half of the slept-pause seam; see the
+/// `#[cfg(not(test))]` twin beside [`sleep_for`].
+#[cfg(test)]
+#[inline]
+fn note_slept_pause() {
+    fixture::note_slept_pause();
 }
 
 /// The registry access deadline under test: short, so that a test meeting a

@@ -60,6 +60,7 @@ thread_local! {
     static REMOVAL_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static MARKER_READ_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+    static SLEPT_PAUSES: Cell<u64> = const { Cell::new(0) };
     static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
     static ACCESS_PLANT: RefCell<Option<AccessPlant>> = const { RefCell::new(None) };
@@ -238,6 +239,96 @@ pub(crate) fn before_registry_access(nth: usize, act: AccessAct) -> AccessPlanti
     AccessPlanting {
         _not_send: PhantomData,
     }
+}
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four seccomp instructions, installed the way
+/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
+/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
+/// an isolated child's thread, or a thread a test starts for it, alone.
+#[cfg(target_os = "linux")]
+pub(crate) fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(number),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            1_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// One more wait of a registry access slept on this thread (`super::sleep_for`).
+/// Called from `super::note_slept_pause`.
+pub(crate) fn note_slept_pause() {
+    SLEPT_PAUSES.with(|slept| slept.set(slept.get().saturating_add(1)));
+}
+
+/// How many waits of a registry access have slept on this thread. A test reads
+/// it before and after a topology coordinator's call, on the coordinator's own
+/// thread: no difference means that no wait of an access the coordinator made
+/// slept there (the record's §9.16, I2-2).
+pub(crate) fn slept_pauses() -> u64 {
+    SLEPT_PAUSES.with(Cell::get)
 }
 
 /// A registry access over `common_git_dir` is about to make its first attempt
