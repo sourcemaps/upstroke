@@ -63,7 +63,9 @@ is `pr11_fub_impl9`'s (`claude-opus-5-5`, `max`), spawned on `ce55ca91` after th
 figures are under `~/orch-pr11/logs/pr11_fub_impl9/`, cited as `impl9/…`. **Its step-5 round** (§9.20) is
 `pr11_fub_step5`'s (`claude-opus-5-5`, `max`), spawned on `55029628` after the supervisor's step-5 merge triage made
 round 8's two findings mandatory merge work; its figures are under `~/orch-pr11/logs/pr11_fub_step5/`, cited as
-`step5/…`.
+`step5/…`. **Its CAS-1 round** (§9.21) is `pr11_fub_cas1`'s (`claude-opus-5-5`, `max`), spawned on `4253b2ca` on an
+isolated branch, after follow-up C's integration round found that a publication's compare-and-swap re-check waited on
+the coordinator's thread; its figures are under `~/orch-pr11/logs/pr11_fub_cas1/`, cited as `cas1/…`.
 
 ## 0. Status
 
@@ -77,7 +79,7 @@ round 8's two findings mandatory merge work; its figures are under `~/orch-pr11/
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. **Repair round 9** (§9.19) answers the delta review of round 8 (two `gpt-6-astra` lenses at `max` on `ce55ca91`: the regression lens PASS, the regular lens one P3). §9.18.4's conclusion that step 5's rule for a witnessed finding did not apply to round 8's two findings is withdrawn. In its place stand round 8's text-only scope and the deferred investigation, and whether those findings, each carrying an archived failing test, must be fixed before B's merge or are carried by their guards is left to B's merge triage, neither asserted nor waived. It changes no source file and no finding. **The step-5 round** (§9.20) follows the supervisor's step-5 merge triage, which made those two findings mandatory merge work. Its isolated diagnosis puts both in one pre-existing class: a fork that another test thread makes during this test process's own ref write keeps a copy of the run's cleanup lease, and a single observation reads it held. Both were attributed in natural runs, one at master and one at this head, and constructed from the commits that introduced each witness; neither is B's. It proposes **H3**, a frozen hunk in `recover/tests.rs` alone (+133/−3): W1's observation and W2's first resume make the bounded wait #320 makes before every later resume, with three regression tests. H3 is in RULING P-1's form (PROPOSED RULING B-W), not adopted, and the merge waits on its freeze ruling as on H1's. Both findings stay filed, provenance `pre_existing`, until the change that merges H3 deletes them. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. **Repair round 9** (§9.19) answers the delta review of round 8 (two `gpt-6-astra` lenses at `max` on `ce55ca91`: the regression lens PASS, the regular lens one P3). §9.18.4's conclusion that step 5's rule for a witnessed finding did not apply to round 8's two findings is withdrawn. In its place stand round 8's text-only scope and the deferred investigation, and whether those findings, each carrying an archived failing test, must be fixed before B's merge or are carried by their guards is left to B's merge triage, neither asserted nor waived. It changes no source file and no finding. **The step-5 round** (§9.20) follows the supervisor's step-5 merge triage, which made those two findings mandatory merge work. Its isolated diagnosis puts both in one pre-existing class: a fork that another test thread makes during this test process's own ref write keeps a copy of the run's cleanup lease, and a single observation reads it held. Both were attributed in natural runs, one at master and one at this head, and constructed from the commits that introduced each witness; neither is B's. It proposes **H3**, a frozen hunk in `recover/tests.rs` alone (+133/−3): W1's observation and W2's first resume make the bounded wait #320 makes before every later resume, with three regression tests. H3 is in RULING P-1's form (PROPOSED RULING B-W), not adopted, and the merge waits on its freeze ruling as on H1's. Both findings stay filed, provenance `pre_existing`, until the change that merges H3 deletes them. **The CAS-1 round** (§9.21) routes the publishability re-check that `compare_and_swap_ref` makes before its funnel through the call's own hooks. The frozen `publish` hands the swap the coordinator's hooks, and the re-check had asked the hook-less check, so during an integration's publication its waits slept on the coordinator's thread: master's code, missed by R1's census, found by follow-up C's integration round. Its four witnesses are red at `4253b2ca` and green after. R1's census gains row C6, and a census over the manager now reports any function that takes hooks and reaches a sleeping registry wait. A probe over the topology suite finds no other coordinator-thread access that sleeps. It changes no frozen file and adds no kind of refusal. |
 
 ## 1. Design
 
@@ -6341,34 +6343,35 @@ heading. §0's last row, the authors' paragraph, and this section.
 
 | T | Test | Where | Runs on |
 |---|---|---|---|
-| T1 | `two_coordinators_in_two_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: two processes, 500 cycles each (1,000), 0 failures | WM `:16832` | all; 150 cycles each on Windows |
+| T1 | `two_coordinators_in_two_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: two processes, 500 cycles each (1,000), 0 failures | WM `:17364` | all; 150 cycles each on Windows |
 | T2 | `a_verification_beside_another_processs_registration_write_in_flight_spends_no_deferral` | CO `:4169` | all |
 | T2′ | `a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies` | CO `:4207` | all |
-| T3 | `three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: three processes, 340 cycles each | WM `:16843` | all; 100 each on Windows |
-| T4 | `a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt`, `a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure`, `a_registry_access_passes_two_failures_and_returns_the_success_after_them`, `an_undecidable_veto_refuses_at_once_naming_why`, `the_final_attempt_passes_a_failure_repaired_by_the_deadline`, `contended_attempts_counts_exactly_the_attempt_answers`, `a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt` | WM `:15165-15373` | all |
-| T5 | `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`, `no_production_argv_of_the_manager_names_prune` | WM `:16615`, `:16647` | all |
-| T6 | `an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt` | WM `:15750` | Unix |
-| T9 | `an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`, `r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one` | WM `:16556`, `:15407` | all |
-| T10 | `the_manager_never_fails_beside_the_legacy_engines_gate_snapshots` | WM `:17042` | all |
-| T11 | `a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`, `a_list_over_a_registration_half_written_passes_once_its_writer_finishes`, `a_list_over_a_whole_registration_git_cannot_list_refuses_at_its_deadline` | WM `:15577-15635` | all |
-| T12 | `an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_nothing_at_the_slot` | WM `:15703` | Unix |
-| T13 | `adds_whose_checkouts_outlast_the_deadline_do_not_wait_for_each_other` | WM `:16501` | Unix |
-| T14 | `an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it` | WM `:15787` | all |
-| T15 | `an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing` (FUB-D5-GENUINE's tree and a 300-byte name); `an_add_whose_destination_cannot_be_removed_refuses_after_one_attempt_and_keeps_it` (FUB-D6-INODE's two shapes); `a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies` | WM `:15936`, `:15990`; CO `:7118` | all, the 300-byte name on Unix only; Unix; Unix |
-| T16 | `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add` (a directory holding entries, and a file, each beside a sibling torn by `tear_registration` at the add's `Before` hook, after the gate's list; renamed at repair round 3, R4), `a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first` (the order: a sibling already torn when the gate lists the registry is met by the gate first; repair round 3, R4), `a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git`, `an_add_whose_destination_cannot_be_made_is_git_state_at_once`, `after_an_untouched_failure_the_destination_is_removed_and_made_again` (its retry held while the destination is read; repair round 3, R2); the control `a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before` | WM `:16088-16283`; CO `:7253` | all; Unix for the last four |
-| T17 | `a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout` | WM `:16341` | all |
-| T18 | `an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name` | WM `:17122` | Unix |
-| T20 | `an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is_never_git` | WM `:16050` | Unix |
-| T22 | `derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it` | WM `:16383` | all |
-| T23 | `a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again` | WM `:16456` | Unix |
-| 2P | `a_list_passes_a_registration_another_process_finishes_writing` (contention), `accesses_over_a_registration_a_dead_process_left_torn_refuse_and_are_never_git_state` (a torn write by a dead writer), `a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses` (a registration nobody writes) | WM `:16937-17019` | all |
-| LC | `a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end` | WM `:17260` | Linux |
-| R1 | the 34 witnesses of §9.13.1 (`a_pipeline_is_granted_while_…` and `a_pipeline_is_served_while_…`), one or more per census access and per routing point; the controls `the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping` and `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T) | CO `:4776-5454`, `:5551`; `src/engine/topology/run/tests.rs` `:367` | all |
+| T3 | `three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_others_registry_writes`: three processes, 340 cycles each | WM `:17375` | all; 100 each on Windows |
+| T4 | `a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt`, `a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure`, `a_registry_access_passes_two_failures_and_returns_the_success_after_them`, `an_undecidable_veto_refuses_at_once_naming_why`, `the_final_attempt_passes_a_failure_repaired_by_the_deadline`, `contended_attempts_counts_exactly_the_attempt_answers`, `a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt` | WM `:15697-15905` | all |
+| T5 | `no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`, `no_production_argv_of_the_manager_names_prune` | WM `:17147`, `:17179` | all |
+| T6 | `an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt` | WM `:16282` | Unix |
+| T9 | `an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait`, `r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one` | WM `:17088`, `:15939` | all |
+| T10 | `the_manager_never_fails_beside_the_legacy_engines_gate_snapshots` | WM `:17574` | all |
+| T11 | `a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state`, `a_list_over_a_registration_half_written_passes_once_its_writer_finishes`, `a_list_over_a_whole_registration_git_cannot_list_refuses_at_its_deadline` | WM `:16109-16167` | all |
+| T12 | `an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_nothing_at_the_slot` | WM `:16235` | Unix |
+| T13 | `adds_whose_checkouts_outlast_the_deadline_do_not_wait_for_each_other` | WM `:17033` | Unix |
+| T14 | `an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it` | WM `:16319` | all |
+| T15 | `an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing` (FUB-D5-GENUINE's tree and a 300-byte name); `an_add_whose_destination_cannot_be_removed_refuses_after_one_attempt_and_keeps_it` (FUB-D6-INODE's two shapes); `a_verification_whose_snapshot_checkout_fails_after_the_takeover_ends_resumably_and_its_resume_reverifies` | WM `:16468`, `:16522`; CO `:7146` | all, the 300-byte name on Unix only; Unix; Unix |
+| T16 | `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add` (a directory holding entries, and a file, each beside a sibling torn by `tear_registration` at the add's `Before` hook, after the gate's list; renamed at repair round 3, R4), `a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first` (the order: a sibling already torn when the gate lists the registry is met by the gate first; repair round 3, R4), `a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git`, `an_add_whose_destination_cannot_be_made_is_git_state_at_once`, `after_an_untouched_failure_the_destination_is_removed_and_made_again` (its retry held while the destination is read; repair round 3, R2); the control `a_verification_whose_snapshot_destination_cannot_be_made_defers_as_before` | WM `:16620-16815`; CO `:7281` | all; Unix for the last four |
+| T17 | `a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout` | WM `:16873` | all |
+| T18 | `an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name` | WM `:17654` | Unix |
+| T20 | `an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is_never_git` | WM `:16582` | Unix |
+| T22 | `derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it` | WM `:16915` | all |
+| T23 | `a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again` | WM `:16988` | Unix |
+| 2P | `a_list_passes_a_registration_another_process_finishes_writing` (contention), `accesses_over_a_registration_a_dead_process_left_torn_refuse_and_are_never_git_state` (a torn write by a dead writer), `a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses` (a registration nobody writes) | WM `:17469-17551` | all |
+| LC | `a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end` | WM `:17792` | Linux |
+| R1 | the 34 witnesses of §9.13.1 (`a_pipeline_is_granted_while_…` and `a_pipeline_is_served_while_…`), one or more per census access and per routing point; the controls `the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping` and `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T) | CO `:4776-5463`, `:5560`; `src/engine/topology/run/tests.rs` `:367` | all |
 | R3 | `a_foreign_writer_whose_handshake_never_arrives_writes_nothing_and_says_so`, `a_foreign_writer_is_cancelled_and_joined_before_its_fixture_is_reclaimed` (§9.13.3) | CO `:4317`, `:4333` | all |
-| R7 | `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add`, `a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io`, `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification`, and the control `a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once` (§9.14.4); the CI-failing `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`, unchanged | WM `:7407-7527`, `:7237` | Unix; all |
+| R7 | `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add`, `a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io`, `a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification`, and the control `a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once` (§9.14.4); the CI-failing `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`, unchanged | WM `:7939-8059`, `:7769` | Unix; all |
 | R8 | `run::tests::both_drivers_run_each_transition_through_the_one_generic_function` (R-T), its sources read with their line endings normalised (§9.15) | `src/engine/topology/run/tests.rs` `:367` | all, on a CRLF checkout too |
-| I2 | Repair round 6 (§9.16): a shutdown answered inside a registry access's wait, one witness per pausing transition (`a_shutdown_answered_inside_…`, twelve, from the dispatch's head check to finalization); the reviews' witnesses kept (`a_shutdown_answered_during_a_registry_pause_dispatches_nothing_and_appends_nothing`, `a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate`) and the admission's (`a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline`); the stop's two halves (`a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing`, `a_publication_begun_after_a_wait_answered_a_shutdown_moves_no_ref`); closure's and finalization's routing (`a_closures_registry_wait_answers_on_the_coordinator`, `a_finalizations_registry_wait_answers_on_the_coordinator`); the timer (`a_wait_answers_a_queued_shutdown_when_no_thread_can_be_started`, `a_coordinator_whose_timer_cannot_start_refuses_before_it_appends_anything`, `a_wait_whose_timer_unwinds_is_still_woken_and_the_timer_serves_the_next`, `a_wait_after_its_timer_has_stopped_refuses_at_once_and_never_sleeps`, `a_wait_that_begins_after_a_shutdown_does_not_wait`); R-T per call site (`run::tests::both_drivers_run_each_transition_through_the_one_generic_function`, its positive control `run::tests::the_r_t_census_reports_one_call_that_bypasses_its_driver`, and `every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`); census 1's domain (`run::tests::both_attempt_started_arms_take_their_pool_from_an_authority`) | CO `:5861-6227`, `:6319`, `:6462`, `:6404`, `:6542`, `:6601`, `:6817`, `:6805`, `:6830`, `:6898`, `:6941`, `:7026`, `:6987`, `:5634`; `src/engine/topology/run/tests.rs` `:367`, `:403`, `:506` | all; the two thread-exhaustion witnesses on Linux |
+| I2 | Repair round 6 (§9.16): a shutdown answered inside a registry access's wait, one witness per pausing transition (`a_shutdown_answered_inside_…`, twelve, from the dispatch's head check to finalization); the reviews' witnesses kept (`a_shutdown_answered_during_a_registry_pause_dispatches_nothing_and_appends_nothing`, `a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate`) and the admission's (`a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline`); the stop's two halves (`a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing`, `a_publication_begun_after_a_wait_answered_a_shutdown_moves_no_ref`); closure's and finalization's routing (`a_closures_registry_wait_answers_on_the_coordinator`, `a_finalizations_registry_wait_answers_on_the_coordinator`); the timer (`a_wait_answers_a_queued_shutdown_when_no_thread_can_be_started`, `a_coordinator_whose_timer_cannot_start_refuses_before_it_appends_anything`, `a_wait_whose_timer_unwinds_is_still_woken_and_the_timer_serves_the_next`, `a_wait_after_its_timer_has_stopped_refuses_at_once_and_never_sleeps`, `a_wait_that_begins_after_a_shutdown_does_not_wait`); R-T per call site (`run::tests::both_drivers_run_each_transition_through_the_one_generic_function`, its positive control `run::tests::the_r_t_census_reports_one_call_that_bypasses_its_driver`, and `every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`); census 1's domain (`run::tests::both_attempt_started_arms_take_their_pool_from_an_authority`) | CO `:5870-6255`, `:6347`, `:6490`, `:6432`, `:6570`, `:6629`, `:6845`, `:6833`, `:6858`, `:6926`, `:6969`, `:7054`, `:7015`, `:5643`; `src/engine/topology/run/tests.rs` `:367`, `:403`, `:506` | all; the two thread-exhaustion witnesses on Linux |
 | W7 | Repair round 7 (§9.17): the tear's prober reports only after a sample taken after the wait that ended it, the order forced both ways (`a_prober_cancelled_after_the_attempt_it_waits_for_reports_it_and_finishes_the_tear`, `a_prober_cancelled_before_anything_it_waits_for_leaves_the_tear_and_says_so`); the witness it serves is I2's `a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate` | CO `:4534`, `:4558` | all |
+| CAS1 | The CAS-1 round (§9.21): census C6's `a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration` and `a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing` (inside R1's and I2's ranges above); the manager's `a_swaps_publishability_recheck_waits_through_the_calls_hooks` and `a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref`; the census `no_function_that_takes_hooks_reaches_a_registry_wait_that_sleeps_by_default` and its positive control `the_hooks_routing_census_reports_a_swap_that_drops_its_hooks` | CO `:4978`, `:6165`; WM `:4837`, `:4877`, `:5165`, `:5228` | all |
 
 **How they wait.** Each waits on a handshake or a seam, with time only as a watchdog.
 - A tear an access must fail on first is finished only after `contended_attempts` has moved. An add's own tear is
@@ -6710,7 +6713,8 @@ integration, D1 to D4 a settlement), several of which reach more than one access
     R-X's wait. Its default sleeps, and every other implementation of `EffectHooks` keeps it. So each pipeline's own
     accesses, on its own thread, and every caller outside the topology coordinator wait as before.
   - `tolerant_registry_access` and `with_registry` take the pause. Every manager function that takes hooks routes its
-    accesses' waits through them.
+    accesses' waits through them. *(Corrected at the CAS-1 round, §9.21: `compare_and_swap_ref` did not. Its
+    publishability re-check asked the hook-less `assert_publishable` until that round.)*
   - Six hook-less entry points the coordinator calls have pausing twins: `revalidate`, `changed_paths`,
     `commit_parent`, `commit_tree_sha`, `assert_publishable` and `proposal_state`. The originals delegate to them with
     `NoHooks`.
@@ -6867,6 +6871,7 @@ freeze ruling, and until that ruling this pull request does not meet G6's frozen
   - B1 and B2: a retry's verification, and a closed retry's scrub (its worktree removal and its intent removal);
   - C1 to C5: the decision, the publication, a conflict's classification, the stale arm's intent, add gate, add and
     pick, and a publication's and a rejection's staging removal and staging intent removal;
+  - C6, added at the CAS-1 round (§9.21): the publication's compare-and-swap re-check;
   - D1 to D4: the promotion's changed paths, the candidate's two object checks, the reclaim's worktree removal and
     intent removal, and a failed settlement's scrub (both halves);
   - **the repair arm** that A6, B1 and B2 name ("torn plan + scans"): the removal's and the verification's plan, the
@@ -8252,3 +8257,211 @@ All of this is at `3ce7bb46`'s tree, identical by sha256 to the prototype the di
 - the holders of the archived sightings;
 - any rate;
 - whether a different-process resume can meet such a copy in production, which is PR281's.
+
+### 9.21 The CAS-1 round: a publication's compare-and-swap re-check waits through the coordinator
+
+**Who and why.** This round is `pr11_fub_cas1`'s (`claude-opus-5-5`, `max`), spawned by `orch_pr11` on `4253b2ca`, on an
+isolated local branch, to be integrated into this pull request only on the orchestrator's clearance.
+- **What started it.** Follow-up C's integration round met it, did not change it, and routed it here
+  (`~/orch-pr11/questions/pr11_fuc_impl4-1.md`, "Not C's"). Its dev probe recorded the call stack of every registry
+  access a coordinator's thread starts, and during an integration two of them were the swap's re-check, made with no
+  hooks (`~/orch-pr11/logs/pr11_fuc_impl4/probe/ACCESS-MAP.txt`, INT 14 and INT 33). The supervisor made it an unresolved
+  responsiveness obligation of this change, to be met with faithful, bounded red and green evidence, mutations and a
+  formal disposition before the merge.
+- **The brief and the scope.** The brief is `~/orch-pr11/briefs/pr11_fub_cas1.md`: the re-check, its witnesses, R1's
+  census and the sibling sweep. Its figures are under `~/orch-pr11/logs/pr11_fub_cas1/`, cited as `cas1/…`.
+- **What it adopts.** No owner decision. H1 and H3 stay proposed and conditional, and this round changes neither.
+
+**The commits, on `4253b2ca`:**
+- `3f5d1760`: the repair, its four witnesses, and the two coordinator witnesses' notes;
+- `03fdf500`: the census that would have caught it, and its positive control;
+- then this text, §9.4's re-pinned cites and its CAS1 row, §9.13.1's corrected sentence, and the header's and §0's
+  sentences.
+
+#### 9.21.1 What was wrong
+
+- `WorkspaceManager::compare_and_swap_ref` takes hooks. Its publishability re-check, made before its funnel, called
+  the hook-less `assert_publishable`, which hands `assert_publishable_pausing` the `NoHooks` observer. So every wait of
+  that registry list slept on the calling thread, whatever hooks the caller had passed.
+- The frozen `integrate::publish` hands the swap `journal.hooks().effects()`, which on the coordinator is the
+  coordinator itself (§9.13.1). So during an integration's publication, a re-check that met a registration it could not
+  list slept on the coordinator's thread until the list passed or the access's deadline came: 10 s in production, 500 ms
+  under test. No pipeline was served meanwhile. That is the wait R1 removed from every other access the coordinator
+  makes (PR11's R-F: the coordinator's only wait is for its next message).
+- **It is master's code.** Master `5c222ff2` makes the same call, and this change left it alone until now. R1's census
+  (§9.13.1, `impl3/r1/census.txt`) listed C2 as `publish`'s own check and missed the swap's second access, so
+  §9.13.1's sentence that every manager function taking hooks routes its accesses' waits through them was not true of
+  this one. That sentence is corrected in place.
+
+#### 9.21.2 Reproduction: red at `4253b2ca`
+
+- **How it was run.** The four witnesses of §9.21.4 were added to `4253b2ca` without the repair
+  (`cas1/repro/witnesses-only.diff`, sha256 `fdf6c15c25325bf5…`) and run with three controls
+  (`cas1/repro/red-at-4253b2ca/`).
+- **All four fail, each on the stall itself:**
+  - the coordinator's served witness fails with `RegistryRefused` after 16 attempts at the 500 ms deadline, having
+    served no pipeline;
+  - the coordinator's shutdown witness fails "the shutdown was injected while the tear stood": the coordinator slept
+    through the wait, so it never reached a point where the shutdown could be answered;
+  - the manager's two fail with `RegistryRefused` after 16 attempts: the call's hooks were never asked to wait, so
+    nothing mended the tear, and for the stop the registry's refusal came back where the wait's own error should have.
+- **The controls pass:** `publish`'s own check's witness (C2), its shutdown witness, and the width-1 control.
+- **Which access the tear meets.** It is planted before the second registry access the coordinator's thread starts
+  after beta's `merge_prepared` is folded. `publish`'s own check is the first and the swap's re-check the second;
+  `direct_ref_target` between them makes no registry access. Two pieces of evidence pin this. The probe of §9.21.6
+  records the re-check's stack, `assert_publishable ← compare_and_swap_ref ← integrate::publish`. And the mutations
+  separate the two accesses: with the swap's line hook-less its witnesses are red and C2's green, and with `publish`'s
+  own line hook-less the reverse (§9.21.5).
+
+#### 9.21.3 The repair
+
+- **What changed.** `compare_and_swap_ref` calls `self.assert_publishable_pausing(hooks, refname)`, so the re-check
+  waits through the call's own hooks, as every other access of a function that takes hooks does. It still runs before
+  the funnel opens, and the checks' order, the funnel and its effect are unchanged.
+- **What it does not change.** No frozen file changes. No effect row is needed: `compare_and_swap_ref` and
+  `assert_publishable_pausing` are both already listed in `effects/wrappers.toml`. No new sleep: this removes one from
+  the coordinator's thread.
+- **No new kind of refusal.** A wait the caller's hooks end now ends the swap too, with that wait's own error, before
+  its funnel opens. On the coordinator that is the refusal §9.16.3 gave every routed wait: a shutdown answered inside
+  the wait stops its transition, and the command ends with the shutdown's refusal, `UpstrokeError::Refused`,
+  resumably. The body's risk paragraph already discloses that for "such a wait". This round adds one wait to the
+  waits it covers.
+- **Classified against master.** Master's publication made the same re-check, and its waits slept. A shutdown that
+  arrived during them was answered only after the publication: the ref had moved and `task_merged` had been appended,
+  and then the command ended. Here the coordinator answers the shutdown inside the wait. The ref does not move, nothing
+  is appended after `merge_prepared`, and the command ends with the shutdown's refusal, the run resumable, as after a
+  shutdown inside C2's wait under H1. Against master this is the difference §9.16.3 made at every routed wait, now made
+  at this one too.
+
+#### 9.21.4 R1's census, extended, and the census that would have caught it
+
+**The census row.** R1's census (§9.13.1) gains **C6**: the frozen `publish` (`integrate.rs:480`) calls
+`manager.compare_and_swap_ref(journal.hooks().effects(), …)`, whose re-check `assert_publishable_pausing` lists the
+registry through `worktree_records_with`. Its handle is H: the call takes the coordinator's hooks, which the manager
+dropped before this round.
+
+**Its witnesses** (`CO`), each bounded by `bounded` (120 s):
+- **`a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration`** (`:4978`), in R1's form.
+  Two pipelines run at width 2, and the tear stands before the second registry access after beta's `merge_prepared`.
+  The prober finishes it only after an invocation has reached the runner after the tear, which needs the coordinator
+  to answer a grant during the wait. The witness passes only if the access then completes, the run finishes and no wait
+  slept on the coordinator's thread.
+- **`a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing`** (`:6165`), in I2-1's form through
+  `stopped_in_its_wait`. The command ends on the shutdown, and the access had failed on the tear first. Nothing slept
+  on the coordinator, and nothing was appended after the shutdown: `merge_prepared` once and no `task_merged`. The ref
+  is where the log authorizes it, the invocations balance, and the run reopens.
+
+**At the manager** (`WM`): `a_swaps_publishability_recheck_waits_through_the_calls_hooks` (`:4837`) and
+`a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref` (`:4877`).
+- A sibling task's registration is torn the way a killed `git worktree add` leaves it.
+- The call's hooks either mend it at their first wait or end the access there.
+- In the first, the swap passes, no wait slept on the calling thread, and the ref moves.
+- In the second, the swap ends with the wait's own error, its funnel never opened, and the ref is where it was.
+
+**The census that would have caught it** (`WM`): `no_function_that_takes_hooks_reaches_a_registry_wait_that_sleeps_by_default`
+(`:5165`), with its positive control `the_hooks_routing_census_reports_a_swap_that_drops_its_hooks` (`:5228`).
+- **What it reads.** The manager's production files: `src/workspace_manager.rs`, and every child it declares outside a
+  test-only item. Comments, strings and test-only items are blanked (`effects::production_code`), and line endings are
+  normalised.
+- **What it decides.** A function reaches a sleeping wait when its body names `sleep_for` or `NoHooks`, or calls by name
+  a function that does. `EffectHooks::registry_pause` is the seam itself and is not read as one. A function that takes
+  hooks and reaches one is reported: it drops its hooks, so on the coordinator that access's waits sleep on its thread.
+- **Its domain is asserted:** the declared children are read, more than 200 functions, the eight hook-less entry points
+  are found by name as reaching a sleeping wait, and six hooked functions as taking hooks.
+- **What it reports.** At `4253b2ca`, `compare_and_swap_ref` alone; here, nothing (§9.21.5).
+- **Its control** puts CAS-1 back into the live source, and exactly `compare_and_swap_ref` is reported. It also reports
+  a wait reached through a helper and a pausing twin handed `NoHooks`, does not report a wait asked of the caller's
+  hooks, and does not read the violation written as prose.
+- **Its limits,** stated where it is defined. Calls are matched by name, so another type's method of the same name
+  reads as one. A wait reached through a function value, a trait object, a closure handed in from outside these files,
+  or hooks of another type a function builds for itself is not seen. It reads the manager alone, so an engine call site
+  that has hooks and calls a hook-less function is the sweep's (§9.21.6).
+- **What kind of file it is.** It tests the manager's own routing: a subject, governing nothing outside the manager.
+
+#### 9.21.5 Mutations
+
+The campaign is `cas1/mutation/VERDICTS.txt` (runner `cas1/tools/mutate.py`, head `03fdf500`).
+- **How a row was run.** Each row is `git archive 03fdf500` with one substitution, built from its own tree (its compile
+  line names the copy), and runs 13 tests: this round's six; C2's two witnesses; the decision's and a dispatch intent's
+  R1 witnesses; the width-1 control; R-T; and the swap's substitution test.
+- **How it is judged.** A row passes when exactly its expected tests are red and all 13 ran. Six of six pass:
+
+| Row | Mutation | Red | Green |
+|---|---|---|---|
+| control | none | none | 13 |
+| `cas1-hookless-recheck` | the re-check asks the hook-less `assert_publishable`, `4253b2ca`'s line | the four witnesses; the census, naming `compare_and_swap_ref`; its control | 7 |
+| `cas1-nohooks-recheck` | the re-check is the pausing twin handed `NoHooks` | the same six | 7 |
+| `h1-publish-check-nohooks` | `publish`'s own check hook-less (H1's line), the re-check routed | C2's two witnesses | 11 |
+| `r1-global-sleep` | the coordinator's wait sleeps (R1 undone) | both CAS-1 coordinator witnesses, C2's two, the decision's and the intent's | 7 |
+| `i21-pause-ignores-interrupt` | the coordinator's wait returns `Ok` after it answered a shutdown | the two publication shutdown witnesses | 11 |
+
+The census's control is red under the first two rows by design: it first reads the live source's routed spelling,
+which those mutants remove.
+
+#### 9.21.6 The sibling sweep
+
+**The question.** Is there any other manager call, reached from the coordinator with hooks available, that drops them
+into a hook-less registry access?
+
+**Inside the manager** (`cas1/sweep/STATIC.txt` §1 and §2).
+- Every registry access goes through `tolerant_registry_access`, called at five sites. Two take the call's hooks; three
+  forward a pause their callers choose.
+- The only callers that choose a sleep are the eight hook-less entry points: `revalidate`, `worktree_records`,
+  `quiescence`, and the five twins that hand their pausing form `NoHooks`.
+- The census finds no function that takes hooks and reaches one of them, other than `compare_and_swap_ref` before this
+  round.
+
+**Engine call sites** (`STATIC.txt` §3). None is on CAS-1's cause:
+- attempt bodies and a verification's body call the hook-less entry points on pipeline threads under the coordinator
+  (`Coordinator::spawn_attempt` and `spawn_verification`). A pipeline's own waits sleep on its own thread by design
+  (§9.13.1), and its hooks are its own;
+- creation and a resume's recovery call them before any coordinator exists;
+- the frozen `integrate.rs` reaches them through `run::PausingRefs` (I2-7) or as H1's pausing twins.
+
+**Executed** (`cas1/sweep/DYNAMIC.txt`, from a dev probe that is never committed, `cas1/tools/apply-probe.py`).
+- **What it records.** Every registry access identifies the wait it was handed, the default sleep or the
+  coordinator's, and records its call stack. It ran over the topology suite (`engine::topology::`, `--skip real_docker`).
+- **At `03fdf500`:** 785 passed and 0 failed. 16,634 accesses waited through the coordinator and 38,691 by the default
+  sleep, and **none of the sleeping ones was on a coordinator's thread** (a stack holding `Coordinator::drive`). The
+  21,807 sleeping accesses that carry coordinator frames are on pipeline threads, from `Coordinator::spawn_attempt`
+  (16,454) and `spawn_verification` (5,353) on the blocking pool.
+- **Its positive control, with CAS-1 put back:** 711 sleeping accesses on a coordinator's thread, every one at
+  `assert_publishable ← compare_and_swap_ref`. 783 passed, and the two CAS-1 coordinator witnesses failed.
+- **What follows.** Over what the suite drives, CAS-1 was the only registry access on a coordinator's thread that
+  slept, and none remains.
+
+**Listed, not changed** (`STATIC.txt` §4). Two Windows-only filesystem retries sleep 25 ms between attempts, up to 39
+times, while handles close.
+- `remove_tree_once_handles_close` (`src/workspace_manager.rs:1513`) is reached from a worktree's removal, which the
+  coordinator makes on its own thread.
+- `read_marker_once_handles_close` (`:6617`) is the same retry for a registration's `locked` marker.
+- Both are master's code, neither is a registry access, and neither takes a pause seam. This round does not decide
+  whether R-S's "synchronous work it already did at width 1 (its own Git, filesystem and appends)" covers them, or
+  R-F excludes them.
+
+#### 9.21.7 Under slow Git
+
+- **Why it was measured.** Follow-up C's round 5 found that I2-1's shutdown harness fails when each Git process starts
+  late enough (`~/orch-pr11/handovers/pr11_fuc_impl5.md`, in progress), with a stand-in that starts every `git` late
+  (`~/orch-pr11/logs/pr11_fuc_impl5/standin/slowgit/git`). The new shutdown witness uses that harness, so it was
+  measured the same way, with a copy of the stand-in (`cas1/slowgit/SUMMARY.txt`). Every `git` was started 0, 170, 250,
+  400 and 600 ms late, one run each, and 400 ms twice.
+- **What it showed.** Both CAS-1 coordinator witnesses passed up to 400 ms and failed at 600 ms, as C2's two witnesses
+  and the decision's two did. The dispatch intent's shutdown witness failed from 170 ms.
+- **What follows.** At those latencies the new witnesses do not join the failing class, and whatever repairs the
+  harness covers them too. Nothing was run on Windows or macOS here; CI is the truth there.
+
+#### 9.21.8 The frozen proof, and what else ran
+
+- **The frozen proof** (`cas1/frozen/frozen-proof-03fdf500.txt`, `cas1/tools/frozen-proof-cas1.sh`):
+  - this round changes no frozen file: 34 of 34 are byte-identical to `4253b2ca`'s;
+  - `integrate.rs` is H1's blob `bf62256e` and `recover/tests.rs` is H3's `74c0b121`, both unchanged;
+  - part 1 against master: those two files, +149/−7;
+  - part 2 against `d724fb16`, E-G6-1 executed as a rule not adopted: FAIL, with the two proposed hunks unenumerated.
+  All four are as at `4253b2ca`.
+- **The platforms** (`cas1/platform/code-03fdf500/`): the Windows target linted and type-checked on 1.85 with
+  `-D warnings`, the macOS target linted, and the Linux target type-checked on 1.85 with `-D warnings`. All four
+  passed.
+- **At this round's head, the ten gates.** The body records them.
+
+**Not verified here:** the Windows and macOS legs, the guest, and CI's stable 1.99.0. CI is the truth for them.
