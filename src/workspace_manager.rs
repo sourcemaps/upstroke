@@ -1673,14 +1673,14 @@ fn note_removal_attempt(_attempt: u32) {}
 ///
 /// **What it still guards.** One exclusion tolerance cannot replace: the
 /// torn-registration plan ([`WorkspaceManager::repair_torn_registrations`])
-/// reads an empty `commondir` as a dead add's residue and removes that slot,
-/// and an add of this same process in flight passes through that state for the
-/// writes between `commondir`'s open and its write. The run lock keeps other
-/// processes of the run out; nothing else keeps this process's own adds out. So
-/// it is a read-write lock: **adds hold it shared**, so two adds of one process
-/// never wait for each other; **the plan holds it alone**; the list, a removal's
-/// scan and a removal's mutation take nothing. (A mutex taken by every access
-/// under a bounded wait refused 3 of 120 cycles of
+/// reads an empty `commondir` as a dead add's residue and removes that
+/// instance, and an add of this same process in flight passes through that
+/// state for the writes between `commondir`'s open and its write. The run lock
+/// keeps other processes of the run out; nothing else keeps this process's own
+/// adds out. So it is a read-write lock: **adds hold it shared**, so two adds
+/// of one process never wait for each other; **the plan holds it alone**; the
+/// list, a removal's scan and a removal's mutation take nothing. (A mutex taken
+/// by every access under a bounded wait refused 3 of 120 cycles of
 /// `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`: bounding
 /// a wait for a lock that serialises everything turns queueing into refusals —
 /// the record's §3.4.)
@@ -2785,19 +2785,12 @@ impl WorkspaceManager {
     /// An I/O error, [`UpstrokeError::RegistryRefused`], or a removal's error.
     fn sweep_earlier_instances(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
         for instance in self.earlier_instances(self.registered_instances()?)? {
-            let slot = instance.slot();
-            let tag = instance.tag();
-            let path = self.instance_path(slot, tag);
-            let binding = tolerant_registry_access(
-                &self.common_git_dir,
-                RegistryHold::Unheld,
-                &mut || Again::Attempt,
-                &mut || self.revalidate_removal_proving(&path, WriterProof::NoWriterAlive),
+            self.remove_instance_proving(
+                hooks,
+                instance.slot(),
+                instance.tag(),
+                WriterProof::NoWriterAlive,
             )?;
-            let ledger = hooks.durability_ledger();
-            funnel(hooks, slot.remove_site(), || {
-                self.remove_bound(slot, tag, &path, binding.admin.as_deref(), &ledger)
-            })?;
         }
         Ok(())
     }
@@ -2876,10 +2869,11 @@ impl WorkspaceManager {
     /// refused it here on every attempt, and the forced removal that repairs
     /// the store ([`Self::remove_worktree_proving`]) was never reached. So
     /// when the enumeration refuses, [`Self::repair_torn_registrations`] runs
-    /// that forced removal for every *other* slot an intent names whose
-    /// registration's `commondir` holds no bytes — its checkout and its
-    /// registration go, its intent stays — and the enumeration runs again; its
-    /// answer then stands. Nothing is enumerated around the torn entry: the
+    /// that forced removal for every instance of every *other* slot whose
+    /// registration's `commondir` holds no bytes — that instance's checkout
+    /// and registration go, its intent stays, and no other instance of its
+    /// slot is touched — and the enumeration runs again; its answer then
+    /// stands. Nothing is enumerated around the torn entry: the
     /// repair only removes, and every containment check still reads the list
     /// Git itself returns. When the repair finds nothing it may remove, the
     /// enumeration's refusal is returned as it was.
@@ -3623,12 +3617,12 @@ impl WorkspaceManager {
     /// the add a killed conductor left torn may be that generation's own;
     /// with nothing reclaimed before that verification, no removal had
     /// repaired the store, and the revalidation here refused on every attempt.
-    /// A torn slot's forced removal takes its checkout and registration and
-    /// leaves its intent, so the slot verified reads as
-    /// [`VerifyFailure::NotRegistered`], which routes to the forced removal
-    /// and fresh add its caller makes of any worktree that is not quiescent.
-    /// The repair runs under each torn slot's removal site; this site stays
-    /// read-only.
+    /// A torn instance's forced removal takes its checkout and registration
+    /// and leaves its intent, so a slot whose own instance was the torn one
+    /// reads as [`VerifyFailure::NotRegistered`], which routes to the forced
+    /// removal and fresh add its caller makes of any worktree that is not
+    /// quiescent. The repair removes only the instances it proved torn, each
+    /// under its slot's removal site; this site stays read-only.
     ///
     /// # Errors
     ///
@@ -3956,6 +3950,42 @@ impl WorkspaceManager {
             bound.push((tag, path, binding));
         }
         Ok(bound)
+    }
+
+    /// The forced removal of the one instance of `slot` that `tag` names,
+    /// under `proof`: its registration bound by the removal's scan, a
+    /// tolerant registry access with no hold, and then the checkout and that
+    /// registration removed ([`Self::remove_bound`]) inside one execution of
+    /// the slot's removal site. No other instance of the slot is bound or
+    /// touched, so a removal made on what is known of one instance never
+    /// reaches another's: the torn-registration repair removes the instance
+    /// its plan proved torn ([`Self::repair_torn_registrations`]), and the
+    /// final sweep each earlier instance it found
+    /// ([`Self::sweep_earlier_instances`]). A slot's retirement removes every
+    /// instance ([`Self::remove_worktree_proving`]).
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
+    fn remove_instance_proving(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+        tag: Option<&InstanceTag>,
+        proof: WriterProof,
+    ) -> Result<(), UpstrokeError> {
+        let path = self.instance_path(slot, tag);
+        let binding = tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || self.revalidate_removal_proving(&path, proof),
+        )?;
+        let ledger = hooks.durability_ledger();
+        funnel(hooks, slot.remove_site(), || {
+            self.remove_bound(slot, tag, &path, binding.admin.as_deref(), &ledger)
+        })
     }
 
     /// The tags of every instance of `slot` the execution root holds, this
@@ -6260,23 +6290,30 @@ impl WorkspaceManager {
     }
 
     /// The repair [`Self::remove_intent`] and [`Self::verify_worktree`] run
-    /// when Git's enumeration refuses: the forced removal of every slot an
-    /// intent names whose registration is torn, but `excluding`, answering
-    /// whether it found any, so the caller knows to ask Git again.
+    /// when Git's enumeration refuses: the forced removal of every instance
+    /// whose registration is torn, of every slot the walks reach
+    /// ([`Self::intents`]) but `excluding`, answering whether it found any, so
+    /// the caller knows to ask Git again.
     ///
-    /// Each is [`Self::remove_worktree_proving`] itself, under the torn
-    /// slot's own removal site: its gate binds the registration from the
-    /// byte-safe `gitdir`, the checkout goes with its durability barrier, and
-    /// the registration is removed directly on the proof it has always used,
-    /// with no `git worktree prune` (which could take the store from a checkout
-    /// the plan passed over). Only the intent is left, for the step that owns
-    /// the slot, whose own forced removal then finds nothing to remove and
-    /// converges. The checkout goes with the registration because a checkout
-    /// left behind without one converges only while `<common git
-    /// dir>/worktrees` survives: once nothing else is registered, the store is
-    /// removed with its last registration, and the forced removal refuses a
-    /// checkout that is present with no registration directory at all, on
-    /// every attempt.
+    /// Each is [`Self::remove_instance_proving`] itself, under the torn
+    /// instance's own slot's removal site: its gate binds that instance's
+    /// registration from the byte-safe `gitdir`, the checkout goes with its
+    /// durability barrier, and the registration is removed directly on the
+    /// proof it has always used, with no `git worktree prune` (which could take
+    /// the store from a checkout the plan passed over). **Only the instance the
+    /// plan proved torn is removed.** The tear proves nothing of another
+    /// instance of its slot: an earlier incarnation's late add, torn beside the
+    /// successor's live instance of the same slot, leaves the successor's
+    /// checkout, its registration and its paid edits where they are (the
+    /// follow-up C record, §6.10). Every instance goes when the step that owns
+    /// the slot retires it ([`Self::remove_worktree_proving`]). Only the intent
+    /// is left, for that step, whose own forced removal then finds nothing of
+    /// the torn instance to remove and converges. The checkout goes with the
+    /// registration because a checkout left behind without one converges only
+    /// while `<common git dir>/worktrees` survives: once nothing else is
+    /// registered, the store is removed with its last registration, and the
+    /// forced removal refuses a checkout that is present with no registration
+    /// directory at all, on every attempt.
     /// Traced on Git 2.43, `git worktree add` writes `commondir` before it
     /// populates the checkout, so a torn registration is an add that never
     /// populated its checkout, and no step has a checkout to keep.
@@ -6302,9 +6339,10 @@ impl WorkspaceManager {
     /// intent that does not parse, a registration the gate refuses to bind,
     /// such as one whose `gitdir` is empty — nothing is removed and `false` is
     /// returned, and the caller returns the enumeration's own refusal, as it
-    /// did before this repair existed. A torn registration that no intent
-    /// names is never touched; the enumeration keeps dying on it and the
-    /// removal keeps refusing.
+    /// did before this repair existed. A torn registration no walk reaches —
+    /// this incarnation's own instance that no intent names ([`Self::intents`])
+    /// — is never touched; the enumeration keeps dying on it and the removal
+    /// keeps refusing.
     ///
     /// # Errors
     ///
@@ -6314,18 +6352,19 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         excluding: Option<&Slot>,
     ) -> Result<bool, UpstrokeError> {
-        let Ok(torn) = self.slots_with_torn_registrations(excluding) else {
+        let Ok(torn) = self.instances_with_torn_registrations(excluding) else {
             return Ok(false);
         };
-        for slot in &torn {
-            self.remove_worktree_proving(hooks, slot, WriterProof::Unknown)?;
+        for (slot, tag) in &torn {
+            self.remove_instance_proving(hooks, slot, tag.as_ref(), WriterProof::Unknown)?;
         }
         Ok(!torn.is_empty())
     }
 
-    /// The plan of [`Self::repair_torn_registrations`]: every slot an intent
-    /// names, but `excluding`, whose registration the forced removal's gate
-    /// binds and whose `commondir` holds no bytes. Reads only.
+    /// The plan of [`Self::repair_torn_registrations`]: every instance, of
+    /// every slot the walks reach but `excluding`, whose registration the
+    /// forced removal's gate binds and whose `commondir` holds no bytes, each
+    /// named by its slot and its tag. Reads only.
     ///
     /// A tolerant registry access holding R-X **alone** (`REGISTRY_LOCKS`):
     /// the plan reads an empty `commondir` as a dead add's residue, and an add
@@ -6333,10 +6372,10 @@ impl WorkspaceManager {
     /// process runs while it reads. A plan that cannot take R-X, or meets a
     /// store it cannot read, by its deadline refuses, and
     /// [`Self::repair_torn_registrations`] answers `false`.
-    fn slots_with_torn_registrations(
+    fn instances_with_torn_registrations(
         &self,
         excluding: Option<&Slot>,
-    ) -> Result<Vec<Slot>, UpstrokeError> {
+    ) -> Result<Vec<(Slot, Option<InstanceTag>)>, UpstrokeError> {
         tolerant_registry_access(
             &self.common_git_dir,
             RegistryHold::Exclusive,
@@ -6345,12 +6384,16 @@ impl WorkspaceManager {
         )
     }
 
-    /// One attempt of [`Self::slots_with_torn_registrations`].
+    /// One attempt of [`Self::instances_with_torn_registrations`].
     ///
     /// Every instance of each slot is read ([`Self::instance_tags_of`]), so an
-    /// earlier incarnation's add a kill left torn is repaired with its slot,
-    /// whichever instance of it the tear is in.
-    fn torn_plan(&self, excluding: Option<&Slot>) -> Result<Vec<Slot>, UpstrokeError> {
+    /// earlier incarnation's add a kill left torn is repaired whichever
+    /// instance of its slot the tear is in, and each torn instance is named
+    /// by its tag, so that the repair removes it and no other instance.
+    fn torn_plan(
+        &self,
+        excluding: Option<&Slot>,
+    ) -> Result<Vec<(Slot, Option<InstanceTag>)>, UpstrokeError> {
         let mut torn = Vec::new();
         for slot in self.logical_slots(self.registered_instances_once()?)? {
             if excluding == Some(&slot) {
@@ -6367,10 +6410,7 @@ impl WorkspaceManager {
                 };
                 let commondir = admin.join("commondir");
                 match fs::metadata(&commondir) {
-                    Ok(metadata) if metadata.len() == 0 => {
-                        torn.push(slot);
-                        break;
-                    }
+                    Ok(metadata) if metadata.len() == 0 => torn.push((slot.clone(), tag)),
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(source) => {

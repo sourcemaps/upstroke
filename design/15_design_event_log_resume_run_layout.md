@@ -172,8 +172,9 @@ creates on disk is an instance of it, named for the incarnation that created it.
 - An incarnation adds, verifies and runs commands in its own instance only. Every other
   incarnation's instance of a slot, and a name written before instances existed, is residue: it is
   never verified as reusable, never reused, and every reclaim of its slot removes it. So a fresh
-  process's resume recreates each open generation's worktree as its own instance, and a dead
-  writer that acts afterwards acts on its own incarnation's paths.
+  process's resume reclaims every earlier incarnation's instance of each open generation, its intent
+  included, before it recreates the generation's worktree as its own instance, and a dead writer
+  that acts afterwards acts on its own incarnation's paths.
 
 **Every walk reaches every instance.** The manager's list of slots, which every reclaim walks,
 reports each slot once, from three sources: every intent, tagged or not; every directory under a
@@ -183,7 +184,9 @@ reclaimed recreates its checkout and registration but not its intent, and is rea
 current incarnation's own instances count only through their intent, so a torn registration of its
 own that no intent names stays the refusal it was. A slot's removal removes every instance of it in
 one execution of its effect site, each bound to its own registration; an instance that cannot be
-removed refuses the command resumably, as any removal does, and nothing retains it.
+removed refuses the command resumably, as any removal does, and nothing retains it. The repair of a
+registration a killed add left torn, which runs when Git's listing dies on it, removes that one
+instance: the tear says nothing of the slot's other instances, a live one among them.
 
 **Terminal finalization sweeps last.** Before it removes the execution root, the root's removal
 sweeps every earlier incarnation's instance, by directory and by registration, through the removal

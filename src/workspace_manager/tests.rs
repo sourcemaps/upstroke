@@ -17956,8 +17956,13 @@ fn r_o3_a_task_scrub_past_a_torn_registration_leaves_no_instance_registered() {
 
 /// What a census of the execution root finds: every entry under the three
 /// slot namespaces, and every checkout under the root Git lists, each as
-/// `<namespace>/<name>`.
-fn instance_census(manager: &WorkspaceManager) -> (Vec<String>, Vec<String>) {
+/// `<namespace>/<name>`, and every file in its intents directory, by name.
+///
+/// The intents are a census half of their own because an intent is an
+/// instance's durable record too: a resume that removed every earlier
+/// instance's checkout and registration and kept their intents left the
+/// first two halves clean (the follow-up C record, §6.10).
+fn instance_census(manager: &WorkspaceManager) -> (Vec<String>, Vec<String>, Vec<String>) {
     let root = canonical_prefix(manager.execution_root()).expect("the root's canonical prefix");
     let mut entries = Vec::new();
     for namespace in ["tasks", "merge", "snapshots"] {
@@ -17981,20 +17986,50 @@ fn instance_census(manager: &WorkspaceManager) -> (Vec<String>, Vec<String>) {
             registered.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
+    let intents = intent_names(manager);
     entries.sort();
     registered.sort();
-    (entries, registered)
+    (entries, registered, intents)
 }
 
-/// The two halves of [`instance_census`] hold only `manager`'s own instances.
+/// Every file name in `manager`'s intents directory, sorted; none when the
+/// directory does not exist.
+fn intent_names(manager: &WorkspaceManager) -> Vec<String> {
+    let directory = manager.execution_root().join("intents");
+    let mut names = match fs::read_dir(&directory) {
+        Ok(listing) => listing
+            .map(|entry| {
+                entry
+                    .expect("an intents entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", directory.display()),
+    };
+    names.sort();
+    names
+}
+
+/// The three halves of [`instance_census`] hold only `manager`'s own
+/// instances: each entry and registration ends in `_<tag>`, and each intent
+/// in `_<tag>.intent`.
 fn assert_only_own_instances(manager: &WorkspaceManager, when: &str) {
     let suffix = format!("_{}", manager.instance_tag().as_str());
-    let (entries, registered) = instance_census(manager);
-    for name in entries.iter().chain(&registered) {
+    let intent_suffix = format!("{suffix}.intent");
+    let (entries, registered, intents) = instance_census(manager);
+    for (name, own) in entries
+        .iter()
+        .chain(&registered)
+        .map(|name| (name, &suffix))
+        .chain(intents.iter().map(|name| (name, &intent_suffix)))
+    {
         assert!(
-            name.ends_with(&suffix),
+            name.ends_with(own.as_str()),
             "{when}: `{name}` is not this incarnation's instance; census {entries:?} / \
-             {registered:?}"
+             {registered:?} / {intents:?}"
         );
     }
 }
@@ -18002,16 +18037,34 @@ fn assert_only_own_instances(manager: &WorkspaceManager, when: &str) {
 /// P-1 (§4.6): three managers of one run, three fixed incarnations, leave
 /// instances of shared and of distinct slots — with intents; intentless,
 /// recreated by `git worktree add` at a dead tag; and registration-only, the
-/// checkout removed. After each resume's walk the census lists only the
-/// resuming incarnation's instances; after finalization it lists none, and
-/// the execution root is removed.
+/// checkout removed. After each resume's walk the census, the intents
+/// included, lists only the resuming incarnation's instances; after
+/// finalization it lists none, and the execution root is removed.
+///
+/// Each resume recreates the open generation through the production path,
+/// `T-DISPATCH`'s `verify_or_recreate`, as recovery does, and reclaims every
+/// other slot as the walks do. A resume simulated by the walks' reclaim of
+/// the open generation's slot hid that the production path kept every
+/// earlier incarnation's intent of it, and a census without the intents
+/// could not see them (the follow-up C record, §6.10).
 #[test]
 fn p1_after_every_walk_only_the_current_incarnations_instances_remain() {
+    use crate::engine::topology::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
+    use crate::engine::topology::seams::NoTopologyHooks;
+    use crate::topology::events::CommitSha;
+
     let fixture = Fixture::created("p1-three-incarnations");
     let first = &fixture.manager;
     let second = of_incarnation(&fixture, "inc-2");
     let third = of_incarnation(&fixture, "inc-3");
-    let alpha = fixture.task("alpha", 1);
+    let open = OpenGeneration {
+        key: TaskKey(0),
+        generation: GenerationId(1),
+        base: CommitSha(fixture.head.clone()),
+        slot: task_slot(TaskKey(0), GenerationId(1)),
+        source: None,
+    };
+    let alpha = open.slot.clone();
     let beta = fixture.task("beta", 1);
     let staging = Slot::Staging { sequence: 2 };
     let snapshot = Slot::Snapshot {
@@ -18027,19 +18080,28 @@ fn p1_after_every_walk_only_the_current_incarnations_instances_remain() {
     fs::remove_dir_all(first.slot_path(&staging))
         .expect("the checkout goes, the registration stays");
 
-    // Each resume walks every slot `intents()` reports — the open generation
-    // alpha is recreated as its own, every other slot reclaimed — and the
-    // census then holds its own instances only.
+    // Each resume walks every slot `intents()` reports — every other slot
+    // reclaimed, then the open generation alpha recreated as its own through
+    // the production path — and the census then holds its own instances only.
     let resume = |manager: &WorkspaceManager, when: &str| {
         for slot in manager.intents().expect("intents") {
-            reclaim_slot(manager, &slot).expect("the walk reclaims the slot");
+            if slot != alpha {
+                reclaim_slot(manager, &slot).expect("the walk reclaims the slot");
+            }
         }
-        manager
-            .write_intent(&mut NoHooks, &alpha)
-            .expect("the open generation's intent");
-        manager
-            .add_worktree(&mut NoHooks, &alpha, &fixture.head)
-            .expect("the open generation, recreated as this incarnation's");
+        assert_eq!(
+            verify_or_recreate(
+                manager,
+                &mut NoTopologyHooks::new(),
+                &open,
+                &open.quiescence()
+            )
+            .expect("the open generation, recreated as this incarnation's"),
+            Reuse::Recreated {
+                failure: VerifyFailure::NotRegistered
+            },
+            "{when}: a fresh incarnation has no instance of its own to reuse"
+        );
         assert_only_own_instances(manager, when);
     };
     resume(&second, "after the second incarnation's walk");
@@ -18067,11 +18129,103 @@ fn p1_after_every_walk_only_the_current_incarnations_instances_remain() {
             .expect("finalization's last step"),
         "the execution root is removed"
     );
-    let (entries, registered) = instance_census(&third);
+    let (entries, registered, intents) = instance_census(&third);
     assert!(
-        entries.is_empty() && registered.is_empty(),
-        "after finalization the census lists nothing: {entries:?} / {registered:?}"
+        entries.is_empty() && registered.is_empty() && intents.is_empty(),
+        "after finalization the census lists nothing: {entries:?} / {registered:?} / \
+         {intents:?}"
     );
+}
+
+/// `T-DISPATCH`'s recreate on resume, through the production path
+/// (`verify_or_recreate`): the dispatching incarnation leaves its open
+/// generation with its intent and its instance, and three fresh incarnations
+/// resume it in turn. Each finds no instance of its own, recreates the
+/// generation as its own, and leaves exactly one intent of it in the intents
+/// directory, its own: every earlier incarnation's intent is reclaimed before
+/// the replacement is created (erratum E-FUC-3's item 3; the record's §4.5).
+/// At `83516466` the recreate removed the earlier instances' checkouts and
+/// registrations and kept their intents, so the counts were 2, 3 and 4 (the
+/// follow-up C record, §6.10).
+#[test]
+fn every_resume_that_recreates_an_open_generation_leaves_one_intent_its_own() {
+    use crate::engine::topology::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
+    use crate::engine::topology::seams::NoTopologyHooks;
+    use crate::topology::events::CommitSha;
+
+    let fixture = Fixture::created("resume-intents");
+    let open = OpenGeneration {
+        key: TaskKey(0),
+        generation: GenerationId(1),
+        base: CommitSha(fixture.head.clone()),
+        slot: task_slot(TaskKey(0), GenerationId(1)),
+        source: None,
+    };
+    let dispatched = add_tracked(&fixture, &fixture.manager, &open.slot);
+    assert_eq!(intent_names(&fixture.manager).len(), 1, "the premise");
+
+    let mut counts = Vec::new();
+    let mut resumed = Vec::new();
+    for incarnation in ["inc-2", "inc-3", "inc-4"] {
+        let resumer = of_incarnation(&fixture, incarnation);
+        let reuse = verify_or_recreate(
+            &resumer,
+            &mut NoTopologyHooks::new(),
+            &open,
+            &open.quiescence(),
+        )
+        .expect("the resume recreates the open generation");
+        assert_eq!(
+            reuse,
+            Reuse::Recreated {
+                failure: VerifyFailure::NotRegistered
+            },
+            "{incarnation}: a fresh incarnation has no instance of its own to reuse"
+        );
+        assert!(
+            healthy_instance(&resumer, &open.slot, &fixture.head),
+            "{incarnation}: the generation's worktree is its own, at the recorded base"
+        );
+        let census = instance_census(&resumer);
+        counts.push(census.2.len());
+        resumed.push((incarnation, resumer, census));
+    }
+    assert_eq!(
+        counts,
+        vec![1, 1, 1],
+        "every resume reclaims the earlier incarnations' intents before it creates its own"
+    );
+    for (incarnation, resumer, (entries, registered, intents)) in &resumed {
+        let tag = resumer.instance_tag().as_str();
+        let own = format!("_{tag}");
+        assert!(
+            entries
+                .iter()
+                .chain(registered)
+                .all(|name| name.ends_with(&own))
+                && intents
+                    .iter()
+                    .all(|name| name.ends_with(&format!("{own}.intent"))),
+            "{incarnation}: after its resume only its own instance and intent remain: \
+             {entries:?} / {registered:?} / {intents:?}"
+        );
+    }
+    assert!(
+        !dispatched.checkout.exists() && !dispatched.admin.exists() && !dispatched.intent.exists(),
+        "nothing of the dispatching incarnation's instance is left"
+    );
+}
+
+/// Whether `manager`'s own instance of `slot` is registered with Git and
+/// checked out at `base`.
+fn healthy_instance(manager: &WorkspaceManager, slot: &Slot, base: &str) -> bool {
+    let checkout = manager.slot_path(slot);
+    manager
+        .worktree_records()
+        .expect("Git enumerates the store")
+        .into_iter()
+        .any(|record| crate::util::same_path(record.path(), &checkout))
+        && git(&checkout, &["rev-parse", "HEAD"]) == base
 }
 
 /// A rerere resolution the user recorded the ordinary way (§5.2's witness,
@@ -18479,6 +18633,94 @@ fn a_torn_registration_an_earlier_incarnation_left_is_repaired_with_its_slot() {
         .expect("Git enumerates again");
 }
 
+/// The torn-registration repair removes only the instance its plan proved
+/// torn. The successor runs `alpha` and has written its paid edits there; a
+/// dead incarnation's late add recreates its own instance of `alpha`, with no
+/// intent, beside it. Then the successor retires the unrelated slot `beta`,
+/// and its intent removal revalidates through Git's enumeration.
+///
+/// - **Whole**, the control, first: the late add's registration is whole,
+///   nothing is repaired, and the retirement of `beta` touches no instance of
+///   `alpha`.
+/// - **Torn**: the late add's registration is left as a kill leaves it, so
+///   the enumeration dies on it and the repair runs. It removes the dead
+///   instance's checkout and registration and nothing else: the successor's
+///   checkout, its registration, its intent and its paid edits stay, its
+///   instance still verifies, and Git enumerates again. A repair that removed
+///   every instance of the torn instance's slot deleted the successor's live
+///   worktree (executed at `83516466`, the follow-up C record, §6.10).
+#[test]
+fn a_torn_earlier_instances_repair_leaves_the_successors_live_instance_of_its_slot() {
+    for torn in [false, true] {
+        let shape = if torn { "torn" } else { "whole" };
+        let fixture = Fixture::created(&format!("instance-beside-live-{shape}"));
+        let earlier = of_incarnation(&fixture, "inc-0");
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+        let live = fixture.manager.slot_path(&alpha);
+        let live_admin = super::fixture::registration_of(&fixture.manager, &live);
+        let paid = live.join("paid-edits.txt");
+        write_file(&paid, b"the successor's paid edits\n");
+
+        let dead = earlier.slot_path(&alpha);
+        late_add(&fixture, &dead);
+        let dead_admin = if torn {
+            let admin = tear_registration(&fixture.manager, &dead);
+            assert_enumeration_dies_on(&fixture, &admin);
+            admin
+        } else {
+            super::fixture::registration_of(&fixture.manager, &dead)
+        };
+        assert!(
+            !earlier.intent_path(&alpha).exists(),
+            "{shape}: the late add wrote no intent"
+        );
+
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &beta)
+            .expect("beta's removal binds by gitdir and lists nothing");
+        fixture
+            .manager
+            .remove_intent(&mut NoHooks, &beta)
+            .expect("beta's intent removal, past the repair when there is a tear");
+        assert_eq!(
+            fs::read(&paid).ok().as_deref(),
+            Some(b"the successor's paid edits\n".as_slice()),
+            "{shape}: PAID EDITS LOST: the successor's checkout was removed"
+        );
+        assert!(
+            live_admin.is_dir(),
+            "{shape}: REGISTRATION LOST: the successor's instance is no longer registered"
+        );
+        assert!(
+            fixture.manager.intent_path(&alpha).exists(),
+            "{shape}: the successor's intent stays"
+        );
+        assert_eq!(
+            fixture
+                .manager
+                .verify_worktree(
+                    &mut NoHooks,
+                    &alpha,
+                    &Quiescence::AtBase(fixture.head.clone())
+                )
+                .expect("verify"),
+            Ok(()),
+            "{shape}: the successor's instance still verifies as its own"
+        );
+        assert_eq!(
+            !dead.exists() && !dead_admin.exists(),
+            torn,
+            "{shape}: the repair removes the torn instance, and only a repair removes one"
+        );
+        fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates again");
+    }
+}
+
 /// P-2's helper: a dead incarnation in a process of its own. It adopts the
 /// parent's fixture, derives its manager under the incarnation the parent
 /// names, writes the slot's intent and dies inside the add at the phase the
@@ -18613,10 +18855,10 @@ fn p2_instances_of_killed_incarnations_in_other_processes_are_reclaimed_by_the_r
             .expect("finalization's last step"),
         "the root is removed"
     );
-    let (entries, registered) = instance_census(&fixture.manager);
+    let (entries, registered, intents) = instance_census(&fixture.manager);
     assert!(
-        entries.is_empty() && registered.is_empty(),
-        "{entries:?} / {registered:?}"
+        entries.is_empty() && registered.is_empty() && intents.is_empty(),
+        "{entries:?} / {registered:?} / {intents:?}"
     );
 }
 

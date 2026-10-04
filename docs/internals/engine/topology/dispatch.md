@@ -527,13 +527,29 @@ worktree reaches this module at all — [`super::settle::retry`] performs the
 retained `Worktree.Verify` through its own `WorktreeVerify` seam and writes
 the closure itself — so nothing here has one to hand the recreate branch.
 
-### The intent is re-written rather than removed and re-written
+### Every instance's intent goes before this incarnation's is written
 
 The reclaim order elsewhere is *worktree then intent*, because an intent that
 outlives its worktree is reclaimed harmlessly while a worktree that outlives
 its intent is a leak nothing can find. That reasoning applies here too, so
-the sequence is: force-remove the worktree, re-write the (idempotent) intent,
-add. At no instant does a worktree exist without a durable intent naming it.
+the sequence is: force-remove the worktree — every instance of the slot,
+whichever incarnation created it (`WorkspaceManager::remove_worktree`) — then
+every instance's intent (`WorkspaceManager::remove_intent`), then write this
+incarnation's intent, and add. At no instant does a worktree exist without a
+durable intent naming it.
+
+Under per-incarnation slot instances an intent is its creating incarnation's
+own file, and a fresh process's resume has none of its own to re-write: the
+generation's intent is the dead incarnation's. Re-writing this incarnation's
+intent over nothing left every earlier incarnation's intent of the generation
+in place, one more with every resume — 2, 3 and 4 intents after three
+resumes, measured at `83516466` (the follow-up C record, §6.10) — until the
+generation's retirement or terminal finalization. Erratum E-FUC-3's item 3
+reclaims every earlier incarnation's instance *and intent* on resume, and the
+record's §4.5 reclaims every durable record of a dead instance before any
+admission, so the recreate is the walks' own reclaim of the slot followed by
+its creation. In a live process the only intent is its own, which is removed
+and written again.
 
 ### Errors
 
