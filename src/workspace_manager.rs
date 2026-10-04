@@ -2874,11 +2874,18 @@ impl WorkspaceManager {
     /// finalization: the root is not removed over an instance that is still
     /// there.
     ///
+    /// Every registry access of the sweep — its read of the registry and each
+    /// removal's scan — waits through `hooks`, so on the topology coordinator
+    /// a wait answers its messages, and one that ends the command ends the
+    /// sweep there (the follow-up C record, §6.11).
+    ///
     /// # Errors
     ///
-    /// An I/O error, [`UpstrokeError::RegistryRefused`], or a removal's error.
+    /// An I/O error, [`UpstrokeError::RegistryRefused`], the error of a wait
+    /// `hooks` ended, or a removal's error.
     fn sweep_earlier_instances(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
-        for instance in self.earlier_instances(self.registered_instances()?)? {
+        let registered = self.registered_instances(&mut |pause| hooks.registry_pause(pause))?;
+        for instance in self.earlier_instances(registered)? {
             self.remove_instance_proving(
                 hooks,
                 instance.slot(),
@@ -3121,7 +3128,20 @@ impl WorkspaceManager {
     /// whose slot is refused, or [`UpstrokeError::RegistryRefused`] from the
     /// registry's read.
     pub fn intents(&self) -> Result<Vec<Slot>, UpstrokeError> {
-        self.logical_slots(self.registered_instances()?)
+        self.logical_slots(self.registered_instances(&mut sleep_for)?)
+    }
+
+    /// [`Self::intents`], its registry read waiting out its pauses through
+    /// `hooks` ([`EffectHooks::registry_pause`]): the form a walk that holds
+    /// the call's hooks takes, so that on the topology coordinator a store
+    /// the read cannot finish keeps no pipeline from its grants (the
+    /// follow-up B record's §9.13; the follow-up C record's §6.11).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::intents`], and the error of a wait `hooks` ended.
+    pub fn intents_pausing(&self, hooks: &mut dyn EffectHooks) -> Result<Vec<Slot>, UpstrokeError> {
+        self.logical_slots(self.registered_instances(&mut |pause| hooks.registry_pause(pause))?)
     }
 
     /// [`Self::intents`] over `registered`, the registry's instances as one
@@ -3238,14 +3258,22 @@ impl WorkspaceManager {
     /// no other incarnation's instance). Anything else that fails is attempted
     /// again until the access's deadline and then refuses, resumably.
     ///
+    /// Its waits are `pause_for`'s: the caller's hooks' pause where it holds
+    /// them, so that on the topology coordinator they answer its messages
+    /// (the follow-up C record, §6.11).
+    ///
     /// # Errors
     ///
-    /// [`UpstrokeError::RegistryRefused`].
-    fn registered_instances(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+    /// [`UpstrokeError::RegistryRefused`], or the error of a wait `pause_for`
+    /// ended.
+    fn registered_instances(
+        &self,
+        pause_for: &mut dyn FnMut(std::time::Duration) -> Result<(), UpstrokeError>,
+    ) -> Result<Vec<SlotInstance>, UpstrokeError> {
         tolerant_registry_access(
             &self.common_git_dir,
             RegistryHold::Unheld,
-            &mut sleep_for,
+            pause_for,
             &mut || Again::Attempt,
             &mut || self.registered_instances_once(),
         )
@@ -3337,7 +3365,7 @@ impl WorkspaceManager {
     ///
     /// The containment refusals or a Git or I/O error.
     pub fn reclaim_intents(&self, hooks: &mut dyn EffectHooks) -> Result<Reclaimed, UpstrokeError> {
-        let slots = self.intents()?;
+        let slots = self.intents_pausing(hooks)?;
         // Revalidate even when there are no intents: callers rely on reclaim
         // as a fresh containment check. With nothing to remove, Git's ordinary
         // enumeration is safe and a repository with no linked-worktree store
@@ -4078,10 +4106,14 @@ impl WorkspaceManager {
     /// ([`Self::sweep_earlier_instances`]). A slot's retirement removes every
     /// instance ([`Self::remove_worktree_proving`]).
     ///
+    /// The scan's waits go through `hooks`, as the slot's own removal's do,
+    /// so on the topology coordinator they answer its messages (the follow-up
+    /// C record, §6.11).
+    ///
     /// # Errors
     ///
-    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
-    /// or I/O error.
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], the error
+    /// of a wait `hooks` ended, or a Git or I/O error.
     fn remove_instance_proving(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -4093,7 +4125,7 @@ impl WorkspaceManager {
         let binding = tolerant_registry_access(
             &self.common_git_dir,
             RegistryHold::Unheld,
-            &mut sleep_for,
+            &mut |pause| hooks.registry_pause(pause),
             &mut || Again::Attempt,
             &mut || self.revalidate_removal_proving(&path, proof),
         )?;

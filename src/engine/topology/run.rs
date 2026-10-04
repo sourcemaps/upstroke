@@ -2386,7 +2386,7 @@ fn reclaim_snapshots_of(
     hooks: &mut dyn TopologyHooks,
     names: JudgeNames,
 ) -> Result<(), UpstrokeError> {
-    for slot in manager.intents()? {
+    for slot in manager.intents_pausing(hooks.effects())? {
         let crate::workspace_manager::Slot::Snapshot { name } = &slot else {
             continue;
         };

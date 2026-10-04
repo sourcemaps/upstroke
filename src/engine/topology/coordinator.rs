@@ -4406,6 +4406,12 @@ mod tests {
     enum Torn {
         CommondirEmpty,
         GitdirMissing,
+        /// A registration whose `gitdir` cannot be read: a directory stands
+        /// where the file should be. The removal's scan and the registry read
+        /// that discovers earlier incarnations' instances both fail on it,
+        /// where they pass over the two shapes above (the follow-up C record,
+        /// §6.11).
+        GitdirUnreadable,
     }
 
     #[derive(Clone)]
@@ -4420,7 +4426,10 @@ mod tests {
 
     impl Plant {
         fn finish_tear(&self) {
-            if self.torn == Torn::GitdirMissing {
+            if self.torn == Torn::GitdirUnreadable {
+                crate::workspace_manager::fixture::remove_dir(&self.admin.join("gitdir"));
+            }
+            if matches!(self.torn, Torn::GitdirMissing | Torn::GitdirUnreadable) {
                 self.whole();
             }
             crate::workspace_manager::fixture::write_file(
@@ -4466,6 +4475,17 @@ mod tests {
                         &self.admin.join("locked"),
                         b"initializing\n",
                     );
+                }
+                Torn::GitdirUnreadable => {
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("HEAD"),
+                        format!("{}\n", self.head).as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(
+                        &self.admin.join("commondir"),
+                        b"../..\n",
+                    );
+                    crate::workspace_manager::fixture::create_dir(&self.admin.join("gitdir"));
                 }
             }
             let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
@@ -5112,6 +5132,129 @@ mod tests {
             );
             assert!(wide.run.invocations_balance());
         });
+    }
+
+    /// The follow-up C record's §6.11: C's instance-only repair (C-I1) waits
+    /// through the coordinator. The residue is an earlier incarnation's: its
+    /// intent of a slot, and the registration of its own instance of that slot,
+    /// torn as a killed `git worktree add` leaves it. The repair's plan names
+    /// that instance by its tag, and the removal that takes it meets a foreign
+    /// registration torn at its own start; a pipeline is served while it
+    /// waits. At the merge of #329's final head (`905ed0c8`) the instance's
+    /// removal slept on the coordinator's thread, no pipeline was served, and
+    /// the access refused at its deadline.
+    fn served_while_an_earlier_instances_repair_waits(
+        tag: &str,
+        failing: &[(u32, u32)],
+        at: TearAt,
+        torn: Torn,
+    ) {
+        let (what, tag, failing) = (tag.to_owned(), tag.to_owned(), failing.to_vec());
+        bounded(&what, move || {
+            let tasks = two_independent();
+            let plans = WidePlans {
+                gates: 2,
+                ..WidePlans::default()
+            };
+            let mut wide = Wide::started_with(&tag, &tasks, 2, plans, holding(&tasks, &failing));
+            let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
+            let leftover = common.join("worktrees").join("earlier-residue");
+            let mut hooks = TearHeld::new(&wide, "foreign-held", at);
+            hooks.tearing(torn);
+            let earlier = WorkspaceManager::derive(
+                &wide.env.fixture.base,
+                &wide.env.fixture.private,
+                crate::workspace_manager::fixture::RUN_ID,
+                "inc-earlier",
+            )
+            .expect("a manager of the run's earlier incarnation");
+            assert_ne!(
+                earlier.instance_tag(),
+                wide.env.fixture.manager.instance_tag(),
+                "the residue is another incarnation's"
+            );
+            let slot = crate::engine::topology::dispatch::task_slot(TaskKey(9), GenerationId(0));
+            earlier
+                .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+                .expect("the earlier incarnation's intent");
+            let checkout = earlier.slot_path(&slot).join(".git");
+            let (admin, head) = (leftover.clone(), wide.env.fixture.head.clone());
+            let (TearAt::Fold(when) | TearAt::Access(when, _)) = at;
+            hooks.also = Some((
+                when,
+                Box::new(move || {
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("HEAD"),
+                        format!("{head}\n").as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(
+                        &admin.join("gitdir"),
+                        format!(
+                            "{}\n",
+                            crate::workspace_manager::fixture::as_git_writes_it(&checkout)
+                        )
+                        .as_bytes(),
+                    );
+                    crate::workspace_manager::fixture::write_file(&admin.join("commondir"), b"");
+                }),
+            ));
+            let planted = hooks.planted();
+            let pipelines = wide.env.pipelines();
+            let runner = Arc::clone(&wide.env.runner);
+            let mut scheduler = Scheduler::scripted(&runner, alpha_waits_for_the_tear(planted));
+            let contended = crate::workspace_manager::contended_attempts(&common);
+            let slept = crate::workspace_manager::fixture::slept_pauses();
+            let progress = wide
+                .run
+                .run_concurrently(
+                    &wide.env.seams(),
+                    &pipelines,
+                    &mut hooks,
+                    Some(&mut scheduler),
+                )
+                .expect("the access is passed once the coordinator served a pipeline meanwhile");
+            assert_eq!(
+                crate::workspace_manager::fixture::slept_pauses(),
+                slept,
+                "no wait of a registry access the coordinator made slept on its thread"
+            );
+            drop(scheduler);
+            hooks
+                .finish()
+                .expect("an invocation reached the runner while the access waited on the tear");
+            drop(hooks);
+            assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+            assert!(
+                crate::workspace_manager::contended_attempts(&common) > contended,
+                "the access failed on the tear first"
+            );
+            assert!(
+                !leftover.exists(),
+                "the repair removed the earlier incarnation's torn instance"
+            );
+            assert!(wide.run.invocations_balance());
+        });
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_an_earlier_instances_repair_removal_waits_on_a_torn_registration()
+    {
+        served_while_an_earlier_instances_repair_waits(
+            "served-earlier-repair-removal",
+            &[],
+            TearAt::Access(candidate_created_of_beta, 4),
+            Torn::GitdirMissing,
+        );
+    }
+
+    #[test]
+    fn a_pipeline_is_served_while_a_verifications_earlier_instance_repair_removal_waits() {
+        served_while_an_earlier_instances_repair_waits(
+            "served-earlier-verify-repair",
+            &[(0, 1)],
+            TearAt::Access(retained_attempt_finished_of_beta, 3),
+            Torn::GitdirMissing,
+        );
     }
 
     #[test]
@@ -6268,6 +6411,32 @@ mod tests {
         );
     }
 
+    /// The follow-up C record's §6.11: a shutdown answered inside a wait of
+    /// the final sweep's registry read ends the command there. The sweep
+    /// removes nothing further, the execution root stays, and the run is
+    /// resumable, as B's contract has it for every wait on the coordinator.
+    #[test]
+    fn a_shutdown_answered_inside_a_final_sweeps_wait_removes_nothing_further() {
+        stopped_in_its_wait(
+            "shutdown-wait-sweep",
+            StoppedInItsWait {
+                at: TearAt::Access(run_finished, 6),
+                torn: Torn::GitdirUnreadable,
+                finish_at_shutdown: true,
+            },
+            two_held,
+            first_released,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(kinds_of(events).last(), Some(&"run_finished"));
+                assert!(
+                    wide.env.fixture.manager.execution_root().exists(),
+                    "the sweep stopped before the execution root was removed"
+                );
+            },
+        );
+    }
+
     fn coordinator_of<'s>(
         run: &'s mut TopologyRun,
         seams: &'s RunSeams<'s>,
@@ -6843,6 +7012,30 @@ mod tests {
             || halting_on_gamma("waits-closure"),
             TearAt::Fold(attempt_interrupted),
             Torn::GitdirMissing,
+            gamma_halts_while_alpha_gates,
+            RunOutcome::Halted,
+        );
+    }
+
+    #[test]
+    fn a_final_sweeps_registry_read_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a final sweep's registry read meeting an unreadable registration",
+            || two_held("waits-sweep-read"),
+            TearAt::Access(run_finished, 6),
+            Torn::GitdirUnreadable,
+            first_invoking,
+            RunOutcome::Complete,
+        );
+    }
+
+    #[test]
+    fn a_closures_snapshot_discovery_answers_on_the_coordinator() {
+        waits_through_the_coordinator(
+            "a closure's snapshot reclaim's registry read meeting an unreadable registration",
+            || halting_on_gamma("waits-closure-discovery"),
+            TearAt::Access(attempt_interrupted, 1),
+            Torn::GitdirUnreadable,
             gamma_halts_while_alpha_gates,
             RunOutcome::Halted,
         );

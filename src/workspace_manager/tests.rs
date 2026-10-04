@@ -17646,6 +17646,209 @@ fn an_untagged_instance_from_before_instances_is_reclaimed_like_an_earlier_incar
     assert!(fixture.manager.intents().expect("intents").is_empty());
 }
 
+/// The follow-up C record's §6.11: a registration of the repository's store
+/// whose `gitdir` cannot be read — a directory stands where the file should
+/// be — at `<common git dir>/worktrees/<name>`. Git's own list passes over it;
+/// the read that discovers earlier incarnations' instances and the removal's
+/// scan fail on it, on every attempt, until it is gone.
+fn plant_an_unreadable_registration(common_git_dir: &Path, name: &str) -> PathBuf {
+    let admin = common_git_dir.join("worktrees").join(name);
+    create_dir(&admin.join("gitdir"));
+    write_file(&admin.join("commondir"), b"../..\n");
+    admin
+}
+
+/// §6.11's observer: every wait of a registry access the call makes is
+/// counted, and the first that finds the unreadable registration removes it,
+/// so the attempt after that wait reads the store whole. It never sleeps: a
+/// wait that slept on the calling thread instead (`super::sleep_for`) is one it
+/// never sees, and `slept_pauses` counts it.
+struct HealsTheStoreAtAPause {
+    admin: PathBuf,
+    pauses: usize,
+    healed_at: Option<usize>,
+}
+
+impl HealsTheStoreAtAPause {
+    fn over(admin: PathBuf) -> Self {
+        Self {
+            admin,
+            pauses: 0,
+            healed_at: None,
+        }
+    }
+}
+
+impl EffectHooks for HealsTheStoreAtAPause {
+    fn phase(&mut self, _site: EffectSiteId, _phase: HookPhase) -> Injection {
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+
+    fn registry_pause(&mut self, _pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.pauses += 1;
+        if self.healed_at.is_none() && self.admin.exists() {
+            fs::remove_dir_all(&self.admin).unwrap_or_else(|error| {
+                panic!("heal the store at {}: {error}", self.admin.display())
+            });
+            self.healed_at = Some(self.pauses);
+        }
+        Ok(())
+    }
+}
+
+/// An earlier incarnation's instance of `slot` that its registration alone
+/// names: the late add's checkout, then the checkout removed.
+fn an_earlier_registration_only_instance(
+    fixture: &Fixture,
+    earlier: &WorkspaceManager,
+    slot: &Slot,
+) {
+    late_add(fixture, &earlier.slot_path(slot));
+    fs::remove_dir_all(earlier.slot_path(slot)).expect("the checkout goes, the registration stays");
+}
+
+/// §6.11: `intents_pausing`, the form a walk that holds hooks takes, reads
+/// the registry through them. The read meets a registration it cannot read,
+/// waits through the hooks — which heal the store — and the attempt after
+/// the wait finds the earlier instance its registration alone names. Nothing
+/// sleeps on the calling thread.
+#[test]
+fn intents_pausing_reads_the_registry_through_the_hooks_it_is_handed() {
+    let fixture = Fixture::created("pausing-intents");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = Slot::Staging { sequence: 4 };
+    an_earlier_registration_only_instance(&fixture, &earlier, &slot);
+    let mut hooks = HealsTheStoreAtAPause::over(plant_an_unreadable_registration(
+        fixture.manager.common_git_dir(),
+        "unreadable",
+    ));
+    let slept = super::fixture::slept_pauses();
+
+    let intents = fixture
+        .manager
+        .intents_pausing(&mut hooks)
+        .expect("the read is passed once the store is healed");
+
+    assert_eq!(intents, vec![slot], "the slot its registration alone names");
+    assert_eq!(
+        hooks.healed_at,
+        Some(1),
+        "the read failed on the store and waited through the hooks"
+    );
+    assert_eq!(
+        super::fixture::slept_pauses(),
+        slept,
+        "no wait of the read slept on the calling thread"
+    );
+}
+
+/// §6.11: a reclaim's walk (`reclaim_intents`) enumerates through the hooks
+/// it is handed, so its registry read waits through them, and the earlier
+/// instance it finds is reclaimed.
+#[test]
+fn a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed() {
+    let fixture = Fixture::created("pausing-reclaim");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = Slot::Staging { sequence: 4 };
+    an_earlier_registration_only_instance(&fixture, &earlier, &slot);
+    let mut hooks = HealsTheStoreAtAPause::over(plant_an_unreadable_registration(
+        fixture.manager.common_git_dir(),
+        "unreadable",
+    ));
+    let slept = super::fixture::slept_pauses();
+
+    let reclaimed = fixture
+        .manager
+        .reclaim_intents(&mut hooks)
+        .expect("the reclaim is passed once the store is healed");
+
+    assert_eq!(reclaimed.slots, vec![slot.clone()]);
+    assert_eq!(
+        hooks.healed_at,
+        Some(1),
+        "the walk's read failed on the store and waited through the hooks"
+    );
+    assert_eq!(super::fixture::slept_pauses(), slept, "nothing slept");
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+}
+
+/// §6.11: terminal finalization's final sweep reads the registry through the
+/// hooks it is handed. Its read meets a registration it cannot read, waits
+/// through the hooks, and then removes the earlier instance it found.
+#[test]
+fn the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed() {
+    let fixture = Fixture::created("pausing-sweep-read");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.task("alpha", 1);
+    late_add(&fixture, &earlier.slot_path(&slot));
+    let mut hooks = HealsTheStoreAtAPause::over(plant_an_unreadable_registration(
+        fixture.manager.common_git_dir(),
+        "unreadable",
+    ));
+    let slept = super::fixture::slept_pauses();
+
+    fixture
+        .manager
+        .remove_execution_root(&mut hooks)
+        .expect("the finalization's last step is passed once the store is healed");
+
+    assert_eq!(
+        hooks.healed_at,
+        Some(1),
+        "the sweep's read failed on the store and waited through the hooks"
+    );
+    assert_eq!(super::fixture::slept_pauses(), slept, "nothing slept");
+    assert!(instance_directories_of(&fixture.manager, &slot).is_empty());
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+}
+
+/// §6.11: each removal the final sweep makes waits through the hooks it is
+/// handed. The unreadable registration is planted just before the removal's
+/// own access, the third of the call (the gate's list, the sweep's read, the
+/// removal), so only the removal's scan meets it.
+#[test]
+fn the_final_sweeps_removal_waits_through_the_hooks_it_is_handed() {
+    let fixture = Fixture::created("pausing-sweep-removal");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.task("alpha", 1);
+    late_add(&fixture, &earlier.slot_path(&slot));
+    let admin = fixture
+        .manager
+        .common_git_dir()
+        .join("worktrees")
+        .join("unreadable");
+    let _planting = super::fixture::before_registry_access(
+        3,
+        Box::new(|common_git_dir: &Path| {
+            plant_an_unreadable_registration(common_git_dir, "unreadable");
+        }),
+    );
+    let mut hooks = HealsTheStoreAtAPause::over(admin.clone());
+    let slept = super::fixture::slept_pauses();
+
+    fixture
+        .manager
+        .remove_execution_root(&mut hooks)
+        .expect("the removal is passed once the store is healed");
+
+    assert_eq!(
+        hooks.healed_at,
+        Some(1),
+        "the removal's scan failed on the store and waited through the hooks"
+    );
+    assert!(
+        !admin.exists(),
+        "the planted registration was met and healed"
+    );
+    assert_eq!(super::fixture::slept_pauses(), slept, "nothing slept");
+    assert!(instance_directories_of(&fixture.manager, &slot).is_empty());
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+}
+
 /// §4.5, the refusing variant: nothing retains a dead instance. One that
 /// cannot be removed refuses the reclaim, resumably, as any removal does, and
 /// the next reclaim, once it can be removed, converges. Evaluated on the Unix
