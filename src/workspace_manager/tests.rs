@@ -4911,6 +4911,384 @@ fn a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref() {
     );
 }
 
+/// One function of this module's production code, as the hooks-routing census
+/// reads it: whether its signature takes hooks, whether its body names a wait
+/// that sleeps by default, and the names its body calls.
+struct RoutingRead {
+    name: String,
+    takes_hooks: bool,
+    names_a_sleeping_wait: bool,
+    calls: BTreeSet<String>,
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Whether `code` names the identifier `word` as a whole word.
+fn names_word(code: &str, word: &str) -> bool {
+    code.match_indices(word).any(|(at, _)| {
+        let before = code[..at].bytes().next_back();
+        let after = code[at + word.len()..].bytes().next();
+        !before.is_some_and(is_identifier_byte) && !after.is_some_and(is_identifier_byte)
+    })
+}
+
+/// Every identifier in `body` that is called: followed, past whitespace and
+/// any turbofish, by `(`.
+fn called_names(body: &str) -> BTreeSet<String> {
+    let bytes = body.as_bytes();
+    let mut called = BTreeSet::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if !is_identifier_byte(bytes[at]) || (at > 0 && is_identifier_byte(bytes[at - 1])) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && is_identifier_byte(bytes[at]) {
+            at += 1;
+        }
+        let mut next = at;
+        if body[next..].starts_with("::<") {
+            let mut depth = 0_usize;
+            while next < bytes.len() {
+                match bytes[next] {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            next += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                next += 1;
+            }
+        }
+        while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+            next += 1;
+        }
+        if bytes.get(next) == Some(&b'(') {
+            called.insert(body[start..at].to_owned());
+        }
+    }
+    called
+}
+
+/// Every `fn` item with a body in `code`, which comments, strings and
+/// test-only items have already been blanked out of. A nested `fn` is read
+/// on its own, and its body is also part of the body that holds it.
+fn routing_reads(code: &str) -> Vec<RoutingRead> {
+    let bytes = code.as_bytes();
+    let mut reads = Vec::new();
+    for (start, _) in code.match_indices("fn ") {
+        if start > 0 && is_identifier_byte(bytes[start - 1]) {
+            continue;
+        }
+        let after = start + "fn ".len();
+        let name: String = code[after..]
+            .trim_start()
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let mut depth = 0_i32;
+        let mut open = None;
+        for (at, byte) in bytes.iter().enumerate().skip(after) {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                b'{' if depth == 0 => {
+                    open = Some(at);
+                    break;
+                }
+                b';' if depth == 0 => break,
+                _ => {}
+            }
+        }
+        let Some(open) = open else {
+            continue;
+        };
+        let mut braces = 0_usize;
+        let mut close = None;
+        for (at, byte) in bytes.iter().enumerate().skip(open) {
+            match byte {
+                b'{' => braces += 1,
+                b'}' => {
+                    braces -= 1;
+                    if braces == 0 {
+                        close = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.unwrap_or_else(|| panic!("the body of `fn {name}` closes"));
+        let (signature, body) = (&code[start..open], &code[open..=close]);
+        reads.push(RoutingRead {
+            name,
+            takes_hooks: signature.contains("EffectHooks"),
+            names_a_sleeping_wait: names_word(body, "sleep_for") || names_word(body, "NoHooks"),
+            calls: called_names(body),
+        });
+    }
+    reads
+}
+
+/// What the hooks-routing census found: the functions that take hooks and
+/// reach a wait that sleeps by default, the names that reach one, the names
+/// that take hooks, and how many functions it read.
+struct RoutingCensus {
+    violations: BTreeSet<String>,
+    sleeping: BTreeSet<String>,
+    hooked: BTreeSet<String>,
+    read: usize,
+}
+
+/// The hooks-routing census over `sources`, copies of this module's files.
+///
+/// A wait that sleeps by default is `sleep_for`, the wait an access made with
+/// no hooks sleeps by, or [`NoHooks`], whose wait is that default. A function
+/// reaches one when its body names either or calls, by name, a function that
+/// reaches one. A function that takes hooks and reaches one drops them: the
+/// waits of that access sleep on the caller's thread whatever hooks the caller
+/// passed, which on the topology coordinator is a sleep on its thread (CAS-1,
+/// the record's §9.21). [`EffectHooks::registry_pause`] is not read as one: it
+/// is the seam itself, the wait a routed access asks of the caller's hooks,
+/// and its default is what a caller that is not the coordinator chooses.
+///
+/// **What it cannot see.** Calls are matched by name, so a call of another
+/// type's method spelt like one that reaches a sleeping wait reads as one; and
+/// a wait reached through a function value, a trait object, a closure handed
+/// in from outside these files, or hooks of another type a function builds
+/// for itself, is not seen at all. It reads this module's files and no other:
+/// an engine call site that has hooks and calls a hook-less function is the
+/// sibling sweep's (§9.21), not this census's.
+fn hooks_routing_census(sources: &[&str]) -> RoutingCensus {
+    let reads: Vec<RoutingRead> = sources
+        .iter()
+        .flat_map(|source| {
+            routing_reads(&crate::effects::production_code(
+                &source.replace("\r\n", "\n"),
+            ))
+        })
+        .filter(|read| read.name != "registry_pause")
+        .collect();
+    let mut sleeping: BTreeSet<String> = std::iter::once("sleep_for".to_owned())
+        .chain(
+            reads
+                .iter()
+                .filter(|read| read.names_a_sleeping_wait)
+                .map(|read| read.name.clone()),
+        )
+        .collect();
+    loop {
+        let reached: Vec<String> = reads
+            .iter()
+            .filter(|read| !sleeping.contains(&read.name))
+            .filter(|read| read.calls.iter().any(|called| sleeping.contains(called)))
+            .map(|read| read.name.clone())
+            .collect();
+        if reached.is_empty() {
+            break;
+        }
+        sleeping.extend(reached);
+    }
+    let violations = reads
+        .iter()
+        .filter(|read| read.takes_hooks)
+        .filter(|read| {
+            read.names_a_sleeping_wait || read.calls.iter().any(|called| sleeping.contains(called))
+        })
+        .map(|read| read.name.clone())
+        .collect();
+    let hooked = reads
+        .iter()
+        .filter(|read| read.takes_hooks)
+        .map(|read| read.name.clone())
+        .collect();
+    RoutingCensus {
+        violations,
+        sleeping,
+        hooked,
+        read: reads.len(),
+    }
+}
+
+/// This module's production files, `src/workspace_manager.rs` and every child
+/// it declares outside a test-only item, as `(path under src/, text)`.
+fn this_modules_sources() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let parent = fs::read_to_string(root.join("workspace_manager.rs"))
+        .expect("this module's source")
+        .replace("\r\n", "\n");
+    let code = crate::effects::production_code(&parent);
+    let children: BTreeSet<String> = code
+        .match_indices("mod ")
+        .filter(|(at, _)| {
+            !code[..*at]
+                .bytes()
+                .next_back()
+                .is_some_and(is_identifier_byte)
+        })
+        .filter_map(|(at, _)| {
+            let rest = &code[at + "mod ".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect();
+            (!name.is_empty() && rest[name.len()..].trim_start().starts_with(';')).then_some(name)
+        })
+        .collect();
+    std::iter::once(("workspace_manager.rs".to_owned(), parent))
+        .chain(children.into_iter().map(|child| {
+            let file = format!("workspace_manager/{child}.rs");
+            let text = fs::read_to_string(root.join(&file))
+                .unwrap_or_else(|error| panic!("the declared child {file}: {error}"));
+            (file, text)
+        }))
+        .collect()
+}
+
+/// CAS-1's census (the record's §9.21): no function of this module that takes
+/// hooks reaches a registry wait that sleeps by default. Every wait of a
+/// registry access a call makes goes through the hooks the caller passed,
+/// which the topology coordinator makes answer its messages (§9.13, R1). At
+/// `4253b2ca` it named one function, `compare_and_swap_ref`, whose
+/// publishability re-check asked the hook-less `assert_publishable`.
+#[test]
+fn no_function_that_takes_hooks_reaches_a_registry_wait_that_sleeps_by_default() {
+    let sources = this_modules_sources();
+    let files: BTreeSet<&str> = sources.iter().map(|(file, _)| file.as_str()).collect();
+    for child in ["hooks", "worktree", "snapshot_ref", "object", "residue"] {
+        assert!(
+            files.contains(format!("workspace_manager/{child}.rs").as_str()),
+            "the census reads the declared child `{child}`: {files:?}"
+        );
+    }
+    assert!(
+        !files.contains("workspace_manager/tests.rs")
+            && !files.contains("workspace_manager/fixture.rs"),
+        "a test-only child is not production code: {files:?}"
+    );
+    let texts: Vec<&str> = sources.iter().map(|(_, text)| text.as_str()).collect();
+    let census = hooks_routing_census(&texts);
+    assert!(
+        census.read > 200,
+        "the census read this module's functions rather than nothing: {}",
+        census.read
+    );
+    for hookless in [
+        "revalidate",
+        "worktree_records",
+        "assert_publishable",
+        "proposal_state",
+        "changed_paths",
+        "commit_parent",
+        "commit_tree_sha",
+        "quiescence",
+    ] {
+        assert!(
+            census.sleeping.contains(hookless),
+            "the census reads `{hookless}`, a hook-less entry point it exists to keep out of \
+             every call that takes hooks, as reaching a sleeping wait: {:?}",
+            census.sleeping
+        );
+    }
+    for hooked in [
+        "compare_and_swap_ref",
+        "write_intent",
+        "add_worktree",
+        "remove_worktree",
+        "assert_publishable_pausing",
+        "funnel_lending",
+    ] {
+        assert!(
+            census.hooked.contains(hooked),
+            "the census reads `{hooked}` as taking hooks"
+        );
+    }
+    assert!(
+        census.violations.is_empty(),
+        "these functions take hooks and reach a registry wait that sleeps by default, so on the \
+         topology coordinator that wait sleeps on its thread: {:?}",
+        census.violations
+    );
+}
+
+/// The census's own positive control (§12): the violation it exists for, put
+/// back into the live source, and two more shapes; and the same violation as
+/// prose, which it does not count.
+#[test]
+fn the_hooks_routing_census_reports_a_swap_that_drops_its_hooks() {
+    let sources = this_modules_sources();
+    let routed = "        self.assert_publishable_pausing(hooks, refname)?;\n        \
+                  refuse_new(refname, new)?;\n";
+    let texts: Vec<String> = sources
+        .iter()
+        .map(|(file, text)| {
+            if file == "workspace_manager.rs" {
+                assert_eq!(
+                    text.matches(routed).count(),
+                    1,
+                    "the swap's routed re-check is spelt once in the live source"
+                );
+                text.replacen(
+                    routed,
+                    "        self.assert_publishable(refname)?;\n        refuse_new(refname, new)?;\n",
+                    1,
+                )
+            } else {
+                text.clone()
+            }
+        })
+        .collect();
+    let dropped: Vec<&str> = texts.iter().map(String::as_str).collect();
+    assert_eq!(
+        hooks_routing_census(&dropped).violations,
+        BTreeSet::from(["compare_and_swap_ref".to_owned()]),
+        "the swap that asks the hook-less check is reported, and nothing else"
+    );
+
+    let through_a_helper = "impl M {\n    fn checked(&self) -> R {\n        self.revalidate()\n    }\n    pub fn primitive(&self, hooks: &mut dyn EffectHooks) -> R {\n        self.checked()?;\n        funnel(hooks, S, || Ok(()))\n    }\n    pub fn revalidate(&self) -> R {\n        self.revalidate_with(&mut sleep_for)\n    }\n}\n";
+    assert_eq!(
+        hooks_routing_census(&[through_a_helper]).violations,
+        BTreeSet::from(["primitive".to_owned()]),
+        "a hook-less wait reached through a helper is reported at the function that took hooks"
+    );
+    let handed_none = "fn primitive(&self, hooks: &mut dyn EffectHooks) -> R {\n    self.revalidate_pausing(&mut NoHooks)?;\n    funnel(hooks, S, || Ok(()))\n}\n";
+    assert_eq!(
+        hooks_routing_census(&[handed_none]).violations,
+        BTreeSet::from(["primitive".to_owned()]),
+        "a pausing twin handed no hooks is reported"
+    );
+    let the_seam = "fn registry_pause(&mut self, pause: Duration) -> R {\n    super::sleep_for(pause)\n}\nfn primitive(&self, hooks: &mut dyn EffectHooks) -> R {\n    self.revalidate_with(&mut |pause| hooks.registry_pause(pause))\n}\n";
+    assert!(
+        hooks_routing_census(&[the_seam]).violations.is_empty(),
+        "a wait asked of the caller's hooks is the routing itself, whatever their default does"
+    );
+
+    for (what, prose) in [
+        ("a block comment", format!("/*\n{handed_none}*/\n")),
+        (
+            "a raw string literal",
+            format!("const S: &str = r\"{handed_none}\";\n"),
+        ),
+    ] {
+        let census = hooks_routing_census(&[prose.as_str()]);
+        assert!(
+            census.violations.is_empty() && census.read == 0,
+            "{what} is prose, not a function of this module: {:?}",
+            census.violations
+        );
+    }
+}
+
 /// The direct-ref reader refuses a **symbolic ref that resolves to the
 /// expected object** (`PR5-WORKSPACE-031`).
 ///
