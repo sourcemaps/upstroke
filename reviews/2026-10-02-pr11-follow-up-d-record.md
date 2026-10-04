@@ -39,7 +39,8 @@ under `~/orch-pr11/logs/pr11_fud_impl/`, cited as `fudi/…`. Its repair round 2
 figures are under `~/orch-pr11/logs/pr11_fud_impl2/`, cited as `fudi2/…`. Its implementation round 3 (§5.17), which
 implements R-D1's preservation design, is `pr11_fud_impl3`'s; its figures are under `~/orch-pr11/logs/pr11_fud_impl3/`,
 cited as `fudi3/…`. Its repair round 4 (§5.18) is `pr11_fud_impl4`'s; its figures are under
-`~/orch-pr11/logs/pr11_fud_impl4/`, cited as `fudi4/…`.
+`~/orch-pr11/logs/pr11_fud_impl4/`, cited as `fudi4/…`. Its repair round 5 (§5.19) is `pr11_fud_impl5`'s; its figures
+are under `~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`.
 
 ## 0. Status
 
@@ -53,6 +54,7 @@ cited as `fudi3/…`. Its repair round 4 (§5.18) is `pr11_fud_impl4`'s; its fig
 | Implementation, repair round 2 (§5.16) | **The early review's E1 to E4 repaired**, on the same terms: draft, PROPOSED, conditional on O8, not merge-ready. Two lenses read `20e27724` before CI was green on every leg, so their review is early evidence and clears nothing for the merge. E1 corrects the moved-`HEAD` safety claim: the resume's branch check guards the checkout only while `HEAD` differs from the head the event log records, and the executed loss is R-D1's, which stays open at P1 for a preserving mechanism or the owner. E2 narrows R-D7 to refusals that recur after a successful reclaim. E3 rewrites T-L5 so that no Git child it observes runs inside the access's deadline. E4 recounts the Windows path budget with `ScratchTree::acquire`'s prefix. CI at `20e27724` failed only on #329's own test, routed to #329. |
 | Implementation, round 3 (§5.17) | **R-D1's preservation design, round 4, implemented as a draft, and PROPOSED — conditional on O8, exactly as D's own texts.** The proposal `~/orch-pr11/owner-package/RD1-PRESERVATION-PROPOSAL.md` (sha256 `f9e81c07…5415`; its regression lens PASSED, its required regular verdict UNMET, its routing held): part K (a kept pin written whatever `HEAD` is), part G4 (the resume's guarded exact discard of the attempt in flight, behind a kept pin and a copy that same resume made durable) and part N (an attempt error after the worker ran, and a publication failure, keep the checkout and pin it), with the design's three instrument rows. B's published head `55029628` is merged **provisionally**, not as B's final head. N1 and N2 are filed. Not merge-ready, unreviewed, and R-D1's preservation is the owner's through O8. |
 | Implementation, repair round 4 (§5.18) | **The hosted-Linux failure of T-R10 at `202c0805` repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** CI run 37202558686 failed one test on the runner's Git 2.55.0. T-R10's operator `fetch --prune` ran Git's automatic maintenance, whose `geometric` default (from Git 2.54) can prune the planted torn registration before the operator's repair, in a race. It is a test defect: F2's fetch now runs with automatic maintenance off, and nothing it asserts changes. The cause is executed on a Git 2.55.0 stand-in, red before, green after, and red again under a mutation; round 3's other 69 tests do not depend on it. No production code, finding, instrument, cost or limit changes; #329's `55029628` stays merged provisionally. Unreviewed. |
+| Implementation, repair round 5 (§5.19) | **D2's D-I2-1 repaired, on the same terms: draft, PROPOSED, conditional on O8, and not merge-ready.** D2, one regression lens at `fb1717b1`, executed that the orphan shared index files an inherited `GIT_TEST_SPLIT_INDEX` leaves outlast the checkout's next split write. The record, the notes, the R-D7 finding and the body now state the true reach: Git's expiry removes an orphan only at a later split write of the checkout's own index that creates a shared index file, once the orphan is older than the checkout's `splitIndex.sharedIndexExpire`; with the default it stays at least two weeks, with `never` for good, and captures can accumulate them. An `include_str!` test pins the notes, red at `fb1717b1` and green after. No behaviour, production code, instrument or other cost changes; #329's `55029628` stays merged provisionally; R-D1's regular review stays unmet. Unreviewed. |
 
 ## 1. Design
 
@@ -3722,8 +3724,12 @@ All of the proposal's §9.1 and §9.3, in the code's behaviour and here:
   pinned checkout that a new run refuses until a resume or a clean; ignored content in the discard's way entering the
   repository's objects and the copy; the resume's extra Git children.
 - **The O3 exception:** an inherited `GIT_TEST_SPLIT_INDEX` still splits the private index's writes; they unlink nothing
-  (`splitIndex.sharedIndexExpire=never`) and leave orphan `sharedindex.*` files that Git's next split write of the
-  checkout's index removes. The variable is O3's class, with FUD-D4-ENV's.
+  (`splitIndex.sharedIndexExpire=never`) and leave orphan `sharedindex.*` files in the checkout's Git directory. Git
+  removes one only at a later split write of the checkout's own index that creates a shared index file, and only once
+  it is older than the checkout's `splitIndex.sharedIndexExpire`: with the default, `2.weeks.ago`, it stays until it
+  is older than two weeks and such a write follows; with `never`, automatic expiry never reclaims it; and repeated
+  captures can accumulate them. The variable is O3's class, with FUD-D4-ENV's, and the cost is the owner's choice.
+  *(Repair round 5, §5.19: D-I2-1. This said that Git's next split write of the checkout's index removes them.)*
 - **The phase-A window:** a write into a file in the instant between Git's up-to-date check and its unlink is lost, as
   in Git's own checkout, reset and read-tree; disclosed, not designed away.
 - **"No loss" only in the covered cases** (§5.17.3 and the proposal's §1, §4.6, §10), never as a universal guarantee.
@@ -4066,3 +4072,167 @@ clone of Git's `v2.55.0` tag, made before the correction, served only to read Gi
 - **CI at this round's head is not waited on;** the orchestrator reads native CI.
 
 The pull request body records the head the ten gates passed at, with the logs under `fudi4/gates/`.
+
+### 5.19 Repair round 5: D2's D-I2-1, the understated orphan-cleanup cost
+
+> **On §5's terms, as §5.18 left them:** a draft, PROPOSED, conditional on the owner's decision O8, and not merge-ready.
+> Its merge waits on O8's adoption, on #329 merged (O9, O14, O11), on the integration of #329's *final* head (the merge
+> of `55029628` stays PROVISIONAL), and on the required reviews: **the regular review of R-D1's design is unmet**, and
+> nothing here substitutes for it. Nothing here adopts an owner decision, a contract or a freeze. The round adds two
+> commits on `fb1717b1`, the text-and-test fix `8ee1353d` and this record's commit, with no rebase, and no
+> `reviewed_sha` is re-stamped.
+
+**Who and on what.** `pr11_fud_impl5` (`claude-opus-5-5`, `max`), a fresh repair session `orch_pr11` spawned on
+2026-10-04 on `fb1717b1`. Its brief is `~/orch-pr11/briefs/pr11_fud_impl5.md`; round 1's to 4's briefs and
+`~/orch-pr11/d-impl/UNIT.md` bind where it does not change them. Its figures are under
+`~/orch-pr11/logs/pr11_fud_impl5/`, cited as `fudi5/…`. The stopped round-2 regular review of R-D1's design was not
+read, opened, run or used, and nothing here retries, rewords, reroutes or relabels it. This round ran no `find`,
+`ls -R`, `du` or `grep -r` over the roots its brief forbids; its searches were `git grep` in its own worktree.
+
+#### 5.19.1 The finding
+
+- **D2** is #331's review round i2 at `fb1717b1`: one lens, regression (`gpt-6-astra`, `max`), CHANGES_REQUIRED
+  (`~/orch-pr11/reviews/review-331-i2-regression-fb1717b1.review.md`; the triage `review-331-i2-triage.md`). It is not
+  a two-lens review. R-D1's required regular review stays HELD and UNMET, and D2 does not stand in for it.
+- **D-I2-1 (P3, executed):** §5.17.7, the notes of `PRIVATE_INDEX_CONTROLS`, the R-D7 finding and the pull request body
+  said that the orphan `sharedindex.*` files an inherited `GIT_TEST_SPLIT_INDEX` leaves are removed by Git's next split
+  write of the checkout's index. On Git 2.43.0, in an ordinary and a linked checkout, the reviewer split the checkout's
+  index with the default expiry, ran the private capture with `GIT_TEST_SPLIT_INDEX=1` and G4's exact split-index
+  controls, removed the private index and ran the checkout's next `git update-index --split-index`: **both orphans
+  remained.** Expiry `now` removed them, and `never` kept them
+  (`~/orch-pr11/reviews/331-i2-witnesses/review-split-expiry-0imgakuv/`: `witness.py`, `ordinary-and-linked.json`,
+  `result.json`).
+- **Why the evidence had not caught it:** the engine tests split the checkout's index through
+  `split_the_checkouts_index`, which sets the expiry to `now` (`src/engine/tests.rs:14997`), so they could not support
+  the broader claim.
+- **The triage's disposition:** fix, mandatory, since the finding carries an executed reproduction. Qualify the record,
+  the body, the notes and the R-D7 finding, and pin the notes with an `include_str!` test, red at `fb1717b1` and green
+  after.
+- **Where the claim stood at `fb1717b1`** (`fudi5/notes/claim-sites-fb1717b1.txt`: `git grep`, and the live body):
+  §5.17.7 (`:3724`–`3726`), `docs/internals/workspace.md:118`–`123`, the R-D7 finding's `:70`–`71`, and the body's
+  costs. R-D1's proposal says it too, in its §4.6.3, §6.4, §9.1 (twice) and §9.3
+  (`fudi5/notes/proposal-claim-sites.txt`, with the file's sha256 `f9e81c07…`). That file is the owner package's, not
+  this branch's, and this round does not edit it; for this implementation §5.19.3's statement supersedes those
+  sentences.
+
+#### 5.19.2 Reproduced
+
+**The reviewer's sequence, executed again** (`fudi5/repro/repro.py`), on this box's Git 2.43.0 and on the permitted
+Git 2.55.0 build (`fudi5/repro/git-binaries.txt`). Each capture is the engine's own Git sequence at `fb1717b1` for a
+checkout with nothing in the revert's way (`fill_capture`, `private_tree`, `changed_paths`: `read-tree`,
+`add -A --ignore-errors`, `write-tree`, `diff-tree`), each child built as the engine builds it (`git_command`'s
+settings and `GIT_NO_REPLACE_OBJECTS`, a private `core.hooksPath`, `core.fsmonitor=false`, `PRIVATE_INDEX_CONTROLS`
+with `GIT_INDEX_FILE` on a private file in the checkout's own Git directory, and `CAPTURE_CONTROLS`), with
+`GIT_TEST_SPLIT_INDEX=1` inherited; the private file is then removed, as `CheckoutCapture::remove` does. It models the
+engine's Git sequence; it does not run the engine. "An eligible write" below is the checkout's own
+`git update-index --split-index` on its split index, and the script checks that each one created a new shared index
+file: the index's shared index has a new inode, since Git writes a new one to a temporary file and renames it into
+place, and identical content keeps the same name. Both Gits gave the same counts (`fudi5/repro/summary-git-2.43.0.txt`,
+`summary-git-2.55.0.txt`, `checks.txt`; every file name and command line in `report-*.json` and `commands-*.json`):
+
+| Checkout | Expiry | Orphans after one capture | Left by the next eligible write | Aged, then another eligible write |
+|---|---|---|---|---|
+| ordinary and linked | the default (unset) | 2 | 2 | aged 13 days: 2 left; aged 15 days: 0 |
+| ordinary and linked | `never` | 2 | 2 | aged 400 days: 2 left |
+| ordinary and linked | `now` | 2 | 0 | — |
+
+- **Accumulation:** three captures, each with new output and each followed by an eligible write, left 2, 3 and 4
+  orphans, under the default and under `never`, in both checkouts.
+- **A split write that creates no shared index file runs no expiry:** with the expiry `now` and 30 tracked files, the
+  checkout's `git add` of one changed file wrote its split index on the same shared index and left both orphans; the
+  eligible write after it took them.
+- **A checkout whose own index is not split** kept both under `now` through the operator's later `add`, `commit`, `add`
+  and `status`, run without the variable; its index stayed unsplit, so no split write of it ran.
+- **Git's own documentation** (Git 2.43.0's `git-config` and `git-update-index`,
+  `fudi5/repro/git-2.43.0-docs-splitindex.txt`): shared index files "that were not modified since the time this
+  variable specifies will be removed when a new shared index file is created"; the default is "2.weeks.ago", and
+  "never" suppresses expiration altogether.
+- A first run's eligible-write column compared the shared index's name only, which identical content keeps. It is
+  superseded, and its orphan counts equal the rerun's (`fudi5/repro/superseded-name-only-detection/SUPERSEDED.txt`).
+
+#### 5.19.3 The true reach, stated where the claim stood
+
+Under an inherited `GIT_TEST_SPLIT_INDEX` the private index's writes unlink nothing, and leave orphan `sharedindex.*`
+files in the checkout's Git directory. **Git removes an orphan only at a later split write of the checkout's own index
+that creates a shared index file, and only once the orphan is older than the checkout's configured
+`splitIndex.sharedIndexExpire`.** With the default, `2.weeks.ago`, an orphan stays until it is older than two weeks
+and such a write follows; with `never`, automatic expiry never reclaims it; and repeated captures can accumulate them.
+It stays O3's class, with FUD-D4-ENV's, and a cost for the owner's choice: disclosed, not accepted.
+- **§5.17.7** is corrected in place and marked.
+- **`docs/internals/workspace.md`,** the section of `PRIVATE_INDEX_CONTROLS`, states the same. Its premise is made exact
+  too: "every split write" unlinks the older shared indexes now reads every split write that creates a shared index
+  file, Git's documented trigger, which the write of one file above shows.
+- **The R-D7 finding:** its bullet is corrected in place, and a dated section added; `reviewed_sha` is unchanged.
+- **The body's costs,** and a ledger row, `FUD-I2-ORPHANEXPIRY`, `fixed`.
+
+No behaviour changes: the engine's Git sequences, the controls and the cost are what they were. Only the statement of
+the cost's reach changes.
+
+#### 5.19.4 The pin
+
+`workspace::tests::the_private_index_notes_tie_an_orphan_shared_index_to_the_checkouts_expiry`, appended to
+`src/workspace.rs`'s test module, under the lane's convention for a notes misstatement. It `include_str!`s
+`docs/internals/workspace.md`, splits it on `"\n## "`, finds the section by its heading, collapses its whitespace, and
+asserts six clauses of the corrected statement present (the eligible write, the expiry, the default's window, `never`,
+the accumulation, the O3 class) and the retired clause absent. It goes through the notes because `Cargo.toml` excludes
+`findings/` and `reviews/` from the package. No behaviour test can guard the sentence: Git's behaviour is unchanged, so
+one would be green at `fb1717b1`. The reviewer's sequence, executed again in §5.19.2, is the evidence. The test
+carries no comment (§13); its notes section says what it pins.
+
+The runs (`fudi5/pin/MATRIX.txt`): `pin-run.sh` builds each tree through `upstroke-build` on this round's private base,
+and a run counts only if its log names the tree on its Compiling line.
+- **Red** applied alone to a `git archive` of `fb1717b1`, the test without the notes' correction
+  (`red-tree-construction.txt`): rc 101 on the first clause, twice (`red-fb1717b1.log`, `red-fb1717b1-2.log`).
+- **Green** at `8ee1353d` (`green-8ee1353d.log`), and with the notes and `src/workspace.rs` given CRLF line ends, as a
+  winguest checkout has them (`mut-crlf.log`).
+- **Each assertion bites alone** (`pin-matrix.sh` and `notes-mutate.py`, on a `git archive` of `8ee1353d`): each of the
+  six clauses reworded fails on that clause; the retired clause put back fails on the absence check; the heading
+  renamed fails to find the section; and the corrected statement moved to another section fails on the first clause.
+  The control is green.
+- An earlier green run is not counted: it reused the red tree's binary in the shared slot
+  (`fudi5/pin/superseded/SUPERSEDED.txt`).
+
+#### 5.19.5 Platforms, the frozen effects, and what stays
+
+- **Platforms** (`fudi5/platform/code-8ee1353d/`, each Checking line naming this worktree): Windows clippy, Windows
+  MSRV with `-D warnings`, macOS clippy and the Linux MSRV with `-D warnings`, each rc 0 with no warning. Nothing ran
+  on Windows or macOS here; CI is the truth for those legs.
+- **The frozen effects** (`fudi5/tools/frozen-proof5.sh`, round 4's proof with this round's base `fb1717b1`, at the code
+  commit: `fudi5/frozen/frozen-proof-8ee1353d.txt`; this record's commit changes no code, and the pull request body
+  cites the proof at the head it is pushed at):
+  - **G6's frozen set:** zero delta from #329's provisional head `55029628`, 34 of 34 byte-identical. From master, 33
+    of 34: `src/engine/topology/integrate.rs` differs by +16 −4, #329's H1, as in §5.17.8. This round's delta over the
+    set is zero.
+  - **Against G5's range `d724fb16`:** unchanged, five files, +257 −78. E-G6-1's rule, executed and not adopted, fails
+    on #329's H1 alone.
+  - **The PR5-frozen legacy section:** from `55029628`, exactly D's five differ.
+  - **D's O8 five-file set, this round** (`fb1717b1..8ee1353d`): `src/workspace.rs` +55 −0, inside its test module
+    (blob `213f67a8…`). `src/engine/coordinator.rs`, `src/engine/resume.rs` and `src/engine/tests.rs` keep their
+    blobs, and **`src/engine/attempt.rs` is unchanged** (`51534706…`).
+  - **Cumulative from master** (the same from `55029628` and from `54a1ff14`): `src/workspace.rs` +1,591 −81,
+    `src/engine/attempt.rs` +53 −10, `src/engine/coordinator.rs` +116 −10, `src/engine/resume.rs` +138 −4, and
+    `src/engine/tests.rs` +4,844 −0. §5.18.7 gave `src/workspace.rs` +1,537 −82: `git diff` now pairs one line,
+    `self.remove_prepared_pin(prepared)`, as unchanged where it listed it as deleted and added, so 1,537 + 55 − 1 and
+    82 − 1. The production region is byte-identical to `fb1717b1`'s (`fudi5/frozen/numstat-pairing.txt`).
+  - **Append-only** (`fudi5/frozen/append-only-8ee1353d.txt`): against master and against `fb1717b1`,
+    `src/workspace.rs`'s test module keeps every byte it had before its closing brace, with 2,352 bytes added this
+    round; `src/engine/tests.rs` is master's blob with bytes appended, and unchanged this round.
+  - **Schema 4:** `TOPOLOGY_ACTIVATION` is `Inactive`, and no topology path changes.
+  - **Every other path this round changes:** `docs/internals/workspace.md`, the R-D7 finding, and this record. No
+    instrument changes: nothing under `effects/`, `clippy.toml`, `src/runner/contract.rs`, `.github/`, `scripts/`,
+    `.cargo/` or `Cargo.toml`, and no second-limb path.
+- **What stays as it was:** B's PROVISIONAL integration (`55029628`); N1 and N2; the three instrument rows; the O8
+  texts; `design/15`; and every cost and limit of §5.17.7, apart from this correction of the O3 exception's reach. No
+  production code changes. The held regular review's questions, C-SIDE (O1), ENV-1 (O3) and the O7 method are not
+  touched.
+
+#### 5.19.6 What waits, and the CI history
+
+- **What waits** is as §5.17.11 has it: O8, #329's final head, the required reviews (the regular review of R-D1's
+  design unmet; this repair unreviewed), and N1's and N2's G6 classification.
+- **CI at `fb1717b1`:** run 37207835491 passed every job and the `upstroke-ci` rollup, and the policy run 37207835464
+  passed (`fudi5/ci/jobs-37207835491.tsv`, `runs-fb1717b1.json`); the two cancelled runs at that head were superseded
+  by the body edit.
+- **CI at this round's head is not waited on;** the orchestrator reads native CI.
+
+The pull request body records the head the ten gates passed at, with the logs under `fudi5/gates/`.
