@@ -3100,8 +3100,9 @@ checks against the log), T-X10, T-X16, T-X18, T-X19 and T-X20, and the controls 
 (`a_resume_that_dies_before_its_revert_is_finished_by_the_next`) and X17
 (`a_leftover_whose_name_is_not_utf8_is_pinned_then_reverted`, Linux: a name APFS refuses). T-X10's resumed attempt then
 fails on what the discard left, so its leftovers warning is not delivered (R-D5): the test reads the log's
-`run_resumed` record instead. T-X20's second resume does not refuse; whether its attempt commits is the nested
-repository's to decide.
+`run_resumed` record instead. T-X20's first resume runs with the event log read-only, so it stops after its guarded
+discard having recorded nothing, and the second finds the same attempt in flight, as the design's two resumes in a row
+do; the second does not refuse, and whether its attempt commits is the nested repository's to decide.
 
 ## `fn a_retry_after_a_deleted_pin_restores_it_from_the_untouched_copy() {`
 

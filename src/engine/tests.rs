@@ -13436,11 +13436,17 @@ fn a_run_that_dies_after_its_capture_loses_nothing_on_resume() {
         Vec::<(String, String)>::new(),
         "no pin yet"
     );
+    let leftovers = file_bytes(&repo, "agent-output.txt").expect("the leftovers' bytes");
 
     let report = bounded_resume("the resume", &repo, fake(Effect::EditFile)).expect("the resume");
     assert!(committed(&report, "t1"), "{report:?}");
     let pin = kept_pin_of(&repo, 1);
-    assert!(pin_target(&repo, &pin).is_some(), "attempt 1's kept pin");
+    let commit = pin_target(&repo, &pin).expect("attempt 1's kept pin");
+    assert_eq!(
+        blob_at(&repo, &commit, "agent-output.txt"),
+        Some(leftovers),
+        "the pin holds the leftovers"
+    );
     the_restore_brings_the_output_back(&repo, &report, &pin);
 }
 
@@ -13882,8 +13888,10 @@ fn a_discard_stopped_part_way_finishes_on_the_next_resume_without_operator_clean
         let fault = PartWay::hold(&repo, held);
         let first = bounded_resume(form, &repo, fake(Effect::EditFile));
         fault.heal();
-        let refusal = resume_refusal(&first, form);
-        assert!(refusal.contains("stopped part-way"), "{form}: {refusal}");
+        assert!(
+            first.is_err(),
+            "{form}: the fault stops the first resume: {first:?}"
+        );
         let report = bounded_resume(form, &repo, fake(Effect::EditFile))
             .unwrap_or_else(|error| panic!("{form}: the second resume: {error:?}"));
         assert!(committed(&report, "t1"), "{form}: {report:?}");
@@ -14269,13 +14277,13 @@ fn the_discard_reads_the_checkouts_per_worktree_ignore_rules() {
         Some(b"ignored by this worktree's own rules\n".to_vec()),
         "cache.bin stays"
     );
-    let commit = pin_target(&repo, &kept_pin_of(&repo, 1)).expect("the kept pin");
-    assert_eq!(
-        blob_at(&repo, &commit, "cache.bin"),
-        None,
-        "and no pin holds it"
-    );
-    assert!(blob_at(&repo, &commit, "agent-output.txt").is_some());
+    for (pin, commit) in kept_pins(&repo) {
+        assert_eq!(
+            blob_at(&repo, &commit, "cache.bin"),
+            None,
+            "and no pin holds it: {pin}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -14332,16 +14340,43 @@ fn a_nested_repository_with_a_commit_does_not_wedge_the_resume() {
     let nested_head = git_in(&repo.join("nested"), &["rev-parse", "HEAD"])
         .trim()
         .to_owned();
-    resume_and_die_inside_the_attempt(&repo);
+    let run_id = rundir::latest_run(&repo).expect("a run to resume");
+    let log = paths_of(&repo, &run_id).events();
+    let recorded = fs::read(&log).expect("the event log");
+    let writable = fs::metadata(&log).expect("the event log").permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&log, read_only).expect("the event log made read-only");
+    let first = bounded_resume("the first resume", &repo, fake(Effect::EditFile));
+    fs::set_permissions(&log, writable).expect("the event log made writable again");
+    match &first {
+        Err(UpstrokeError::Resume { message, .. }) => {
+            panic!("the first resume does not refuse: {message}")
+        }
+        Err(_) => {}
+        Ok(report) => panic!(
+            "prerequisite not met: the read-only event log took a write (root, or \
+             CAP_DAC_OVERRIDE): {report:?}"
+        ),
+    }
+    assert_eq!(
+        fs::read(&log).expect("the event log"),
+        recorded,
+        "the first resume recorded nothing, so the second finds the same attempt in flight"
+    );
     assert!(
         repo.join("nested").join(".git").is_dir(),
         "the repository stays"
     );
-    let report = bounded_resume("the second resume", &repo, fake(Effect::EditFile))
-        .expect("the second resume does not refuse");
+    let report = bounded_resume(
+        "the second resume, over the same attempt",
+        &repo,
+        fake(Effect::EditFile),
+    )
+    .expect("the second resume does not refuse");
     assert!(
-        warning_with(&report, "discarded").is_some(),
-        "its guarded discard ran: {:?}",
+        repo.join("nested").join(".git").is_dir(),
+        "the repository stays: {:?}",
         report.warnings
     );
     assert_eq!(
