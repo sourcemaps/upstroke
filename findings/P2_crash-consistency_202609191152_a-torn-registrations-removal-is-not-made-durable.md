@@ -8,7 +8,7 @@ reviewed_sha: 99fd1f2ebf58febc566bc1b00336181414bff50a
 location: src/workspace_manager.rs:2807
 provenance: pre_existing
 first_bad: PR5-RD-002
-guard: the next change to the empty-`commondir` branch of `remove_worktree_proving`, to `repair_torn_registrations`, or to how a removal makes Git's administrative state durable
+guard: the change that makes a registration's removal durable (a directory barrier on `<common git dir>/worktrees`, measured first as below), or the next change to how `remove_bound` deletes a registration after #329
 ---
 
 ## Failure sequence
@@ -64,3 +64,19 @@ directory's deletion durable before the funnel returns — a directory barrier o
 `<common git dir>/worktrees`, recorded on the durability ledger as the checkout's barrier is — so
 the intent's removal cannot outlive it, with a witness that reads the ledger rather than the
 directory's state, as the checkout barrier's witnesses do.
+
+## At #329's implementation (2026-10-03)
+
+**Its reach widened.** #329's targeted removal (`reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5) deletes every registration a forced removal binds through
+the same `remove_tree_once_handles_close(admin)`, not only a registration with an empty `commondir`, and runs no
+`git worktree prune`. So the unsynced deletion above is now every bound registration's. One consequence is new: a
+healthy registration that a power loss brings back is no longer removed by a later engine removal's prune. Git lists it
+as prunable, and it stays until a user's `git worktree prune` or an operator removes it. Re-adding its slot path then
+fails in Git's registry phase, and the add refuses at its deadline, resumably. Engine slot paths carry their key and
+generation, so a path is re-added only when the same generation's slot is recreated. Reasoned, not executed: it needs a
+power loss.
+
+**Not taken up by #329.** This file's guard named the next change to the empty-`commondir` branch, and #329 changed it.
+#329's reviewed design adds no durability barrier, and its implementation adds nothing beyond that design (the
+orchestrator's brief for it). So this file is re-guarded, not closed, and the change that takes it up should measure as
+below first.

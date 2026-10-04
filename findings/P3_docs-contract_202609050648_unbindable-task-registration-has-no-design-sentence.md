@@ -92,3 +92,13 @@ that its writers have stopped, with deterministic tests for those conditions. Th
 skip at `88c41a3` is historical evidence, not a prescribed implementation. Keep the classifier
 and sampling contract consistent with the adopted behavior. `locked` alone is not a liveness
 proof.
+
+## At #329's implementation (2026-10-03)
+
+The refusal this file records is now a registry refusal. The forced removal's scan is a tolerant registry access, so
+on disk alone this state is a write in flight and is attempted past until the access's deadline (10 s; 500 ms under
+test). The removal then refuses as `UpstrokeError::RegistryRefused`, resumable and never Git state, carrying the same
+diagnostic as its last failure. `an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup` pins the
+new variant. `design/15`'s paragraph "A registry another process is writing", now in force, says that an access meeting
+an entry a dead writer left torn refuses resumably. It does not decide the unbindable-registration policy this file
+asks for, so the file stays open with its guard.

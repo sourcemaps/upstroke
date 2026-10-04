@@ -532,7 +532,7 @@ fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_r
 }
 
 #[test]
-fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_deferral_or_parks() {
+fn the_verification_notes_say_a_registry_another_process_is_writing_never_reaches_the_git_arm() {
     use crate::engine::topology::attempt::JudgeError;
     use crate::engine::topology::integrate::Verified;
     use crate::topology::events::SequenceId;
@@ -547,28 +547,36 @@ fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_def
         .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
     for (proposition, pin) in [
         (
-            "a registry another process is half-way through writing reaches this arm",
-            "A registry another process is half-way through writing is foreign Git state here too",
+            "a registry another process is half-way through writing never reaches this arm",
+            "A registry another process is half-way through writing never reaches this arm",
         ),
         (
-            "a coordinator in a linked checkout of the same repository is one such process",
+            "every registry access is attempted again until its deadline",
+            "attempted again until its deadline",
+        ),
+        (
+            "a registration still in the way then refuses as a registry refusal",
+            "refuses as `UpstrokeError::RegistryRefused`",
+        ),
+        (
+            "the command then ends resumably with nothing appended",
+            "the command ends resumably, with the transaction open and nothing appended",
+        ),
+        (
+            "a coordinator in a linked checkout of the same repository was the case",
             "`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`",
         ),
         (
-            "a host agent's own prune is another",
+            "a genuine checkout failure after Git's takeover no longer reaches it",
+            "`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`",
+        ),
+        (
+            "a prune's deletion after the add returned still does",
+            "`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`",
+        ),
+        (
+            "a host agent's own prune is one starter of it",
             "`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`",
-        ),
-        (
-            "the terminal spends one of the candidate's deferrals",
-            "spends one of the candidate's deferrals",
-        ),
-        (
-            "the one that reaches `max_defers` parks the candidate with a question",
-            "parks the candidate with an unblock question",
-        ),
-        (
-            "the other process finishing undoes none of it",
-            "the other process finishing undoes none of it",
         ),
         (
             "an attempt's Git error is the pipeline's and ends the command resumably instead",
@@ -603,6 +611,27 @@ fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_def
             "the mapping the notes state: a Git error in a verification's judgement is an outage \
              of its sequence, not an error that ends the command: {error}"
         ),
+    }
+
+    let refused = super::verified(
+        Err(JudgeError::Other(
+            crate::error::UpstrokeError::RegistryRefused {
+                message: "the worktree registry kept this access from completing until its \
+                          deadline"
+                    .to_owned(),
+            },
+        )),
+        Vec::new(),
+        SequenceId(1),
+    );
+    match refused {
+        Err(crate::error::UpstrokeError::RegistryRefused { .. }) => {}
+        Ok(Verified::Unavailable { detail, .. }) => panic!(
+            "the mapping the notes state: a registry refusal is never an outage of the sequence, \
+             and this one was mapped to one: {detail}"
+        ),
+        Ok(Verified::Judged(_)) => panic!("a registry refusal is not a verdict"),
+        Err(error) => panic!("the registry refusal is passed on as it is, not as {error:?}"),
     }
 }
 

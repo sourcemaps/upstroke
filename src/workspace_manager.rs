@@ -115,6 +115,65 @@ pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1")
 /// only under the run's own namespace.
 pub const RUN_REF_ROOT: &str = "refs/upstroke/runs";
 
+/// The command-scope configuration every Git child the manager starts runs
+/// under, in both of its builders ([`WorkspaceManager::command`] and
+/// [`read_only_git`]), one list so that the two cannot drift (the follow-up C
+/// record, §2.2 and §5.2-§5.3; `DESIGN.md` §15, "Engine Git children"):
+///
+/// - `maintenance.auto=false` and `gc.auto=0`: no Git process an engine
+///   command starts runs automatic maintenance, whose `gc` prunes worktrees and
+///   can detach from the command (executed in a partial clone, 2.43 and 2.55);
+/// - `gc.autoDetach=false` and `maintenance.autoDetach=false`: maintenance
+///   reached despite both runs attached, inside the command;
+/// - `rerere.enabled=false`: no engine cherry-pick reads or writes the
+///   repository's shared `rr-cache` or the worktree's `MERGE_RR`, so a
+///   resolution recorded at some other time, by the user or by a dead
+///   incarnation's pick, is never replayed into a slot, and a pick records
+///   nothing there for another to replay (`rerere.c`'s `setup_rerere` returns
+///   before either is opened when rerere is disabled);
+/// - `worktree.useRelativePaths=false`: an engine add never upgrades the
+///   repository's format in the common config, which Git 2.48 and later do for
+///   a first add under the user's `worktree.useRelativePaths=true`, and which
+///   Gits older than 2.48 then refuse; older Gits ignore the key.
+///
+/// Command scope outranks every configuration file, and Git hands each value
+/// to every Git child through `GIT_CONFIG_PARAMETERS`.
+const ENGINE_GIT_SWITCHES: [&str; 12] = [
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "gc.autoDetach=false",
+    "-c",
+    "maintenance.autoDetach=false",
+    "-c",
+    "rerere.enabled=false",
+    "-c",
+    "worktree.useRelativePaths=false",
+];
+
+/// The environment bindings every Git child the manager starts is given, in
+/// both builders, after [`NO_REPLACEMENT_OBJECTS`] (the follow-up C record,
+/// §2.2):
+///
+/// - `GIT_NO_LAZY_FETCH=1`: Git never fetches a missing object from a partial
+///   clone's promisor remote, the path by which an engine command reached
+///   automatic maintenance;
+/// - `GIT_ALLOW_PROTOCOL=` (empty): every transport is refused before any
+///   helper, `ssh` or `upload-pack` starts, on Gits that predate the variable
+///   above too;
+/// - `GIT_TERMINAL_PROMPT=0`: Git's credential prompts fail rather than read
+///   the terminal.
+///
+/// A command that needs an object a partial clone lacks therefore fails,
+/// naming it, and is resumable once the operator has fetched it.
+const ENGINE_GIT_ENVIRONMENT: [(&str, &str); 3] = [
+    ("GIT_NO_LAZY_FETCH", "1"),
+    ("GIT_ALLOW_PROTOCOL", ""),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
+
 // ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
@@ -496,6 +555,30 @@ pub enum Refusal {
         /// Where its intent was looked for.
         intent: PathBuf,
     },
+
+    /// An add whose new worktree's `$GIT_DIR` Git for Windows would refuse:
+    /// longer, in UTF-8 bytes as Git for Windows renders the path, than its
+    /// `PATH_MAX - 40`, 220 (`setup.c`'s `strlen` check, which dies with
+    /// "'$GIT_DIR' too big" in the add's checkout child after the add has
+    /// begun). Refused at once, before any registry access, so no retry of
+    /// the tolerant registry access can mistake it for contention (the
+    /// follow-up C record, §4.7, and the decision appendix's
+    /// FUC-D5-WINPATHBYTES).
+    #[error(
+        "refusing `git worktree add`: the `$GIT_DIR` Git for Windows would be handed, `{git_dir}`, \
+         is {bytes} bytes in UTF-8, over Git's budget of {budget} (`PATH_MAX - 40`). A run cannot \
+         move its private root, since a resume refuses an explicit root other than the recorded \
+         one, so this run must be finished by a binary whose slot names fit under its root, or \
+         abandoned"
+    )]
+    GitDirOverBudget {
+        /// The `$GIT_DIR`, as Git for Windows would render it.
+        git_dir: String,
+        /// Its length in UTF-8 bytes.
+        bytes: usize,
+        /// Git for Windows' budget.
+        budget: usize,
+    },
 }
 
 impl From<Refusal> for UpstrokeError {
@@ -787,8 +870,11 @@ pub(crate) enum Primitive {
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitWorkingDirectory {
-    /// The managed base: where `worktree add`, `worktree prune`, `commit-tree`
-    /// and `update-ref` run, and where the manager's reads run.
+    /// The managed base: where `worktree add`, `commit-tree` and `update-ref`
+    /// run, and where the manager's reads run. A removal runs no Git child
+    /// since #329 removed its `git worktree prune`, and is named here because
+    /// it acts through what `<base>/.git` resolves to: the common git dir, from
+    /// which it removes its registration and the store it emptied.
     ManagedBase,
     /// The slot's checkout: where `add`, `write-tree`, `cherry-pick` and the
     /// per-worktree reads run.
@@ -867,6 +953,9 @@ impl Primitive {
             | Self::RemoveExecutionRoot
             | Self::WriteIntent
             | Self::RemoveIntent => &[],
+            // `RemoveWorktree` runs no Git child since #329; it keeps the base
+            // for the common git dir its registration is removed from (see
+            // `GitWorkingDirectory::ManagedBase`).
             Self::AddWorktree
             | Self::RemoveWorktree
             | Self::SnapshotCommitTree
@@ -890,7 +979,8 @@ impl Primitive {
 mod naming;
 use self::naming::safe_component;
 pub use self::naming::{
-    IntentKind, IntentRecord, IntentRecordError, Slot, SlotId, SlotIdError, SnapshotName,
+    InstanceTag, IntentKind, IntentRecord, IntentRecordError, Slot, SlotId, SlotIdError,
+    SlotInstance, SnapshotName,
 };
 
 /// The slot's effect-site vocabulary: which [`EffectSiteId`] each of its four
@@ -1397,6 +1487,11 @@ pub struct WorkspaceManager {
     repo_key: String,
     run_id: String,
     incarnation: String,
+    /// The tag of this incarnation's slot instances, from `incarnation`
+    /// alone: every slot this manager adds, verifies or runs a command in is
+    /// this incarnation's instance of it (naming's module doc, "A slot has
+    /// one instance per coordinator incarnation").
+    tag: InstanceTag,
     /// The operator's authorized private root, canonicalized. It is the anchor
     /// the reparse-point walk starts at — see `containment::reparse_point_below`.
     ///
@@ -1551,53 +1646,458 @@ fn remove_tree_once_handles_close(path: &Path) -> std::io::Result<()> {
 fn note_removal_attempt(_attempt: u32) {}
 
 /// One lock per repository's worktree registry (`<common git dir>/worktrees`),
-/// shared by every [`WorkspaceManager`] of that repository in this process.
+/// shared by every [`WorkspaceManager`] of that repository in this process:
+/// the working record's R-X (`reviews/2026-10-01-pr11-follow-up-b-record.md`).
 ///
-/// **Why a lock, and why here.** From PR11 several pipelines of one run add and
-/// remove snapshots while the coordinator adds and removes task and staging
-/// worktrees, all through clones of one manager, and Git 2.43's registry is not
-/// safe against itself: `git worktree add` makes the administrative directory
-/// before it writes `locked`, `gitdir` and `commondir`, a plain `git worktree
-/// prune` removes a directory with no `gitdir`, and every enumeration — `git
-/// worktree list`, the one `add` makes of its siblings, and this module's own
-/// scan in [`WorkspaceManager::remove_worktree_proving`] — reads each entry's
-/// files and dies (or, here, refuses) on one half written. Measured with four
-/// concurrent loops: an add raced by a prune failed 2–3 times in 600
+/// **Why a lock, and why it is no longer what keeps the registry whole.** From
+/// PR11 several pipelines of one run add and remove snapshots while the
+/// coordinator adds and removes task and staging worktrees, all through clones
+/// of one manager, and Git's registry is not safe against itself: `git worktree
+/// add` makes the administrative directory before it writes `locked`, `gitdir`
+/// and `commondir`, and every enumeration — `git worktree list`, the one `add`
+/// makes of its siblings, and this module's own scan in
+/// [`WorkspaceManager::remove_worktree_proving`] — reads each entry's files and
+/// dies (or, here, refuses) on one half written. Measured with four concurrent
+/// loops: an add raced by a prune failed 2–3 times in 600
 /// (`~/orch-pr11/logs/pr11_research_c/git-worktree-add-prune-race-*.log`), and a
 /// `git worktree list` raced by adds and prunes failed 7–10 times in about 7,500,
 /// and once in about 2,000 against adds alone
 /// (`~/orch-pr11/logs/pr11_impl_c/git-worktree-list-race.log`); serially, never.
+/// PR11 serialised every registry access of one process behind this lock, and
+/// that could not reach a writer in another process: two coordinators of one
+/// repository in two checkouts each held their own
+/// (`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`). Since #329 every
+/// access survives another's half-done work through
+/// [`tolerant_registry_access`], whoever the writer is, so the lock no longer
+/// serialises anything that tolerance covers.
 ///
-/// **What it guards.** No data: it orders every registry access this process
-/// makes — the `git worktree add` child, a removal from its registration scan to
-/// its prune, `git worktree list`, and the torn-registration plan's scan — so
-/// none of them sees another half done. **Protocol.** Keyed by the canonical
-/// common git directory, so two managers of one repository share it. Its four
-/// holders take it around one Git child (the add, the list), one scan (a
-/// removal's, the torn plan's), or a removal's mutation inside its funnel, and
-/// each releases it before its funnel's `After` hook. No holder
-/// calls a hook, a registry reader or anything else that could take it again,
-/// so it is never taken twice on one thread, and a holder waits only for its
-/// own Git child and filesystem calls, so it adds no wait cycle. (Phase 3 held
-/// it across a removal's hooks, and an observer that listed the worktrees from
-/// one waited on its own caller for ever: the PR11 record, §13, round R1,
-/// `R1-REG-1`.) A poisoned lock is taken anyway: it protects an ordering, not a
-/// value. **What it cannot guard:** another process — or an agent running Git in
-/// its own worktree — that edits the registry is outside it (the PR11 record,
-/// §11).
+/// **What it still guards.** One exclusion tolerance cannot replace: the
+/// torn-registration plan ([`WorkspaceManager::repair_torn_registrations`])
+/// reads an empty `commondir` as a dead add's residue and removes that
+/// instance, and an add of this same process in flight passes through that
+/// state for the writes between `commondir`'s open and its write. The run lock
+/// keeps other processes of the run out; nothing else keeps this process's own
+/// adds out. So it is a read-write lock: **adds hold it shared**, so two adds
+/// of one process never wait for each other; **the plan holds it alone**; the
+/// list, a removal's scan and a removal's mutation take nothing. (A mutex taken
+/// by every access under a bounded wait refused 3 of 120 cycles of
+/// `concurrent_snapshot_adds_and_removals_on_one_repository_never_fail`: bounding
+/// a wait for a lock that serialises everything turns queueing into refusals —
+/// the record's §3.4.)
+///
+/// **Protocol.** Keyed by the canonical common git directory, so two managers
+/// of one repository share it. Every acquisition is a `try_read` or `try_write`
+/// loop that sleeps outside the lock and gives up at the access's deadline
+/// ([`with_registry`]), so no wait for it is unbounded. A holder holds it around
+/// one attempt — one `git worktree add` child, or the plan's scan — and calls no
+/// hook and no registry reader under it, so it is never taken twice on one
+/// thread and adds no wait cycle. (Phase 3 held it across a removal's hooks, and
+/// an observer that listed the worktrees from one waited on its own caller for
+/// ever: the PR11 record, §13, round R1, `R1-REG-1`.) A poisoned lock is taken
+/// anyway: it protects an ordering, not a value. **What it cannot guard:**
+/// another process; that is what tolerance is for.
 ///
 /// The table holds one entry per repository this process has managed and is
-/// never pruned; shared ownership is the lifecycle — each manager of the
-/// repository holds the `Arc` only while it holds the lock.
+/// never pruned; shared ownership is the lifecycle — each access of the
+/// repository holds the `Arc` only while it holds or waits for the lock.
 static REGISTRY_LOCKS: std::sync::Mutex<
-    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::RwLock<()>>>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+fn registry_lock_of(common_git_dir: &Path) -> std::sync::Arc<std::sync::RwLock<()>> {
     let mut table = REGISTRY_LOCKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::sync::Arc::clone(table.entry(common_git_dir.to_path_buf()).or_default())
+}
+
+/// How a registry access takes this process's registry lock (R-X) around each
+/// attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegistryHold {
+    /// Not at all: a list, a scan, a removal.
+    Unheld,
+    /// Shared: an add. Adds of one process do not wait for each other.
+    Shared,
+    /// Alone: the torn-registration plan, which must not read this process's
+    /// add in flight as a dead add's residue.
+    Exclusive,
+}
+
+/// What a registry access does after a failed attempt, as the caller's veto
+/// answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Again {
+    /// Attempt again, while the deadline allows.
+    Attempt,
+    /// Return this attempt's error, unchanged: the failure is the operation's
+    /// own.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the contract's third answer, published for follow-up D's legacy add (the \
+                      record's §5.5 and §7.6); the topology's own accesses never return Git state \
+                      and answer only `Attempt` or `Undecidable`, and the contract's witnesses \
+                      give it"
+        )
+    )]
+    Return,
+    /// The caller could not decide: refuse now, as
+    /// [`UpstrokeError::RegistryRefused`], naming why.
+    Undecidable { why: String },
+}
+
+/// How long one registry access may wait for R-X, attempt again and sleep:
+/// ten seconds in production. A writer's registration is torn only for the few
+/// file writes between its `mkdir` and its `commondir`, microseconds, and a
+/// removal's for the deletion of one directory; ten seconds is four orders of
+/// magnitude over both, and a registration still in the way then is static, so
+/// the access refuses resumably. The `#[cfg(test)]` twin, at the bottom of this
+/// file for the reason [`note_removal_attempt`] gives, is 500 ms, so that a test
+/// meeting a tear it planted does not wait out this one.
+#[cfg(not(test))]
+const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The longest backoff sleep between two attempts of one registry access; the
+/// first is one millisecond, and each doubles up to this.
+const REGISTRY_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Record that a registry access decided to attempt again, so that a test can
+/// finish the tear it planted only after the access has failed once on it
+/// (the helper contract's `CONTENDED_ATTEMPTS`, the record's §6.4). A no-op in a
+/// production build; the `#[cfg(test)]` twin sits beside
+/// [`note_removal_attempt`]'s, for the same reason.
+#[cfg(not(test))]
+#[inline]
+fn note_contended(_common_git_dir: &Path) {}
+
+/// Run `attempt` under R-X as `hold` says, waiting for R-X by a `try_read` or
+/// `try_write` loop that sleeps outside it and gives up at `deadline`. `None`
+/// when R-X stayed held elsewhere in this process until then, and then no
+/// attempt ran. R-X is released when the attempt returns.
+fn with_registry<T>(
+    common_git_dir: &Path,
+    hold: RegistryHold,
+    deadline: std::time::Instant,
+    attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
+) -> Option<Result<T, UpstrokeError>> {
+    if hold == RegistryHold::Unheld {
+        return Some(attempt());
+    }
+    let registry = registry_lock_of(common_git_dir);
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        match hold {
+            RegistryHold::Unheld => return Some(attempt()),
+            RegistryHold::Shared => match registry.try_read() {
+                Ok(_held) => return Some(attempt()),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let _held = poisoned.into_inner();
+                    return Some(attempt());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            },
+            RegistryHold::Exclusive => match registry.try_write() {
+                Ok(_held) => return Some(attempt()),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let _held = poisoned.into_inner();
+                    return Some(attempt());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            },
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+    }
+}
+
+/// Run one registry access as a series of attempts: the tolerant registry
+/// access (the working record `reviews/2026-10-01-pr11-follow-up-b-record.md`,
+/// §5.3 to §5.5 with §6.4 and §7.6 as the contract's current text).
+///
+/// **Nothing is classified.** It reads no store state, no error text and no
+/// timestamp: whether another process's registry write caused a failure cannot
+/// be told from outside Git (rounds 3 to 5 of the record tried, and every round's
+/// reviewers built a state the reads did not see). It reads the monotonic clock
+/// for its deadline and takes R-X as `hold` says; the only things that decide
+/// another attempt are `again` and the deadline.
+///
+/// **When it attempts again.**
+/// 1. It runs `attempt`, under R-X as `hold` says, released when the attempt
+///    returns. A wait for R-X that reaches the deadline refuses, and no attempt
+///    runs.
+/// 2. On `Ok`, it returns at once. `again` is never called before the first
+///    attempt or after a success.
+/// 3. On `Err`, it calls `again()` once, outside R-X.
+/// 4. On [`Again::Return`], it returns that `Err` exactly as the attempt
+///    returned it. This is the only way it returns `UpstrokeError::Git`.
+/// 5. On [`Again::Undecidable`], it refuses at once, naming why; no further
+///    attempt runs. A veto that cannot be evaluated is never returned as Git
+///    state and never attempted past.
+/// 6. On [`Again::Attempt`], it counts the answer for the test handshake
+///    (`note_contended`). If the deadline has passed, it refuses. Otherwise it
+///    sleeps the backoff — one millisecond, doubling, at most
+///    [`REGISTRY_BACKOFF_CEILING`], never past the deadline — and goes back to 1.
+/// 7. So the attempt that follows a sleep the deadline cut short is made, and
+///    it is the last: a store a writer leaves whole by the deadline is passed.
+///
+/// **The bound, end to end.** One deadline, [`REGISTRY_ACCESS_DEADLINE`] after
+/// the call begins. Every wait for R-X and every backoff sleep ends by it, and
+/// no attempt starts after it but the final one, which starts at it. Nothing
+/// interrupts an attempt or a veto that has started — killing a Git writer
+/// mid-write is exactly what leaves a torn registration — so an access returns
+/// by the deadline plus the runtime of its last attempt plus the runtime of the
+/// veto after it, and bounds neither.
+///
+/// **What it returns:** `Ok` from the first successful attempt; the failed
+/// attempt's own error, unchanged, when `again` answers `Return`; otherwise
+/// [`UpstrokeError::RegistryRefused`], whose message names the store, the
+/// deadline, the attempt count, the last failure's text and, for a veto that
+/// could not decide, why — resumable, and never `UpstrokeError::Git`.
+///
+/// `common_git_dir` is the canonical common git directory, as
+/// [`WorkspaceManager::common_git_dir`] holds it: R-X's key, and the store a
+/// refusal names is `<common_git_dir>/worktrees`. A caller that passes another
+/// spelling shares no R-X with this process's manager of the repository.
+///
+/// # Errors
+///
+/// The attempt's own error when `again` answers `Return`, and
+/// [`UpstrokeError::RegistryRefused`] as above.
+pub(crate) fn tolerant_registry_access<T>(
+    common_git_dir: &Path,
+    hold: RegistryHold,
+    again: &mut dyn FnMut() -> Again,
+    attempt: &mut dyn FnMut() -> Result<T, UpstrokeError>,
+) -> Result<T, UpstrokeError> {
+    let deadline = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let store = common_git_dir.join("worktrees");
+    let mut pause = std::time::Duration::from_millis(1);
+    let mut attempts: u32 = 0;
+    let mut last: Option<UpstrokeError> = None;
+    loop {
+        let Some(outcome) = with_registry(common_git_dir, hold, deadline, &mut *attempt) else {
+            return Err(registry_lock_refusal(&store, hold, attempts, last.as_ref()));
+        };
+        attempts = attempts.saturating_add(1);
+        let failure = match outcome {
+            Ok(value) => return Ok(value),
+            Err(failure) => failure,
+        };
+        match again() {
+            Again::Return => return Err(failure),
+            Again::Undecidable { why } => {
+                return Err(UpstrokeError::RegistryRefused {
+                    message: format!(
+                        "a worktree registry access of {} stopped after {attempts} attempt(s): \
+                         whether another attempt is safe could not be decided ({why}); the last \
+                         attempt failed with: {failure}",
+                        store.display()
+                    ),
+                });
+            }
+            Again::Attempt => {}
+        }
+        note_contended(common_git_dir);
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(UpstrokeError::RegistryRefused {
+                message: format!(
+                    "the worktree registry {} kept this access from completing until its \
+                     deadline ({REGISTRY_ACCESS_DEADLINE:?}): {attempts} attempt(s), the last \
+                     failed with: {failure}",
+                    store.display()
+                ),
+            });
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(now)));
+        pause = pause.saturating_mul(2).min(REGISTRY_BACKOFF_CEILING);
+        last = Some(failure);
+    }
+}
+
+/// The refusal of an access whose wait for R-X reached its deadline: what held
+/// it, and what the attempts before the wait met, if any ran.
+fn registry_lock_refusal(
+    store: &Path,
+    hold: RegistryHold,
+    attempts: u32,
+    last: Option<&UpstrokeError>,
+) -> UpstrokeError {
+    let holder = match hold {
+        RegistryHold::Exclusive => "its adds or another torn-registration plan",
+        RegistryHold::Unheld | RegistryHold::Shared => "its torn-registration plan",
+    };
+    let before = match last {
+        Some(failure) => format!("{attempts} attempt(s) ran, the last failed with: {failure}"),
+        None => "no attempt ran".to_owned(),
+    };
+    UpstrokeError::RegistryRefused {
+        message: format!(
+            "this process's registry lock for the worktree registry {} stayed held by {holder} \
+             until the access's deadline ({REGISTRY_ACCESS_DEADLINE:?}); {before}",
+            store.display()
+        ),
+    }
+}
+
+/// What is at an add's destination, read without following a link.
+enum AtDestination {
+    /// Nothing.
+    Absent,
+    /// A directory, not a link or reparse point, holding no entry.
+    EmptyDirectory,
+    /// Anything else: a directory holding entries, a file, a link or reparse
+    /// point; named for the message.
+    Other(&'static str),
+    /// Its metadata, or its listing, could not be read.
+    Unreadable(std::io::Error),
+}
+
+impl AtDestination {
+    fn read(path: &Path) -> Self {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Absent,
+            Err(error) => return Self::Unreadable(error),
+        };
+        if containment::is_reparse_point(&metadata) {
+            return Self::Other("a link or reparse point");
+        }
+        if !metadata.is_dir() {
+            return Self::Other("a file");
+        }
+        match fs::read_dir(path).map(|mut entries| entries.next()) {
+            Ok(None) => Self::EmptyDirectory,
+            Ok(Some(Ok(_))) => Self::Other("a directory holding entries"),
+            Ok(Some(Err(error))) | Err(error) => Self::Unreadable(error),
+        }
+    }
+}
+
+/// An add's destination, which the access makes before Git runs and reads
+/// after each failed attempt (the record's §5.3, §7.2 and §8.2).
+///
+/// **Why it is made first.** Git's add scans its siblings, makes its entry and
+/// that entry's `locked`, and only then takes the destination over
+/// (`junk_work_tree`; 2.43.0 `builtin/worktree.c:489`, 2.50.1 `:504`, 2.55.0
+/// `:538`). On every failure after that it runs `remove_junk`, which removes the
+/// entry and then the destination with `remove_dir_recursively`, ending, for an
+/// empty destination, in the `rmdir` this access performs. So a destination
+/// still there and empty after a failure, which this access can remove, holds
+/// nothing to lose, and the add is attempted again. It does not prove Git never
+/// took it over: a Git killed after the takeover, before it wrote anything
+/// there, leaves it empty too (FUB-D9-TAKEOVERWORD), and that is a failure
+/// another attempt meets as residue, never Git state. A destination that is
+/// gone, or that this access cannot remove, may have been taken over — by a
+/// checkout that cannot be made, or by another process's prune deleting the
+/// entry after the takeover, which leave the same end state (§6.2) — and
+/// refuses resumably, never as Git state (§7.3).
+///
+/// **Why a destination that is not an empty directory is Git state at once.**
+/// Git's add runs its sibling scan before it checks its destination
+/// (`get_worktrees`, then `check_candidate_path`), so attempting such an add
+/// returned a torn sibling's registry error as Git state; and its check follows
+/// a link to an empty directory and checks out through it (§8.2). No Git
+/// command runs for it.
+struct Destination<'p> {
+    path: &'p Path,
+    /// Whether this access made the directory at `path`, rather than finding
+    /// it there empty.
+    made: bool,
+}
+
+impl<'p> Destination<'p> {
+    /// Before the first attempt: make the destination as an empty directory,
+    /// or take the empty directory already there. Anything else at the path,
+    /// and a destination that cannot be made or read, is Git state, with no
+    /// Git command run.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstrokeError::Git`] naming the path and what is there or the OS
+    /// error.
+    fn prepare(path: &'p Path) -> Result<Self, UpstrokeError> {
+        let refused = |what: String| UpstrokeError::Git {
+            message: format!(
+                "the worktree destination {} {what}; no Git command ran",
+                path.display()
+            ),
+        };
+        match AtDestination::read(path) {
+            AtDestination::EmptyDirectory => Ok(Self { path, made: false }),
+            AtDestination::Absent => match fs::create_dir(path) {
+                Ok(()) => Ok(Self { path, made: true }),
+                Err(error) => Err(refused(format!("could not be made: {error}"))),
+            },
+            AtDestination::Other(what) => Err(refused(format!("already exists as {what}"))),
+            AtDestination::Unreadable(error) => Err(refused(format!("could not be read: {error}"))),
+        }
+    }
+
+    /// After a failed attempt: the removal proof. An empty directory this
+    /// access can remove is untouched, so it is removed and made again and the
+    /// answer is [`Again::Attempt`]; anything else, and a directory that cannot
+    /// be made again, is [`Again::Undecidable`]. It runs no Git command and
+    /// reads and writes nothing but the destination.
+    fn untouched(&mut self) -> Again {
+        let undecidable = |path: &Path, what: String| Again::Undecidable {
+            why: format!("the worktree destination {} {what}", path.display()),
+        };
+        match AtDestination::read(self.path) {
+            AtDestination::EmptyDirectory => {
+                if let Err(error) = fs::remove_dir(self.path) {
+                    return undecidable(
+                        self.path,
+                        format!(
+                            "is an empty directory this access cannot remove ({error}), so Git \
+                             may have taken it over"
+                        ),
+                    );
+                }
+                match fs::create_dir(self.path) {
+                    Ok(()) => {
+                        self.made = true;
+                        Again::Attempt
+                    }
+                    Err(error) => undecidable(
+                        self.path,
+                        format!("was removed untouched and could not be made again: {error}"),
+                    ),
+                }
+            }
+            AtDestination::Absent => undecidable(
+                self.path,
+                "is gone: Git took it over, or may have".to_owned(),
+            ),
+            AtDestination::Other(what) => undecidable(self.path, format!("now holds {what}")),
+            AtDestination::Unreadable(error) => {
+                undecidable(self.path, format!("could not be read: {error}"))
+            }
+        }
+    }
+
+    /// After a refused access: remove the destination this access made, when
+    /// it is still an empty directory.
+    fn settle(&self) {
+        if self.made
+            && matches!(
+                AtDestination::read(self.path),
+                AtDestination::EmptyDirectory
+            )
+        {
+            // Best effort, as Git's own junk removal is: a directory this
+            // access cannot remove stays empty, and the slot's forced removal
+            // binds nothing for an empty directory and takes it, store or no
+            // store (`revalidate_removal_proving`).
+            let _ = fs::remove_dir(self.path);
+        }
+    }
 }
 
 impl WorkspaceManager {
@@ -1633,6 +2133,7 @@ impl WorkspaceManager {
             repo_key,
             run_id: run_id.to_owned(),
             incarnation: incarnation.to_owned(),
+            tag: InstanceTag::of_incarnation(incarnation),
             private_root,
             execution_root,
         };
@@ -1671,16 +2172,36 @@ impl WorkspaceManager {
         &self.execution_root
     }
 
-    /// Where a slot's worktree lives.
+    /// Where this incarnation's instance of a slot lives: the only worktree of
+    /// the slot this manager adds, verifies or runs a command in.
     #[must_use]
     pub fn slot_path(&self, slot: &Slot) -> PathBuf {
-        self.execution_root.join(slot.relative())
+        self.instance_path(slot, Some(&self.tag))
     }
 
-    /// Where a slot's intent lives.
+    /// Where this incarnation's intent for a slot lives.
     #[must_use]
     pub fn intent_path(&self, slot: &Slot) -> PathBuf {
-        self.execution_root.join("intents").join(slot.intent_name())
+        self.instance_intent_path(slot, Some(&self.tag))
+    }
+
+    /// The tag of this incarnation's slot instances.
+    #[must_use]
+    pub fn instance_tag(&self) -> &InstanceTag {
+        &self.tag
+    }
+
+    /// Where the instance of `slot` that `tag` names lives, whichever
+    /// incarnation created it: `None` is the untagged name.
+    fn instance_path(&self, slot: &Slot, tag: Option<&InstanceTag>) -> PathBuf {
+        self.execution_root.join(slot.instance_relative(tag))
+    }
+
+    /// Where the intent of the instance of `slot` that `tag` names lives.
+    fn instance_intent_path(&self, slot: &Slot, tag: Option<&InstanceTag>) -> PathBuf {
+        self.execution_root
+            .join("intents")
+            .join(slot.instance_intent_name(tag))
     }
 
     /// The three containment conditions, re-checked.
@@ -1794,10 +2315,28 @@ impl WorkspaceManager {
         slot: Option<&Slot>,
         registration: Option<&Path>,
     ) -> Result<Vec<(PathBuf, PathBuf, Leaf)>, UpstrokeError> {
+        self.acted_through_instance_paths(
+            primitive,
+            slot.map(|slot| (slot, Some(&self.tag))),
+            registration,
+        )
+    }
+
+    /// [`Self::acted_through_paths`] for the instance of a slot that a tag
+    /// names, this incarnation's or another's: the slot roles resolve to that
+    /// instance's checkout and intent. Every primitive acts through this
+    /// incarnation's instance but the forced removal and the intent removal,
+    /// which act through every instance of their slot in turn.
+    fn acted_through_instance_paths(
+        &self,
+        primitive: Primitive,
+        instance: Option<(&Slot, Option<&InstanceTag>)>,
+        registration: Option<&Path>,
+    ) -> Result<Vec<(PathBuf, PathBuf, Leaf)>, UpstrokeError> {
         let mut paths = Vec::new();
         let anchor = self.private_root.clone();
         let need_slot = |role: ActedThrough| {
-            slot.ok_or_else(|| UpstrokeError::Refused {
+            instance.ok_or_else(|| UpstrokeError::Refused {
                 message: format!(
                     "internal: {primitive:?} acts through {role:?} but was given no slot"
                 ),
@@ -1827,25 +2366,33 @@ impl WorkspaceManager {
                     ));
                 }
                 ActedThrough::IntentFile => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.intent_path(slot), Leaf::Entry));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((
+                        anchor.clone(),
+                        self.instance_intent_path(slot, tag),
+                        Leaf::Entry,
+                    ));
                 }
                 ActedThrough::SlotParent => {
-                    let slot = need_slot(*role)?;
+                    let (slot, tag) = need_slot(*role)?;
                     let parent = self
-                        .slot_path(slot)
+                        .instance_path(slot, tag)
                         .parent()
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|| self.execution_root.clone());
                     paths.push((anchor.clone(), parent, Leaf::Directory));
                 }
                 ActedThrough::SlotCheckoutDirectory => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.slot_path(slot), Leaf::Directory));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((
+                        anchor.clone(),
+                        self.instance_path(slot, tag),
+                        Leaf::Directory,
+                    ));
                 }
                 ActedThrough::SlotCheckoutEntry => {
-                    let slot = need_slot(*role)?;
-                    paths.push((anchor.clone(), self.slot_path(slot), Leaf::Entry));
+                    let (slot, tag) = need_slot(*role)?;
+                    paths.push((anchor.clone(), self.instance_path(slot, tag), Leaf::Entry));
                 }
                 ActedThrough::HooksPath => {
                     paths.push((anchor.clone(), self.hooks_dir(), Leaf::Directory));
@@ -1953,8 +2500,35 @@ impl WorkspaceManager {
         slot: Option<&Slot>,
         registration: Option<&Path>,
     ) -> Result<(), UpstrokeError> {
+        self.revalidate_walked(
+            primitive,
+            self.acted_through_paths(primitive, slot, registration)?,
+        )
+    }
+
+    /// [`Self::revalidate_acted_through`] at the paths of the instance of a
+    /// slot that a tag names ([`Self::acted_through_instance_paths`]).
+    fn revalidate_acted_through_instance(
+        &self,
+        primitive: Primitive,
+        instance: Option<(&Slot, Option<&InstanceTag>)>,
+        registration: Option<&Path>,
+    ) -> Result<(), UpstrokeError> {
+        self.revalidate_walked(
+            primitive,
+            self.acted_through_instance_paths(primitive, instance, registration)?,
+        )
+    }
+
+    /// The walk of [`Self::revalidate_acted_through`] over `paths`, resolved
+    /// for `primitive`.
+    fn revalidate_walked(
+        &self,
+        primitive: Primitive,
+        paths: Vec<(PathBuf, PathBuf, Leaf)>,
+    ) -> Result<(), UpstrokeError> {
         refuse_unreal_directory(&self.base)?;
-        for (anchor, path, leaf) in self.acted_through_paths(primitive, slot, registration)? {
+        for (anchor, path, leaf) in paths {
             refuse_reparse_points(&anchor, &path, leaf)?;
         }
         if primitive.acted_through().contains(&ActedThrough::HooksPath) {
@@ -2108,14 +2682,22 @@ impl WorkspaceManager {
     /// empty; otherwise resumably_open". The answer says which happened, so a
     /// caller cannot read "did nothing" as "removed".
     ///
+    /// **The final sweep comes first** ([`Self::sweep_earlier_instances`]):
+    /// terminal finalization calls this last, after its scrubs, and an earlier
+    /// incarnation's writer that recreated its instance after its kind's scrub
+    /// would otherwise keep the root with no walk left to reach it (the
+    /// follow-up C record, §5.4). The R18 site itself still removes only the
+    /// scaffolding and the root.
+    ///
     /// # Errors
     ///
-    /// The containment refusals, or an I/O error.
+    /// The containment refusals, the sweep's refusals, or an I/O error.
     pub fn remove_execution_root(
         &self,
         hooks: &mut dyn EffectHooks,
     ) -> Result<bool, UpstrokeError> {
         self.revalidate()?;
+        self.sweep_earlier_instances(hooks)?;
         funnel(
             hooks,
             EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
@@ -2176,6 +2758,43 @@ impl WorkspaceManager {
         )
     }
 
+    /// Terminal finalization's final sweep: every instance of an earlier
+    /// incarnation, or untagged, that the execution root's slot namespaces or
+    /// the registry hold ([`Self::earlier_instances`], sources 2 and 3 of
+    /// [`Self::intents`], over all three namespaces), each removed with
+    /// force through its own kind's removal site, bound to its own
+    /// registration, as every walk removes one.
+    ///
+    /// **What it leaves.** This incarnation's own instances: at the last step
+    /// of a `Complete` or `Halted` finalization the scrubs have removed them,
+    /// a torn one no intent names stays the finalizer's refusal, and a live
+    /// one keeps the root. And whatever a still-running earlier writer
+    /// creates after the sweep's scan: the scan narrows the window to itself
+    /// and cannot close it (the record, §5.4's table; R-UR).
+    ///
+    /// The proof is [`WriterProof::NoWriterAlive`], the finalizer's own: an
+    /// entry that names nothing yet, an add still writing it, is passed over
+    /// and left as it is, never bound by its Git-generated name.
+    ///
+    /// A removal that fails refuses the sweep, resumably, and so the
+    /// finalization: the root is not removed over an instance that is still
+    /// there.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, [`UpstrokeError::RegistryRefused`], or a removal's error.
+    fn sweep_earlier_instances(&self, hooks: &mut dyn EffectHooks) -> Result<(), UpstrokeError> {
+        for instance in self.earlier_instances(self.registered_instances()?)? {
+            self.remove_instance_proving(
+                hooks,
+                instance.slot(),
+                instance.tag(),
+                WriterProof::NoWriterAlive,
+            )?;
+        }
+        Ok(())
+    }
+
     /// The empty directory every funnel points `core.hooksPath` at.
     ///
     /// `decisions.workspace_candidates.candidate` calls the commit "hook-free",
@@ -2221,7 +2840,12 @@ impl WorkspaceManager {
         let path = self.intent_path(slot);
         // Owned snapshots: the record is persisted, and serde owns its
         // fields.
-        let record = IntentRecord::new(slot, self.run_id.clone(), self.incarnation.clone())?;
+        let record = IntentRecord::new(
+            slot,
+            Some(&self.tag),
+            self.run_id.clone(),
+            self.incarnation.clone(),
+        )?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.write_intent_site(), || {
             self.revalidate_acted_through(Primitive::WriteIntent, Some(slot), None)?;
@@ -2245,13 +2869,21 @@ impl WorkspaceManager {
     /// refused it here on every attempt, and the forced removal that repairs
     /// the store ([`Self::remove_worktree_proving`]) was never reached. So
     /// when the enumeration refuses, [`Self::repair_torn_registrations`] runs
-    /// that forced removal for every *other* slot an intent names whose
-    /// registration's `commondir` holds no bytes — its checkout and its
-    /// registration go, its intent stays — and the enumeration runs again; its
-    /// answer then stands. Nothing is enumerated around the torn entry: the
+    /// that forced removal for every instance of every *other* slot whose
+    /// registration's `commondir` holds no bytes — that instance's checkout
+    /// and registration go, its intent stays, and no other instance of its
+    /// slot is touched — and the enumeration runs again; its answer then
+    /// stands. Nothing is enumerated around the torn entry: the
     /// repair only removes, and every containment check still reads the list
     /// Git itself returns. When the repair finds nothing it may remove, the
     /// enumeration's refusal is returned as it was.
+    ///
+    /// **Every instance's intent goes** (naming's module doc): this
+    /// incarnation's, and every other incarnation's intent of the same slot
+    /// the intents directory holds, tagged or not, in one execution of the
+    /// site, so a caller that counts the site's hooks counts one. Each is
+    /// walked at its own path before it is removed, and the directory is
+    /// synced once after the last.
     ///
     /// # Errors
     ///
@@ -2272,28 +2904,68 @@ impl WorkspaceManager {
             self.revalidate()?;
         }
         let directory = self.execution_root.join("intents");
-        let path = directory.join(slot.intent_name());
+        let tags = self.intent_tags_of(slot)?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_intent_site(), || {
-            self.revalidate_acted_through(Primitive::RemoveIntent, Some(slot), None)?;
-            match fs::remove_file(&path) {
-                Ok(()) => sync_directory(&directory, &ledger),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(source) => Err(UpstrokeError::Filesystem {
-                    operation: "remove",
-                    path,
-                    source,
-                }),
+            let mut removed = false;
+            for tag in &tags {
+                self.revalidate_acted_through_instance(
+                    Primitive::RemoveIntent,
+                    Some((slot, tag.as_ref())),
+                    None,
+                )?;
+                let path = self.instance_intent_path(slot, tag.as_ref());
+                match fs::remove_file(&path) {
+                    Ok(()) => removed = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Filesystem {
+                            operation: "remove",
+                            path,
+                            source,
+                        });
+                    }
+                }
+            }
+            if removed {
+                sync_directory(&directory, &ledger)
+            } else {
+                Ok(())
             }
         })
     }
 
-    /// Every intent the execution root still carries, in directory order.
+    /// The tags of every intent of `slot` the intents directory holds, this
+    /// incarnation's first and always, whether its intent is there or not;
+    /// `None` is an untagged intent. A name that is not an intent of this
+    /// slot is not this removal's: [`Self::intents`] is where a malformed
+    /// name refuses.
     ///
     /// # Errors
     ///
-    /// An I/O error, or an intent file whose name no slot renders.
-    pub fn intents(&self) -> Result<Vec<Slot>, UpstrokeError> {
+    /// An I/O error reading the directory.
+    fn intent_tags_of(&self, slot: &Slot) -> Result<Vec<Option<InstanceTag>>, UpstrokeError> {
+        let mut others = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            if let Some(instance) = SlotInstance::from_intent_name(&name) {
+                if instance.slot() == slot && instance.tag() != Some(&self.tag) {
+                    others.insert(instance.tag().cloned());
+                }
+            }
+        }
+        let mut tags = vec![Some(self.tag.clone())];
+        tags.extend(others);
+        Ok(tags)
+    }
+
+    /// The names in `intents/`, staging leftovers excepted (see
+    /// [`Self::staging_leftovers`]), in directory order; nothing when the
+    /// directory does not exist.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, or a name that is not UTF-8.
+    fn intent_file_names(&self) -> Result<Vec<String>, UpstrokeError> {
         let directory = self.execution_root.join("intents");
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -2305,7 +2977,7 @@ impl WorkspaceManager {
                 });
             }
         };
-        let mut slots = Vec::new();
+        let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| UpstrokeError::Io {
                 path: directory.clone(),
@@ -2316,22 +2988,215 @@ impl WorkspaceManager {
                 message: format!("intent {} has a non-UTF-8 name", entry.path().display()),
             })?;
             // A staging file of the exact shape `write_intent` produces is
-            // never an intent; `reclaim_intents` removes it. Anything else
-            // that is not an intent name is the malformed file it is.
+            // never an intent; terminal finalization removes it.
             if staging_kind(name).is_some() {
                 continue;
             }
-            let slot = Slot::from_intent_name(name).ok_or_else(|| UpstrokeError::Git {
-                message: format!(
-                    "unexpected file `{name}` in the intent directory of {}",
-                    self.execution_root.display()
-                ),
-            })?;
-            slot.validate()?;
-            slots.push(slot);
+            names.push(name.to_owned());
         }
-        slots.sort();
-        Ok(slots)
+        Ok(names)
+    }
+
+    /// Every slot the execution root holds an instance of that a walk must
+    /// reach, as **logical** slots, each once, sorted.
+    ///
+    /// Three sources (the follow-up C record, §4.3):
+    /// 1. every intent of every incarnation, tagged or not;
+    /// 2. every directory `<root>/<namespace>/<instance>` that is not this
+    ///    incarnation's, an untagged name counting as another incarnation's;
+    /// 3. every registration whose `gitdir` names such a directory, read
+    ///    through the tolerant registry access ([`Self::registered_instances`]).
+    ///
+    /// An earlier incarnation's Git writer that had not yet run when its slot
+    /// was reclaimed recreates its instance's checkout and registration but
+    /// not its intent (executed, the record's §4.3), so a walk that read the
+    /// intents alone would never reach it again; every walk enumerates this,
+    /// so each meets such an instance as it meets one with an intent, and
+    /// removes it with the slot (see [`Self::remove_worktree_proving`]).
+    ///
+    /// **This incarnation's own instances count only through their intent.**
+    /// It creates an instance only after writing its intent, so an intentless
+    /// instance at its own tag is none of its dead instances, and the rule
+    /// that "a torn registration that no intent names is not this reclaim's to
+    /// remove" stands for it (frozen `finalize.rs`'s
+    /// `scrub_slots_still_refuses_a_torn_registration_no_intent_names`).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, an intent file whose name no instance renders, an intent
+    /// whose slot is refused, or [`UpstrokeError::RegistryRefused`] from the
+    /// registry's read.
+    pub fn intents(&self) -> Result<Vec<Slot>, UpstrokeError> {
+        self.logical_slots(self.registered_instances()?)
+    }
+
+    /// [`Self::intents`] over `registered`, the registry's instances as one
+    /// read of it found them: the torn-registration plan reads them inside its
+    /// own registry access, and every other caller through
+    /// [`Self::registered_instances`].
+    fn logical_slots(&self, registered: Vec<SlotInstance>) -> Result<Vec<Slot>, UpstrokeError> {
+        let mut slots = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            // Anything in `intents/` that is not an intent name is the
+            // malformed file it is.
+            let instance =
+                SlotInstance::from_intent_name(&name).ok_or_else(|| UpstrokeError::Git {
+                    message: format!(
+                        "unexpected file `{name}` in the intent directory of {}",
+                        self.execution_root.display()
+                    ),
+                })?;
+            instance.slot().validate()?;
+            slots.insert(instance.slot().clone());
+        }
+        for instance in self.earlier_instances(registered)? {
+            slots.insert(instance.slot().clone());
+        }
+        Ok(slots.into_iter().collect())
+    }
+
+    /// Every instance sources 2 and 3 of [`Self::intents`] find that is not
+    /// this incarnation's, `registered` being source 3: the instances of
+    /// earlier incarnations, and the untagged names written before instances
+    /// existed, sorted and each once.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error reading a namespace.
+    fn earlier_instances(
+        &self,
+        registered: Vec<SlotInstance>,
+    ) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let mut found = std::collections::BTreeSet::new();
+        for instance in self.namespace_instances()?.into_iter().chain(registered) {
+            if instance.tag() != Some(&self.tag) {
+                found.insert(instance);
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
+    /// Every directory under the three slot namespaces whose name is an
+    /// instance of a valid slot, whoever created it.
+    ///
+    /// Read with `symlink_metadata`, so a link at an instance's name is not a
+    /// directory and is not followed: it is not an instance, and it keeps the
+    /// execution root, as any entry the walks do not own does. An entry that
+    /// vanishes while it is read is skipped.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error reading a namespace or an entry.
+    fn namespace_instances(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let mut found = Vec::new();
+        for namespace in ["tasks", "merge", "snapshots"] {
+            let directory = self.execution_root.join(namespace);
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: directory,
+                        source,
+                    });
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|source| UpstrokeError::Io {
+                    path: directory.clone(),
+                    source,
+                })?;
+                let name = entry.file_name();
+                let Some(instance) = name
+                    .to_str()
+                    .and_then(|name| SlotInstance::from_entry(namespace, name))
+                    .filter(|instance| instance.slot().validate().is_ok())
+                else {
+                    continue;
+                };
+                match fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) if metadata.is_dir() => found.push(instance),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Io {
+                            path: entry.path(),
+                            source,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every registration of the repository's store whose `gitdir` names a
+    /// checkout directly under one of this execution root's slot namespaces,
+    /// as the instance that checkout is, whoever created it.
+    ///
+    /// **A tolerant registry access** ([`tolerant_registry_access`], no
+    /// hold), read the way the forced removal's scan reads the store and
+    /// never through Git's enumeration, which dies on a torn `commondir`: each
+    /// entry's `gitdir` by bytes, bound through `registration_checkout` and
+    /// canonical prefixes. An entry or a `gitdir` that vanishes while it is
+    /// read is skipped, and so is an entry with no `gitdir` or an empty one:
+    /// it names no path (an add of this process in flight is one, and names
+    /// no other incarnation's instance). Anything else that fails is attempted
+    /// again until the access's deadline and then refuses, resumably.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstrokeError::RegistryRefused`].
+    fn registered_instances(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || self.registered_instances_once(),
+        )
+    }
+
+    /// One attempt of [`Self::registered_instances`].
+    fn registered_instances_once(&self) -> Result<Vec<SlotInstance>, UpstrokeError> {
+        let store = self.common_git_dir.join("worktrees");
+        let entries = match fs::read_dir(&store) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: store,
+                    source,
+                });
+            }
+        };
+        let root = canonical_prefix(&self.execution_root)?;
+        let mut found = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: store.clone(),
+                source,
+            })?;
+            let admin = entry.path();
+            let gitdir = admin.join("gitdir");
+            let bytes = match fs::read(&gitdir) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: gitdir,
+                        source,
+                    });
+                }
+            };
+            if trim_gitdir(&bytes).is_empty() {
+                continue;
+            }
+            let checkout = canonical_prefix(&registration_checkout(&admin, &bytes)?)?;
+            if let Some(instance) = instance_under(&root, &checkout) {
+                found.push(instance);
+            }
+        }
+        Ok(found)
     }
 
     /// Reclaim every intent this execution root carries: forced removal of
@@ -2642,10 +3507,28 @@ impl WorkspaceManager {
     /// Separate sites make the *ordering* a caller's obligation, so the
     /// obligation is checked here — see [`Refusal::AddWithoutIntent`].
     ///
+    /// **The add is a tolerant registry access** ([`tolerant_registry_access`],
+    /// R-X shared). Its destination is made as an empty directory before Git
+    /// runs ([`Destination::prepare`]), and a destination that is anything but
+    /// an empty directory is Git state at once with no Git command run. After a
+    /// failed `git worktree add`, the destination answers whether another
+    /// attempt is safe ([`Destination::untouched`]): an empty directory the
+    /// access can remove holds nothing to lose — Git's junk removal would have
+    /// removed it after a failure of Git's own past its takeover — so it is
+    /// made again and the add attempted again; anything else refuses at once,
+    /// resumably, as
+    /// [`UpstrokeError::RegistryRefused`]. So this funnel returns Git state only
+    /// for a destination that could not be made or was not an empty directory
+    /// when it began, and neither depends on the registry
+    /// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.2, §7.3, §8.2). A
+    /// refused add removes the destination it made, when that is still an
+    /// empty directory.
+    ///
     /// # Errors
     ///
     /// A slot refusal, [`Refusal::AddWithoutIntent`], the containment refusals,
-    /// or a Git error.
+    /// a Git error for a destination that could not be made or was not an empty
+    /// directory, or [`UpstrokeError::RegistryRefused`].
     pub fn add_worktree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2653,6 +3536,8 @@ impl WorkspaceManager {
         commit: &str,
     ) -> Result<PathBuf, UpstrokeError> {
         let path = self.slot_target(slot)?;
+        #[cfg(windows)]
+        refuse_git_dir_over_budget(&path, crate::runner::host::GitdirRule::Windows)?;
         self.revalidate()?;
         let intent = self.intent_path(slot);
         funnel(hooks, slot.add_site(), move || {
@@ -2676,7 +3561,10 @@ impl WorkspaceManager {
             };
             if !durable {
                 return Err(Refusal::AddWithoutIntent {
-                    slot: slot.relative().display().to_string(),
+                    slot: slot
+                        .instance_relative(Some(&self.tag))
+                        .display()
+                        .to_string(),
                     intent,
                 }
                 .into());
@@ -2701,11 +3589,17 @@ impl WorkspaceManager {
                 Self::WORKTREE_ADD_ARGV.iter().map(OsString::from).collect();
             argv.push(path.as_os_str().to_os_string());
             argv.push(OsString::from(commit));
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.git_ok(&self.base, &argv)?;
+            let mut destination = Destination::prepare(&path)?;
+            let added = tolerant_registry_access(
+                &self.common_git_dir,
+                RegistryHold::Shared,
+                &mut || destination.untouched(),
+                &mut || self.git_ok(&self.base, &argv).map(|_quiet| ()),
+            );
+            if added.is_err() {
+                destination.settle();
+            }
+            added?;
             Ok(path)
         })
     }
@@ -2723,12 +3617,12 @@ impl WorkspaceManager {
     /// the add a killed conductor left torn may be that generation's own;
     /// with nothing reclaimed before that verification, no removal had
     /// repaired the store, and the revalidation here refused on every attempt.
-    /// A torn slot's forced removal takes its checkout and registration and
-    /// leaves its intent, so the slot verified reads as
-    /// [`VerifyFailure::NotRegistered`], which routes to the forced removal
-    /// and fresh add its caller makes of any worktree that is not quiescent.
-    /// The repair runs under each torn slot's removal site; this site stays
-    /// read-only.
+    /// A torn instance's forced removal takes its checkout and registration
+    /// and leaves its intent, so a slot whose own instance was the torn one
+    /// reads as [`VerifyFailure::NotRegistered`], which routes to the forced
+    /// removal and fresh add its caller makes of any worktree that is not
+    /// quiescent. The repair removes only the instances it proved torn, each
+    /// under its slot's removal site; this site stays read-only.
     ///
     /// # Errors
     ///
@@ -2906,12 +3800,20 @@ impl WorkspaceManager {
     ///
     /// The contained-deletion form is the one implemented, because it is the
     /// only one that works when the checkout is already gone — and because it
-    /// is the form whose containment is checkable. The `locked` marker
-    /// `git worktree add` leaves behind is cleared as part of the removal:
-    /// measured, `git worktree prune` skips a locked entry and
-    /// `git worktree remove --force` refuses one, so a removal that did not
-    /// clear it would leave exactly the residue this sentence promises never
-    /// blocks reclaim.
+    /// is the form whose containment is checkable. **Its registration is
+    /// removed directly, and no `git worktree prune` runs** (#329, the record's
+    /// §2.5 and §3.5): the registration the removal's scan bound to this slot's
+    /// checkout is removed, `locked` first and then its directory, and then the
+    /// store itself when that left it empty, as Git's prune removed an emptied
+    /// store. Git's prune deletes *every* entry with neither `locked` nor
+    /// `gitdir`, and `git worktree add` makes its entry before it writes
+    /// `locked`, so an engine prune could delete another process's add in
+    /// flight; removal bound to the instance's own registration deletes no
+    /// other process's entry. The `locked` marker `git worktree add` leaves
+    /// behind is cleared as part of the removal: measured, `git worktree prune`
+    /// skips a locked entry and `git worktree remove --force` refuses one, so
+    /// a removal that did not clear it would leave exactly the residue this
+    /// sentence promises never blocks reclaim.
     ///
     /// A registration the store holds that names no checkout — `locked`
     /// beside an empty `gitdir`, or `locked` with no `gitdir` at all, the two
@@ -2920,11 +3822,24 @@ impl WorkspaceManager {
     /// whichever slot is being removed: the plain funnel proves nothing about
     /// writers of the root, and on disk that state is an add in flight. See
     /// [`WriterProof`]; [`Self::remove_worktree_proving`] is the form a caller
-    /// with the proof uses.
+    /// with the proof uses. The scan is a tolerant registry access, so that
+    /// refusal is attempted past until its deadline, and a registration still
+    /// in that state then refuses as [`UpstrokeError::RegistryRefused`],
+    /// carrying the scan's own text.
+    ///
+    /// **Every instance of the slot goes** (naming's module doc): this
+    /// incarnation's, and every other incarnation's the execution root holds
+    /// — found through its intent, its directory under the slot's namespace,
+    /// or a registration whose `gitdir` names it — each bound to its own
+    /// registration and removed in turn, in one execution of the site. An
+    /// earlier incarnation's instance that cannot be removed refuses the
+    /// removal as any removal does, resumably: nothing retains it
+    /// (the follow-up C record, §4.5).
     ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git or I/O error.
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
     pub fn remove_worktree(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2969,62 +3884,165 @@ impl WorkspaceManager {
     /// finalization's scrub and the live loop's; its error is the funnel's,
     /// never absorbed.
     ///
-    /// The repository's registry lock (`REGISTRY_LOCKS`) is held twice, and
-    /// never across a hook. First around the registration scan, before any
-    /// hook: it binds the registration the removal will act through, so a
-    /// scan refusal comes first and a registration exchanged at the `Before`
-    /// hook is refused by the acted-through check inside the funnel. Then,
-    /// inside the funnel after the `Before` hook has returned, around the
-    /// removal of the checkout, the administrative directory and the prune,
-    /// which act on that binding; it is released before the `After` hook. So
-    /// the scan never reads an add this process has in flight and the prune
-    /// never removes one, and an observer may list the worktrees, or wait on
-    /// another thread's registry access, from either hook (the PR11 record,
-    /// §13, round R1, `R1-REG-1`).
+    /// **The scan is a tolerant registry access, and nothing holds R-X.** The
+    /// registration scan runs before any hook, through
+    /// [`tolerant_registry_access`] with no hold: it binds the registration the
+    /// removal will act through, so a scan refusal comes first and a
+    /// registration exchanged at the `Before` hook is refused by the
+    /// acted-through check inside the funnel; a scan that meets another
+    /// process's registration half written is attempted again until its
+    /// deadline, and refuses resumably after it. The mutation, inside the
+    /// funnel, removes the checkout and then exactly the registration the scan
+    /// bound, and the store only when that left it empty; it enumerates nothing
+    /// and takes no lock, because removals of one process act on different
+    /// slots and the store's removal is an `rmdir`, which fails on a store that
+    /// is not empty. An add of this process that has not yet made its entry
+    /// and meets a store removed under it fails before Git takes its
+    /// destination over, and is attempted again. An observer may list the
+    /// worktrees, or wait on another thread's registry access, from either hook
+    /// (the PR11 record, §13, round R1, `R1-REG-1`).
     ///
     /// # Errors
     ///
-    /// The containment refusals, or a Git or I/O error.
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
     pub fn remove_worktree_proving(
         &self,
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
         proof: WriterProof,
     ) -> Result<Vec<PathBuf>, UpstrokeError> {
-        let path = self.slot_target(slot)?;
-        let RemovalBinding {
-            admin: registration,
-            passed_over,
-        } = {
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.revalidate_removal_proving(&path, proof)?
-        };
+        slot.validate()?;
+        let bound = tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || self.bind_instances(slot, proof),
+        )?;
         let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_site(), || {
-            let registry = registry_lock_of(&self.common_git_dir);
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.remove_bound(slot, &path, registration.as_deref(), &ledger)
+            for (tag, path, binding) in &bound {
+                self.remove_bound(slot, tag.as_ref(), path, binding.admin.as_deref(), &ledger)?;
+            }
+            Ok(())
         })?;
+        let mut passed_over: Vec<PathBuf> = bound
+            .into_iter()
+            .flat_map(|(_, _, binding)| binding.passed_over)
+            .collect();
+        passed_over.sort();
+        passed_over.dedup();
         Ok(passed_over)
     }
 
-    /// [`Self::remove_worktree_proving`]'s second critical section, entered
-    /// holding the registry lock with `registration` bound by its scan: the
-    /// checkout removed and its deletion made durable, then the registration
-    /// cleared and pruned.
+    /// One attempt of [`Self::remove_worktree_proving`]'s scan: every
+    /// instance of `slot` ([`Self::instance_tags_of`]), each with its path and
+    /// the registration the removal's scan binds to it.
+    fn bind_instances(
+        &self,
+        slot: &Slot,
+        proof: WriterProof,
+    ) -> Result<Vec<(Option<InstanceTag>, PathBuf, RemovalBinding)>, UpstrokeError> {
+        let mut bound = Vec::new();
+        for tag in self.instance_tags_of(slot)? {
+            let path = self.instance_path(slot, tag.as_ref());
+            let binding = self.revalidate_removal_proving(&path, proof)?;
+            bound.push((tag, path, binding));
+        }
+        Ok(bound)
+    }
+
+    /// The forced removal of the one instance of `slot` that `tag` names,
+    /// under `proof`: its registration bound by the removal's scan, a
+    /// tolerant registry access with no hold, and then the checkout and that
+    /// registration removed ([`Self::remove_bound`]) inside one execution of
+    /// the slot's removal site. No other instance of the slot is bound or
+    /// touched, so a removal made on what is known of one instance never
+    /// reaches another's: the torn-registration repair removes the instance
+    /// its plan proved torn ([`Self::repair_torn_registrations`]), and the
+    /// final sweep each earlier instance it found
+    /// ([`Self::sweep_earlier_instances`]). A slot's retirement removes every
+    /// instance ([`Self::remove_worktree_proving`]).
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, [`UpstrokeError::RegistryRefused`], or a Git
+    /// or I/O error.
+    fn remove_instance_proving(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+        tag: Option<&InstanceTag>,
+        proof: WriterProof,
+    ) -> Result<(), UpstrokeError> {
+        let path = self.instance_path(slot, tag);
+        let binding = tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || self.revalidate_removal_proving(&path, proof),
+        )?;
+        let ledger = hooks.durability_ledger();
+        funnel(hooks, slot.remove_site(), || {
+            self.remove_bound(slot, tag, &path, binding.admin.as_deref(), &ledger)
+        })
+    }
+
+    /// The tags of every instance of `slot` the execution root holds, this
+    /// incarnation's first and always, whether it exists or not; `None` is
+    /// the untagged name. Found the three ways [`Self::intents`] finds an
+    /// instance: an intent, a directory under the slot's namespace, and a
+    /// registration whose `gitdir` names one (read once, not through its own
+    /// registry access: the caller's attempt is one).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error, or a failure of the registry's read, which the caller's
+    /// registry access attempts again.
+    fn instance_tags_of(&self, slot: &Slot) -> Result<Vec<Option<InstanceTag>>, UpstrokeError> {
+        let mut others = std::collections::BTreeSet::new();
+        for name in self.intent_file_names()? {
+            if let Some(instance) = SlotInstance::from_intent_name(&name) {
+                if instance.slot() == slot {
+                    others.insert(instance.tag().cloned());
+                }
+            }
+        }
+        for instance in self
+            .namespace_instances()?
+            .into_iter()
+            .chain(self.registered_instances_once()?)
+        {
+            if instance.slot() == slot {
+                others.insert(instance.tag().cloned());
+            }
+        }
+        let own = Some(self.tag.clone());
+        others.remove(&own);
+        let mut tags = vec![own];
+        tags.extend(others);
+        Ok(tags)
+    }
+
+    /// [`Self::remove_worktree_proving`]'s mutation for one instance of
+    /// `slot`, the one `tag` names, with `registration` bound by its scan: the
+    /// checkout removed and its deletion made durable, then that registration
+    /// removed directly — `locked`, then its directory — and then the store,
+    /// when that left it empty. No `git worktree prune` runs, and no entry the
+    /// scan did not bind to this instance is touched.
     fn remove_bound(
         &self,
         slot: &Slot,
+        tag: Option<&InstanceTag>,
         path: &Path,
         registration: Option<&Path>,
         ledger: &DurabilityLedger,
     ) -> Result<(), UpstrokeError> {
-        self.revalidate_acted_through(Primitive::RemoveWorktree, Some(slot), registration)?;
+        self.revalidate_acted_through_instance(
+            Primitive::RemoveWorktree,
+            Some((slot, tag)),
+            registration,
+        )?;
         let present = match fs::symlink_metadata(path) {
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -3052,76 +4070,46 @@ impl WorkspaceManager {
             message: format!("{} has no parent directory", checkout.display()),
         })?;
         sync_checkout_removed(&checkout, parent, ledger)?;
-        if let Some(admin) = registration {
-            if !self.registration_still_names(admin, path)? {
-                // Its identity metadata is already absent: forced cleanup
-                // converges without inferring or deleting an admin path.
-                self.git_ok(
-                    &self.base,
-                    &[OsString::from("worktree"), OsString::from("prune")],
-                )?;
-                return Ok(());
-            }
-            let locked = admin.join("locked");
-            match fs::remove_file(&locked) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: locked,
-                        source,
-                    });
-                }
-            }
-            // A killed `git worktree add` can leave an empty `commondir`.
-            // Git then cannot enumerate *any* worktree, so `prune` cannot
-            // remove this one. `revalidate_removal` bound this admin
-            // directory to the exact, contained slot from its byte-safe
-            // `gitdir` before the checkout was deleted. Only that proved
-            // registration may be removed directly.
-            let commondir = admin.join("commondir");
-            let commondir_empty = match fs::metadata(&commondir) {
-                Ok(metadata) => metadata.len() == 0,
-                // No `commondir` at all is Git's to prune; only a read
-                // failure is ours to report.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(source) => {
-                    return Err(UpstrokeError::Io {
-                        path: commondir,
-                        source,
-                    });
-                }
-            };
-            if commondir_empty {
-                if !self.registration_still_names(admin, path)? {
-                    self.git_ok(
-                        &self.base,
-                        &[OsString::from("worktree"), OsString::from("prune")],
-                    )?;
-                    return Ok(());
-                }
-                remove_tree_once_handles_close(admin).map_err(|source| {
-                    UpstrokeError::Filesystem {
-                        operation: "remove",
-                        path: admin.to_path_buf(),
-                        source,
-                    }
-                })?;
-                // No prune: nothing of this slot's is left for one, and
-                // what it would remove is other slots' — among it a
-                // registration whose `gitdir` is gone and, once that
-                // empties the store, `<common git dir>/worktrees` itself,
-                // without which the gate above refuses that slot's
-                // checkout on every attempt. That slot's own removal
-                // prunes, after its checkout has gone.
-                return Ok(());
+        let Some(admin) = registration else {
+            // No registration names this slot: nothing of the store is this
+            // removal's to touch.
+            return Ok(());
+        };
+        if !self.registration_still_names(admin, path)? {
+            // Its identity metadata is already absent: forced cleanup
+            // converges without inferring or deleting an admin path.
+            return Ok(());
+        }
+        let locked = admin.join("locked");
+        match fs::remove_file(&locked) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Filesystem {
+                    operation: "remove",
+                    path: locked,
+                    source,
+                });
             }
         }
-        self.git_ok(
-            &self.base,
-            &[OsString::from("worktree"), OsString::from("prune")],
-        )?;
+        // `revalidate_removal_proving` bound this admin directory to the
+        // exact, contained slot from its byte-safe `gitdir` before the
+        // checkout was deleted, and `registration_still_names` re-read that
+        // identity just now: only that proved registration is removed, and
+        // the same way whether its `commondir` was written or a killed add
+        // left it empty, which Git can enumerate nothing past.
+        remove_tree_once_handles_close(admin).map_err(|source| UpstrokeError::Filesystem {
+            operation: "remove",
+            path: admin.to_path_buf(),
+            source,
+        })?;
+        // The store itself, when this removal left it empty, as `git worktree
+        // prune` removed an emptied store; an `rmdir`, so it fails on a store
+        // another registration still holds, and best effort, as Git's is. The
+        // frozen `finalize.rs` test
+        // `scrub_slots_converges_when_git_has_pruned_the_emptied_registration_store`
+        // pins the store's absence after its slots' removals.
+        let _ = fs::remove_dir(self.common_git_dir.join("worktrees"));
         Ok(())
     }
 
@@ -4907,8 +5895,8 @@ impl WorkspaceManager {
     /// The hooks path, walked immediately before every command the manager
     /// runs through [`Self::git`] and [`Self::git_with_identity`].
     ///
-    /// That set is the funnel primitives' commands (`worktree add`, `worktree
-    /// prune`, `add`, `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`)
+    /// That set is the funnel primitives' commands (`worktree add`, `add`,
+    /// `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`)
     /// and the manager's reads through the same runner (`worktree list`,
     /// `for-each-ref`, `show-ref`, `rev-parse`, `diff`). The two free
     /// functions `read_only_git` and `read_only_git_ok` are not in it: they
@@ -4968,9 +5956,9 @@ impl WorkspaceManager {
     /// ignores every replacement, and the same command materialises `A`
     /// (measured, both ways). It is set here rather than in the snapshot
     /// funnel because this is where the commands are built, and the reason
-    /// holds for all of them: every funnel primitive (`worktree add`, `worktree
-    /// prune`, `add`, `write-tree`, `cherry-pick`, `commit-tree`,
-    /// `update-ref`) and every read the manager makes through
+    /// holds for all of them: every funnel primitive (`worktree add`, `add`,
+    /// `write-tree`, `cherry-pick`, `commit-tree`, `update-ref`) and every
+    /// read the manager makes through
     /// [`Self::git`] and [`Self::git_with_identity`] (`rev-parse`, `worktree
     /// list`, `for-each-ref`, `show-ref`, `diff`) is about the objects the
     /// repository actually holds.
@@ -5002,9 +5990,13 @@ impl WorkspaceManager {
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
             .args(["-c", "protocol.file.allow=never"])
+            .args(ENGINE_GIT_SWITCHES)
             .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
             .args(args)
             .stdin(Stdio::null());
+        for (key, value) in ENGINE_GIT_ENVIRONMENT {
+            command.env(key, value);
+        }
         command
     }
 
@@ -5045,26 +6037,36 @@ impl WorkspaceManager {
 
     /// Every registered worktree of the managed repository.
     ///
+    /// A tolerant registry access ([`tolerant_registry_access`], no hold): one
+    /// attempt is `git worktree list --porcelain -z` **and** the parse of its
+    /// output, so output the parser refuses — Git 2.43 exits 0 over a
+    /// registration half written, printing a record the parser rejects — is a
+    /// failed attempt like Git's own failure, and is attempted again. Output
+    /// the parser accepts is a success, even when an entry in it is still
+    /// being written: no consumer reads a foreign record's `HEAD`.
+    ///
     /// # Errors
     ///
-    /// A Git error.
+    /// [`UpstrokeError::RegistryRefused`] when no attempt succeeded by the
+    /// access's deadline.
     pub fn worktree_records(&self) -> Result<Vec<WorktreeRecord>, UpstrokeError> {
-        let registry = registry_lock_of(&self.common_git_dir);
-        let output = {
-            let _serialized = registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.git_ok(
-                &self.base,
-                &[
-                    OsString::from("worktree"),
-                    OsString::from("list"),
-                    OsString::from("--porcelain"),
-                    OsString::from("-z"),
-                ],
-            )?
-        };
-        parse_worktree_records(&output)
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Unheld,
+            &mut || Again::Attempt,
+            &mut || {
+                let output = self.git_ok(
+                    &self.base,
+                    &[
+                        OsString::from("worktree"),
+                        OsString::from("list"),
+                        OsString::from("--porcelain"),
+                        OsString::from("-z"),
+                    ],
+                )?;
+                parse_worktree_records(&output)
+            },
+        )
     }
 
     fn worktree_record(&self, path: &Path) -> Result<Option<WorktreeRecord>, UpstrokeError> {
@@ -5145,11 +6147,23 @@ impl WorkspaceManager {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // No registrations at all. Nothing to remove only if the
-                // target is absent too; a target that is there with no
-                // registration directory is the I/O failure it looks like,
-                // and a target that cannot be read is its own.
+                // target is absent too, or is an empty directory — the
+                // destination an add makes before Git runs, left by a
+                // coordinator killed before Git's first write, which no
+                // registration can name and which holds nothing to lose. A
+                // target that is anything else there with no registration
+                // directory is the I/O failure it looks like, and a target
+                // that cannot be read is its own.
                 return match fs::symlink_metadata(&target) {
                     Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(RemovalBinding::unbound())
+                    }
+                    Ok(_)
+                        if matches!(
+                            AtDestination::read(&target),
+                            AtDestination::EmptyDirectory
+                        ) =>
+                    {
                         Ok(RemovalBinding::unbound())
                     }
                     Ok(_) => Err(UpstrokeError::Io {
@@ -5276,23 +6290,30 @@ impl WorkspaceManager {
     }
 
     /// The repair [`Self::remove_intent`] and [`Self::verify_worktree`] run
-    /// when Git's enumeration refuses: the forced removal of every slot an
-    /// intent names whose registration is torn, but `excluding`, answering
-    /// whether it found any, so the caller knows to ask Git again.
+    /// when Git's enumeration refuses: the forced removal of every instance
+    /// whose registration is torn, of every slot the walks reach
+    /// ([`Self::intents`]) but `excluding`, answering whether it found any, so
+    /// the caller knows to ask Git again.
     ///
-    /// Each is [`Self::remove_worktree_proving`] itself, under the torn
-    /// slot's own removal site: its gate binds the registration from the
-    /// byte-safe `gitdir`, the checkout goes with its durability barrier, and
-    /// the empty-`commondir` branch removes the registration on the proof it
-    /// has always used and stops there, without the `git worktree prune` that
-    /// could take the store from a checkout the plan passed over. Only the
-    /// intent is left, for the step that owns the slot, whose own forced
-    /// removal then finds nothing to remove and converges. The checkout goes
-    /// with the registration because a checkout left behind without one
-    /// converges only while `<common git dir>/worktrees` survives: once
-    /// nothing else is registered, the next `git worktree prune` deletes the
-    /// empty directory, and the forced removal refuses a checkout that is
-    /// present with no registration directory at all, on every attempt.
+    /// Each is [`Self::remove_instance_proving`] itself, under the torn
+    /// instance's own slot's removal site: its gate binds that instance's
+    /// registration from the byte-safe `gitdir`, the checkout goes with its
+    /// durability barrier, and the registration is removed directly on the
+    /// proof it has always used, with no `git worktree prune` (which could take
+    /// the store from a checkout the plan passed over). **Only the instance the
+    /// plan proved torn is removed.** The tear proves nothing of another
+    /// instance of its slot: an earlier incarnation's late add, torn beside the
+    /// successor's live instance of the same slot, leaves the successor's
+    /// checkout, its registration and its paid edits where they are (the
+    /// follow-up C record, §6.10). Every instance goes when the step that owns
+    /// the slot retires it ([`Self::remove_worktree_proving`]). Only the intent
+    /// is left, for that step, whose own forced removal then finds nothing of
+    /// the torn instance to remove and converges. The checkout goes with the
+    /// registration because a checkout left behind without one converges only
+    /// while `<common git dir>/worktrees` survives: once nothing else is
+    /// registered, the store is removed with its last registration, and the
+    /// forced removal refuses a checkout that is present with no registration
+    /// directory at all, on every attempt.
     /// Traced on Git 2.43, `git worktree add` writes `commondir` before it
     /// populates the checkout, so a torn registration is an add that never
     /// populated its checkout, and no step has a checkout to keep.
@@ -5318,9 +6339,10 @@ impl WorkspaceManager {
     /// intent that does not parse, a registration the gate refuses to bind,
     /// such as one whose `gitdir` is empty — nothing is removed and `false` is
     /// returned, and the caller returns the enumeration's own refusal, as it
-    /// did before this repair existed. A torn registration that no intent
-    /// names is never touched; the enumeration keeps dying on it and the
-    /// removal keeps refusing.
+    /// did before this repair existed. A torn registration no walk reaches —
+    /// this incarnation's own instance that no intent names ([`Self::intents`])
+    /// — is never touched; the enumeration keeps dying on it and the removal
+    /// keeps refusing.
     ///
     /// # Errors
     ///
@@ -5330,48 +6352,73 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         excluding: Option<&Slot>,
     ) -> Result<bool, UpstrokeError> {
-        let Ok(torn) = self.slots_with_torn_registrations(excluding) else {
+        let Ok(torn) = self.instances_with_torn_registrations(excluding) else {
             return Ok(false);
         };
-        for slot in &torn {
-            self.remove_worktree_proving(hooks, slot, WriterProof::Unknown)?;
+        for (slot, tag) in &torn {
+            self.remove_instance_proving(hooks, slot, tag.as_ref(), WriterProof::Unknown)?;
         }
         Ok(!torn.is_empty())
     }
 
-    /// The plan of [`Self::repair_torn_registrations`]: every slot an intent
-    /// names, but `excluding`, whose registration the forced removal's gate
-    /// binds and whose `commondir` holds no bytes. Reads only.
-    fn slots_with_torn_registrations(
+    /// The plan of [`Self::repair_torn_registrations`]: every instance, of
+    /// every slot the walks reach but `excluding`, whose registration the
+    /// forced removal's gate binds and whose `commondir` holds no bytes, each
+    /// named by its slot and its tag. Reads only.
+    ///
+    /// A tolerant registry access holding R-X **alone** (`REGISTRY_LOCKS`):
+    /// the plan reads an empty `commondir` as a dead add's residue, and an add
+    /// of this process in flight passes through that state, so no add of this
+    /// process runs while it reads. A plan that cannot take R-X, or meets a
+    /// store it cannot read, by its deadline refuses, and
+    /// [`Self::repair_torn_registrations`] answers `false`.
+    fn instances_with_torn_registrations(
         &self,
         excluding: Option<&Slot>,
-    ) -> Result<Vec<Slot>, UpstrokeError> {
-        let registry = registry_lock_of(&self.common_git_dir);
-        let _serialized = registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ) -> Result<Vec<(Slot, Option<InstanceTag>)>, UpstrokeError> {
+        tolerant_registry_access(
+            &self.common_git_dir,
+            RegistryHold::Exclusive,
+            &mut || Again::Attempt,
+            &mut || self.torn_plan(excluding),
+        )
+    }
+
+    /// One attempt of [`Self::instances_with_torn_registrations`].
+    ///
+    /// Every instance of each slot is read ([`Self::instance_tags_of`]), so an
+    /// earlier incarnation's add a kill left torn is repaired whichever
+    /// instance of its slot the tear is in, and each torn instance is named
+    /// by its tag, so that the repair removes it and no other instance.
+    fn torn_plan(
+        &self,
+        excluding: Option<&Slot>,
+    ) -> Result<Vec<(Slot, Option<InstanceTag>)>, UpstrokeError> {
         let mut torn = Vec::new();
-        for slot in self.intents()? {
+        for slot in self.logical_slots(self.registered_instances_once()?)? {
             if excluding == Some(&slot) {
                 continue;
             }
-            let target = self.slot_target(&slot)?;
-            let Some(admin) = self
-                .revalidate_removal_proving(&target, WriterProof::Unknown)?
-                .admin
-            else {
-                continue;
-            };
-            let commondir = admin.join("commondir");
-            match fs::metadata(&commondir) {
-                Ok(metadata) if metadata.len() == 0 => torn.push(slot),
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(UpstrokeError::Io {
-                        path: commondir,
-                        source,
-                    });
+            slot.validate()?;
+            for tag in self.instance_tags_of(&slot)? {
+                let target = self.instance_path(&slot, tag.as_ref());
+                let Some(admin) = self
+                    .revalidate_removal_proving(&target, WriterProof::Unknown)?
+                    .admin
+                else {
+                    continue;
+                };
+                let commondir = admin.join("commondir");
+                match fs::metadata(&commondir) {
+                    Ok(metadata) if metadata.len() == 0 => torn.push((slot.clone(), tag)),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(UpstrokeError::Io {
+                            path: commondir,
+                            source,
+                        });
+                    }
                 }
             }
         }
@@ -5404,6 +6451,70 @@ pub use self::residue::{
     ResidueTarget, classify_object_residue, element_breaks_quiescence, observed_residue_elements,
     residue_classified_sites,
 };
+
+/// Git for Windows' budget for a `$GIT_DIR`, in bytes: `PATH_MAX - 40`, with
+/// its `PATH_MAX` of 260. Measured on the CI guest with Git 2.50.1.windows.1:
+/// a `.git` path of 220 characters adds, 221 fails "'$GIT_DIR' too big"
+/// (`~/pr10-evidence/fix-g5-b/r9/guest/gitdir-threshold.log`, lines 12-13 and
+/// 23-24), and Git compares `strlen`, so a non-ASCII character counts its
+/// UTF-8 bytes.
+#[cfg(any(windows, test))]
+const WINDOWS_GIT_DIR_BUDGET: usize = 220;
+
+/// Refuse an add at `checkout` whose `$GIT_DIR`, `<checkout>/.git` as `rule`
+/// renders it — Git for Windows' own spelling, no verbatim prefix and `/`
+/// separators — is longer than [`WINDOWS_GIT_DIR_BUDGET`] in UTF-8 bytes.
+///
+/// [`WorkspaceManager::add_worktree`] calls it on Windows only, before any
+/// registry access; it is compiled for tests everywhere so that the rendering
+/// and the boundary are pinned on every platform.
+///
+/// # Errors
+///
+/// [`Refusal::GitDirOverBudget`], or a Git error for a path that is not UTF-8,
+/// which Git for Windows could not be handed exactly.
+#[cfg(any(windows, test))]
+fn refuse_git_dir_over_budget(
+    checkout: &Path,
+    rule: crate::runner::host::GitdirRule,
+) -> Result<(), UpstrokeError> {
+    let git_dir = checkout.join(".git");
+    let Some(text) = git_dir.to_str() else {
+        return Err(UpstrokeError::Git {
+            message: format!(
+                "refusing `git worktree add` at {}: its `$GIT_DIR` is not UTF-8, so Git for \
+                 Windows cannot be handed it exactly",
+                checkout.display()
+            ),
+        });
+    };
+    let rendered = rule.spelling(text.as_bytes());
+    if rendered.len() > WINDOWS_GIT_DIR_BUDGET {
+        return Err(Refusal::GitDirOverBudget {
+            git_dir: String::from_utf8_lossy(&rendered).into_owned(),
+            bytes: rendered.len(),
+            budget: WINDOWS_GIT_DIR_BUDGET,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// The instance a canonical `checkout` is when it sits directly under one of
+/// the slot namespaces of the canonical execution root `root` and its name is
+/// an instance of a valid slot; `None` for anything else, the user's own
+/// worktrees and other runs' included.
+fn instance_under(root: &Path, checkout: &Path) -> Option<SlotInstance> {
+    let relative = checkout.strip_prefix(root).ok()?;
+    let mut components = relative.components();
+    let (Some(Component::Normal(namespace)), Some(Component::Normal(name)), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return None;
+    };
+    SlotInstance::from_entry(namespace.to_str()?, name.to_str()?)
+        .filter(|instance| instance.slot().validate().is_ok())
+}
 
 fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
     let pointer = worktree.join(".git");
@@ -5449,18 +6560,36 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
 /// into a `TreeMismatch` -- so this is not a second copy of a manager
 /// precaution but the same one, at the reads the manager makes outside its
 /// builder.
+///
+/// **[`ENGINE_GIT_SWITCHES`] and [`ENGINE_GIT_ENVIRONMENT`] too**, the switch
+/// set the manager's own builder gives every command: none of these reads
+/// reaches rerere or maintenance itself, but a configured program a read
+/// starts — `status` runs a clean filter over a stat-dirty file, measured on
+/// 2.43 and 2.55 — inherits them, and the two builders carry one set.
 fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
-    Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
-        .args(args)
-        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
-        .stdin(Stdio::null())
+    read_only_command(cwd, args)
         .output()
         .map_err(|error| UpstrokeError::Git {
             message: format!("failed to run git: {error}"),
         })
+}
+
+/// The command [`read_only_git`] runs, built and not started, so that a test
+/// can read its arguments and environment.
+fn read_only_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
+        .args(ENGINE_GIT_SWITCHES)
+        .args(args)
+        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
+        .stdin(Stdio::null());
+    for (key, value) in ENGINE_GIT_ENVIRONMENT {
+        command.env(key, value);
+    }
+    command
 }
 
 fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
@@ -5480,20 +6609,39 @@ fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError>
 
 /// Every object `git fsck --unreachable` reports, and nothing else.
 ///
+/// **A failed `fsck` is an error, never an empty listing**
+/// (`PR128-RESIDUE-UNREACHABLE-OBJECTS-IGNORES-THE-EXIT-STATUS`; the decision
+/// appendix's FUC-D5-SPLITREAD). `fsck` reads every worktree's index and
+/// `HEAD`, so it fails on a registration a killed add left torn, and on a
+/// split index whose shared base a late writer expired between its two reads;
+/// a listing taken from such a run's standard output is whatever it printed
+/// before it stopped. So a non-zero exit returns the command and its standard
+/// error, and the callers pass it on: a failed observation refuses rather
+/// than certifying "no residue" or "published".
+///
 /// # Errors
 ///
-/// A Git error.
+/// A Git error: `git` could not be run, or `fsck` exited non-zero.
 pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError> {
-    let output = read_only_git(
-        worktree,
-        &[
-            "fsck",
-            "--unreachable",
-            "--no-progress",
-            "--no-dangling",
-            "--connectivity-only",
-        ],
-    )?;
+    let args = [
+        "fsck",
+        "--unreachable",
+        "--no-progress",
+        "--no-dangling",
+        "--connectivity-only",
+    ];
+    let output = read_only_git(worktree, &args)?;
+    if !output.status.success() {
+        return Err(UpstrokeError::Git {
+            message: format!(
+                "git {} failed in {} ({}): {}",
+                args.join(" "),
+                worktree.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
     let listing = String::from_utf8_lossy(&output.stdout);
     Ok(listing
         .lines()
@@ -6385,6 +7533,46 @@ fn note_removal_attempt(attempt: u32) {
 fn note_marker_read_attempt(attempt: u32) {
     fixture::note_marker_read_attempt(attempt);
 }
+
+/// How many times a registry access has decided to attempt again, per common
+/// git dir exactly as the caller passed it: the test handshake of
+/// [`tolerant_registry_access`]'s contract (`CONTENDED_ATTEMPTS`, the record's
+/// §6.4). A test that must finish a tear only after an access has failed once
+/// on it waits, with a watchdog, for [`contended_attempts`] to exceed its value
+/// before the access began. Never reset or decremented, and keyed per
+/// repository, so two such tests in one suite do not overwrite each other.
+#[cfg(test)]
+pub(crate) static CONTENDED_ATTEMPTS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The count of [`CONTENDED_ATTEMPTS`] for one common git dir; 0 before any.
+#[cfg(test)]
+pub(crate) fn contended_attempts(common_git_dir: &Path) -> usize {
+    CONTENDED_ATTEMPTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(common_git_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The `#[cfg(test)]` half of the contended-attempt seam: one more `Attempt`
+/// answer for `common_git_dir`, counted before the deadline check and the
+/// sleep. See the `#[cfg(not(test))]` twin beside `REGISTRY_ACCESS_DEADLINE`.
+#[cfg(test)]
+fn note_contended(common_git_dir: &Path) {
+    let mut table = CONTENDED_ATTEMPTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let count = table.entry(common_git_dir.to_path_buf()).or_default();
+    *count = count.saturating_add(1);
+}
+
+/// The registry access deadline under test: short, so that a test meeting a
+/// tear it planted does not wait out the production one. See the
+/// `#[cfg(not(test))]` twin.
+#[cfg(test)]
+const REGISTRY_ACCESS_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[cfg(test)]
 mod tests;

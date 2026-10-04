@@ -914,7 +914,11 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
             .manager
             .write_intent(&mut NoHooks, &slot)
             .expect("the intent must be durable");
-        fixture
+        // The worktree is the instance the add made, at the path it returns:
+        // this incarnation's, named with its tag. The slot's untagged spelling
+        // names no checkout the manager makes (the follow-up C record, §4.2),
+        // so nothing exists there and a file cannot be planted under it.
+        let target = fixture
             .manager
             .add_worktree(&mut NoHooks, &slot, &fixture.head)
             .expect("the worktree the killed child was working in");
@@ -923,7 +927,6 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
         // process has. Opened on another thread so the handle outlives this
         // statement -- exactly the shape of a process that has exited while its
         // last handle is still closing.
-        let target = fixture.manager.execution_root().join(slot.relative());
         let held = target.join("held-by-the-dying-child");
         fs::write(&held, b"bytes the child had open").expect("plant the file");
 
@@ -1408,17 +1411,22 @@ fn a_marker_read_records_the_one_attempt_the_unix_arm_makes() {
     );
 }
 
-/// The Unix arm makes exactly one attempt, and the seam reports that one.
+/// The Unix arm makes exactly one attempt per removal, and the seam reports
+/// each.
 ///
 /// The seam exists for the Windows control above, which is the only place a
 /// retry can happen — so on every other leg it would be code nothing exercises,
 /// and a mis-wiring of it would show up only on the platform whose suite is
 /// hardest to run. This pins it where CI runs it every time.
 ///
-/// One attempt, not "at least one": `remove_tree_once_handles_close` is called a
-/// second time for the Git admin directory when a killed `worktree add` left an
-/// empty `commondir`, and this fixture is an ordinary worktree, so a count above
-/// one here would mean the seam is counting something other than what it says.
+/// Two removals, one attempt each, not "at least one": since #329 the forced
+/// removal deletes the registration it bound directly instead of pruning
+/// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §2.5), so
+/// `remove_tree_once_handles_close` is called once for the checkout and once for
+/// the Git admin directory, and each call's one attempt is numbered 1. The seam
+/// reports the most attempts one removal made, so a count above one, or an
+/// observer run more than twice, would mean it is counting something other
+/// than what it says.
 ///
 /// **What this deliberately does not claim.** An earlier version said it proved
 /// the observer runs "once per attempt rather than once per call". It cannot: a
@@ -1460,17 +1468,18 @@ fn a_removal_records_the_one_attempt_the_unix_arm_makes() {
     assert_eq!(
         observing.count(),
         1,
-        "the removal made one attempt and the seam must say so"
+        "each removal, the checkout's and its registration's, made one attempt, and the seam \
+         must say so"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        1,
-        "the observer ran once, for that one attempt"
+        2,
+        "the observer ran once for each of those two attempts"
     );
     assert_eq!(
         ordinals.load(Ordering::SeqCst),
         1,
-        "the attempt is numbered from one, which is what the retry assertions read"
+        "each attempt is numbered from one, which is what the retry assertions read"
     );
 }
 
@@ -6642,7 +6651,12 @@ fn tree_bytes_detects_a_directory_replaced_by_a_link_to_equal_contents() {
 /// `remove_worktree` **refuses** it, with a diagnostic naming this admin
 /// directory and nothing else, and the residue blocks every removal through
 /// this funnel in the repository, not only this slot's. That is pinned as what
-/// the public `WorkspaceManager` library API does today. The shipped CLI's
+/// the public `WorkspaceManager` library API does today. Since #329 the
+/// removal's scan is a tolerant registry access, so on disk alone this state
+/// is a write in flight and is attempted past until the access's deadline;
+/// the refusal then arrives as `UpstrokeError::RegistryRefused`, resumable and
+/// never Git state, carrying that diagnostic as its last failure
+/// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §3.6). The shipped CLI's
 /// `upstroke resume` uses the separate `Workspace::reclaim_gate_workspaces`
 /// path, which never decodes a registration's `gitdir`; this test does not
 /// reproduce a refusal in that path. `DESIGN.md` §15's reclaim sentence is
@@ -6736,9 +6750,12 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
     );
 
     // The refusal, for this slot: the diagnostic names this admin directory
-    // and nothing else, and none of the four trees changed.
+    // and nothing else, and none of the four trees changed. It is the scan's
+    // last failure, after the access's deadline.
     let refused = |error: &UpstrokeError| match error {
-        UpstrokeError::Git { message } => message == &expected,
+        UpstrokeError::RegistryRefused { message } => {
+            message.ends_with(&format!("the last failed with: git error: {expected}"))
+        }
         _ => false,
     };
     let before = snapshot();
@@ -6782,7 +6799,7 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
             .worktree_records()
             .expect("records")
             .iter()
-            .any(|record| record.path().ends_with("kbeta-g1")),
+            .any(|record| record.path() == other_path),
         "the unrelated slot is still registered"
     );
 }
@@ -14835,4 +14852,4287 @@ fn the_one_update_ref_spawn_gives_its_child_the_cleanup_lease() {
         1,
         "and nothing else in the module does"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #329: the tolerant registry access
+// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §5 to §8 and its
+// implementation section). The T-numbers are the record's.
+// ---------------------------------------------------------------------------
+
+/// A failed attempt of a contract witness, numbered, so that a refusal's text
+/// can be checked against the attempt it carries.
+fn attempt_failed(number: u32) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!("attempt {number} failed"),
+    }
+}
+
+/// A key no other test's access shares: R-X and `CONTENDED_ATTEMPTS` are keyed
+/// by the common git dir as the caller passes it. The guard keeps it unique.
+fn contract_key(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, PathBuf) {
+    let tree = scratch(tag);
+    let key = tree.path().join("common");
+    (tree, key)
+}
+
+/// The message of a registry refusal, or a panic naming what came instead.
+fn registry_refusal<T: std::fmt::Debug>(result: Result<T, UpstrokeError>, what: &str) -> String {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => message,
+        other => panic!("{what}: expected a registry refusal, got {other:?}"),
+    }
+}
+
+/// T4 (record §5.5, §6.4): a veto that answers `Return` after the first
+/// failure returns that failure exactly as the attempt returned it, after one
+/// attempt, the veto asked once and nothing counted as contended.
+#[test]
+fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
+    let (_tree, key) = contract_key("registry-access-veto");
+    let mut asked = 0_u32;
+    let mut made = 0_u32;
+    let result: Result<(), _> = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || {
+            asked += 1;
+            Again::Return
+        },
+        &mut || {
+            made += 1;
+            Err(attempt_failed(made))
+        },
+    );
+    match result {
+        Err(UpstrokeError::Git { message }) => assert_eq!(message, "attempt 1 failed"),
+        other => panic!("a vetoed failure is returned as the attempt returned it: {other:?}"),
+    }
+    assert_eq!((made, asked), (1, 1), "one attempt, the veto asked once");
+    assert_eq!(contended_attempts(&key), 0, "`Return` is not an `Attempt`");
+}
+
+/// T4: an access whose every attempt fails refuses at its deadline as a
+/// registry refusal, never as Git state, naming the store, the deadline, the
+/// attempt count and the last failure; every failure answered `Attempt` and was
+/// counted, the last one included. The final attempt is the one that follows
+/// the sleep the deadline cut short (§6.4, step 7): with attempts that take no
+/// time the backoff fits sixteen in 500 ms.
+#[test]
+fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_and_the_last_failure()
+ {
+    let (_tree, key) = contract_key("registry-access-deadline");
+    let mut made = 0_u32;
+    let started = std::time::Instant::now();
+    let result: Result<(), _> = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || Again::Attempt,
+        &mut || {
+            made += 1;
+            Err(attempt_failed(made))
+        },
+    );
+    let took = started.elapsed();
+    let message = registry_refusal(result, "an access that always fails");
+    assert!(
+        took >= REGISTRY_ACCESS_DEADLINE,
+        "it refused only at its deadline, {REGISTRY_ACCESS_DEADLINE:?}: it took {took:?}"
+    );
+    assert!(
+        took < REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_secs(5),
+        "and returned by the deadline plus its last attempt and veto, which take no time here: \
+         {took:?}"
+    );
+    assert!(
+        (2..=16).contains(&made),
+        "the backoff of 1 ms doubling to 50 ms makes at most sixteen attempts in 500 ms, the \
+         final one included: {made}"
+    );
+    assert!(
+        message.contains(&key.join("worktrees").display().to_string())
+            && message.contains(&format!("{REGISTRY_ACCESS_DEADLINE:?}"))
+            && message.contains(&format!("{made} attempt(s)"))
+            && message.ends_with(&format!("git error: attempt {made} failed")),
+        "the refusal names the store, the deadline, the count and the last failure: {message}"
+    );
+    assert_eq!(
+        contended_attempts(&key),
+        usize::try_from(made).expect("a count fits"),
+        "every failure answered `Attempt`, and each was counted"
+    );
+}
+
+/// T4: two failures and then a success return the success, after three
+/// attempts, with the two failures counted.
+#[test]
+fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
+    let (_tree, key) = contract_key("registry-access-success");
+    let mut made = 0_u32;
+    let result = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || Again::Attempt,
+        &mut || {
+            made += 1;
+            if made < 3 {
+                Err(attempt_failed(made))
+            } else {
+                Ok(30_u32)
+            }
+        },
+    );
+    assert_eq!(
+        result.expect("the third attempt succeeds"),
+        30,
+        "its own value"
+    );
+    assert_eq!(made, 3);
+    assert_eq!(contended_attempts(&key), 2);
+}
+
+/// T4 (FUB-D6-DABSENCE): a veto that answers `Undecidable` refuses at once,
+/// after one attempt, as a registry refusal naming why and carrying the
+/// failure; never Git state, never attempted past, and not counted.
+#[test]
+fn an_undecidable_veto_refuses_at_once_naming_why() {
+    let (_tree, key) = contract_key("registry-access-undecidable");
+    let mut made = 0_u32;
+    let started = std::time::Instant::now();
+    let result: Result<(), _> = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || Again::Undecidable {
+            why: "the destination now holds a file".to_owned(),
+        },
+        &mut || {
+            made += 1;
+            Err(attempt_failed(made))
+        },
+    );
+    let took = started.elapsed();
+    let message = registry_refusal(result, "an undecidable veto");
+    assert_eq!(made, 1, "no attempt after an undecidable veto");
+    assert!(
+        took < REGISTRY_ACCESS_DEADLINE,
+        "it refused at once, not at the deadline: {took:?}"
+    );
+    assert!(
+        message.contains("the destination now holds a file")
+            && message.contains("1 attempt(s)")
+            && message.ends_with("git error: attempt 1 failed"),
+        "{message}"
+    );
+    assert_eq!(contended_attempts(&key), 0);
+}
+
+/// T4 (the final attempt, FUD-D1-PROGRESS): a failure repaired by the
+/// deadline is passed by the attempt the deadline's cut-short sleep leads to.
+/// Every attempt fails until the access's deadline, which is no earlier than
+/// `REGISTRY_ACCESS_DEADLINE` after this test's clock was read; only an attempt
+/// made at the deadline can succeed, and the contract makes exactly one.
+#[test]
+fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
+    let (_tree, key) = contract_key("registry-access-final");
+    let mut made = 0_u32;
+    let repaired = std::time::Instant::now() + REGISTRY_ACCESS_DEADLINE;
+    let result = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || Again::Attempt,
+        &mut || {
+            made += 1;
+            if std::time::Instant::now() >= repaired {
+                Ok(made)
+            } else {
+                Err(attempt_failed(made))
+            }
+        },
+    );
+    let last = result.expect("the final attempt, at the deadline, meets the repaired store");
+    assert!(
+        last >= 2,
+        "the store was repaired only at the deadline, so earlier attempts failed: {last}"
+    );
+    assert_eq!(
+        contended_attempts(&key),
+        usize::try_from(last - 1).expect("a count fits"),
+        "every attempt before the final one failed and answered `Attempt`"
+    );
+}
+
+/// T4: `contended_attempts` counts exactly the `Attempt` answers: two of them,
+/// then a `Return`, count two; an `Undecidable` and a `Return` count nothing
+/// (the two tests above).
+#[test]
+fn contended_attempts_counts_exactly_the_attempt_answers() {
+    let (_tree, key) = contract_key("registry-access-counted");
+    let mut answers = [Again::Attempt, Again::Attempt, Again::Return].into_iter();
+    let mut made = 0_u32;
+    let result: Result<(), _> = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || answers.next().unwrap_or(Again::Return),
+        &mut || {
+            made += 1;
+            Err(attempt_failed(made))
+        },
+    );
+    match result {
+        Err(UpstrokeError::Git { message }) => assert_eq!(message, "attempt 3 failed"),
+        other => panic!("the third failure is returned as it was: {other:?}"),
+    }
+    assert_eq!((made, contended_attempts(&key)), (3, 2));
+}
+
+/// T4 (FUB-D6-BOUND): a veto that blocks past the deadline is followed by no
+/// attempt; the access returns after it, refusing. The bound is the deadline
+/// plus the last attempt's runtime plus the veto's, and the helper bounds
+/// neither.
+#[test]
+fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
+    let (_tree, key) = contract_key("registry-access-slow-veto");
+    let blocked = REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_millis(100);
+    let mut made = 0_u32;
+    let started = std::time::Instant::now();
+    let result: Result<(), _> = tolerant_registry_access(
+        &key,
+        RegistryHold::Unheld,
+        &mut || {
+            std::thread::sleep(blocked);
+            Again::Attempt
+        },
+        &mut || {
+            made += 1;
+            Err(attempt_failed(made))
+        },
+    );
+    let took = started.elapsed();
+    let message = registry_refusal(result, "an access whose veto blocked past its deadline");
+    assert_eq!(
+        made, 1,
+        "no attempt after a veto that ended past the deadline"
+    );
+    assert!(took >= blocked, "it returned after the veto: {took:?}");
+    assert!(message.contains("1 attempt(s)"), "{message}");
+}
+
+/// T4 and T9: with R-X held alone by another thread, as the torn-registration
+/// plan holds it, a shared access (an add) refuses at its deadline with no
+/// attempt run, and an unheld one (a list, a scan) runs at once. A shared
+/// access beside another shared holder runs at once too, and an exclusive one
+/// waits for the shared holder and refuses at its deadline.
+#[test]
+fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_one() {
+    let (_tree, key) = contract_key("registry-access-rx");
+    let bound = std::time::Duration::from_secs(60);
+    for (holder_alone, hold) in [
+        (true, RegistryHold::Shared),
+        (true, RegistryHold::Unheld),
+        (false, RegistryHold::Shared),
+        (false, RegistryHold::Exclusive),
+    ] {
+        let lock = registry_lock_of(&key);
+        let (held, holding) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            if holder_alone {
+                let _held = lock
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = held.send(());
+                let _ = released.recv_timeout(bound);
+            } else {
+                let _held = lock
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = held.send(());
+                let _ = released.recv_timeout(bound);
+            }
+        });
+        holding
+            .recv_timeout(bound)
+            .expect("the other thread holds R-X");
+        let mut made = 0_u32;
+        let started = std::time::Instant::now();
+        let result = tolerant_registry_access(&key, hold, &mut || Again::Attempt, &mut || {
+            made += 1;
+            Ok(made)
+        });
+        let took = started.elapsed();
+        let _ = release.send(());
+        holder.join().expect("the holder thread");
+        let waits = match hold {
+            RegistryHold::Unheld => false,
+            RegistryHold::Shared => holder_alone,
+            RegistryHold::Exclusive => true,
+        };
+        if waits {
+            let message = registry_refusal(
+                result,
+                &format!("a {hold:?} access beside R-X held (alone: {holder_alone})"),
+            );
+            assert_eq!(made, 0, "{hold:?}: no attempt ran");
+            assert!(
+                message.contains("no attempt ran")
+                    && message.contains(&format!("{REGISTRY_ACCESS_DEADLINE:?}")),
+                "{message}"
+            );
+            assert!(took >= REGISTRY_ACCESS_DEADLINE, "{hold:?}: {took:?}");
+        } else {
+            assert_eq!(
+                result.expect("the access runs beside the holder"),
+                1,
+                "{hold:?} (holder alone: {holder_alone})"
+            );
+            assert!(
+                took < REGISTRY_ACCESS_DEADLINE,
+                "{hold:?} (holder alone: {holder_alone}) did not wait: {took:?}"
+            );
+        }
+    }
+}
+
+/// `path` as Git writes it into a registration's `gitdir` and a checkout's
+/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
+/// with `.git` still on (the path's own bytes elsewhere).
+fn as_git_writes_it(path: &Path) -> String {
+    String::from_utf8(
+        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
+    )
+    .expect("a fixture's path is UTF-8")
+}
+
+/// A foreign registration half written, as the design-recast lens of design
+/// review round 3 built it (FUB-D3-TORNOK): `gitdir` written, `locked` holding
+/// `initializing`, `HEAD` opened and empty, no `commondir` (Git 2.43's add
+/// writes `locked`, `gitdir`, the checkout's `.git`, `HEAD`, then
+/// `commondir`). Git exits 0 listing it and prints a record whose `HEAD` is
+/// the zero id with neither `branch` nor `detached`, which the parser refuses.
+fn plant_half_written_registration(fixture: &Fixture, name: &str) -> PathBuf {
+    let admin = fixture
+        .manager
+        .common_git_dir()
+        .join("worktrees")
+        .join(name);
+    let checkout = fixture.root.join(format!("{name}-checkout"));
+    fs::create_dir_all(&admin).expect("the foreign registration's directory");
+    fs::create_dir_all(&checkout).expect("its checkout");
+    fs::write(admin.join("locked"), "initializing\n").expect("its locked");
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&checkout.join(".git"))),
+    )
+    .expect("its gitdir");
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&admin)),
+    )
+    .expect("its checkout's .git");
+    fs::write(admin.join("HEAD"), b"").expect("its HEAD, opened and not written");
+    admin
+}
+
+/// What a writer that finishes the registration [`plant_half_written_registration`]
+/// made writes last: `HEAD` and `commondir`, and the `locked` it unlinks.
+fn finish_registration(admin: &Path, head: &str) {
+    fs::write(admin.join("HEAD"), format!("{head}\n")).expect("the writer writes HEAD");
+    fs::write(admin.join("commondir"), "../..\n").expect("then commondir");
+    fs::remove_file(admin.join("locked")).expect("then it unlocks");
+}
+
+/// Wait, with a watchdog, until an access over `common_git_dir` has answered
+/// `Attempt` more times than `before`: the handshake a test uses to change the
+/// store only after an access has failed on it at least once.
+fn await_contended(common_git_dir: &Path, before: usize) -> usize {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = contended_attempts(common_git_dir);
+        if now > before {
+            return now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no access over {} answered `Attempt` within 60 s",
+            common_git_dir.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Runs `act` once, at the `Before` phase of `site`: after the add's gate
+/// (its `revalidate`, whose list would meet a tear first) and before the
+/// destination step and Git's add — where another process's registry write in
+/// flight meets the add itself.
+struct AtBefore<F: FnMut()> {
+    site: EffectSiteId,
+    act: Option<F>,
+}
+
+impl<F: FnMut()> AtBefore<F> {
+    fn new(site: EffectSiteId, act: F) -> Self {
+        Self {
+            site,
+            act: Some(act),
+        }
+    }
+}
+
+impl<F: FnMut()> EffectHooks for AtBefore<F> {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == self.site && phase == HookPhase::Before {
+            if let Some(mut act) = self.act.take() {
+                act();
+            }
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+/// T11 (FUB-D3-TORNOK), static: a list over a registration half written that
+/// nobody finishes is attempted again until its deadline and then refuses,
+/// carrying the parser's refusal; never Git state.
+#[test]
+fn a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_git_state() {
+    let fixture = Fixture::created("registry-tornok-static");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let admin = plant_half_written_registration(&fixture, "foreign-torn");
+    let started = std::time::Instant::now();
+    let result = fixture.manager.worktree_records();
+    let took = started.elapsed();
+    let message = registry_refusal(result, "a list over a half-written registration");
+    assert!(took >= REGISTRY_ACCESS_DEADLINE, "{took:?}");
+    assert!(
+        message.contains("worktree list record"),
+        "it carries the parser's refusal of the record Git printed: {message}"
+    );
+    fs::remove_dir_all(&admin).expect("the operator removes the registration");
+    fixture
+        .manager
+        .worktree_records()
+        .expect("the list passes once the registration is gone");
+}
+
+/// T11, transient (and T18's second shape, FUB-D5-OPTFILE's effect): the same
+/// registration, finished by its writer only after the list has failed on it
+/// once (the `CONTENDED_ATTEMPTS` handshake), is passed by a later attempt.
+#[test]
+fn a_list_over_a_registration_half_written_passes_once_its_writer_finishes() {
+    let fixture = Fixture::created("registry-tornok-transient");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let admin = plant_half_written_registration(&fixture, "foreign-transient");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let writer = {
+        let (admin, head, common) = (admin.clone(), fixture.head.clone(), common.clone());
+        std::thread::spawn(move || {
+            let seen = await_contended(&common, before);
+            finish_registration(&admin, &head);
+            seen
+        })
+    };
+    let records = fixture
+        .manager
+        .worktree_records()
+        .expect("the list passes once the writer finishes");
+    let seen = writer.join().expect("the writer");
+    assert!(seen > before, "the list failed on the tear at least once");
+    assert!(
+        records
+            .iter()
+            .any(|record| record.path().ends_with("foreign-transient-checkout")),
+        "and lists the finished registration: {records:?}"
+    );
+}
+
+/// T11's control (§5.3: now a refusal): a whole registration nobody is
+/// writing, whose `HEAD` names nothing. Git prints the record TORNOK's prefix
+/// prints and the parser refuses it; nothing distinguishes it from a write in
+/// flight, so it refuses at the deadline, resumably, where master returned it
+/// as Git state at once.
+#[test]
+fn a_list_over_a_whole_registration_git_cannot_list_refuses_at_its_deadline() {
+    let fixture = Fixture::created("registry-quiet-parse");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let admin = plant_half_written_registration(&fixture, "foreign-garbage");
+    fs::remove_file(admin.join("locked")).expect("no lock");
+    fs::write(admin.join("HEAD"), "garbage\n").expect("a HEAD that names nothing");
+    fs::write(admin.join("commondir"), "../..\n").expect("its commondir");
+    let started = std::time::Instant::now();
+    let message = registry_refusal(
+        fixture.manager.worktree_records(),
+        "a list over a registration Git cannot list",
+    );
+    assert!(started.elapsed() >= REGISTRY_ACCESS_DEADLINE);
+    assert!(message.contains("the last failed with"), "{message}");
+}
+
+/// The store's own registrations, for a before-and-after comparison: each
+/// entry's name and the bytes of every file in it.
+fn store_listing(fixture: &Fixture) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let mut listing = std::collections::BTreeMap::new();
+    let Ok(entries) = fs::read_dir(&store) else {
+        return listing;
+    };
+    for entry in entries {
+        let entry = entry.expect("a store entry");
+        for file in fs::read_dir(entry.path())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+        {
+            let name = format!(
+                "{}/{}",
+                entry.file_name().to_string_lossy(),
+                file.file_name().to_string_lossy()
+            );
+            listing.insert(name, fs::read(file.path()).unwrap_or_default());
+        }
+    }
+    listing
+}
+
+/// A store a mode bit makes unwritable for one test, restored when the guard
+/// drops. Panics when the mode bit does not bind (root, or `CAP_DAC_OVERRIDE`).
+#[cfg(unix)]
+fn unwritable(path: &Path) -> RestoreMode {
+    use std::os::unix::fs::PermissionsExt as _;
+    let restore = RestoreMode {
+        path: path.to_path_buf(),
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(0o555)).expect("make it unwritable");
+    let probe = path.join("b329-probe-write");
+    if fs::create_dir(&probe).is_ok() {
+        fs::remove_dir(&probe).expect("remove the probe");
+        panic!(
+            "prerequisite not met: the mode bit did not bind (running as root or with \
+             CAP_DAC_OVERRIDE); this test needs an unprivileged user"
+        );
+    }
+    restore
+}
+
+/// T12 (FUB-D3-PERM): an add into a store nothing can write fails in Git's
+/// registry phase, before Git takes its destination over, on every attempt; it
+/// refuses at its deadline carrying Git's "Permission denied", and leaves
+/// nothing at the slot. Once the store is writable the same add succeeds.
+#[cfg(unix)]
+#[test]
+fn an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_nothing_at_the_slot() {
+    let fixture = Fixture::created("registry-perm");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let restore = unwritable(&store);
+    let started = std::time::Instant::now();
+    let result = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    let took = started.elapsed();
+    drop(restore);
+    let message = registry_refusal(result, "an add into a store nothing can write");
+    assert!(took >= REGISTRY_ACCESS_DEADLINE, "{took:?}");
+    assert!(message.contains("Permission denied"), "{message}");
+    assert!(
+        contended_attempts(&common) > before,
+        "the add was attempted again"
+    );
+    assert!(
+        !fixture.manager.slot_path(&beta).exists(),
+        "a refused add leaves no destination it made"
+    );
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head)
+        .expect("the same add succeeds once the store is writable");
+}
+
+/// T6 at the Rust level: an add whose own registry phase fails once, naming
+/// the add's own entry, before Git takes its destination over, and then can
+/// pass. Git's prune of an add's entry before its `locked` exists is that
+/// failure ("could not open '.git/worktrees/<name>/locked' for writing"),
+/// executed at the Git level by design rounds 6 and 7 (`prune-own`); it needs a
+/// pause inside Git, so the suite reproduces the class with the store refusing
+/// the add's entry once ("could not create directory of
+/// '.git/worktrees/<name>'"). The destination is untouched, so the add is
+/// attempted again, and the store is made writable again only after the add
+/// has failed once (the handshake).
+#[cfg(unix)]
+#[test]
+fn an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt() {
+    let fixture = Fixture::created("registry-own-entry-once");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let restore = unwritable(&store);
+    let restorer = {
+        let common = common.clone();
+        std::thread::spawn(move || {
+            let seen = await_contended(&common, before);
+            drop(restore);
+            seen
+        })
+    };
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head)
+        .expect("the add passes once its own entry can be made");
+    let seen = restorer.join().expect("the restorer");
+    assert!(seen > before, "the add failed once before it passed");
+    assert!(path.join(".git").is_file(), "and checked the slot out");
+}
+
+/// T14 (FUB-D4-OWNENTRY) through the production add: a registration of
+/// another process carrying the add's own administrative name, half written
+/// (`gitdir`, and a `commondir` opened and empty), on which the add's sibling
+/// scan dies. Removed once the add has failed on it twice, the add passes on a
+/// later attempt; kept, the add refuses at its deadline and leaves nothing at
+/// the slot. Nothing tells this from the add's own failure but another
+/// attempt, which the untouched destination licenses.
+#[test]
+fn an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it() {
+    for (windows, label) in [(Some(2_usize), "two"), (None, "every")] {
+        let fixture = Fixture::created(&format!("registry-own-entry-{label}"));
+        let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let beta = fixture.task("beta", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &beta)
+            .expect("the intent");
+        let own = fixture
+            .manager
+            .slot_path(&beta)
+            .file_name()
+            .expect("a slot has a name")
+            .to_os_string();
+        let admin = fixture
+            .manager
+            .common_git_dir()
+            .join("worktrees")
+            .join(&own);
+        let gitdir = fixture.root.join("foreign-same-name").join(".git");
+        let mut hooks = AtBefore::new(beta.add_site(), || {
+            fs::create_dir_all(&admin).expect("the foreign registration");
+            fs::write(
+                admin.join("gitdir"),
+                format!("{}\n", as_git_writes_it(&gitdir)),
+            )
+            .expect("its gitdir");
+            fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not written");
+        });
+        let common = fixture.manager.common_git_dir().to_path_buf();
+        let before = contended_attempts(&common);
+        let remover = windows.map(|windows| {
+            let (admin, common) = (admin.clone(), common.clone());
+            std::thread::spawn(move || {
+                let mut seen = before;
+                while seen < before + windows {
+                    seen = await_contended(&common, seen);
+                }
+                fs::remove_dir_all(&admin).expect("the foreign process removes its registration");
+                seen
+            })
+        });
+        let started = std::time::Instant::now();
+        let result = fixture
+            .manager
+            .add_worktree(&mut hooks, &beta, &fixture.head);
+        let took = started.elapsed();
+        match remover {
+            Some(remover) => {
+                let seen = remover.join().expect("the remover");
+                result.expect("the add passes once the torn entry is gone");
+                assert!(seen >= before + 2, "{label}: it failed on the entry twice");
+            }
+            None => {
+                let message = registry_refusal(result, "an add whose own name stays torn");
+                assert!(took >= REGISTRY_ACCESS_DEADLINE, "{took:?}");
+                assert!(message.contains("commondir"), "{message}");
+                assert!(
+                    !fixture.manager.slot_path(&beta).exists(),
+                    "a refused add leaves no destination it made"
+                );
+                assert!(
+                    admin.exists(),
+                    "and the other process's entry is not its to touch"
+                );
+            }
+        }
+    }
+}
+
+/// `git` with `input` on its stdin, for the plumbing that builds a tree no
+/// porcelain command will.
+fn git_with_input(repo: &Path, args: &[&str], input: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run git");
+    child
+        .stdin
+        .take()
+        .expect("git's stdin")
+        .write_all(input)
+        .expect("write git's stdin");
+    let output = child.wait_with_output().expect("git's output");
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// FUB-D5-GENUINE's tree: a tree holding `.git/worktrees/fake-entry/file.txt`,
+/// which no checkout may make. Git passes its registry phase, takes the
+/// destination over, refuses the path in the checkout, and removes its junk.
+fn tree_with_a_git_path(fixture: &Fixture) -> String {
+    let blob = git_with_input(&fixture.base, &["hash-object", "-w", "--stdin"], b"x\n");
+    let file = git_with_input(
+        &fixture.base,
+        &["mktree"],
+        format!("100644 blob {blob}\tfile.txt\n").as_bytes(),
+    );
+    let entry = git_with_input(
+        &fixture.base,
+        &["mktree"],
+        format!("040000 tree {file}\tfake-entry\n").as_bytes(),
+    );
+    let store = git_with_input(
+        &fixture.base,
+        &["mktree"],
+        format!("040000 tree {entry}\tworktrees\n").as_bytes(),
+    );
+    git_with_input(
+        &fixture.base,
+        &["mktree"],
+        format!("040000 tree {store}\t.git\n100644 blob {blob}\tREADME.md\n").as_bytes(),
+    )
+}
+
+/// A tree holding one file whose name is 300 bytes, past every supported
+/// filesystem's limit on one name: the checkout cannot make it.
+fn tree_with_a_name_too_long(fixture: &Fixture) -> String {
+    let blob = git_with_input(&fixture.base, &["hash-object", "-w", "--stdin"], b"x\n");
+    let long = "n".repeat(300);
+    git_with_input(
+        &fixture.base,
+        &["mktree"],
+        format!("100644 blob {blob}\t{long}\n").as_bytes(),
+    )
+}
+
+/// A commit of `tree` on `fixture.head`, for an add of it.
+fn commit_of(fixture: &Fixture, tree: &str) -> String {
+    git(
+        &fixture.base,
+        &["commit-tree", tree, "-p", &fixture.head, "-m", "b329"],
+    )
+}
+
+/// T15 (record §7.8 and §8.10): an add whose checkout cannot be made fails
+/// after Git took its destination over, and Git's junk removal took the
+/// destination. Nothing outside Git tells that from another process's prune
+/// deleting the add's entry after the takeover (§6.2), so it refuses at once,
+/// after one attempt, as a registry refusal carrying Git's message, never as
+/// Git state and never attempted again, with nothing left at the slot. That is
+/// R14's narrowing (`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`).
+#[test]
+fn an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {
+    for (label, kind) in [("git-path", 0_u8), ("name-too-long", 1)] {
+        if kind == 1 && !cfg!(unix) {
+            continue;
+        }
+        let fixture = Fixture::created(&format!("registry-genuine-{label}"));
+        let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let tree = if kind == 0 {
+            tree_with_a_git_path(&fixture)
+        } else {
+            tree_with_a_name_too_long(&fixture)
+        };
+        let commit = commit_of(&fixture, &tree);
+        let beta = fixture.task("beta", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &beta)
+            .expect("the intent");
+        let common = fixture.manager.common_git_dir().to_path_buf();
+        let before = contended_attempts(&common);
+        let started = std::time::Instant::now();
+        let result = fixture.manager.add_worktree(&mut NoHooks, &beta, &commit);
+        let took = started.elapsed();
+        let message = registry_refusal(result, label);
+        assert_eq!(
+            contended_attempts(&common),
+            before,
+            "{label}: one attempt, never attempted again"
+        );
+        assert!(
+            took < REGISTRY_ACCESS_DEADLINE,
+            "{label}: refused at once: {took:?}"
+        );
+        assert!(
+            message.contains("1 attempt(s)") && message.contains("is gone"),
+            "{label}: {message}"
+        );
+        assert!(
+            !fixture.manager.slot_path(&beta).exists(),
+            "{label}: Git's junk removal took the destination"
+        );
+    }
+}
+
+/// T15's FUB-D6-INODE shapes (Unix): the destination's parent cannot be
+/// written, so neither Git's junk removal nor this access can remove the
+/// destination, and a failure after the takeover leaves it there, empty.
+/// `inode-parent`: an existing empty destination, FUB-D5-GENUINE's tree.
+/// `inode-both`: the destination itself cannot be written either, and a valid
+/// commit. Each refuses after one attempt and the slot holds the empty
+/// directory; with the parent writable again, the slot's forced removal takes
+/// it, binding nothing.
+#[cfg(unix)]
+#[test]
+fn an_add_whose_destination_cannot_be_removed_refuses_after_one_attempt_and_keeps_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for (label, both) in [("inode-parent", false), ("inode-both", true)] {
+        let fixture = Fixture::created(&format!("registry-{label}"));
+        let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let commit = if both {
+            fixture.head.clone()
+        } else {
+            commit_of(&fixture, &tree_with_a_git_path(&fixture))
+        };
+        let beta = fixture.task("beta", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &beta)
+            .expect("the intent");
+        let slot = fixture.manager.slot_path(&beta);
+        fs::create_dir_all(&slot).expect("an existing empty destination");
+        let restore_slot = RestoreMode { path: slot.clone() };
+        if both {
+            fs::set_permissions(&slot, fs::Permissions::from_mode(0o555))
+                .expect("the destination unwritable");
+        }
+        let parent = slot.parent().expect("the slot's parent").to_path_buf();
+        let restore = unwritable(&parent);
+        let common = fixture.manager.common_git_dir().to_path_buf();
+        let before = contended_attempts(&common);
+        let result = fixture.manager.add_worktree(&mut NoHooks, &beta, &commit);
+        let left = AtDestination::read(&slot);
+        drop(restore);
+        drop(restore_slot);
+        let message = registry_refusal(result, label);
+        assert_eq!(
+            contended_attempts(&common),
+            before,
+            "{label}: one attempt, never attempted again"
+        );
+        assert!(
+            message.contains("cannot remove"),
+            "{label}: the removal proof failed: {message}"
+        );
+        assert!(
+            matches!(left, AtDestination::EmptyDirectory),
+            "{label}: the slot holds the empty directory"
+        );
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &beta)
+            .expect("the forced removal takes an empty directory that binds nothing");
+        assert!(!slot.exists(), "{label}");
+    }
+}
+
+/// T20 (`torn-parent`, R′): a torn foreign registration fails the add's
+/// sibling scan before Git takes the destination over, and the destination's
+/// parent cannot be written, so the access cannot prove the destination
+/// untouched by removing it. It refuses after one attempt, never Git; under
+/// round 6's `Return` (option (i)) the scan's registry error would have come
+/// back as Git state.
+#[cfg(unix)]
+#[test]
+fn an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is_never_git() {
+    let fixture = Fixture::created("registry-torn-parent");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
+    let foreign_path = fixture.manager.slot_path(&foreign);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    fs::create_dir_all(&slot).expect("an existing empty destination");
+    let restore = unwritable(slot.parent().expect("the slot's parent"));
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let mut hooks = AtBefore::new(beta.add_site(), || {
+        tear_registration(&fixture.manager, &foreign_path);
+    });
+    let result = fixture
+        .manager
+        .add_worktree(&mut hooks, &beta, &fixture.head);
+    drop(restore);
+    let message = registry_refusal(result, "an add beside a torn entry");
+    assert_eq!(contended_attempts(&common), before, "after one attempt");
+    assert!(message.contains("commondir"), "{message}");
+}
+
+/// T16 (§8.2, FUB-D8-POPULATED): a destination that is not an empty directory
+/// when the access begins is Git state at once, and no Git command runs. The
+/// reviewers' construction: beside it, a sibling torn so that Git's sibling
+/// scan, which runs before Git checks the destination, dies on it. The answer
+/// names the destination, never the sibling's `commondir`; the store and what
+/// was at the destination are untouched.
+#[test]
+fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_run() {
+    for (label, file) in [("directory-holding-entries", false), ("file", true)] {
+        let fixture = Fixture::created(&format!("registry-populated-{label}"));
+        let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
+        let foreign_path = fixture.manager.slot_path(&foreign);
+        let beta = fixture.task("beta", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &beta)
+            .expect("the intent");
+        let slot = fixture.manager.slot_path(&beta);
+        if file {
+            fs::write(&slot, b"a file at the slot\n").expect("a file at the destination");
+        } else {
+            fs::create_dir_all(&slot).expect("the destination");
+            fs::write(slot.join("leftover"), b"x\n").expect("an entry in it");
+        }
+        let common = fixture.manager.common_git_dir().to_path_buf();
+        let before = contended_attempts(&common);
+        let store = std::cell::RefCell::new(None);
+        let mut hooks = AtBefore::new(beta.add_site(), || {
+            tear_registration(&fixture.manager, &foreign_path);
+            *store.borrow_mut() = Some(store_listing(&fixture));
+        });
+        let started = std::time::Instant::now();
+        let error = fixture
+            .manager
+            .add_worktree(&mut hooks, &beta, &fixture.head)
+            .expect_err("a populated destination is refused");
+        let took = started.elapsed();
+        let store = store
+            .into_inner()
+            .expect("the sibling was torn at the add's Before hook");
+        match &error {
+            UpstrokeError::Git { message } => {
+                assert!(
+                    message.contains(&slot.display().to_string())
+                        && message.contains("no Git command ran")
+                        && !message.contains("commondir"),
+                    "{label}: names the destination, not the sibling: {message}"
+                );
+            }
+            other => panic!("{label}: Git state, not {other:?}"),
+        }
+        assert!(
+            took < REGISTRY_ACCESS_DEADLINE,
+            "{label}: at once: {took:?}"
+        );
+        assert_eq!(contended_attempts(&common), before, "{label}: no attempt");
+        assert_eq!(
+            store_listing(&fixture),
+            store,
+            "{label}: the store is untouched"
+        );
+        if file {
+            assert_eq!(fs::read(&slot).expect("the file"), b"a file at the slot\n");
+        } else {
+            assert!(slot.join("leftover").exists(), "{label}: the entry is kept");
+        }
+    }
+}
+
+/// T16, the link case (§8.2): Git's own check follows a link to an empty
+/// directory and checks out through it, and the access refuses it with no Git
+/// run. Through the funnel a link at the slot is refused first by the
+/// acted-through walk (`SlotCheckoutEntry`), so the destination step is
+/// witnessed directly; the walk's refusal is witnessed beside it.
+#[cfg(unix)]
+#[test]
+fn a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git() {
+    let fixture = Fixture::created("registry-destination-link");
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    let target = fixture.root.join("link-target");
+    fs::create_dir_all(&target).expect("an empty directory");
+    fs::create_dir_all(slot.parent().expect("the slot's parent")).expect("tasks/");
+    std::os::unix::fs::symlink(&target, &slot).expect("a link at the slot");
+    match Destination::prepare(&slot) {
+        Err(UpstrokeError::Git { message }) => assert!(
+            message.contains("a link or reparse point") && message.contains("no Git command ran"),
+            "{message}"
+        ),
+        Err(other) => panic!("Git state, not {other:?}"),
+        Ok(_) => panic!("a link to an empty directory is not a destination this access made"),
+    }
+    let error = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head)
+        .expect_err("the funnel refuses a link at the slot");
+    assert!(
+        refusal_of(&error).contains("symlink or reparse point"),
+        "the acted-through walk refuses it first: {}",
+        refusal_of(&error)
+    );
+    assert!(
+        fs::read_dir(&target)
+            .expect("the link's target")
+            .next()
+            .is_none(),
+        "nothing was written through the link"
+    );
+}
+
+/// T16: a destination that cannot be made is Git state at once, naming the
+/// path and the OS error, with no Git command run: where Git's own add would
+/// have failed to make it, so a verification defers on it as before.
+#[cfg(unix)]
+#[test]
+fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
+    let fixture = Fixture::created("registry-destination-unmakeable");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    let restore = unwritable(slot.parent().expect("the slot's parent"));
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let result = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    drop(restore);
+    match result {
+        Err(UpstrokeError::Git { message }) => assert!(
+            message.contains(&slot.display().to_string())
+                && message.contains("could not be made")
+                && message.contains("no Git command ran"),
+            "{message}"
+        ),
+        other => panic!("Git state at once, not {other:?}"),
+    }
+    assert_eq!(contended_attempts(&common), before, "no attempt");
+}
+
+/// T16: after an untouched failure the destination is a new empty directory,
+/// removed and made again by the removal proof. The destination is made by
+/// hand first with a mode no `mkdir` here gives, a torn sibling fails the
+/// first attempt, and once the access has answered `Attempt` the destination
+/// is read: an empty directory with the ordinary mode, which only its removal
+/// and making again explain. Then the sibling is repaired and the add passes.
+#[cfg(unix)]
+#[test]
+fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::created("registry-destination-again");
+    let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
+    let foreign_path = fixture.manager.slot_path(&foreign);
+    let foreign_admin = super::fixture::registration_of(&fixture.manager, &foreign_path);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    fs::create_dir_all(&slot).expect("an existing empty destination");
+    fs::set_permissions(&slot, fs::Permissions::from_mode(0o711)).expect("a mark on it");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let observer = {
+        let (common, slot, foreign_admin) = (common.clone(), slot.clone(), foreign_admin.clone());
+        std::thread::spawn(move || {
+            await_contended(&common, before);
+            let mode = fs::symlink_metadata(&slot)
+                .map(|metadata| metadata.permissions().mode() & 0o777)
+                .ok();
+            let empty = matches!(AtDestination::read(&slot), AtDestination::EmptyDirectory);
+            fs::write(foreign_admin.join("commondir"), "../..\n").expect("repair the sibling");
+            fs::remove_file(foreign_admin.join("locked")).expect("and unlock it");
+            (mode, empty)
+        })
+    };
+    let mut hooks = AtBefore::new(beta.add_site(), || {
+        tear_registration(&fixture.manager, &foreign_path);
+    });
+    fixture
+        .manager
+        .add_worktree(&mut hooks, &beta, &fixture.head)
+        .expect("the add passes once the sibling is whole");
+    let (mode, empty) = observer.join().expect("the observer");
+    assert!(
+        empty,
+        "after the untouched failure the destination is an empty directory"
+    );
+    assert_ne!(
+        mode,
+        Some(0o711),
+        "and a new one: the removal proof removed the marked directory and made it again"
+    );
+}
+
+/// T17 (§5.3, round 6's form): an intent, an empty directory at its slot and
+/// no registration store at all — what a coordinator killed after making an
+/// add's destination leaves when the repository has no other linked checkout.
+/// The forced removal binds nothing for the empty directory and takes it,
+/// where master's scan answered the store's absence as an I/O error on every
+/// attempt. A populated slot with a `.git` file and no store still refuses
+/// (`a_missing_stored_worktree_directory_refuses_before_checkout_deletion`).
+#[test]
+fn a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout() {
+    let fixture = Fixture::created("registry-store-absent");
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    fs::create_dir_all(&slot).expect("the empty destination");
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let _ = fs::remove_dir(&store);
+    assert!(!store.exists(), "the repository has no registration store");
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &beta)
+        .expect("the forced removal takes the empty destination");
+    assert!(!slot.exists(), "and the slot is gone");
+
+    fs::create_dir_all(&slot).expect("a populated slot");
+    fs::write(
+        slot.join(".git"),
+        b"gitdir: /nowhere/.git/worktrees/kbeta-g1\n",
+    )
+    .expect("a checkout's .git file");
+    let message = registry_refusal(
+        fixture.manager.remove_worktree(&mut NoHooks, &beta),
+        "a populated slot with no store",
+    );
+    assert!(
+        message.contains("failed to read"),
+        "the scan's I/O refusal: {message}"
+    );
+    assert!(slot.join(".git").exists(), "nothing was removed");
+}
+
+/// T22 (§6.5, FUB-D6-STATICRESUME): `WorkspaceManager::derive` over a
+/// registration Git's list dies on — an add killed while it wrote `commondir`
+/// — refuses as a registry refusal after its deadline, and writes nothing; the
+/// operator's remedy (remove the registration directory and the checkout it
+/// names) lets it derive again. `PR5-RD-002-RESUME-DERIVES-THROUGH-A-TORN-ENUMERATION`
+/// is retained: this changes only the refusal's variant and its delay.
+#[test]
+fn derive_over_a_registration_the_list_dies_on_refuses_and_the_operators_remedy_clears_it() {
+    let fixture = Fixture::created("registry-static-derive");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&alpha);
+    let admin = tear_registration(&fixture.manager, &checkout);
+    let before = tree_bytes(&fixture.root);
+    let started = std::time::Instant::now();
+    let message = registry_refusal(
+        WorkspaceManager::derive(
+            &fixture.base,
+            &fixture.private,
+            super::fixture::RUN_ID,
+            "inc-2",
+        ),
+        "derive over a torn registration",
+    );
+    assert!(started.elapsed() >= REGISTRY_ACCESS_DEADLINE);
+    assert!(message.contains("commondir"), "{message}");
+    assert_eq!(tree_bytes(&fixture.root), before, "derive wrote nothing");
+    fs::remove_dir_all(&admin).expect("the operator removes the registration directory");
+    fs::remove_dir_all(&checkout).expect("and the checkout it names");
+    WorkspaceManager::derive(
+        &fixture.base,
+        &fixture.private,
+        super::fixture::RUN_ID,
+        "inc-2",
+    )
+    .expect("derive passes once the registration is gone");
+}
+
+/// Write `script` as an executable file at `path`.
+#[cfg(unix)]
+fn executable(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::write(path, script).expect("the script");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable");
+}
+
+/// Configure a required smudge filter named `driver` for every path of the
+/// repository, through `info/attributes`, so that any checkout of any tree
+/// runs it: `smudge` is the command.
+#[cfg(unix)]
+fn require_smudge_filter(fixture: &Fixture, driver: &str, smudge: &Path) {
+    let info = fixture.manager.common_git_dir().join("info");
+    fs::create_dir_all(&info).expect("info/");
+    fs::write(info.join("attributes"), format!("* filter={driver}\n")).expect("info/attributes");
+    git(
+        &fixture.base,
+        &[
+            "config",
+            &format!("filter.{driver}.smudge"),
+            &smudge.to_string_lossy(),
+        ],
+    );
+    git(
+        &fixture.base,
+        &["config", &format!("filter.{driver}.clean"), "cat"],
+    );
+    git(
+        &fixture.base,
+        &["config", &format!("filter.{driver}.required"), "true"],
+    );
+}
+
+/// T23 (§7.8): a failure after Git took the destination over is refused, not
+/// returned and not attempted again. A prune of the add's entry after the
+/// takeover needs a pause inside Git and is executed at the Git level (§6.2,
+/// §7.3); the suite reproduces its end state with a required smudge filter that
+/// fails its first run only. The add refuses after one attempt, carrying the
+/// filter's failure; under option (i) it would be Git state after one attempt,
+/// and under option (ii′) Ok after two.
+#[cfg(unix)]
+#[test]
+fn a_failure_after_the_takeover_is_refused_not_returned_and_not_attempted_again() {
+    let fixture = Fixture::created("registry-after-takeover");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let marker = fixture.root.join("b329-filter-ran");
+    let script = fixture.root.join("b329-fails-once.sh");
+    executable(
+        &script,
+        &format!(
+            "#!/bin/sh\nif [ -e '{}' ]; then exec cat; fi\n: > '{}'\necho 'b329: the smudge \
+             filter refuses its first run' >&2\nexit 1\n",
+            marker.display(),
+            marker.display()
+        ),
+    );
+    require_smudge_filter(&fixture, "b329once", &script);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let result = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    let message = registry_refusal(result, "an add whose checkout's filter failed once");
+    assert!(marker.exists(), "the filter ran, inside the add's checkout");
+    assert_eq!(
+        contended_attempts(&common),
+        before,
+        "one attempt, never attempted again"
+    );
+    assert!(
+        message.contains("1 attempt(s)") && message.contains("b329once"),
+        "it carries the filter's failure: {message}"
+    );
+}
+
+/// T13 (R-X shared): every add's checkout is held past the test deadline by a
+/// slow smudge filter, and four threads add and remove snapshots at once. Adds
+/// hold R-X shared and never wait for each other, so every cycle completes; a
+/// mutex taken by every access under a bounded wait refused cycles like these
+/// (record §3.4: 3 of 120 of PR11's concurrency test).
+#[cfg(unix)]
+#[test]
+fn adds_whose_checkouts_outlast_the_deadline_do_not_wait_for_each_other() {
+    const THREADS: u32 = 4;
+    const ROUNDS: u32 = 2;
+    let fixture = Fixture::created("registry-rx-shared");
+    let script = fixture.root.join("b329-slow.sh");
+    executable(&script, "#!/bin/sh\nsleep 0.7\nexec cat\n");
+    require_smudge_filter(&fixture, "b329slow", &script);
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let manager = fixture.manager.clone();
+                let head = fixture.head.clone();
+                scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for round in 1..=ROUNDS {
+                        let name = SnapshotName::gates(thread, 0, round);
+                        let started = std::time::Instant::now();
+                        match manager.add_snapshot(
+                            &mut NoHooks,
+                            &name,
+                            &SnapshotInput::Commit(oid(&head)),
+                        ) {
+                            Ok(snapshot) => {
+                                if started.elapsed() < REGISTRY_ACCESS_DEADLINE {
+                                    failures.push(format!(
+                                        "adding {name} took {:?}, inside the deadline: the \
+                                         filter did not hold it",
+                                        started.elapsed()
+                                    ));
+                                }
+                                if let Err(error) = manager.remove_snapshot(&mut NoHooks, &snapshot)
+                                {
+                                    failures.push(format!("removing {name}: {error}"));
+                                }
+                            }
+                            Err(error) => failures.push(format!("adding {name}: {error}")),
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("a worker thread"))
+            .collect()
+    });
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// T9 at the manager (record §3.4): while R-X is held alone by another thread,
+/// as the torn-registration plan holds it, an add refuses within its deadline
+/// plus one backoff, with no Git child run and nothing left at its slot, and a
+/// list runs at once. The same add succeeds once R-X is released.
+#[test]
+fn an_add_refuses_within_its_deadline_while_r_x_is_held_alone_and_a_list_does_not_wait() {
+    let fixture = Fixture::created("registry-rx-held");
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let bound = std::time::Duration::from_secs(60);
+    let lock = registry_lock_of(fixture.manager.common_git_dir());
+    let (held, holding) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _held = lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = held.send(());
+        let _ = released.recv_timeout(bound);
+    });
+    holding.recv_timeout(bound).expect("R-X held alone");
+    let started = std::time::Instant::now();
+    let added = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    let add_took = started.elapsed();
+    let started = std::time::Instant::now();
+    let listed = fixture.manager.worktree_records();
+    let list_took = started.elapsed();
+    let _ = release.send(());
+    holder.join().expect("the holder");
+    let message = registry_refusal(added, "an add while R-X is held alone");
+    assert!(message.contains("no attempt ran"), "{message}");
+    assert!(
+        add_took >= REGISTRY_ACCESS_DEADLINE
+            && add_took < REGISTRY_ACCESS_DEADLINE + std::time::Duration::from_secs(5),
+        "the add refused at its deadline: {add_took:?}"
+    );
+    assert!(
+        !fixture.manager.slot_path(&beta).exists(),
+        "and left no destination it made"
+    );
+    listed.expect("the list runs beside R-X");
+    assert!(
+        list_took < REGISTRY_ACCESS_DEADLINE,
+        "the list takes no R-X and does not wait: {list_took:?}"
+    );
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head)
+        .expect("the add passes once R-X is released");
+}
+
+/// T5 (§2.5, §3.5): no engine removal prunes. A registration of another
+/// process caught between its `mkdir` and its `locked` — an entry with neither
+/// `locked` nor `gitdir`, which `git worktree prune` deletes whatever its age —
+/// survives a removal of an engine slot, which removes its own registration
+/// directly. The store goes only with its last registration: a removal that
+/// leaves another entry keeps it, and the last one's removal takes it, as
+/// `git worktree prune` did.
+#[test]
+fn no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty() {
+    let fixture = Fixture::created("registry-no-prune");
+    let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let in_flight = store.join("foreign-add-in-flight");
+    fs::create_dir_all(&in_flight).expect("another process's add, before its locked");
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &alpha)
+        .expect("remove alpha");
+    assert!(
+        in_flight.is_dir(),
+        "the other process's entry in flight survives the removal"
+    );
+    fs::remove_dir(&in_flight).expect("the other process's add fails and removes its junk");
+    // Git names a registration after its checkout's basename, which is
+    // beta's instance under this incarnation's tag.
+    let beta_admin = store.join(
+        fixture
+            .manager
+            .slot_path(&beta)
+            .file_name()
+            .expect("an instance path has a final component"),
+    );
+    assert!(beta_admin.is_dir(), "beta is still registered");
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &beta)
+        .expect("remove beta");
+    assert!(
+        !store.exists(),
+        "the last registration's removal took the emptied store"
+    );
+}
+
+/// T5's census: no production argv of this module names `prune`. A tripwire
+/// over the production region's code lines; the witness above is the
+/// behaviour.
+#[test]
+fn no_production_argv_of_the_manager_names_prune() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace_manager.rs"))
+            .expect("this module's source")
+            .replace("\r\n", "\n");
+    let region = crate::effects::production_region(&source);
+    let named: Vec<&str> = region
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("\"prune\""))
+        .collect();
+    assert!(named.is_empty(), "{named:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// #329: two processes in one repository's registry (T1, T3, and the
+// two-process forms of claim 1), each child a `LinkedChild` of this binary
+// ---------------------------------------------------------------------------
+
+/// The child of the two-process registry tests: one coordinator's registry
+/// work in one checkout of the parent's repository. It takes that checkout's
+/// worktree lock and its own run's lock, derives a manager over its own run,
+/// says it is ready, waits for `GO`, runs `B329_CYCLES` snapshot add-and-remove
+/// cycles through the production funnels, and reports how many failed and
+/// each failure, on one line each.
+#[test]
+#[ignore = "linked child of the two-process registry tests"]
+fn registry_cycles_child() {
+    let link = super::fixture::ParentLink::attach();
+    let var = |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is set"));
+    let base = PathBuf::from(var("B329_BASE"));
+    let private = PathBuf::from(var("B329_PRIVATE"));
+    let number: u32 = var("B329_NUMBER")
+        .to_string_lossy()
+        .parse()
+        .expect("a process number");
+    let cycles: u32 = var("B329_CYCLES")
+        .to_string_lossy()
+        .parse()
+        .expect("a cycle count");
+    let run_id = format!("01KZB329{number:018}");
+    let _worktree = crate::rundir::WorktreeLock::acquire(&base)
+        .expect("this checkout's worktree lock: one coordinator per checkout");
+    let public = crate::rundir::public_dir(&base, &run_id);
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let _run = crate::rundir::RunLock::acquire(&public).expect("the run's lock");
+    let manager = WorkspaceManager::derive(&base, &private, &run_id, &format!("inc-{number}"))
+        .expect("a manager over this run, in the shared repository");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let head = oid(&git(&base, &["rev-parse", "HEAD"]));
+    link.send(&format!("B329_READY {number}"));
+    let go = link.recv_within(super::fixture::LINK_BOUND);
+    assert_eq!(
+        go.as_deref(),
+        Some("GO"),
+        "the parent starts every process at once"
+    );
+    let mut failures = Vec::new();
+    for round in 1..=cycles {
+        let name = SnapshotName::gates(number, 0, round);
+        match manager.add_snapshot(&mut NoHooks, &name, &SnapshotInput::Commit(head.clone())) {
+            Ok(snapshot) => {
+                if let Err(error) = manager.remove_snapshot(&mut NoHooks, &snapshot) {
+                    failures.push(format!("removing {name}: {error}"));
+                }
+            }
+            Err(error) => failures.push(format!("adding {name}: {error}")),
+        }
+    }
+    link.send(&format!(
+        "B329_RESULT {number} cycles={cycles} failures={}",
+        failures.len()
+    ));
+    for failure in &failures {
+        link.send(&format!(
+            "B329_FAILURE {number} {}",
+            failure.replace(['\n', '\r'], " ")
+        ));
+    }
+    link.send(&format!("B329_DONE {number}"));
+}
+
+/// The next line from a linked child that carries `prefix`, within the link's
+/// bound; a panic carrying the child's stderr otherwise.
+fn line_from(lines: &std::sync::mpsc::Receiver<String>, prefix: &str, stderr: &Path) -> String {
+    let deadline = std::time::Instant::now() + super::fixture::LINK_BOUND;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) => {
+                if let Some(at) = line.find(prefix) {
+                    return line[at..].to_owned();
+                }
+            }
+            Err(error) => panic!(
+                "no `{prefix}` line from the linked child ({error}); its stderr:\n{}",
+                fs::read_to_string(stderr).unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// T1 and T3: `processes` coordinators of one repository, each in its own
+/// checkout — the first in the main checkout, the others in linked checkouts
+/// added with plain Git — each holding its own worktree lock and run lock,
+/// run their registry work at once. Each one's R-X is its own; tolerance is
+/// what keeps every cycle from failing on another's write in flight.
+fn registry_cycles_across(tag: &str, processes: u32, cycles: u32) {
+    let fixture = Fixture::created(tag);
+    let mut children = Vec::new();
+    for number in 0..processes {
+        let base = if number == 0 {
+            fixture.base.clone()
+        } else {
+            let linked = fixture.root.join(format!("linked-{number}"));
+            git_os(
+                &fixture.base,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("-q"),
+                    OsStr::new("--detach"),
+                    linked.as_os_str(),
+                    OsStr::new(&fixture.head),
+                ],
+            );
+            linked
+        };
+        let stderr = fixture.root.join(format!("child-{number}.stderr"));
+        let number_text = number.to_string();
+        let cycles_text = cycles.to_string();
+        let (child, lines) = super::fixture::LinkedChild::spawn(
+            "workspace_manager::tests::registry_cycles_child",
+            &[
+                ("B329_BASE", base.as_os_str()),
+                ("B329_PRIVATE", fixture.private.as_os_str()),
+                ("B329_NUMBER", OsStr::new(&number_text)),
+                ("B329_CYCLES", OsStr::new(&cycles_text)),
+            ],
+            &stderr,
+        );
+        line_from(&lines, "B329_READY", &stderr);
+        children.push((number, child, lines, stderr));
+    }
+    for (_, child, _, _) in &children {
+        assert!(child.send("GO"), "every process is told to start");
+    }
+    let mut failed = Vec::new();
+    for (number, child, lines, stderr) in &children {
+        let result = line_from(lines, "B329_RESULT", stderr);
+        loop {
+            let line = line_from(lines, "B329_", stderr);
+            if line.starts_with("B329_DONE") {
+                break;
+            }
+            failed.push(line);
+        }
+        let status = child
+            .wait_within(super::fixture::LINK_BOUND)
+            .unwrap_or_else(|| {
+                panic!(
+                    "process {number} did not end; its stderr:\n{}",
+                    fs::read_to_string(stderr).unwrap_or_default()
+                )
+            });
+        assert!(
+            status.success() && result.ends_with("failures=0"),
+            "process {number}: {result}, {status:?}; its failures: {failed:#?}"
+        );
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert!(
+        processes * cycles >= if cfg!(windows) { 300 } else { 1_000 },
+        "the test runs the cycles it claims"
+    );
+}
+
+/// T1 (PR11 review round 7's witness, `R7-CONC-1`): two processes, one in
+/// the main checkout and one in a linked checkout, 500 add-and-remove cycles
+/// each through the production funnels, and not one fails. Unpatched, round
+/// 3 measured it red 10 of 10, 68 failed operations in 20,000 (the record's
+/// §2.4). Fewer cycles on Windows, where each Git command costs more.
+#[test]
+fn two_coordinators_in_two_checkouts_of_one_repository_never_fail_on_each_others_registry_writes() {
+    registry_cycles_across(
+        "registry-two-processes",
+        2,
+        if cfg!(windows) { 150 } else { 500 },
+    );
+}
+
+/// T3: T1's shape with three processes, one in the main checkout and two in
+/// linked checkouts.
+#[test]
+fn three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_others_registry_writes()
+ {
+    registry_cycles_across(
+        "registry-three-processes",
+        3,
+        if cfg!(windows) { 100 } else { 340 },
+    );
+}
+
+/// The child that writes one registration of the parent's repository the way
+/// `git worktree add` does, file by file, and stops half way: the entry's
+/// directory, `locked`, `gitdir`, the checkout's `.git`, `HEAD` written and
+/// `commondir` opened and empty — the state Git leaves when it is killed while
+/// it writes `commondir`. It says so and waits for its parent: told
+/// `FINISH`, it writes `commondir` and unlinks `locked`, as the add does, and
+/// ends; killed, it leaves the registration torn, as a dead writer does; and
+/// told `WHOLE-UNLISTABLE`, it writes a whole registration Git cannot list (a
+/// `HEAD` that names nothing) and ends, leaving a registration nobody writes.
+#[test]
+#[ignore = "linked child of the two-process registry tests"]
+fn registry_writer_child() {
+    let link = super::fixture::ParentLink::attach();
+    let var = |name: &str| std::env::var_os(name).unwrap_or_else(|| panic!("{name} is set"));
+    let admin = PathBuf::from(var("B329_ADMIN"));
+    let checkout = PathBuf::from(var("B329_CHECKOUT"));
+    let head = var("B329_HEAD").to_string_lossy().into_owned();
+    fs::create_dir_all(&admin).expect("the entry's directory");
+    fs::write(admin.join("locked"), "initializing\n").expect("its locked");
+    fs::create_dir_all(&checkout).expect("its checkout");
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&checkout.join(".git"))),
+    )
+    .expect("its gitdir");
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&admin)),
+    )
+    .expect("the checkout's .git");
+    fs::write(admin.join("HEAD"), format!("{head}\n")).expect("its HEAD");
+    fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not yet written");
+    link.send("B329_TORN");
+    match link.recv_within(super::fixture::LINK_BOUND).as_deref() {
+        Some("FINISH") => {
+            fs::write(admin.join("commondir"), "../..\n").expect("the writer writes commondir");
+            fs::remove_file(admin.join("locked")).expect("and unlocks the entry");
+            link.send("B329_FINISHED");
+        }
+        Some("WHOLE-UNLISTABLE") => {
+            fs::write(admin.join("commondir"), "../..\n").expect("commondir");
+            fs::write(admin.join("HEAD"), "garbage\n").expect("a HEAD that names nothing");
+            fs::remove_file(admin.join("locked")).expect("unlocked");
+            link.send("B329_WHOLE");
+        }
+        other => panic!("an instruction from the parent, not {other:?}"),
+    }
+}
+
+/// A [`registry_writer_child`] for `fixture`'s repository, its entry named
+/// `name`, once it has said its registration is torn.
+fn torn_by_another_process(
+    fixture: &Fixture,
+    name: &str,
+) -> (
+    std::sync::Arc<super::fixture::LinkedChild>,
+    std::sync::mpsc::Receiver<String>,
+    PathBuf,
+    PathBuf,
+) {
+    let admin = fixture
+        .manager
+        .common_git_dir()
+        .join("worktrees")
+        .join(name);
+    let checkout = fixture.root.join(format!("{name}-checkout"));
+    let stderr = fixture.root.join(format!("{name}.stderr"));
+    let (child, lines) = super::fixture::LinkedChild::spawn(
+        "workspace_manager::tests::registry_writer_child",
+        &[
+            ("B329_ADMIN", admin.as_os_str()),
+            ("B329_CHECKOUT", checkout.as_os_str()),
+            ("B329_HEAD", OsStr::new(&fixture.head)),
+        ],
+        &stderr,
+    );
+    line_from(&lines, "B329_TORN", &stderr);
+    (child, lines, admin, stderr)
+}
+
+/// Claim 1, another process's write in flight, across two processes: a list
+/// meets a registration another process is half way through writing, fails on
+/// it, and — the writer told to finish only once the list has failed on it
+/// (the `CONTENDED_ATTEMPTS` handshake) — passes on a later attempt.
+#[test]
+fn a_list_passes_a_registration_another_process_finishes_writing() {
+    let fixture = Fixture::created("registry-writer-in-flight");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let (child, lines, _admin, stderr) = torn_by_another_process(&fixture, "other-process");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let teller = {
+        let (child, common) = (std::sync::Arc::clone(&child), common.clone());
+        std::thread::spawn(move || {
+            let seen = await_contended(&common, before);
+            assert!(child.send("FINISH"), "the writer is told to finish");
+            seen
+        })
+    };
+    let records = fixture
+        .manager
+        .worktree_records()
+        .expect("the list passes once the other process finishes");
+    let seen = teller.join().expect("the teller");
+    line_from(&lines, "B329_FINISHED", &stderr);
+    assert!(
+        seen > before,
+        "the list failed on the write in flight first"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.path().ends_with("other-process-checkout")),
+        "{records:?}"
+    );
+    child
+        .wait_within(super::fixture::LINK_BOUND)
+        .expect("the writer ends");
+}
+
+/// Claim 1, a write a dead process left torn, across two processes: the writer
+/// is killed (the bounded `LinkedChild::kill`) inside its registration write.
+/// Every access over the store then fails on the torn entry on every attempt:
+/// a list and an add each refuse at their deadline, resumably, never as Git
+/// state, and the add leaves nothing at its slot. The operator's remedy —
+/// remove the registration and the checkout it names, once no process writes
+/// it — clears it.
+#[test]
+fn accesses_over_a_registration_a_dead_process_left_torn_refuse_and_are_never_git_state() {
+    let fixture = Fixture::created("registry-dead-writer");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let (child, _lines, admin, _stderr) = torn_by_another_process(&fixture, "dead-writer");
+    let _status = child.kill();
+    assert!(
+        admin.join("locked").exists(),
+        "the dead writer left its entry torn"
+    );
+    let message = registry_refusal(
+        fixture.manager.worktree_records(),
+        "a list over a dead writer's torn entry",
+    );
+    assert!(message.contains("commondir"), "{message}");
+    let message = registry_refusal(
+        fixture
+            .manager
+            .add_worktree(&mut NoHooks, &beta, &fixture.head),
+        "an add over a dead writer's torn entry",
+    );
+    assert!(message.contains("commondir"), "{message}");
+    assert!(!fixture.manager.slot_path(&beta).exists());
+    fs::remove_dir_all(&admin).expect("the operator removes the registration");
+    fs::remove_dir_all(fixture.root.join("dead-writer-checkout")).expect("and its checkout");
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head)
+        .expect("the add passes once the torn entry is gone");
+}
+
+/// Claim 1, a registration nobody is writing, across two processes: the other
+/// process leaves a whole registration Git cannot list and ends. A list over
+/// it refuses at its deadline, never as Git state.
+#[test]
+fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses() {
+    let fixture = Fixture::created("registry-nobody-writes");
+    let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let (child, lines, admin, stderr) = torn_by_another_process(&fixture, "left-unlistable");
+    assert!(child.send("WHOLE-UNLISTABLE"));
+    line_from(&lines, "B329_WHOLE", &stderr);
+    child
+        .wait_within(super::fixture::LINK_BOUND)
+        .expect("the other process ends");
+    assert!(!admin.join("locked").exists(), "nobody is writing it");
+    let message = registry_refusal(
+        fixture.manager.worktree_records(),
+        "a list over a whole registration Git cannot list",
+    );
+    assert!(message.contains("the last failed with"), "{message}");
+}
+
+/// T10 (the legacy writer beside the manager): the legacy engine's gate
+/// snapshots, added and dropped in a linked checkout by four threads, beside
+/// the manager's snapshot cycles in the main checkout on four threads. The
+/// legacy accesses are follow-up D's and are counted, not asserted; the
+/// manager has no failure.
+#[test]
+fn the_manager_never_fails_beside_the_legacy_engines_gate_snapshots() {
+    const THREADS: u32 = 4;
+    const ROUNDS: u32 = 40;
+    let fixture = Fixture::created("registry-legacy-beside");
+    let linked = fixture.root.join("legacy-checkout");
+    git_os(
+        &fixture.base,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            OsStr::new("--detach"),
+            linked.as_os_str(),
+            OsStr::new(&fixture.head),
+        ],
+    );
+    let legacy = crate::workspace::Workspace::open(&linked).expect("the legacy workspace");
+    let tree = git(&linked, &["rev-parse", "HEAD^{tree}"]);
+    let parent = git(&linked, &["rev-parse", "HEAD"]);
+    let legacy_failures = std::sync::atomic::AtomicUsize::new(0);
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        for thread in 0..THREADS {
+            let (legacy, tree, parent, counted) = (&legacy, &tree, &parent, &legacy_failures);
+            let store = fixture.root.join(format!("legacy-store-{thread}"));
+            scope.spawn(move || {
+                for _ in 0..ROUNDS {
+                    match legacy.gate_snapshot_for_candidate_in_store(parent, tree, &store) {
+                        Ok(snapshot) => drop(snapshot),
+                        Err(_) => {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                }
+            });
+        }
+        let workers: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let manager = fixture.manager.clone();
+                let head = fixture.head.clone();
+                scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for round in 1..=ROUNDS {
+                        let name = SnapshotName::gates(thread, 0, round);
+                        match manager.add_snapshot(
+                            &mut NoHooks,
+                            &name,
+                            &SnapshotInput::Commit(oid(&head)),
+                        ) {
+                            Ok(snapshot) => {
+                                if let Err(error) = manager.remove_snapshot(&mut NoHooks, &snapshot)
+                                {
+                                    failures.push(format!("removing {name}: {error}"));
+                                }
+                            }
+                            Err(error) => failures.push(format!("adding {name}: {error}")),
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("a manager thread"))
+            .collect()
+    });
+    eprintln!(
+        "b329 T10: legacy gate snapshot failures beside the manager: {} of {}",
+        legacy_failures.load(std::sync::atomic::Ordering::SeqCst),
+        THREADS * ROUNDS
+    );
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// T18 (FUB-D5-SPELLING): T14's interleaving on a repository whose `.git` is a
+/// link to a directory of another name. Nothing reads Git's text, so no
+/// spelling of the store can be missed: the add is attempted past its own
+/// name's torn entry.
+#[cfg(unix)]
+#[test]
+fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name() {
+    let tree = scratch("registry-spelling");
+    let root = tree.path();
+    let base = root.join("repo");
+    let private = root.join("private");
+    fs::create_dir_all(&base).expect("repo");
+    fs::create_dir_all(&private).expect("private root");
+    git(&base, &["init", "-q", "-b", "main", "--object-format=sha1"]);
+    git(&base, &["config", "user.email", "tests@upstroke.local"]);
+    git(&base, &["config", "user.name", "upstroke tests"]);
+    git(&base, &["config", "core.autocrlf", "false"]);
+    fs::write(base.join("a.txt"), "one\n").expect("a file");
+    git(&base, &["add", "-A"]);
+    git(&base, &["commit", "-q", "-m", "seed"]);
+    let head = git(&base, &["rev-parse", "HEAD"]);
+    fs::rename(base.join(".git"), root.join("elsewhere.gitdir")).expect("move the git dir");
+    std::os::unix::fs::symlink(root.join("elsewhere.gitdir"), base.join(".git"))
+        .expect("link .git to a directory of another name");
+    fs::create_dir_all(crate::rundir::public_dir(&base, super::fixture::RUN_ID))
+        .expect("public dir");
+    let manager = WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-1")
+        .expect("a manager over it");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let beta = Slot::Task {
+        key: "beta".to_owned(),
+        generation: 1,
+    };
+    manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let own = manager
+        .slot_path(&beta)
+        .file_name()
+        .expect("a slot has a name")
+        .to_os_string();
+    let admin = manager.common_git_dir().join("worktrees").join(&own);
+    let gitdir = root.join("foreign-same-name").join(".git");
+    let mut hooks = AtBefore::new(beta.add_site(), || {
+        fs::create_dir_all(&admin).expect("the foreign registration");
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", as_git_writes_it(&gitdir)),
+        )
+        .expect("its gitdir");
+        fs::write(admin.join("commondir"), b"").expect("its commondir, opened and not written");
+    });
+    let common = manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let remover = {
+        let (admin, common) = (admin.clone(), common.clone());
+        std::thread::spawn(move || {
+            let seen = await_contended(&common, before);
+            fs::remove_dir_all(&admin).expect("the foreign process removes its registration");
+            seen
+        })
+    };
+    manager
+        .add_worktree(&mut hooks, &beta, &head)
+        .expect("the add passes once the torn entry is gone");
+    assert!(remover.join().expect("the remover") > before);
+}
+
+// ---------------------------------------------------------------------------
+// The bounded `LinkedChild` (PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE)
+// ---------------------------------------------------------------------------
+
+/// Refuse the syscall `number` for this thread and every process it forks,
+/// answering `errno` instead: four seccomp instructions, installed the way
+/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
+/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
+/// an isolated child's thread alone.
+#[cfg(target_os = "linux")]
+fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
+    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+        jt,
+        jf,
+        k,
+    };
+    let word = |value: libc::c_long| {
+        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
+    };
+    let mut program = [
+        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            word(number),
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog {
+        len: u16::try_from(program.len()).expect("the program fits the count"),
+        filter: program.as_mut_ptr(),
+    };
+    // SAFETY: `prctl` takes its five arguments by value and reads through no
+    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
+    // remaining four are 1, 0, 0 and 0.
+    let allowed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+            1_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        allowed,
+        0,
+        "PR_SET_NO_NEW_PRIVS: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+    // argument and the instructions behind that program's own pointer; both
+    // live for the call and the kernel copies them.
+    let installed = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            libc::c_long::from(libc::PR_SET_SECCOMP),
+            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
+            std::ptr::from_ref(&filter),
+            0_i64,
+            0_i64,
+        )
+    };
+    assert_eq!(
+        installed,
+        0,
+        "PR_SET_SECCOMP: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// The linked child the next test's kill cannot end: it ignores its link
+/// closing, as a child busy elsewhere does, and ends when its parent does, or
+/// after a minute.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "linked child of linked_child_whose_kill_is_refused_child"]
+fn linked_child_that_waits_on_its_parent_child() {
+    let link = super::fixture::ParentLink::attach();
+    link.send("B329_WAITING");
+    // SAFETY: `getppid` takes no argument and cannot fail.
+    let parent = unsafe { libc::getppid() };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // SAFETY: as above.
+    while std::time::Instant::now() < deadline && unsafe { libc::getppid() } == parent {
+        super::fixture::rest(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The isolated caller: it starts a linked child, refuses `kill` on its own
+/// thread with a seccomp policy so that `Child::kill` cannot end the child,
+/// and kills it through `LinkedChild::kill`, then drops it, reporting how
+/// each ended and after how long.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "isolated caller of a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end"]
+fn linked_child_whose_kill_is_refused_child() {
+    let tree = scratch("linked-kill-refused");
+    let stderr = tree.path().join("child.stderr");
+    let (child, lines) = super::fixture::LinkedChild::spawn(
+        "workspace_manager::tests::linked_child_that_waits_on_its_parent_child",
+        &[],
+        &stderr,
+    );
+    line_from(&lines, "B329_WAITING", &stderr);
+    refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+    let panic_text = |panic: Box<dyn std::any::Any + Send>| {
+        panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+            .unwrap_or_else(|| "a panic without a message".to_owned())
+    };
+    let started = std::time::Instant::now();
+    let killed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.kill()));
+    let took = started.elapsed();
+    let how = match killed {
+        Ok(status) => format!("returned {status:?}"),
+        Err(panic) => format!("failed its test: {}", panic_text(panic)),
+    };
+    println!("\nthe kill ended after {} ms and {how}", took.as_millis());
+    let started = std::time::Instant::now();
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(child)));
+    let took = started.elapsed();
+    let how = match dropped {
+        Ok(()) => "returned".to_owned(),
+        Err(panic) => format!("failed its test: {}", panic_text(panic)),
+    };
+    println!("\nthe drop ended after {} ms and {how}", took.as_millis());
+}
+
+/// `PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE`: a `LinkedChild` whose
+/// kill did not end the child — here `kill` itself refused by a seccomp policy,
+/// standing for a child a tracer holds at its exit stop or one in
+/// uninterruptible sleep — fails its test within its collection bound, saying
+/// the child is still not collectable, instead of waiting for the child; and
+/// its drop does the same rather than hang. The isolated caller runs under a
+/// bound of its own, so a mutation that removes either bound fails here rather
+/// than wedging the suite.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_child_its_kill_did_not_end()
+ {
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "workspace_manager::tests::linked_child_whose_kill_is_refused_child",
+        &[],
+        std::time::Duration::from_secs(90),
+    );
+    let after = |what: &str| {
+        ended
+            .stdout
+            .split(&format!("the {what} ended after "))
+            .nth(1)
+            .and_then(|rest| rest.split(" ms").next())
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    };
+    let (kill, drop) = (after("kill"), after("drop"));
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && kill.is_some() && drop.is_some(),
+        "the isolated caller ended and said when its kill and its drop did: {ended}"
+    );
+    let bound = super::fixture::COLLECT_BOUND * 3;
+    assert!(
+        kill.is_some_and(|took| took < bound)
+            && drop.is_some_and(|took| took < bound)
+            && ended.stdout.matches("still not collectable").count() == 2,
+        "a kill that did not end its child must fail its test within its collection bound, and \
+         so must the drop: {ended}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// PR11 follow-up C: a slot instance per coordinator incarnation (U)
+// -----------------------------------------------------------------------
+//
+// The record is `reviews/2026-10-02-pr11-follow-up-c-record.md`: §4.2's tag,
+// §4.3's discovery, §4.5's refusing variant, §4.6's replacements for the two
+// frozen oracles that U makes vacuous, §4.7's untagged names, §5.2 and §5.3's
+// switches and §5.4's final sweep. Its "Implementation" section names each
+// test here with the mutation that turns it red.
+
+/// A manager of the fixture's run under `incarnation`: an earlier or a later
+/// coordinator of the same run, over the same repository and private root.
+fn of_incarnation(fixture: &Fixture, incarnation: &str) -> WorkspaceManager {
+    WorkspaceManager::derive(
+        &fixture.base,
+        &fixture.private,
+        super::fixture::RUN_ID,
+        incarnation,
+    )
+    .expect("derive a manager of the fixture's run under another incarnation")
+}
+
+/// Whether `path`, a checkout path Git or the filesystem reported, is an
+/// instance of `slot` under `manager`'s execution root: its parent is the
+/// slot's namespace directory, and its name is the slot's own component, or
+/// that component, `_` and twelve characters of the Crockford alphabet.
+///
+/// Written here against the names, independently of the parser the manager
+/// discovers instances with, so that a parser that stopped recognising an
+/// instance cannot also blind this oracle to it.
+fn is_instance_of(manager: &WorkspaceManager, slot: &Slot, path: &Path) -> bool {
+    const ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let relative = slot.relative();
+    let (Some(namespace), Some(component)) = (
+        relative.parent(),
+        relative.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return false;
+    };
+    let Ok(directory) = canonical_prefix(&manager.execution_root().join(namespace)) else {
+        return false;
+    };
+    let Ok(path) = canonical_prefix(path) else {
+        return false;
+    };
+    if path.parent() != Some(directory.as_path()) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == component
+        || name
+            .strip_prefix(component)
+            .and_then(|rest| rest.strip_prefix('_'))
+            .is_some_and(|tag| tag.len() == 12 && tag.chars().all(|c| ALPHABET.contains(c)))
+}
+
+/// Every registration Git lists whose checkout is an instance of `slot`.
+fn registered_instances_of(manager: &WorkspaceManager, slot: &Slot) -> Vec<PathBuf> {
+    manager
+        .worktree_records()
+        .expect("Git enumerates the store")
+        .into_iter()
+        .map(WorktreeRecord::into_path)
+        .filter(|path| is_instance_of(manager, slot, path))
+        .collect()
+}
+
+/// Every entry under `slot`'s namespace directory that is an instance of it.
+fn instance_directories_of(manager: &WorkspaceManager, slot: &Slot) -> Vec<PathBuf> {
+    let relative = slot.relative();
+    let namespace = relative.parent().expect("a slot path has a namespace");
+    match fs::read_dir(manager.execution_root().join(namespace)) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("a namespace entry").path())
+            .filter(|path| is_instance_of(manager, slot, path))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", namespace.display()),
+    }
+}
+
+/// What a dead incarnation's Git writer that had not yet run does once it
+/// runs: `git worktree add --detach` at `path`, which makes the leading
+/// directories, the checkout and the registration and writes no intent.
+fn late_add(fixture: &Fixture, path: &Path) {
+    git_os(
+        &fixture.base,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            OsStr::new("--detach"),
+            path.as_os_str(),
+            OsStr::new(&fixture.head),
+        ],
+    );
+}
+
+/// The removal and intent removal every walk makes of a slot, in the frozen
+/// walks' order (`finalize.rs`'s `scrub_slots`, `recover.rs`'s reclaims).
+fn reclaim_slot(manager: &WorkspaceManager, slot: &Slot) -> Result<(), UpstrokeError> {
+    manager.remove_worktree(&mut NoHooks, slot)?;
+    manager.remove_intent(&mut NoHooks, slot)
+}
+
+/// T-TAG, the manager's half: one incarnation renders one instance of a slot
+/// in any manager, and another incarnation renders another, in the same
+/// namespace; neither renders the untagged name.
+#[test]
+fn one_incarnation_renders_one_instance_of_a_slot_and_another_incarnation_another() {
+    let fixture = Fixture::created("instance-rendering");
+    let again = of_incarnation(&fixture, "inc-1");
+    let successor = of_incarnation(&fixture, "inc-2");
+    let slot = fixture.task("alpha", 1);
+    assert_eq!(fixture.manager.slot_path(&slot), again.slot_path(&slot));
+    assert_eq!(fixture.manager.intent_path(&slot), again.intent_path(&slot));
+    assert_eq!(fixture.manager.instance_tag(), again.instance_tag());
+    let ours = fixture.manager.slot_path(&slot);
+    let theirs = successor.slot_path(&slot);
+    assert_ne!(ours, theirs, "two incarnations share no instance path");
+    assert_ne!(
+        fixture.manager.intent_path(&slot),
+        successor.intent_path(&slot),
+        "nor an intent"
+    );
+    assert_eq!(
+        ours.parent(),
+        theirs.parent(),
+        "both live in the slot's namespace"
+    );
+    for (manager, path) in [(&fixture.manager, &ours), (&successor, &theirs)] {
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(format!("kalpha-g1_{}", manager.instance_tag().as_str()).as_str()),
+            "an instance is the slot's component, `_` and the incarnation's tag"
+        );
+        assert!(is_instance_of(manager, &slot, path));
+    }
+    assert_ne!(
+        ours,
+        fixture.manager.execution_root().join(slot.relative()),
+        "no incarnation renders the untagged name"
+    );
+}
+
+/// The two-incarnation reclaim. The successor's walk meets the earlier
+/// incarnation's instance through its intent and removes it — checkout,
+/// registration and intent — and never verifies it as its own: until it adds
+/// its own instance, its verification reads `NotRegistered`, which routes a
+/// resume to the forced removal and a fresh add of its own.
+#[test]
+fn a_successors_reclaim_removes_an_earlier_incarnations_instance_and_never_verifies_it() {
+    let fixture = Fixture::created("instance-two-incarnations");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let earlier = fixture.manager.slot_path(&slot);
+    let earlier_admin = super::fixture::registration_of(&fixture.manager, &earlier);
+    let successor = of_incarnation(&fixture, "inc-2");
+
+    assert_eq!(
+        successor
+            .verify_worktree(
+                &mut NoHooks,
+                &slot,
+                &Quiescence::AtBase(fixture.head.clone())
+            )
+            .expect("verify"),
+        Err(VerifyFailure::NotRegistered),
+        "the earlier incarnation's instance is not the successor's to verify"
+    );
+    assert_eq!(successor.intents().expect("intents"), vec![slot.clone()]);
+    reclaim_slot(&successor, &slot).expect("the successor reclaims the slot");
+    assert!(!earlier.exists(), "the earlier checkout is gone");
+    assert!(!earlier_admin.exists(), "and its registration");
+    assert!(
+        !fixture.manager.intent_path(&slot).exists(),
+        "and its intent"
+    );
+    assert!(successor.intents().expect("intents").is_empty());
+    assert!(registered_instances_of(&successor, &slot).is_empty());
+
+    successor
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the successor's intent");
+    let own = successor
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("the successor's own instance");
+    assert_eq!(own, successor.slot_path(&slot));
+    assert_eq!(
+        successor
+            .verify_worktree(
+                &mut NoHooks,
+                &slot,
+                &Quiescence::AtBase(fixture.head.clone())
+            )
+            .expect("verify"),
+        Ok(()),
+        "and it verifies only its own"
+    );
+    assert_eq!(registered_instances_of(&successor, &slot), vec![own]);
+}
+
+/// §4.3, the late add (FUC-D3-LATEADD). An earlier incarnation's Git writer
+/// that had not yet run when its slot was reclaimed recreates its instance's
+/// checkout and registration, and no intent; a helper writing by absolute
+/// path recreates a directory alone; and a checkout can be gone while its
+/// registration stays. Every walk reaches each through `intents()`, as a
+/// logical slot, and removes it with the slot, whether or not the successor
+/// has an instance of that slot of its own; the successor's own stands.
+#[test]
+fn an_earlier_incarnations_instance_with_no_intent_is_found_by_every_walk() {
+    let fixture = Fixture::created("instance-late-add");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let shared = fixture.task("alpha", 1);
+    let own_only = fixture.task("beta", 1);
+    let theirs_only = Slot::Snapshot {
+        name: SnapshotName::integration(1),
+    };
+
+    // The successor (the fixture's manager) holds alpha and beta of its own.
+    for slot in [&shared, &own_only] {
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, slot)
+            .expect("intent");
+        fixture
+            .manager
+            .add_worktree(&mut NoHooks, slot, &fixture.head)
+            .expect("add");
+    }
+    let own_paths = [
+        fixture.manager.slot_path(&shared),
+        fixture.manager.slot_path(&own_only),
+    ];
+
+    // The late add: the earlier incarnation's alpha and its own snapshot slot,
+    // each checkout and registration, no intent.
+    late_add(&fixture, &earlier.slot_path(&shared));
+    late_add(&fixture, &earlier.slot_path(&theirs_only));
+    // A registration whose checkout is gone, and a directory with none.
+    let registration_only = Slot::Staging { sequence: 4 };
+    let registration_only_path = earlier.slot_path(&registration_only);
+    late_add(&fixture, &registration_only_path);
+    fs::remove_dir_all(&registration_only_path).expect("the checkout goes, the registration stays");
+    let directory_only = fixture.task("gamma", 2);
+    create_dir(&earlier.slot_path(&directory_only));
+    fs::write(
+        earlier.slot_path(&directory_only).join("helper-wrote-this"),
+        b"by absolute path\n",
+    )
+    .expect("a helper's late write");
+
+    let mut expected = vec![
+        shared.clone(),
+        own_only.clone(),
+        directory_only.clone(),
+        registration_only.clone(),
+        theirs_only.clone(),
+    ];
+    expected.sort();
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        expected,
+        "every earlier instance is a logical slot every walk enumerates, each once"
+    );
+
+    for slot in &expected {
+        reclaim_slot(&fixture.manager, slot).expect("the walk removes the slot");
+    }
+    for slot in &expected {
+        assert!(
+            instance_directories_of(&fixture.manager, slot).is_empty(),
+            "no instance of {slot:?} is left in its namespace"
+        );
+        assert!(
+            registered_instances_of(&fixture.manager, slot).is_empty(),
+            "and none is registered"
+        );
+    }
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+    for path in own_paths {
+        assert!(
+            !path.exists(),
+            "the walk removed the successor's own with its slot"
+        );
+    }
+}
+
+/// §4.3's exclusion: this incarnation creates an instance only after its
+/// intent, so an intentless instance at its own tag is none of its dead
+/// instances. `intents()` does not report it and the final sweep leaves it,
+/// so the finalizer's existing refusal of a torn registration no intent names
+/// stands, and a checkout of its own keeps the root (T-FIN2).
+#[test]
+fn this_incarnations_own_instance_with_no_intent_is_not_discovered_and_keeps_the_root() {
+    let fixture = Fixture::created("instance-own-intentless");
+    let slot = fixture.task("alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+    late_add(&fixture, &path);
+    let admin = super::fixture::registration_of(&fixture.manager, &path);
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+    let removed = fixture
+        .manager
+        .remove_execution_root(&mut NoHooks)
+        .expect("finalization's last step");
+    assert!(
+        !removed,
+        "a checkout of this incarnation's own keeps the root"
+    );
+    assert!(path.is_dir() && admin.is_dir(), "and the sweep left it");
+}
+
+/// §4.7: a name with no tag was written before instances existed, and is
+/// another incarnation's like any other: its intent, its checkout and its
+/// registration are reclaimed with its slot.
+#[test]
+fn an_untagged_instance_from_before_instances_is_reclaimed_like_an_earlier_incarnations() {
+    let fixture = Fixture::created("instance-untagged");
+    let slot = fixture.task("alpha", 1);
+    let untagged = fixture.manager.execution_root().join(slot.relative());
+    let record = IntentRecord::new(
+        &slot,
+        None,
+        super::fixture::RUN_ID.to_owned(),
+        "old".to_owned(),
+    )
+    .expect("a record of the untagged name");
+    let intent = fixture
+        .manager
+        .execution_root()
+        .join("intents")
+        .join(slot.intent_name());
+    fs::write(&intent, serde_json::to_vec(&record).expect("serialize")).expect("the old intent");
+    late_add(&fixture, &untagged);
+    assert!(is_instance_of(&fixture.manager, &slot, &untagged));
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        vec![slot.clone()]
+    );
+
+    reclaim_slot(&fixture.manager, &slot).expect("the walk reclaims the untagged instance");
+    assert!(!untagged.exists() && !intent.exists());
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+}
+
+/// §4.5, the refusing variant: nothing retains a dead instance. One that
+/// cannot be removed refuses the reclaim, resumably, as any removal does, and
+/// the next reclaim, once it can be removed, converges. Evaluated on the Unix
+/// legs, where a mode bit binds a non-root user.
+#[cfg(unix)]
+#[test]
+fn an_earlier_instance_that_cannot_be_removed_refuses_the_reclaim_and_the_next_converges() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::created("instance-unremovable");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.task("alpha", 1);
+    earlier
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the earlier intent");
+    let path = earlier
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("the earlier instance");
+    let held = path.join("held");
+    create_dir(&held);
+    fs::write(held.join("file"), b"a writer's file\n").expect("plant a file");
+    let _restore = RestoreMode { path: held.clone() };
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o555)).expect("make it unwritable");
+    let probe = held.join("probe-write");
+    if fs::write(&probe, b"x").is_ok() {
+        fs::remove_file(&probe).expect("remove the probe");
+        panic!(
+            "prerequisite not met: the mode bit did not bind (running as root or with \
+             CAP_DAC_OVERRIDE); this test needs an unprivileged user"
+        );
+    }
+
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &slot)
+        .expect_err("an earlier instance that cannot be removed refuses the reclaim");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Filesystem {
+                operation: "remove",
+                ..
+            }
+        ),
+        "the refusal is the removal's own: {error}"
+    );
+    assert!(
+        earlier.intent_path(&slot).exists(),
+        "its intent stays for the next reclaim"
+    );
+
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o755)).expect("restore");
+    reclaim_slot(&fixture.manager, &slot).expect("the next reclaim converges");
+    assert!(!path.exists());
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+}
+
+/// T-FIN1 (§5.4): an earlier incarnation's writer adds its instance after
+/// finalization's task scrub. The final sweep at the root's removal finds it
+/// — directory and registration — removes it through its kind's removal, and
+/// the root is removed.
+#[test]
+fn the_final_sweep_removes_an_instance_an_earlier_incarnation_added_after_the_scrub() {
+    let fixture = Fixture::created("final-sweep");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    for slot in fixture.manager.intents().expect("intents") {
+        fixture
+            .manager
+            .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+            .expect("the task scrub");
+        fixture
+            .manager
+            .remove_intent(&mut NoHooks, &slot)
+            .expect("the task scrub's intent removal");
+    }
+    let late = earlier.slot_path(&slot);
+    late_add(&fixture, &late);
+    let late_admin = super::fixture::registration_of(&fixture.manager, &late);
+
+    let (mut hooks, shared) = harness();
+    let removed = fixture
+        .manager
+        .remove_execution_root(&mut hooks)
+        .expect("finalization's last step");
+    assert!(removed, "the sweep left the root empty, and it was removed");
+    assert!(!late.exists() && !late_admin.exists());
+    assert!(registered_instances_of(&fixture.manager, &slot).is_empty());
+    let harness = shared.lock().expect("the harness");
+    assert_eq!(
+        harness.count(
+            EffectSiteId::Worktree(WorktreeSite::Remove),
+            HookPhase::After
+        ),
+        1,
+        "the instance went through its kind's removal site, once"
+    );
+    assert_eq!(
+        harness.count(
+            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+            HookPhase::After
+        ),
+        1
+    );
+}
+
+/// The switch set (§2.2, §5.2, §5.3), pinned in both builders: every Git
+/// child the manager starts carries the six command-scope switches and the
+/// three bindings, with the replacement pair, before its own arguments.
+#[test]
+fn both_builders_carry_the_engine_switch_set_and_its_bindings() {
+    let fixture = Fixture::created("switch-set");
+    for switch in [
+        "maintenance.auto=false",
+        "gc.auto=0",
+        "gc.autoDetach=false",
+        "maintenance.autoDetach=false",
+        "rerere.enabled=false",
+        "worktree.useRelativePaths=false",
+    ] {
+        assert!(
+            ENGINE_GIT_SWITCHES
+                .chunks(2)
+                .any(|pair| pair == ["-c", switch]),
+            "the switch set names `-c {switch}`"
+        );
+    }
+    let builders = [
+        (
+            "WorkspaceManager::command",
+            fixture
+                .manager
+                .command(&fixture.base, &[OsString::from("status")]),
+        ),
+        (
+            "read_only_git",
+            read_only_command(&fixture.base, &["status"]),
+        ),
+    ];
+    for (builder, command) in &builders {
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let own = args
+            .iter()
+            .position(|arg| *arg == OsStr::new("status"))
+            .expect("the command's own argument");
+        for pair in ENGINE_GIT_SWITCHES.chunks(2) {
+            let at = args
+                .windows(2)
+                .position(|window| {
+                    window
+                        .iter()
+                        .zip(pair)
+                        .all(|(arg, switch)| *arg == OsStr::new(switch))
+                })
+                .unwrap_or_else(|| panic!("{builder} does not carry {pair:?}: {args:?}"));
+            assert!(at < own, "{builder}'s {pair:?} comes before the subcommand");
+        }
+        let envs: Vec<(&OsStr, Option<&OsStr>)> = command.get_envs().collect();
+        for (key, value) in ENGINE_GIT_ENVIRONMENT
+            .iter()
+            .chain([&NO_REPLACEMENT_OBJECTS])
+        {
+            assert!(
+                envs.contains(&(OsStr::new(key), Some(OsStr::new(value)))),
+                "{builder} binds {key}={value}: {envs:?}"
+            );
+        }
+    }
+    assert_eq!(
+        ENGINE_GIT_ENVIRONMENT,
+        [
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_ALLOW_PROTOCOL", ""),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ]
+    );
+}
+
+/// FUC-D5-SPLITREAD and `PR128-RESIDUE-UNREACHABLE-OBJECTS-IGNORES-THE-EXIT-STATUS`:
+/// a `fsck` that fails is an error naming the command, its exit and its
+/// standard error, never the empty listing it printed before it stopped, and
+/// the residue classifier passes it on. A registration a killed add left torn
+/// is one such failure (`fsck` reads every worktree's `HEAD` and index);
+/// with the store whole again the same repository lists its unreachable
+/// object.
+#[test]
+fn a_failed_fsck_is_an_error_naming_the_command_and_never_an_empty_listing() {
+    let fixture = Fixture::created("fsck-fails-closed");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+    let orphan = fixture.base.join("orphan.txt");
+    fs::write(&orphan, b"an object nothing references\n").expect("orphan file");
+    let object = git(
+        &fixture.base,
+        &["hash-object", "-w", &orphan.to_string_lossy()],
+    );
+    fs::remove_file(&orphan).expect("remove the file; its object stays");
+    assert!(
+        unreachable_objects(&fixture.base)
+            .expect("fsck over a whole store")
+            .contains(&object),
+        "the control: the listing names the planted object"
+    );
+
+    let admin = tear_registration(&fixture.manager, &path);
+    let error = unreachable_objects(&fixture.base).expect_err("a failed fsck is an error");
+    let message = error.to_string();
+    assert!(
+        message.contains("git fsck --unreachable") && message.contains("commondir"),
+        "the error names the command and Git's own complaint: {message}"
+    );
+    let site = EffectSiteId::Object(ObjectSite::CandidateCommitTree);
+    let target = ResidueTarget::new(&fixture.base).at(&path);
+    assert!(
+        observed_residue_elements(site, &target).is_err(),
+        "the residue classifier passes the failure on rather than certifying no residue"
+    );
+
+    fs::write(admin.join("commondir"), b"../..\n").expect("repair the torn commondir");
+    assert!(
+        unreachable_objects(&fixture.base)
+            .expect("fsck over a whole store again")
+            .contains(&object)
+    );
+}
+
+/// FUC-D5-WINPATHBYTES: Git for Windows refuses a `$GIT_DIR` longer than
+/// `PATH_MAX - 40`, 220, by `strlen`, so the add's budget is counted in UTF-8
+/// bytes of the path as Git for Windows renders it — no verbatim prefix, `/`
+/// separators — and not in characters. Pinned on every platform over the
+/// rendering; the native add is the Windows test below.
+#[test]
+fn the_windows_git_dir_budget_counts_utf8_bytes_of_the_path_git_for_windows_is_handed() {
+    use crate::runner::host::GitdirRule;
+    let checkout = |ascii: usize, accented: usize| {
+        PathBuf::from(format!(
+            "C:{}{}",
+            "a".repeat(ascii - 2),
+            "\u{e9}".repeat(accented)
+        ))
+    };
+    let refused = |path: &Path| match refuse_git_dir_over_budget(path, GitdirRule::Windows) {
+        Ok(()) => None,
+        Err(UpstrokeError::Refused { message }) => Some(message),
+        Err(other) => panic!("not the budget's refusal: {other}"),
+    };
+    // `<checkout>/.git`: 215 ASCII characters and `/.git` are 220 bytes.
+    assert_eq!(
+        refused(&checkout(215, 0)),
+        None,
+        "220 bytes is within the budget"
+    );
+    let over = refused(&checkout(216, 0)).expect("221 bytes is over it");
+    assert!(
+        over.contains("221 bytes") && over.contains("220"),
+        "the refusal names the length and the budget: {over}"
+    );
+    // The record's boundary case: 217 ASCII characters and two `é` make 219
+    // characters and 221 bytes, which a character count would admit.
+    let accented = checkout(212, 2);
+    let git_dir = accented.join(".git");
+    let text = git_dir.to_str().expect("UTF-8");
+    assert_eq!(text.chars().count(), 219);
+    assert_eq!(text.len(), 221);
+    let message = refused(&accented).expect("219 characters, 221 bytes, is over the budget");
+    assert!(message.contains("221 bytes"), "{message}");
+    assert_eq!(
+        refused(&checkout(211, 2)),
+        None,
+        "218 characters and 220 bytes is within it"
+    );
+    // The verbatim prefix is not Git's spelling, so it is not counted.
+    let verbatim = PathBuf::from(format!(r"\\?\C:{}", "a".repeat(213)));
+    assert_eq!(
+        refused(&verbatim),
+        None,
+        "220 bytes once the prefix is dropped"
+    );
+    let verbatim = PathBuf::from(format!(r"\\?\C:{}", "a".repeat(214)));
+    assert!(
+        refused(&verbatim).is_some(),
+        "221 bytes once the prefix is dropped"
+    );
+}
+
+/// One frozen scrub step, `finalize.rs`'s private `scrub_slots`, through the
+/// manager's public calls: for every slot `intents()` returns that the step
+/// keeps, the forced removal under the finalizer's proof, then the intent.
+/// `scrub_slots` is frozen, so this sequence cannot drift from it; what it
+/// returns is the count the frozen step returns.
+fn scrub_kind(
+    manager: &WorkspaceManager,
+    hooks: &mut dyn EffectHooks,
+    keep: fn(&Slot) -> bool,
+) -> Result<usize, UpstrokeError> {
+    let mut count = 0;
+    for slot in manager.intents()? {
+        if !keep(&slot) {
+            continue;
+        }
+        let passed_over =
+            manager.remove_worktree_proving(hooks, &slot, WriterProof::NoWriterAlive)?;
+        assert!(
+            passed_over.is_empty(),
+            "no registration here names nothing: {passed_over:?}"
+        );
+        manager.remove_intent(hooks, &slot)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn tasks_only(slot: &Slot) -> bool {
+    matches!(slot, Slot::Task { .. })
+}
+
+fn snapshots_only(slot: &Slot) -> bool {
+    matches!(slot, Slot::Snapshot { .. })
+}
+
+/// One instance an oracle tracks: its checkout, its registration's
+/// administrative directory, captured by `gitdir` before anything ran, and
+/// its intent.
+struct Tracked {
+    checkout: PathBuf,
+    admin: PathBuf,
+    intent: PathBuf,
+}
+
+/// The instance `manager` adds of `slot`, intent first, tracked.
+fn add_tracked(fixture: &Fixture, manager: &WorkspaceManager, slot: &Slot) -> Tracked {
+    manager
+        .write_intent(&mut NoHooks, slot)
+        .expect("write the intent");
+    let checkout = manager
+        .add_worktree(&mut NoHooks, slot, &fixture.head)
+        .expect("add the worktree");
+    Tracked {
+        admin: super::fixture::registration_of(&fixture.manager, &checkout),
+        intent: manager.intent_path(slot),
+        checkout,
+    }
+}
+
+/// The frozen `CrossKind` fixture (`finalize.rs:370-400`) and, with
+/// `earlier`, the replacement's second fixture: alpha's task `g1`, the
+/// integration snapshot of sequence 1 torn as a killed add leaves it, and an
+/// earlier incarnation's instance of alpha beside the fixture's own.
+struct CrossKindInstances {
+    alpha: Slot,
+    snapshot: Slot,
+    tracked: Vec<Tracked>,
+}
+
+impl CrossKindInstances {
+    fn build(fixture: &Fixture, earlier: bool) -> Self {
+        let alpha = fixture.task("alpha", 1);
+        let mut tracked = vec![add_tracked(fixture, &fixture.manager, &alpha)];
+        if earlier {
+            let earlier = of_incarnation(fixture, "inc-0");
+            tracked.push(add_tracked(fixture, &earlier, &alpha));
+        }
+        let snapshot = Slot::Snapshot {
+            name: SnapshotName::integration(1),
+        };
+        let mut torn = add_tracked(fixture, &fixture.manager, &snapshot);
+        torn.admin = tear_registration(&fixture.manager, &torn.checkout);
+        assert_enumeration_dies_on(fixture, &torn.admin);
+        tracked.push(torn);
+        assert_eq!(
+            fixture.manager.intents().expect("intents"),
+            vec![alpha.clone(), snapshot.clone()],
+            "one task slot and one snapshot slot, whatever instances each has"
+        );
+        Self {
+            alpha,
+            snapshot,
+            tracked,
+        }
+    }
+
+    /// R-O1's assertion, which asks Git and not a suffix: no registration
+    /// names any instance of either slot, every captured administrative path
+    /// is absent, and every checkout and intent is gone.
+    fn assert_converged(&self, fixture: &Fixture) {
+        assert!(
+            fixture.manager.intents().expect("intents").is_empty(),
+            "both slots are reclaimed"
+        );
+        for tracked in &self.tracked {
+            assert!(
+                !tracked.checkout.exists() && !tracked.admin.exists() && !tracked.intent.exists(),
+                "{} is reclaimed, its registration and intent with it",
+                tracked.checkout.display()
+            );
+        }
+        for slot in [&self.alpha, &self.snapshot] {
+            assert!(
+                registered_instances_of(&fixture.manager, slot).is_empty(),
+                "Git lists no instance of {slot:?}"
+            );
+        }
+    }
+}
+
+/// R-O1, the replacement for `finalize.rs:421-422`'s first history: the task
+/// scrub, then the snapshot scrub, with no injection, on the frozen fixture
+/// and on its second-incarnation twin.
+#[test]
+fn r_o1_a_cross_kind_scrub_leaves_no_instance_of_either_slot_registered() {
+    for earlier in [false, true] {
+        let fixture = Fixture::created(&format!("r-o1-{earlier}"));
+        let instances = CrossKindInstances::build(&fixture, earlier);
+        assert_eq!(
+            scrub_kind(&fixture.manager, &mut NoHooks, tasks_only)
+                .expect("a torn snapshot registration does not wedge the task scrub"),
+            1
+        );
+        assert_eq!(
+            scrub_kind(&fixture.manager, &mut NoHooks, snapshots_only)
+                .expect("the snapshot scrub converges"),
+            1
+        );
+        instances.assert_converged(&fixture);
+    }
+}
+
+/// Answers `Error` at the `stop`-th phase it sees, and records every phase.
+struct StopAt {
+    stop: usize,
+    seen: Vec<(EffectSiteId, HookPhase)>,
+}
+
+impl EffectHooks for StopAt {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        self.seen.push((site, phase));
+        if self.seen.len() == self.stop {
+            Injection::Error
+        } else {
+            Injection::Proceed
+        }
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+/// R-O2, the replacement for `finalize.rs:421-422` at every injected phase
+/// (`a_cross_kind_scrub_stopped_at_any_phase_converges_on_the_next`): both
+/// scrubs stopped at the stop-th phase, then both again without injection,
+/// R-O1's assertion after every retry, and a completed run's phases exactly
+/// the frozen test's ten — on both fixtures, so an earlier incarnation's
+/// instance costs no phase of its own.
+#[test]
+fn r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered() {
+    for earlier in [false, true] {
+        let mut stop = 0;
+        let completed = loop {
+            stop += 1;
+            assert!(
+                stop <= 32,
+                "two scrubs of one slot each consult a bounded number of phases"
+            );
+            let fixture = Fixture::created(&format!("r-o2-{earlier}-{stop}"));
+            let instances = CrossKindInstances::build(&fixture, earlier);
+            let mut hooks = StopAt {
+                stop,
+                seen: Vec::new(),
+            };
+            let stopped = scrub_kind(&fixture.manager, &mut hooks, tasks_only)
+                .and_then(|_| scrub_kind(&fixture.manager, &mut hooks, snapshots_only));
+            for tracked in &instances.tracked {
+                if tracked.checkout.exists() || tracked.admin.exists() {
+                    assert!(
+                        tracked.intent.exists(),
+                        "stopped at phase {stop}: {} outlives its intent",
+                        tracked.checkout.display()
+                    );
+                }
+            }
+            scrub_kind(&fixture.manager, &mut NoHooks, tasks_only)
+                .and_then(|_| scrub_kind(&fixture.manager, &mut NoHooks, snapshots_only))
+                .unwrap_or_else(|error| {
+                    panic!("stopped at phase {stop}, the next scrubs converge: {error}")
+                });
+            instances.assert_converged(&fixture);
+            if stopped.is_ok() {
+                break hooks.seen;
+            }
+        };
+        let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
+        let remove_intent = EffectSiteId::Worktree(WorktreeSite::RemoveIntent);
+        let snapshot_remove = EffectSiteId::Snapshot(SnapshotSite::Remove);
+        let snapshot_remove_intent = EffectSiteId::Snapshot(SnapshotSite::RemoveIntent);
+        assert_eq!(
+            completed,
+            vec![
+                (remove, HookPhase::Before),
+                (remove, HookPhase::After),
+                (snapshot_remove, HookPhase::Before),
+                (snapshot_remove, HookPhase::After),
+                (remove_intent, HookPhase::Before),
+                (remove_intent, HookPhase::After),
+                (snapshot_remove, HookPhase::Before),
+                (snapshot_remove, HookPhase::After),
+                (snapshot_remove_intent, HookPhase::Before),
+                (snapshot_remove_intent, HookPhase::After),
+            ],
+            "the frozen test's ten phases, with {} instance(s) of alpha",
+            if earlier { 2 } else { 1 }
+        );
+    }
+}
+
+/// R-O3, the replacement for `finalize.rs:456`
+/// (`scrub_slots_converges_past_a_torn_registration_of_the_kind_it_reclaims`):
+/// alpha's and bravo's task `g1`, bravo's torn and sorting second; the task
+/// scrub returns 2, Git lists no instance of either, and alpha's own
+/// administrative directory, captured before the scrub, is gone — which the
+/// frozen test does not assert, and which its suffix predicate cannot see
+/// under per-incarnation names.
+#[test]
+fn r_o3_a_task_scrub_past_a_torn_registration_leaves_no_instance_registered() {
+    for earlier in [false, true] {
+        let fixture = Fixture::created(&format!("r-o3-{earlier}"));
+        let alpha = fixture.task("alpha", 1);
+        let bravo = fixture.task("bravo", 1);
+        let mut tracked = vec![add_tracked(&fixture, &fixture.manager, &alpha)];
+        if earlier {
+            let earlier = of_incarnation(&fixture, "inc-0");
+            tracked.push(add_tracked(&fixture, &earlier, &alpha));
+        }
+        let mut torn = add_tracked(&fixture, &fixture.manager, &bravo);
+        torn.admin = tear_registration(&fixture.manager, &torn.checkout);
+        assert_enumeration_dies_on(&fixture, &torn.admin);
+        tracked.push(torn);
+        assert_eq!(
+            fixture.manager.intents().expect("intents"),
+            vec![alpha.clone(), bravo.clone()],
+            "the torn slot sorts second, behind an intent the scrub reaches first"
+        );
+
+        assert_eq!(
+            scrub_kind(&fixture.manager, &mut NoHooks, tasks_only)
+                .expect("one torn registration does not wedge the scrub of the others"),
+            2
+        );
+        assert!(fixture.manager.intents().expect("intents").is_empty());
+        for tracked in &tracked {
+            assert!(
+                !tracked.checkout.exists() && !tracked.admin.exists() && !tracked.intent.exists(),
+                "{} is reclaimed with its registration and its intent",
+                tracked.checkout.display()
+            );
+        }
+        for slot in [&alpha, &bravo] {
+            assert!(
+                registered_instances_of(&fixture.manager, slot).is_empty(),
+                "Git lists no instance of {slot:?}"
+            );
+        }
+    }
+}
+
+/// What a census of the execution root finds: every entry under the three
+/// slot namespaces, and every checkout under the root Git lists, each as
+/// `<namespace>/<name>`, and every file in its intents directory, by name.
+///
+/// The intents are a census half of their own because an intent is an
+/// instance's durable record too: a resume that removed every earlier
+/// instance's checkout and registration and kept their intents left the
+/// first two halves clean (the follow-up C record, §6.10).
+fn instance_census(manager: &WorkspaceManager) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let root = canonical_prefix(manager.execution_root()).expect("the root's canonical prefix");
+    let mut entries = Vec::new();
+    for namespace in ["tasks", "merge", "snapshots"] {
+        if let Ok(listing) = fs::read_dir(root.join(namespace)) {
+            for entry in listing {
+                let entry = entry.expect("a namespace entry");
+                entries.push(format!(
+                    "{namespace}/{}",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    let mut registered = Vec::new();
+    for record in manager
+        .worktree_records()
+        .expect("Git enumerates the store")
+    {
+        let path = canonical_prefix(record.path()).expect("a registered path's prefix");
+        if let Ok(relative) = path.strip_prefix(&root) {
+            registered.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    let intents = intent_names(manager);
+    entries.sort();
+    registered.sort();
+    (entries, registered, intents)
+}
+
+/// Every file name in `manager`'s intents directory, sorted; none when the
+/// directory does not exist.
+fn intent_names(manager: &WorkspaceManager) -> Vec<String> {
+    let directory = manager.execution_root().join("intents");
+    let mut names = match fs::read_dir(&directory) {
+        Ok(listing) => listing
+            .map(|entry| {
+                entry
+                    .expect("an intents entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", directory.display()),
+    };
+    names.sort();
+    names
+}
+
+/// The three halves of [`instance_census`] hold only `manager`'s own
+/// instances: each entry and registration ends in `_<tag>`, and each intent
+/// in `_<tag>.intent`.
+fn assert_only_own_instances(manager: &WorkspaceManager, when: &str) {
+    let suffix = format!("_{}", manager.instance_tag().as_str());
+    let intent_suffix = format!("{suffix}.intent");
+    let (entries, registered, intents) = instance_census(manager);
+    for (name, own) in entries
+        .iter()
+        .chain(&registered)
+        .map(|name| (name, &suffix))
+        .chain(intents.iter().map(|name| (name, &intent_suffix)))
+    {
+        assert!(
+            name.ends_with(own.as_str()),
+            "{when}: `{name}` is not this incarnation's instance; census {entries:?} / \
+             {registered:?} / {intents:?}"
+        );
+    }
+}
+
+/// P-1 (§4.6): three managers of one run, three fixed incarnations, leave
+/// instances of shared and of distinct slots — with intents; intentless,
+/// recreated by `git worktree add` at a dead tag; and registration-only, the
+/// checkout removed. After each resume's walk the census, the intents
+/// included, lists only the resuming incarnation's instances; after
+/// finalization it lists none, and the execution root is removed.
+///
+/// Each resume recreates the open generation through the production path,
+/// `T-DISPATCH`'s `verify_or_recreate`, as recovery does, and reclaims every
+/// other slot as the walks do. A resume simulated by the walks' reclaim of
+/// the open generation's slot hid that the production path kept every
+/// earlier incarnation's intent of it, and a census without the intents
+/// could not see them (the follow-up C record, §6.10).
+#[test]
+fn p1_after_every_walk_only_the_current_incarnations_instances_remain() {
+    use crate::engine::topology::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
+    use crate::engine::topology::seams::NoTopologyHooks;
+    use crate::topology::events::CommitSha;
+
+    let fixture = Fixture::created("p1-three-incarnations");
+    let first = &fixture.manager;
+    let second = of_incarnation(&fixture, "inc-2");
+    let third = of_incarnation(&fixture, "inc-3");
+    let open = OpenGeneration {
+        key: TaskKey(0),
+        generation: GenerationId(1),
+        base: CommitSha(fixture.head.clone()),
+        slot: task_slot(TaskKey(0), GenerationId(1)),
+        source: None,
+    };
+    let alpha = open.slot.clone();
+    let beta = fixture.task("beta", 1);
+    let staging = Slot::Staging { sequence: 2 };
+    let snapshot = Slot::Snapshot {
+        name: SnapshotName::integration(3),
+    };
+
+    // The first incarnation: alpha and a snapshot with intents, beta's late
+    // add with none, and a staging registration whose checkout is gone.
+    add_tracked(&fixture, first, &alpha);
+    add_tracked(&fixture, first, &snapshot);
+    late_add(&fixture, &first.slot_path(&beta));
+    late_add(&fixture, &first.slot_path(&staging));
+    fs::remove_dir_all(first.slot_path(&staging))
+        .expect("the checkout goes, the registration stays");
+
+    // Each resume walks every slot `intents()` reports — every other slot
+    // reclaimed, then the open generation alpha recreated as its own through
+    // the production path — and the census then holds its own instances only.
+    let resume = |manager: &WorkspaceManager, when: &str| {
+        for slot in manager.intents().expect("intents") {
+            if slot != alpha {
+                reclaim_slot(manager, &slot).expect("the walk reclaims the slot");
+            }
+        }
+        assert_eq!(
+            verify_or_recreate(
+                manager,
+                &mut NoTopologyHooks::new(),
+                &open,
+                &open.quiescence()
+            )
+            .expect("the open generation, recreated as this incarnation's"),
+            Reuse::Recreated {
+                failure: VerifyFailure::NotRegistered
+            },
+            "{when}: a fresh incarnation has no instance of its own to reuse"
+        );
+        assert_only_own_instances(manager, when);
+    };
+    resume(&second, "after the second incarnation's walk");
+    // The second leaves more for the third: an intentless late add of its own
+    // snapshot slot and a registration-only staging slot.
+    late_add(&fixture, &second.slot_path(&snapshot));
+    late_add(&fixture, &second.slot_path(&staging));
+    fs::remove_dir_all(second.slot_path(&staging))
+        .expect("the checkout goes, the registration stays");
+    resume(&third, "after the third incarnation's walk");
+
+    for keep in [
+        tasks_only as fn(&Slot) -> bool,
+        snapshots_only,
+        |slot: &Slot| matches!(slot, Slot::Staging { .. }),
+    ] {
+        scrub_kind(&third, &mut NoHooks, keep).expect("the finalizer's scrub");
+    }
+    third
+        .remove_staging_leftovers(&mut NoHooks)
+        .expect("the finalizer's staging leftovers");
+    assert!(
+        third
+            .remove_execution_root(&mut NoHooks)
+            .expect("finalization's last step"),
+        "the execution root is removed"
+    );
+    let (entries, registered, intents) = instance_census(&third);
+    assert!(
+        entries.is_empty() && registered.is_empty() && intents.is_empty(),
+        "after finalization the census lists nothing: {entries:?} / {registered:?} / \
+         {intents:?}"
+    );
+}
+
+/// `T-DISPATCH`'s recreate on resume, through the production path
+/// (`verify_or_recreate`): the dispatching incarnation leaves its open
+/// generation with its intent and its instance, and three fresh incarnations
+/// resume it in turn. Each finds no instance of its own, recreates the
+/// generation as its own, and leaves exactly one intent of it in the intents
+/// directory, its own: every earlier incarnation's intent is reclaimed before
+/// the replacement is created (erratum E-FUC-3's item 3; the record's §4.5).
+/// At `83516466` the recreate removed the earlier instances' checkouts and
+/// registrations and kept their intents, so the counts were 2, 3 and 4 (the
+/// follow-up C record, §6.10).
+#[test]
+fn every_resume_that_recreates_an_open_generation_leaves_one_intent_its_own() {
+    use crate::engine::topology::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
+    use crate::engine::topology::seams::NoTopologyHooks;
+    use crate::topology::events::CommitSha;
+
+    let fixture = Fixture::created("resume-intents");
+    let open = OpenGeneration {
+        key: TaskKey(0),
+        generation: GenerationId(1),
+        base: CommitSha(fixture.head.clone()),
+        slot: task_slot(TaskKey(0), GenerationId(1)),
+        source: None,
+    };
+    let dispatched = add_tracked(&fixture, &fixture.manager, &open.slot);
+    assert_eq!(intent_names(&fixture.manager).len(), 1, "the premise");
+
+    let mut counts = Vec::new();
+    let mut resumed = Vec::new();
+    for incarnation in ["inc-2", "inc-3", "inc-4"] {
+        let resumer = of_incarnation(&fixture, incarnation);
+        let reuse = verify_or_recreate(
+            &resumer,
+            &mut NoTopologyHooks::new(),
+            &open,
+            &open.quiescence(),
+        )
+        .expect("the resume recreates the open generation");
+        assert_eq!(
+            reuse,
+            Reuse::Recreated {
+                failure: VerifyFailure::NotRegistered
+            },
+            "{incarnation}: a fresh incarnation has no instance of its own to reuse"
+        );
+        assert!(
+            healthy_instance(&resumer, &open.slot, &fixture.head),
+            "{incarnation}: the generation's worktree is its own, at the recorded base"
+        );
+        let census = instance_census(&resumer);
+        counts.push(census.2.len());
+        resumed.push((incarnation, resumer, census));
+    }
+    assert_eq!(
+        counts,
+        vec![1, 1, 1],
+        "every resume reclaims the earlier incarnations' intents before it creates its own"
+    );
+    for (incarnation, resumer, (entries, registered, intents)) in &resumed {
+        let tag = resumer.instance_tag().as_str();
+        let own = format!("_{tag}");
+        assert!(
+            entries
+                .iter()
+                .chain(registered)
+                .all(|name| name.ends_with(&own))
+                && intents
+                    .iter()
+                    .all(|name| name.ends_with(&format!("{own}.intent"))),
+            "{incarnation}: after its resume only its own instance and intent remain: \
+             {entries:?} / {registered:?} / {intents:?}"
+        );
+    }
+    assert!(
+        !dispatched.checkout.exists() && !dispatched.admin.exists() && !dispatched.intent.exists(),
+        "nothing of the dispatching incarnation's instance is left"
+    );
+}
+
+/// Whether `manager`'s own instance of `slot` is registered with Git and
+/// checked out at `base`.
+fn healthy_instance(manager: &WorkspaceManager, slot: &Slot, base: &str) -> bool {
+    let checkout = manager.slot_path(slot);
+    manager
+        .worktree_records()
+        .expect("Git enumerates the store")
+        .into_iter()
+        .any(|record| crate::util::same_path(record.path(), &checkout))
+        && git(&checkout, &["rev-parse", "HEAD"]) == base
+}
+
+/// A rerere resolution the user recorded the ordinary way (§5.2's witness,
+/// as a fixture): `r.txt` of ten lines whose fifth is `main` on `main` and
+/// `side` on a side commit; the user's own pick of the side commit
+/// conflicted, they wrote the fifth line as `resolved`, ran `git rerere` and
+/// aborted. The repository then enables rerere and its auto-update, so a
+/// pick that reached rerere would replay the resolution and stage it.
+struct RecordedResolution {
+    main: String,
+    side: String,
+    rr_cache: PathBuf,
+}
+
+fn record_a_resolution(fixture: &Fixture) -> RecordedResolution {
+    let base = &fixture.base;
+    let lines = |fifth: &str| -> String {
+        (1..=10)
+            .map(|line| format!("line {line} {}\n", if line == 5 { fifth } else { "base" }))
+            .collect()
+    };
+    write_file(&base.join("r.txt"), lines("base").as_bytes());
+    git(base, &["add", "r.txt"]);
+    git(base, &["commit", "-q", "-m", "rerere base"]);
+    git(base, &["checkout", "-q", "-b", "rerere-side"]);
+    write_file(&base.join("r.txt"), lines("side").as_bytes());
+    git(base, &["commit", "-q", "-am", "rerere side"]);
+    let side = git(base, &["rev-parse", "HEAD"]);
+    git(base, &["checkout", "-q", "main"]);
+    write_file(&base.join("r.txt"), lines("main").as_bytes());
+    git(base, &["commit", "-q", "-am", "rerere main"]);
+    let main = git(base, &["rev-parse", "HEAD"]);
+    let pick = git_out(base, &["-c", "rerere.enabled=true", "cherry-pick", &side]);
+    assert!(!pick.status.success(), "the user's own pick conflicts");
+    write_file(&base.join("r.txt"), lines("resolved").as_bytes());
+    git(base, &["-c", "rerere.enabled=true", "rerere"]);
+    git(base, &["cherry-pick", "--abort"]);
+    git(base, &["config", "rerere.enabled", "true"]);
+    git(base, &["config", "rerere.autoUpdate", "true"]);
+    let rr_cache = fixture.manager.common_git_dir().join("rr-cache");
+    assert!(
+        !tree_bytes(&rr_cache).is_empty(),
+        "the premise: the user's resolution is recorded in the shared rr-cache"
+    );
+    RecordedResolution {
+        main,
+        side,
+        rr_cache,
+    }
+}
+
+/// The slot's own git dir (its registration), for its `MERGE_RR`.
+fn slot_git_dir(fixture: &Fixture, slot: &Slot) -> PathBuf {
+    super::fixture::registration_of(&fixture.manager, &fixture.manager.slot_path(slot))
+}
+
+/// T-RR1 (§5.2, FUC-D4-RERERE): with rerere enabled, a recorded resolution
+/// and auto-update, the repair materialization's pick reads `Conflict` with
+/// Git's markers in the file, `rr-cache` is the same names, sizes and bytes
+/// before and after, and no `MERGE_RR` exists in the slot's git dir: the pick
+/// neither read nor wrote the repository's shared rerere state.
+#[test]
+fn t_rr1_the_repair_pick_neither_replays_nor_records_a_rerere_resolution() {
+    let fixture = Fixture::created("rerere-repair");
+    let recorded = record_a_resolution(&fixture);
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &recorded.main)
+        .expect("the repair slot at main");
+    let before = tree_bytes(&recorded.rr_cache);
+    let materialized = fixture
+        .manager
+        .repair_materialize(&mut NoHooks, &slot, &recorded.side)
+        .expect("the pick runs");
+    assert_eq!(
+        materialized,
+        Materialized::Conflict,
+        "Git's own conflict, unresolved"
+    );
+    let content = fs::read_to_string(path.join("r.txt")).expect("the conflicted file");
+    assert!(
+        content.contains("<<<<<<<") && !content.contains("line 5 resolved"),
+        "Git's markers, not the user's recorded resolution: {content}"
+    );
+    assert_eq!(
+        tree_bytes(&recorded.rr_cache),
+        before,
+        "rr-cache is untouched"
+    );
+    assert!(
+        !slot_git_dir(&fixture, &slot).join("MERGE_RR").exists(),
+        "and the slot's git dir has no MERGE_RR"
+    );
+}
+
+/// T-RR2: the same for the proposal pick and the state it leaves.
+#[test]
+fn t_rr2_the_proposal_pick_neither_replays_nor_records_a_rerere_resolution() {
+    let fixture = Fixture::created("rerere-proposal");
+    let recorded = record_a_resolution(&fixture);
+    let slot = Slot::Staging { sequence: 1 };
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &recorded.main)
+        .expect("the staging slot at main");
+    let before = tree_bytes(&recorded.rr_cache);
+    fixture
+        .manager
+        .proposal_cherry_pick(&mut NoHooks, &slot, &recorded.side)
+        .expect_err("the pick conflicts");
+    assert!(
+        matches!(
+            fixture
+                .manager
+                .proposal_state(&slot, &recorded.main)
+                .expect("the state the pick left"),
+            ProposalState::Conflict { .. }
+        ),
+        "the proposal reads Git's conflict, not a resolution staged behind it"
+    );
+    let content = fs::read_to_string(path.join("r.txt")).expect("the conflicted file");
+    assert!(
+        content.contains("<<<<<<<") && !content.contains("line 5 resolved"),
+        "{content}"
+    );
+    assert_eq!(
+        tree_bytes(&recorded.rr_cache),
+        before,
+        "rr-cache is untouched"
+    );
+    assert!(!slot_git_dir(&fixture, &slot).join("MERGE_RR").exists());
+}
+
+/// The running Git's version as `(major, minor)`.
+fn git_version() -> (u32, u32) {
+    let text = git(Path::new("."), &["version"]);
+    let numbers = text
+        .trim_start_matches("git version ")
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    match numbers.as_slice() {
+        [major, minor, ..] => (*major, *minor),
+        _ => panic!("an unreadable `git version`: {text}"),
+    }
+}
+
+/// T-CFG1 (§5.3): under the user's `worktree.useRelativePaths=true`, an
+/// engine add leaves the common config byte for byte as it was; Git 2.48 and
+/// later would otherwise set `extensions.relativeWorktrees` there, which Gits
+/// older than 2.48 refuse. Run where Git is 2.48 or later; older Gits ignore
+/// the key, so there it says so and asserts nothing.
+#[test]
+fn t_cfg1_an_engine_add_leaves_the_common_config_as_it_was_under_relative_paths() {
+    let version = git_version();
+    if version < (2, 48) {
+        eprintln!("t_cfg1: git {version:?} predates worktree.useRelativePaths; nothing to assert");
+        return;
+    }
+    let fixture = Fixture::created("relative-paths-config");
+    git(
+        &fixture.base,
+        &["config", "worktree.useRelativePaths", "true"],
+    );
+    let config = fixture.manager.common_git_dir().join("config");
+    let before = fs::read(&config).expect("the common config");
+    fixture.add_task(&mut NoHooks, "alpha", 1);
+    assert_eq!(
+        String::from_utf8_lossy(&fs::read(&config).expect("the common config")),
+        String::from_utf8_lossy(&before),
+        "the engine's add changed the repository's format"
+    );
+}
+
+/// How long a witness waits for anything it handshakes on, and how long a
+/// held filter or helper waits for its release before it gives up: so a
+/// mutation that breaks a handshake fails its test rather than wedging it.
+#[cfg(unix)]
+const WITNESS_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait, within [`WITNESS_BOUND`], for `marker` to exist.
+#[cfg(unix)]
+fn await_marker(marker: &Path, what: &str) {
+    let deadline = std::time::Instant::now() + WITNESS_BOUND;
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} did not happen within {WITNESS_BOUND:?}"
+        );
+        super::fixture::rest(std::time::Duration::from_millis(10));
+    }
+}
+
+/// `path` as one POSIX shell word: single-quoted, with each `'` in it
+/// closed, escaped and reopened (`'\''`). Git hands a filter's command to the
+/// shell, and the witnesses' scripts assign their directory in shell, so a
+/// temporary directory whose name holds a space or an apostrophe reaches both
+/// whole (the follow-up C record, §6.10).
+#[cfg(unix)]
+fn sh_quoted(path: &Path) -> String {
+    let text = path.to_str().expect("a fixture path is UTF-8");
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The DESC witness's repository (the record, §3.3.3): `.gitattributes`
+/// sends `*.dat` through the `hold` filter, whose smudge runs `script`; C1
+/// adds `b.dat`, and C2, on top of it, rewrites `a.txt` as `C2 base`. Returns
+/// `(c1, c2)`.
+#[cfg(unix)]
+fn filtered_commits(fixture: &Fixture, script: &Path) -> (String, String) {
+    let base = &fixture.base;
+    git(
+        base,
+        &[
+            "config",
+            "filter.hold.smudge",
+            &format!("sh {}", sh_quoted(script)),
+        ],
+    );
+    git(base, &["config", "filter.hold.clean", "cat"]);
+    write_file(&base.join(".gitattributes"), b"*.dat filter=hold\n");
+    write_file(&base.join("b.dat"), b"held data\n");
+    git(base, &["add", ".gitattributes", "b.dat"]);
+    git(base, &["commit", "-q", "-m", "C1"]);
+    let c1 = git(base, &["rev-parse", "HEAD"]);
+    write_file(&base.join("a.txt"), b"C2 base\n");
+    git(base, &["commit", "-q", "-am", "C2"]);
+    let c2 = git(base, &["rev-parse", "HEAD"]);
+    (c1, c2)
+}
+
+/// The successor's half of every route: its walk reclaims the slot — every
+/// instance and intent the dead incarnation left — it adds its own instance
+/// at C2, and the worker writes its paid edits there. Returns the successor's
+/// checkout.
+#[cfg(unix)]
+fn successor_takes_the_slot(successor: &WorkspaceManager, slot: &Slot, c2: &str) -> PathBuf {
+    for found in successor.intents().expect("intents") {
+        reclaim_slot(successor, &found).expect("the successor's walk");
+    }
+    successor
+        .write_intent(&mut NoHooks, slot)
+        .expect("the successor's intent");
+    let checkout = successor
+        .add_worktree(&mut NoHooks, slot, c2)
+        .expect("the successor's instance");
+    write_file(&checkout.join("a.txt"), b"paid worker edits\n");
+    checkout
+}
+
+/// What every route asserts at the end: the successor's checkout holds the
+/// paid edits, its registration is there and names it, and its HEAD is C2.
+#[cfg(unix)]
+fn assert_successor_intact(successor: &WorkspaceManager, checkout: &Path, c2: &str) {
+    assert_eq!(
+        fs::read_to_string(checkout.join("a.txt")).ok().as_deref(),
+        Some("paid worker edits\n"),
+        "PAID EDITS LOST: the dead incarnation's writer reached the successor's checkout"
+    );
+    let admin = successor
+        .revalidate_removal_proving(checkout, WriterProof::Unknown)
+        .expect("the store binds")
+        .admin;
+    assert!(
+        admin.is_some_and(|admin| admin.is_dir()),
+        "REGISTRATION LOST: the successor's checkout is no longer registered"
+    );
+    assert_eq!(git(checkout, &["rev-parse", "HEAD"]), c2, "HEAD REWRITTEN");
+}
+
+/// The DESC witness's **filter** route through the production funnels
+/// (the record, §3.3.3; at base, #329's `witness-locks-filter-base.log`): a
+/// dead incarnation's add is held in its checkout's smudge filter; the
+/// successor reclaims the slot, adds its own and writes the paid edits; the
+/// filter is released, the dead add's checkout fails, and its junk removal
+/// deletes its own paths by name. Under one name per slot that is the
+/// successor's registration and checkout; under per-incarnation instances it
+/// is the dead incarnation's own, already gone.
+#[cfg(unix)]
+#[test]
+fn desc_filter_route_a_dead_adds_junk_removal_cannot_reach_the_successors_slot() {
+    let fixture = Fixture::created("desc-filter-route");
+    let hold = fixture.root.join("hold");
+    create_dir(&hold);
+    let script = hold.join("filter.sh");
+    write_file(
+        &script,
+        format!(
+            "dir={dir}\n\
+             if mkdir \"$dir/claimed\" 2>/dev/null; then\n\
+             : > \"$dir/held\"\n\
+             n=0\n\
+             while [ ! -e \"$dir/release\" ] && [ \"$n\" -lt 6000 ]; do sleep 0.01; n=$((n+1)); done\n\
+             fi\n\
+             exec cat\n",
+            dir = sh_quoted(&hold)
+        )
+        .as_bytes(),
+    );
+    let (c1, c2) = filtered_commits(&fixture, &script);
+    let slot = fixture.task("alpha", 1);
+    let dead = of_incarnation(&fixture, "inc-0");
+    dead.write_intent(&mut NoHooks, &slot)
+        .expect("the dead incarnation's intent");
+    let dead_add = {
+        let (dead, slot) = (dead.clone(), slot.clone());
+        std::thread::spawn(move || dead.add_worktree(&mut NoHooks, &slot, &c1))
+    };
+    await_marker(
+        &hold.join("held"),
+        "the dead add's checkout reaching its filter",
+    );
+
+    let checkout = successor_takes_the_slot(&fixture.manager, &slot, &c2);
+    write_file(&hold.join("release"), b"");
+    let dead_outcome = dead_add.join().expect("the dead add's thread");
+    assert!(
+        dead_outcome.is_err(),
+        "the dead add's checkout lost its directory and failed: {dead_outcome:?}"
+    );
+    assert_successor_intact(&fixture.manager, &checkout, &c2);
+}
+
+/// The DESC witness's **helper** route (the record, §3.3.3; #329's
+/// `pr329-d3-reg-recreated` result): the dead add completes, but its filter
+/// started a helper that keeps the checkout's path and, once released, runs
+/// `git -C <that path> reset --hard HEAD` after the successor has re-taken
+/// the slot. Under one name per slot it resets the successor's checkout and
+/// the paid edits are lost; under per-incarnation instances the path it kept
+/// is the dead incarnation's own, which the successor's walk removed.
+#[cfg(unix)]
+#[test]
+fn desc_helper_route_a_dead_filters_late_helper_cannot_reach_the_successors_slot() {
+    let fixture = Fixture::created("desc-helper-route");
+    let hold = fixture.root.join("hold");
+    create_dir(&hold);
+    let script = hold.join("filter.sh");
+    write_file(
+        &script,
+        format!(
+            "dir={dir}\n\
+             if mkdir \"$dir/claimed\" 2>/dev/null; then\n\
+             top=\"$(pwd)\"\n\
+             ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR\n\
+               n=0\n\
+               while [ ! -e \"$dir/release\" ] && [ \"$n\" -lt 6000 ]; do sleep 0.01; n=$((n+1)); done\n\
+               git -C \"$top\" reset -q --hard HEAD > \"$dir/helper.log\" 2>&1\n\
+               : > \"$dir/helper-done\" ) < /dev/null > /dev/null 2>&1 &\n\
+             fi\n\
+             exec cat\n",
+            dir = sh_quoted(&hold)
+        )
+        .as_bytes(),
+    );
+    let (c1, c2) = filtered_commits(&fixture, &script);
+    let slot = fixture.task("alpha", 1);
+    let dead = of_incarnation(&fixture, "inc-0");
+    dead.write_intent(&mut NoHooks, &slot)
+        .expect("the dead incarnation's intent");
+    dead.add_worktree(&mut NoHooks, &slot, &c1)
+        .expect("the dead add completes; its filter's helper lives on");
+    assert!(
+        hold.join("claimed").is_dir(),
+        "the filter started its helper"
+    );
+
+    let checkout = successor_takes_the_slot(&fixture.manager, &slot, &c2);
+    write_file(&hold.join("release"), b"");
+    await_marker(&hold.join("helper-done"), "the helper's late reset");
+    assert_successor_intact(&fixture.manager, &checkout, &c2);
+}
+
+/// The plan of a torn registration's repair reads every instance of every
+/// slot: an earlier incarnation's add killed while it wrote `commondir` left
+/// its registration torn, so Git's enumeration dies on it, and another slot's
+/// intent removal — whose revalidation runs that enumeration — repairs it
+/// through the torn slot's own removal and then succeeds. A plan that read
+/// only this incarnation's instance of each slot found nothing to repair, and
+/// the removal refused on every attempt.
+#[test]
+fn a_torn_registration_an_earlier_incarnation_left_is_repaired_with_its_slot() {
+    let fixture = Fixture::created("instance-torn-earlier");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let alpha = fixture.task("alpha", 1);
+    let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+    let torn = add_tracked(&fixture, &earlier, &alpha);
+    tear_registration(&fixture.manager, &torn.checkout);
+    assert_enumeration_dies_on(&fixture, &torn.admin);
+
+    fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &beta)
+        .expect("beta's removal binds by gitdir and lists nothing");
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &beta)
+        .expect("beta's intent removal repairs the earlier torn registration first");
+    assert!(!torn.admin.exists() && !torn.checkout.exists());
+    assert!(
+        torn.intent.exists(),
+        "the repair removes the checkout and the registration and leaves the intent, for the \
+         step that owns the slot"
+    );
+    fixture
+        .manager
+        .worktree_records()
+        .expect("Git enumerates again");
+}
+
+/// The torn-registration repair removes only the instance its plan proved
+/// torn. The successor runs `alpha` and has written its paid edits there; a
+/// dead incarnation's late add recreates its own instance of `alpha`, with no
+/// intent, beside it. Then the successor retires the unrelated slot `beta`,
+/// and its intent removal revalidates through Git's enumeration.
+///
+/// - **Whole**, the control, first: the late add's registration is whole,
+///   nothing is repaired, and the retirement of `beta` touches no instance of
+///   `alpha`.
+/// - **Torn**: the late add's registration is left as a kill leaves it, so
+///   the enumeration dies on it and the repair runs. It removes the dead
+///   instance's checkout and registration and nothing else: the successor's
+///   checkout, its registration, its intent and its paid edits stay, its
+///   instance still verifies, and Git enumerates again. A repair that removed
+///   every instance of the torn instance's slot deleted the successor's live
+///   worktree (executed at `83516466`, the follow-up C record, §6.10).
+#[test]
+fn a_torn_earlier_instances_repair_leaves_the_successors_live_instance_of_its_slot() {
+    for torn in [false, true] {
+        let shape = if torn { "torn" } else { "whole" };
+        let fixture = Fixture::created(&format!("instance-beside-live-{shape}"));
+        let earlier = of_incarnation(&fixture, "inc-0");
+        let alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let beta = fixture.add_task(&mut NoHooks, "beta", 1);
+        let live = fixture.manager.slot_path(&alpha);
+        let live_admin = super::fixture::registration_of(&fixture.manager, &live);
+        let paid = live.join("paid-edits.txt");
+        write_file(&paid, b"the successor's paid edits\n");
+
+        let dead = earlier.slot_path(&alpha);
+        late_add(&fixture, &dead);
+        let dead_admin = if torn {
+            let admin = tear_registration(&fixture.manager, &dead);
+            assert_enumeration_dies_on(&fixture, &admin);
+            admin
+        } else {
+            super::fixture::registration_of(&fixture.manager, &dead)
+        };
+        assert!(
+            !earlier.intent_path(&alpha).exists(),
+            "{shape}: the late add wrote no intent"
+        );
+
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &beta)
+            .expect("beta's removal binds by gitdir and lists nothing");
+        fixture
+            .manager
+            .remove_intent(&mut NoHooks, &beta)
+            .expect("beta's intent removal, past the repair when there is a tear");
+        assert_eq!(
+            fs::read(&paid).ok().as_deref(),
+            Some(b"the successor's paid edits\n".as_slice()),
+            "{shape}: PAID EDITS LOST: the successor's checkout was removed"
+        );
+        assert!(
+            live_admin.is_dir(),
+            "{shape}: REGISTRATION LOST: the successor's instance is no longer registered"
+        );
+        assert!(
+            fixture.manager.intent_path(&alpha).exists(),
+            "{shape}: the successor's intent stays"
+        );
+        assert_eq!(
+            fixture
+                .manager
+                .verify_worktree(
+                    &mut NoHooks,
+                    &alpha,
+                    &Quiescence::AtBase(fixture.head.clone())
+                )
+                .expect("verify"),
+            Ok(()),
+            "{shape}: the successor's instance still verifies as its own"
+        );
+        assert_eq!(
+            !dead.exists() && !dead_admin.exists(),
+            torn,
+            "{shape}: the repair removes the torn instance, and only a repair removes one"
+        );
+        fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates again");
+    }
+}
+
+/// P-2's helper: a dead incarnation in a process of its own. It adopts the
+/// parent's fixture, derives its manager under the incarnation the parent
+/// names, writes the slot's intent and dies inside the add at the phase the
+/// parent names, by `std::process::abort` (`Injection::Kill`), as the frozen
+/// recovery tests' children die at theirs.
+#[test]
+#[ignore = "subprocess helper"]
+fn instance_kill_child() {
+    let (Some(root), Some(incarnation), Some(phase), Some(kind)) = (
+        std::env::var_os(INSTANCE_KILL_ROOT),
+        std::env::var(INSTANCE_KILL_INCARNATION).ok(),
+        std::env::var(INSTANCE_KILL_PHASE).ok(),
+        std::env::var(INSTANCE_KILL_SLOT).ok(),
+    ) else {
+        return;
+    };
+    let fixture = Fixture::adopt(PathBuf::from(root));
+    let manager = of_incarnation(&fixture, &incarnation);
+    let slot = match kind.as_str() {
+        "task" => fixture.task("alpha", 1),
+        _ => Slot::Snapshot {
+            name: SnapshotName::integration(7),
+        },
+    };
+    let head = fixture.head.clone();
+    // The parent owns the tree; this process dies without its destructor.
+    std::mem::forget(fixture);
+
+    struct KillAt(HookPhase);
+    impl EffectHooks for KillAt {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if matches!(
+                site,
+                EffectSiteId::Worktree(WorktreeSite::Add)
+                    | EffectSiteId::Snapshot(SnapshotSite::Add)
+            ) && phase == self.0
+            {
+                Injection::Kill
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn refusal_cause(&self) -> Option<String> {
+            None
+        }
+    }
+    let at = if phase == "before" {
+        HookPhase::Before
+    } else {
+        HookPhase::After
+    };
+    manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the dead incarnation's intent");
+    let _ = manager.add_worktree(&mut KillAt(at), &slot, &head);
+    panic!("the add's funnel returned past the kill armed at its {phase} phase");
+}
+
+const INSTANCE_KILL_ROOT: &str = "UPSTROKE_PR330_INSTANCE_KILL_ROOT";
+const INSTANCE_KILL_INCARNATION: &str = "UPSTROKE_PR330_INSTANCE_KILL_INCARNATION";
+const INSTANCE_KILL_PHASE: &str = "UPSTROKE_PR330_INSTANCE_KILL_PHASE";
+const INSTANCE_KILL_SLOT: &str = "UPSTROKE_PR330_INSTANCE_KILL_SLOT";
+
+/// P-2 (§4.6): child processes, each a dead incarnation of the run under its
+/// own fixed incarnation id, are killed inside the add in turn — before Git
+/// ran and after it finished — and the parent then resumes as a further
+/// incarnation. After its walk the census lists only the parent's own
+/// instances; after finalization it lists none, and the root is removed.
+#[test]
+fn p2_instances_of_killed_incarnations_in_other_processes_are_reclaimed_by_the_resume() {
+    let fixture = Fixture::created("p2-killed-incarnations");
+    let root = fixture.root.clone();
+    for (incarnation, phase, slot) in [
+        ("inc-a", "before", "task"),
+        ("inc-b", "after", "task"),
+        ("inc-c", "after", "snapshot"),
+        ("inc-d", "before", "snapshot"),
+    ] {
+        let status = run_kill_child_within(
+            "workspace_manager::tests::instance_kill_child",
+            &[
+                (INSTANCE_KILL_ROOT, root.as_os_str()),
+                (INSTANCE_KILL_INCARNATION, OsStr::new(incarnation)),
+                (INSTANCE_KILL_PHASE, OsStr::new(phase)),
+                (INSTANCE_KILL_SLOT, OsStr::new(slot)),
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap_or_else(|| panic!("the {incarnation} child ended within its bound"));
+        assert!(
+            died_by_abort(&status),
+            "the {incarnation} child died by abort at its {phase} phase: {status:?}"
+        );
+    }
+    let alpha = fixture.task("alpha", 1);
+    let snapshot = Slot::Snapshot {
+        name: SnapshotName::integration(7),
+    };
+    for (slot, incarnation) in [(&alpha, "inc-b"), (&snapshot, "inc-c")] {
+        assert!(
+            of_incarnation(&fixture, incarnation)
+                .slot_path(slot)
+                .join(".git")
+                .exists(),
+            "the premise: {incarnation}'s add finished before it died"
+        );
+    }
+
+    for slot in fixture.manager.intents().expect("intents") {
+        reclaim_slot(&fixture.manager, &slot).expect("the resume's walk");
+    }
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &alpha)
+        .expect("the open generation's intent");
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &alpha, &fixture.head)
+        .expect("the open generation, as the resume's own");
+    assert_only_own_instances(&fixture.manager, "after the resume's walk");
+
+    scrub_kind(&fixture.manager, &mut NoHooks, tasks_only).expect("the task scrub");
+    fixture
+        .manager
+        .remove_staging_leftovers(&mut NoHooks)
+        .expect("the staging leftovers");
+    assert!(
+        fixture
+            .manager
+            .remove_execution_root(&mut NoHooks)
+            .expect("finalization's last step"),
+        "the root is removed"
+    );
+    let (entries, registered, intents) = instance_census(&fixture.manager);
+    assert!(
+        entries.is_empty() && registered.is_empty() && intents.is_empty(),
+        "{entries:?} / {registered:?} / {intents:?}"
+    );
+}
+
+/// The real `git` on this process's `PATH`, which P-3's stub hands on to.
+#[cfg(unix)]
+fn real_git() -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("a git on PATH")
+}
+
+#[cfg(unix)]
+const LATE_ADD_ROOT: &str = "UPSTROKE_PR330_LATE_ADD_ROOT";
+#[cfg(unix)]
+const LATE_ADD_HOLD: &str = "UPSTROKE_PR330_LATE_ADD_HOLD";
+#[cfg(unix)]
+const LATE_ADD_REAL_GIT: &str = "UPSTROKE_PR330_LATE_ADD_REAL_GIT";
+
+/// P-3's helper: the dead incarnation, in a process whose `PATH` starts with
+/// a `git` stub that holds the first `worktree add` before the real Git runs,
+/// until the parent releases it. The incarnation writes its intent and calls
+/// the production add; the add's Git runs late, after the successor's walk.
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn late_add_child() {
+    let (Some(root), Some(_hold)) = (
+        std::env::var_os(LATE_ADD_ROOT),
+        std::env::var_os(LATE_ADD_HOLD),
+    ) else {
+        return;
+    };
+    let fixture = Fixture::adopt(PathBuf::from(root));
+    let dead = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.task("alpha", 1);
+    let head = fixture.head.clone();
+    std::mem::forget(fixture);
+    dead.write_intent(&mut NoHooks, &slot)
+        .expect("the dead incarnation's intent");
+    match dead.add_worktree(&mut NoHooks, &slot, &head) {
+        Ok(path) => println!("late add: added {}", path.display()),
+        Err(error) => println!("late add: refused: {error}"),
+    }
+}
+
+/// P-3 (§4.3, through the production funnels): a dead incarnation's add is
+/// held before its Git runs, in a process of its own. The successor's walk
+/// reclaims the slot (the dead intent; nothing else exists yet), adds its own
+/// instance and writes the paid edits; the add is released and its Git
+/// recreates the dead instance — checkout and registration, no intent. The
+/// successor's instance is untouched; `intents()` reaches the late instance;
+/// the final sweep removes it and keeps the successor's, whose checkout keeps
+/// the root.
+#[cfg(unix)]
+#[test]
+fn p3_a_late_add_released_after_the_successors_walk_is_found_and_removed() {
+    let fixture = Fixture::created("p3-late-add");
+    let hold = fixture.root.join("hold");
+    create_dir(&hold);
+    let stub_dir = fixture.root.join("stub");
+    create_dir(&stub_dir);
+    let stub = stub_dir.join("git");
+    write_file(
+        &stub,
+        b"#!/bin/sh\n\
+          case \" $* \" in\n\
+          *\" worktree add \"*)\n\
+          if mkdir \"$UPSTROKE_PR330_LATE_ADD_HOLD/claimed\" 2>/dev/null; then\n\
+          : > \"$UPSTROKE_PR330_LATE_ADD_HOLD/held\"\n\
+          n=0\n\
+          while [ ! -e \"$UPSTROKE_PR330_LATE_ADD_HOLD/release\" ] && [ \"$n\" -lt 6000 ]; do sleep 0.01; n=$((n+1)); done\n\
+          fi ;;\n\
+          esac\n\
+          exec \"$UPSTROKE_PR330_LATE_ADD_REAL_GIT\" \"$@\"\n",
+    );
+    super::fixture::set_mode(&stub, 0o755);
+    let real = real_git();
+    let mut path = std::ffi::OsString::from(stub_dir.as_os_str());
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let child = {
+        let (root, hold, real, path) = (
+            fixture.root.clone(),
+            hold.clone(),
+            real.clone(),
+            path.clone(),
+        );
+        std::thread::spawn(move || {
+            crate::agent::proc::test_support::run_test_isolated(
+                "workspace_manager::tests::late_add_child",
+                &[
+                    (LATE_ADD_ROOT, root.as_os_str()),
+                    (LATE_ADD_HOLD, hold.as_os_str()),
+                    (LATE_ADD_REAL_GIT, real.as_os_str()),
+                    ("PATH", path.as_os_str()),
+                ],
+                WITNESS_BOUND,
+            )
+        })
+    };
+    await_marker(&hold.join("held"), "the dead add reaching its Git");
+
+    let slot = fixture.task("alpha", 1);
+    let (_, c2) = (fixture.head.clone(), fixture.head.clone());
+    let checkout = successor_takes_the_slot(&fixture.manager, &slot, &c2);
+    write_file(&hold.join("release"), b"");
+    let ended = child.join().expect("the child's thread");
+    assert!(
+        ended.status.is_some_and(|status| status.success())
+            && ended.stdout.contains("late add: added"),
+        "the dead add ran late and recreated its instance: {ended}"
+    );
+    let dead = of_incarnation(&fixture, "inc-0");
+    let late = dead.slot_path(&slot);
+    assert!(late.join(".git").exists(), "the late add's checkout");
+    let late_admin = super::fixture::registration_of(&fixture.manager, &late);
+    assert!(
+        !dead.intent_path(&slot).exists(),
+        "and no intent: the walk removed it"
+    );
+    assert_successor_intact(&fixture.manager, &checkout, &c2);
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        vec![slot.clone()]
+    );
+
+    assert!(
+        !fixture
+            .manager
+            .remove_execution_root(&mut NoHooks)
+            .expect("finalization's last step"),
+        "the successor's own checkout keeps the root"
+    );
+    assert!(
+        !late.exists() && !late_admin.exists(),
+        "the sweep removed the late instance"
+    );
+    assert_successor_intact(&fixture.manager, &checkout, &c2);
+}
+
+/// §4.5 on Windows: an open handle blocks a deletion there, so an earlier
+/// incarnation's instance a process still holds open refuses the reclaim
+/// after the removal's whole retry budget, resumably, and nothing retains
+/// it; once the handle closes, the next reclaim converges.
+#[cfg(windows)]
+#[test]
+fn an_earlier_instance_held_open_refuses_the_reclaim_until_its_handle_closes() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let fixture = Fixture::created("instance-held-open");
+    let earlier = of_incarnation(&fixture, "inc-0");
+    let slot = fixture.task("alpha", 1);
+    let tracked = add_tracked(&fixture, &earlier, &slot);
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(tracked.checkout.join("a.txt"))
+        .expect("hold a file of the earlier instance open, deletion not shared");
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &slot)
+        .expect_err("an earlier instance held open refuses the reclaim");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Filesystem {
+                operation: "remove",
+                ..
+            }
+        ),
+        "the refusal is the removal's own: {error}"
+    );
+    assert!(
+        tracked.intent.exists(),
+        "its intent stays for the next reclaim"
+    );
+    drop(handle);
+    reclaim_slot(&fixture.manager, &slot).expect("once the handle closes, the reclaim converges");
+    assert!(!tracked.checkout.exists() && !tracked.admin.exists());
+    assert!(fixture.manager.intents().expect("intents").is_empty());
+}
+
+/// FUC-D5-WINPATHBYTES, natively: under a private root whose name carries
+/// two `é`, a task instance whose `$GIT_DIR` Git for Windows would be handed
+/// is 221 UTF-8 bytes — 217 ASCII characters and the two `é`, 219 characters
+/// — is refused at once, before any registry access: no destination is
+/// made and nothing is registered. One byte less, 220, is added.
+#[cfg(windows)]
+#[test]
+fn a_git_dir_over_the_byte_budget_is_refused_before_any_registry_access_on_windows() {
+    use crate::runner::host::GitdirRule;
+
+    let fixture = Fixture::created("winpathbytes");
+    let private = fixture.root.join("p\u{e9}\u{e9}");
+    create_dir(&private);
+    let manager =
+        WorkspaceManager::derive(&fixture.base, &private, super::fixture::RUN_ID, "inc-1")
+            .expect("derive under the accented private root");
+    manager
+        .create_execution_root(&mut NoHooks)
+        .expect("the execution root");
+    let root = manager
+        .execution_root()
+        .to_str()
+        .expect("the execution root is UTF-8")
+        .len();
+    // `<root>/tasks/k<key>-g1_<tag>/.git`, as Git for Windows renders it.
+    let fixed = root + "/tasks/k".len() + "-g1_".len() + InstanceTag::LEN + "/.git".len();
+    let task = |bytes: usize| {
+        let key = "a".repeat(
+            bytes
+                .checked_sub(fixed)
+                .filter(|length| *length > 0)
+                .unwrap_or_else(|| panic!("the fixture's root ({root} bytes) leaves no key")),
+        );
+        fixture.task(&key, 1)
+    };
+    let rendered = |slot: &Slot| {
+        let git_dir = manager.slot_path(slot).join(".git");
+        String::from_utf8(GitdirRule::Windows.spelling(git_dir.to_str().expect("UTF-8").as_bytes()))
+            .expect("UTF-8")
+    };
+
+    let over = task(221);
+    let spelled = rendered(&over);
+    assert_eq!(
+        (spelled.len(), spelled.chars().count()),
+        (221, 219),
+        "{spelled}"
+    );
+    manager
+        .write_intent(&mut NoHooks, &over)
+        .expect("the intent");
+    let store = manager.common_git_dir().join("worktrees");
+    let registered_before = fs::read_dir(&store).map_or(0, |entries| entries.count());
+    let message = match manager.add_worktree(&mut NoHooks, &over, &fixture.head) {
+        Err(UpstrokeError::Refused { message }) => message,
+        other => panic!("the add is refused by its budget: {other:?}"),
+    };
+    assert!(
+        message.contains("221 bytes") && message.contains("220"),
+        "{message}"
+    );
+    assert!(
+        !manager.slot_path(&over).exists(),
+        "no destination was made: the refusal came before the registry phase"
+    );
+    assert_eq!(
+        fs::read_dir(&store).map_or(0, |entries| entries.count()),
+        registered_before,
+        "and nothing was registered"
+    );
+
+    let at = task(220);
+    assert_eq!(rendered(&at).len(), 220);
+    manager.write_intent(&mut NoHooks, &at).expect("the intent");
+    let added = manager
+        .add_worktree(&mut NoHooks, &at, &fixture.head)
+        .expect("a 220-byte $GIT_DIR is within Git for Windows' budget");
+    assert!(added.join(".git").exists());
 }
