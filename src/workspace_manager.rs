@@ -3892,6 +3892,13 @@ impl WorkspaceManager {
     /// A swap that reclaimed nothing held Git's lock throughout and needs no
     /// such check.
     ///
+    /// The publishability re-check before the funnel waits out its registry
+    /// list's pauses through `hooks` ([`Self::assert_publishable_pausing`]), as
+    /// every other access of a call that takes hooks does: the topology
+    /// coordinator's publication hands the swap its own hooks, so that wait
+    /// answers the coordinator's messages and never sleeps on its thread (the
+    /// record's §9.21, CAS-1).
+    ///
     /// # Errors
     ///
     /// [`Refusal::SymbolicRef`] or [`Refusal::CheckedOutRef`];
@@ -3899,7 +3906,9 @@ impl WorkspaceManager {
     /// [`Refusal::MalformedObjectId`] or [`Refusal::NullExpectedOld`] for
     /// `old`; [`Refusal::RefLockNamesAnotherWrite`],
     /// [`Refusal::RefLockOnPackedRef`] or [`Refusal::RefRepackedDuringReclaim`]
-    /// around a lock file; or a Git error when the old value does not match.
+    /// around a lock file; [`UpstrokeError::RegistryRefused`], or the error of
+    /// a wait `hooks` ended, from the re-check's list; or a Git error when the
+    /// old value does not match.
     pub fn compare_and_swap_ref(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -3908,7 +3917,7 @@ impl WorkspaceManager {
         old: &str,
         new: &str,
     ) -> Result<(), UpstrokeError> {
-        self.assert_publishable(refname)?;
+        self.assert_publishable_pausing(hooks, refname)?;
         refuse_new(refname, new)?;
         refuse_expected_old(refname, old)?;
         funnel(hooks, EffectSiteId::Ref(site), || {

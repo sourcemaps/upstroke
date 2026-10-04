@@ -4757,6 +4757,160 @@ fn a_compare_and_swap_refuses_a_ref_substituted_since_the_caller_recorded_it() {
     );
 }
 
+/// CAS-1's observer: every wait of a registry access the call makes is
+/// counted, and either mends the registration the witness tore, so that the
+/// attempt after it passes, or ends the access with `ends` as its error, as the
+/// topology coordinator's wait does once a message it answered has ended its
+/// command. Every funnel phase the call reaches is recorded.
+struct WaitsOutATear {
+    admin: PathBuf,
+    ends: Option<&'static str>,
+    pauses: usize,
+    phases: Vec<(EffectSiteId, HookPhase)>,
+}
+
+impl WaitsOutATear {
+    fn mending(admin: PathBuf) -> Self {
+        Self {
+            admin,
+            ends: None,
+            pauses: 0,
+            phases: Vec::new(),
+        }
+    }
+}
+
+impl EffectHooks for WaitsOutATear {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        self.phases.push((site, phase));
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+
+    fn registry_pause(&mut self, _pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.pauses += 1;
+        if let Some(message) = self.ends {
+            return Err(UpstrokeError::Refused {
+                message: message.to_owned(),
+            });
+        }
+        fs::write(self.admin.join("commondir"), "../..\n").expect("mend the torn commondir");
+        match fs::remove_file(self.admin.join("locked")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => panic!("unlock the torn registration: {error}"),
+        }
+    }
+}
+
+/// An integration ref at the fixture's head, beside a sibling task whose
+/// registration is torn the way a killed `git worktree add` leaves it, so the
+/// publishability re-check's list fails until something mends it. Returns the
+/// ref's name and the registration's administrative directory.
+fn an_integration_ref_beside_a_torn_registration(fixture: &Fixture) -> (&'static str, PathBuf) {
+    let name = "refs/upstroke/runs/run-1/integration";
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateIntegration,
+            name,
+            &fixture.head,
+        )
+        .expect("create");
+    let sibling = fixture.add_task(&mut NoHooks, "sibling", 1);
+    let admin = tear_registration(&fixture.manager, &fixture.manager.slot_path(&sibling));
+    (name, admin)
+}
+
+/// CAS-1 (the record's §9.21): a compare-and-swap's publishability re-check
+/// waits through the call's own hooks. `integrate::publish` hands the swap the
+/// topology coordinator's hooks, whose wait answers the coordinator's messages
+/// (§9.13, R1). At `4253b2ca` the re-check asked the hook-less
+/// `assert_publishable`, so its waits slept on the calling thread, and the
+/// tear, which only a wait made through the hooks mends here, held the swap to
+/// its deadline.
+#[test]
+fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
+    let fixture = Fixture::created("cas1-recheck-waits");
+    let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
+    let mut hooks = WaitsOutATear::mending(admin);
+    let slept = super::fixture::slept_pauses();
+
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut hooks,
+            RefSite::CompareAndSwapIntegration,
+            name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("the re-check passes once a wait made through the call's hooks mended the tear");
+
+    assert!(
+        hooks.pauses >= 1,
+        "the re-check met the tear and waited through the call's hooks"
+    );
+    assert_eq!(
+        super::fixture::slept_pauses(),
+        slept,
+        "no wait of the re-check slept on the calling thread"
+    );
+    assert_eq!(
+        fixture.manager.direct_ref_target(name).expect("read"),
+        Some(fixture.seed.clone()),
+        "and the swap moved the ref"
+    );
+}
+
+/// CAS-1, the stop: a wait of the re-check that ends its access ends the swap
+/// there, with the wait's own error, before the swap's funnel opens, so the
+/// ref is not moved. The topology coordinator's wait ends so once a shutdown
+/// it answered has ended its command (§9.16, I2-1). At `4253b2ca` the
+/// re-check never reached the hooks, and the swap refused at the access's
+/// deadline with the registry's error instead.
+#[test]
+fn a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref() {
+    const ENDS: &str = "the command ended while the re-check waited";
+    let fixture = Fixture::created("cas1-recheck-ends");
+    let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
+    let mut hooks = WaitsOutATear {
+        ends: Some(ENDS),
+        ..WaitsOutATear::mending(admin)
+    };
+
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut hooks,
+            RefSite::CompareAndSwapIntegration,
+            name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a wait that ends the access ends the swap");
+
+    assert!(
+        matches!(&error, UpstrokeError::Refused { message } if message == ENDS),
+        "the swap ends with the wait's own error: {error:?}"
+    );
+    assert_eq!(hooks.pauses, 1, "the access stopped at its first wait");
+    assert!(
+        hooks.phases.is_empty(),
+        "the swap's funnel never opened: {:?}",
+        hooks.phases
+    );
+    assert_eq!(
+        fixture.manager.direct_ref_target(name).expect("read"),
+        Some(fixture.head.clone()),
+        "and the ref is where it was"
+    );
+}
+
 /// The direct-ref reader refuses a **symbolic ref that resolves to the
 /// expected object** (`PR5-WORKSPACE-031`).
 ///

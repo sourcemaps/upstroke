@@ -4975,6 +4975,15 @@ mod tests {
     }
 
     #[test]
+    fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {
+        served_while_alpha_waits(
+            "registry-served-swap-recheck",
+            &[],
+            TearAt::Access(merge_prepared_of_beta, 2),
+        );
+    }
+
+    #[test]
     fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {
         served_while_alpha_waits(
             "registry-served-retry-verify",
@@ -6139,6 +6148,25 @@ mod tests {
             "shutdown-wait-publish",
             StoppedInItsWait {
                 at: TearAt::Fold(merge_prepared_of_beta),
+                torn: Torn::CommondirEmpty,
+                finish_at_shutdown: true,
+            },
+            two_held_gated(&[]),
+            beta_settles_first,
+            |wide, _| {
+                let events = wide.run.events();
+                assert_eq!(count(events, "merge_prepared"), 1, "{:?}", kinds_of(events));
+                assert_eq!(count(events, "task_merged"), 0, "{:?}", kinds_of(events));
+            },
+        );
+    }
+
+    #[test]
+    fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {
+        stopped_in_its_wait(
+            "shutdown-wait-swap-recheck",
+            StoppedInItsWait {
+                at: TearAt::Access(merge_prepared_of_beta, 2),
                 torn: Torn::CommondirEmpty,
                 finish_at_shutdown: true,
             },

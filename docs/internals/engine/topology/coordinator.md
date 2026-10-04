@@ -1945,6 +1945,13 @@ Census C1: `integrate::decide`'s publishability check (H1).
 
 Census C2: `integrate::publish`'s publishability check (H1).
 
+## `mod tests` › `fn a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration() {`
+
+Census C6: the publishability re-check that `WorkspaceManager::compare_and_swap_ref` makes before its
+funnel, through the hooks `integrate::publish` hands it (CAS-1, the record's §9.21). The tear is
+planted before the second registry access after beta's `merge_prepared`, so `publish`'s own check
+(C2) passes and the swap's re-check meets it.
+
 ## `mod tests` › `fn a_pipeline_is_served_while_a_retrys_worktree_check_waits_on_a_torn_registration() {`
 
 Census B1: the retained retry's worktree verification.
@@ -2218,6 +2225,11 @@ Integration: the frozen `decide`'s publishability check (H1) meets the tear; no 
 
 Publication: after `merge_prepared`, the frozen `publish`'s check (H1) meets the tear; no
 `task_merged`, and no compare-and-swap moved the ref.
+
+## `mod tests` › `fn a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing() {`
+
+Publication, CAS-1: after `merge_prepared` and `publish`'s own check, the compare-and-swap's
+publishability re-check meets the tear; no `task_merged`, and the ref is where the log authorizes it.
 
 ## `mod tests` › `fn a_shutdown_answered_inside_a_stale_picks_wait_classifies_nothing_into_the_log() {`
 
