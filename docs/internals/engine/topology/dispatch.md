@@ -331,7 +331,25 @@ which worktree a generation owns.
 O21 — the fresh dispatch
 ---------------------------------------------------------------------------
 
+## `pub trait DispatchJournal {`
+
+What a dispatch appends through and lends the manager, as one value: the
+dispatch's `task_dispatched`, and the hooks its registry accesses wait through.
+One value rather than an emitter and hooks apart, because on the topology
+coordinator both are the coordinator, which lends itself as the hooks so that a
+registry access's waits answer its messages (the follow-up B record's §9.13,
+R1): two parameters would be two mutable borrows of it.
+
+## `struct Emitting<'a> {`
+
+An emitter and its hooks as a [`DispatchJournal`], for the callers that hold the
+two apart.
+
 ## `pub fn dispatch(`
+
+[`dispatch_through`] over an emitter and its hooks, the form the tests drive.
+
+## `pub fn dispatch_through(`
 
 **O21.** Append `task_dispatched`, then write the intent, then add the
 worktree — and for a repair, materialize its source into it.
@@ -356,9 +374,10 @@ or on a reparse point) are the other half of that condition and are raised by
 the funnels themselves. Otherwise: whatever the emitter or a Git funnel
 returns.
 
-## `manager.revalidate()?;`
+## `manager.revalidate_pausing(journal.hooks().effects())?;`
 
-Before the append, because a refusal after it would leave an open
+Its registry list waits through the journal's hooks (R1). Before the append,
+because a refusal after it would leave an open
 generation whose worktree can never be built. `T-DISPATCH` lists "source
 candidate object missing" beside the containment refusals, so both are
 here and both are ahead of the event.

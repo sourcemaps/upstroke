@@ -127,13 +127,42 @@ pub fn task_slot(key: TaskKey, generation: GenerationId) -> Slot {
     }
 }
 
+pub trait DispatchJournal {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), super::emit::EmitFailure>;
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks;
+}
+
+struct Emitting<'a> {
+    hooks: &'a mut dyn TopologyHooks,
+    emitter: &'a mut dyn EventEmitter,
+}
+
+impl DispatchJournal for Emitting<'_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), super::emit::EmitFailure> {
+        self.emitter.emit(body, self.hooks)
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+}
+
 pub fn dispatch(
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
     emitter: &mut dyn EventEmitter,
     request: &DispatchRequest,
 ) -> Result<Dispatched, super::emit::EmitFailure> {
-    manager.revalidate()?;
+    dispatch_through(manager, &mut Emitting { hooks, emitter }, request)
+}
+
+pub fn dispatch_through(
+    manager: &WorkspaceManager,
+    journal: &mut dyn DispatchJournal,
+    request: &DispatchRequest,
+) -> Result<Dispatched, super::emit::EmitFailure> {
+    manager.revalidate_pausing(journal.hooks().effects())?;
     if let DispatchKind::Repair { source, .. } = &request.kind {
         refuse_absent_source(manager, source)?;
     }
@@ -141,19 +170,16 @@ pub fn dispatch(
     let slot = task_slot(request.key, request.generation);
     let worktree = manager.slot_path(&slot);
 
-    emitter.emit(
-        TopologyEventBody::TaskDispatched {
-            data: TaskDispatched {
-                key: request.key,
-                generation: request.generation,
-                base_sha: request.base.clone(),
-                worktree_path: worktree.to_string_lossy().into_owned(),
-                lease: request.kind.grant(),
-                source_candidate: request.kind.source_candidate(),
-            },
+    journal.emit(TopologyEventBody::TaskDispatched {
+        data: TaskDispatched {
+            key: request.key,
+            generation: request.generation,
+            base_sha: request.base.clone(),
+            worktree_path: worktree.to_string_lossy().into_owned(),
+            lease: request.kind.grant(),
+            source_candidate: request.kind.source_candidate(),
         },
-        hooks,
-    )?;
+    })?;
 
     let mut dispatched = Dispatched {
         key: request.key,
@@ -164,12 +190,12 @@ pub fn dispatch(
         kind: request.kind.clone(),
         materialized: None,
     };
-    dispatched.worktree = create_worktree(manager, hooks, &dispatched.open_generation())?;
+    dispatched.worktree = create_worktree(manager, journal.hooks(), &dispatched.open_generation())?;
 
     if dispatched.source().is_some() {
         dispatched.materialized = Some(materialize_repair(
             manager,
-            hooks,
+            journal.hooks(),
             &dispatched.open_generation(),
         )?);
     }

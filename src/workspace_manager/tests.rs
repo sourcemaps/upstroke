@@ -33,10 +33,10 @@ use std::collections::BTreeSet;
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
     Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
-    ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
-    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git, git_os,
-    git_out, replacement_liveness, run_kill_child, run_kill_child_within,
-    run_replacement_witness_child, scratch, tear_registration,
+    ambient_replacement_controls, as_git_writes_it, assert_replacement_controls_pinned, create_dir,
+    died_by_abort, died_by_kill, environment_without_ambient_replacement_controls,
+    fan_out_directory, git, git_os, git_out, replacement_liveness, run_kill_child,
+    run_kill_child_within, run_replacement_witness_child, scratch, tear_registration,
     without_ambient_replacement_controls, write_file, write_include_path,
 };
 
@@ -4322,12 +4322,28 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.changed_paths(slot, &head).map(drop)),
         ),
         (
+            "changed_paths_pausing",
+            Box::new(|slot| {
+                manager
+                    .changed_paths_pausing(&mut NoHooks, slot, &head)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_diff",
             Box::new(|slot| manager.candidate_diff(slot, &head, &head).map(drop)),
         ),
         (
             "proposal_state",
             Box::new(|slot| manager.proposal_state(slot, &head).map(drop)),
+        ),
+        (
+            "proposal_state_pausing",
+            Box::new(|slot| {
+                manager
+                    .proposal_state_pausing(&mut NoHooks, slot, &head)
+                    .map(drop)
+            }),
         ),
         (
             "unresolved_conflicts",
@@ -7276,6 +7292,267 @@ fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
             .len(),
         1,
         "only the base checkout is still registered"
+    );
+}
+
+/// R7 (#329's record, §9.14): a sibling snapshot whose checkout cannot be read,
+/// as a Windows checkout whose deletion is pending cannot. On `test (winguest)`
+/// the test above failed once, "adding k3-g0-a16-gates: failed to read
+/// …\snapshots\k1-g0-a16-gates: Access is denied. (os error 5)": the add's
+/// gate resolved every path the worktree list named after the list's access
+/// had returned, and Windows answers `ERROR_ACCESS_DENIED` to an open of a
+/// directory another removal has deleted while a handle on it is still open.
+/// Here a real snapshot is added and its checkout exchanged for a link to
+/// itself, so its registration still names the path and resolving the path
+/// fails with `ELOOP` where Windows answers `ERROR_ACCESS_DENIED`: the same
+/// call, `canonical_prefix(record.path())`, failing the same way, with another
+/// error. Unix, where such a link needs no privilege. Returns the sibling's
+/// checkout path.
+#[cfg(unix)]
+fn plant_a_sibling_whose_checkout_cannot_be_read(fixture: &Fixture, key: u32) -> PathBuf {
+    let path = a_sibling_snapshot(fixture, key);
+    fs::remove_dir_all(&path).expect("take the sibling's checkout away");
+    leave_a_link_to_itself(&path);
+    // The plant must bite: the registry still names the sibling, and its path
+    // fails to resolve with something other than absence.
+    let name = path.file_name().expect("a checkout name").to_owned();
+    assert!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("the registry lists")
+            .iter()
+            .any(|record| record.path().ends_with(&name)),
+        "prerequisite not met: the registry no longer names the sibling"
+    );
+    assert!(
+        matches!(
+            canonical_prefix(&path),
+            Err(UpstrokeError::Io { ref source, .. })
+                if source.kind() != std::io::ErrorKind::NotFound
+        ),
+        "prerequisite not met: the sibling's path resolves, so nothing here fails to read it"
+    );
+    path
+}
+
+/// A snapshot of task `key` beside the one a witness adds, through the
+/// production funnels: its checkout path.
+#[cfg(unix)]
+fn a_sibling_snapshot(fixture: &Fixture, key: u32) -> PathBuf {
+    fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(key, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect("the sibling snapshot")
+        .path()
+        .to_path_buf()
+}
+
+/// A link at `path` naming `path` itself: resolving it fails with `ELOOP`.
+#[cfg(unix)]
+fn leave_a_link_to_itself(path: &Path) {
+    std::os::unix::fs::symlink(path, path).expect("leave a link to itself");
+}
+
+/// R7's observer: every wait of a registry access the call makes ends the
+/// sibling's removal the witness left in flight, as the last handle on a
+/// Windows checkout whose deletion is pending closing ends it — the link
+/// standing in for that checkout is removed, and the path is absent from then
+/// on — and is counted. With `plant_at`, the link is planted at that site's
+/// `Before` hook rather than before the call.
+#[cfg(unix)]
+struct EndsTheSiblingsRemovalAtAPause {
+    link: PathBuf,
+    plant_at: Option<EffectSiteId>,
+    pauses: usize,
+}
+
+#[cfg(unix)]
+impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if phase == HookPhase::Before && self.plant_at == Some(site) {
+            fs::remove_dir_all(&self.link).expect("take the sibling's checkout away");
+            leave_a_link_to_itself(&self.link);
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+
+    fn registry_pause(&mut self, _pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.pauses += 1;
+        match fs::remove_file(&self.link) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => panic!(
+                "end the sibling's removal at {}: {error}",
+                self.link.display()
+            ),
+        }
+    }
+}
+
+/// R7, the add: a sibling whose checkout cannot be read while its removal is
+/// in flight does not fail an add. The gate's list and the resolution of every
+/// path it names are one registry access, so the read that failed is attempted
+/// again, after a wait made through the call's own hooks — R1's guarantee that
+/// the coordinator answers its messages for the length of every wait — and the
+/// attempt after it reads the sibling as absent. At `f9c88fdb` the gate
+/// returned the failed read at once, as `UpstrokeError::Io`, and no wait ran.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add() {
+    let fixture = Fixture::created("r7-sibling-read-add");
+    let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
+    let attempted_again = contended_attempts(fixture.manager.common_git_dir());
+    let mut hooks = EndsTheSiblingsRemovalAtAPause {
+        link: sibling,
+        plant_at: None,
+        pauses: 0,
+    };
+
+    let snapshot = fixture
+        .manager
+        .add_snapshot(
+            &mut hooks,
+            &SnapshotName::gates(3, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect("a sibling's removal in flight does not fail the add");
+
+    assert!(
+        hooks.pauses >= 1,
+        "the read that failed waited through the call's hooks before it was attempted again"
+    );
+    assert!(
+        contended_attempts(fixture.manager.common_git_dir()) > attempted_again,
+        "the registry access answered that it would attempt again"
+    );
+    assert!(
+        fs::symlink_metadata(&hooks.link).is_err(),
+        "the sibling's removal ended at the wait"
+    );
+    assert!(
+        snapshot.path().join(".git").is_file(),
+        "and the add made its checkout"
+    );
+}
+
+/// R7, the bound: a sibling whose checkout stays unreadable refuses the add
+/// resumably, at the registry access's deadline, as
+/// `UpstrokeError::RegistryRefused` carrying the read's own error — never as
+/// the raw I/O error, which `f9c88fdb` returned at once. The gate refuses
+/// before the add's intent is written, so nothing of the add is left.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never_as_io() {
+    let fixture = Fixture::created("r7-sibling-read-refused");
+    let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
+    let sibling = sibling
+        .file_name()
+        .expect("a checkout name")
+        .to_string_lossy();
+    let name = SnapshotName::gates(3, 0, 1);
+
+    let error = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &name,
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect_err("a sibling that stays unreadable refuses the add");
+
+    let UpstrokeError::RegistryRefused { message } = &error else {
+        panic!("the refusal is the registry's, typed and resumable, not {error:?}");
+    };
+    assert!(
+        message.contains(&format!("{sibling}: ")) && message.contains("failed to read"),
+        "it carries the read that failed: {message}"
+    );
+    let slot = Slot::Snapshot { name };
+    assert!(
+        !fixture.manager.intent_path(&slot).exists() && !fixture.manager.slot_path(&slot).exists(),
+        "the gate refused before the add wrote its intent or made its destination"
+    );
+}
+
+/// R7, the verification's lookup: the same read in `worktree_record`, where a
+/// verification looks its slot up among the paths the list names. The sibling's
+/// checkout is made unreadable at the verification's `Before` hook, after its
+/// gate has passed, and its removal ends at the lookup's first wait: the lookup
+/// attempts again and answers for the slot, which is not registered. At
+/// `f9c88fdb` the lookup returned the failed read at once, as
+/// `UpstrokeError::Io`.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification()
+ {
+    let fixture = Fixture::created("r7-sibling-read-verify");
+    let sibling = a_sibling_snapshot(&fixture, 1);
+    let slot = fixture.task("alpha", 1);
+    let mut hooks = EndsTheSiblingsRemovalAtAPause {
+        link: sibling,
+        plant_at: Some(EffectSiteId::Worktree(WorktreeSite::Verify)),
+        pauses: 0,
+    };
+
+    let verified = fixture
+        .manager
+        .verify_worktree(&mut hooks, &slot, &Quiescence::AtBase(fixture.head.clone()))
+        .expect("a sibling's removal in flight does not fail the verification");
+
+    assert_eq!(verified, Err(VerifyFailure::NotRegistered));
+    assert!(
+        hooks.pauses >= 1,
+        "the lookup's read that failed waited through the call's hooks"
+    );
+    assert!(
+        fs::symlink_metadata(&hooks.link).is_err(),
+        "the sibling's removal ended at the wait"
+    );
+}
+
+/// R7, what the resolution reads and refuses: a sibling whose checkout is a
+/// link to nothing is not a path that failed to read. Resolving it reads the
+/// link, and the refusal it makes is the gate's answer at once, as it was
+/// before the resolution joined the registry access: no attempt is made again
+/// and no deadline is waited out, so the refusal is never retyped as the
+/// registry's.
+#[cfg(unix)]
+#[test]
+fn a_sibling_whose_checkout_is_a_link_to_nothing_refuses_the_add_at_once() {
+    let fixture = Fixture::created("r7-sibling-link-refused");
+    let sibling = a_sibling_snapshot(&fixture, 1);
+    fs::remove_dir_all(&sibling).expect("take the sibling's checkout away");
+    std::os::unix::fs::symlink(fixture.root.join("nothing-here"), &sibling)
+        .expect("leave a link to nothing in its place");
+    let attempted_again = contended_attempts(fixture.manager.common_git_dir());
+
+    let error = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(3, 0, 1),
+            &SnapshotInput::Commit(oid(&fixture.head)),
+        )
+        .expect_err("a link on a listed path refuses the add");
+
+    assert!(
+        matches!(&error, UpstrokeError::Refused { message }
+            if message.contains("is a symlink or reparse point")),
+        "the refusal is the link's, as the resolution made it: {error:?}"
+    );
+    assert_eq!(
+        contended_attempts(fixture.manager.common_git_dir()),
+        attempted_again,
+        "and the registry access never answered that it would attempt again"
     );
 }
 
@@ -14895,6 +15172,7 @@ fn a_registry_access_returns_a_vetoed_failure_unchanged_after_one_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || {
             asked += 1;
             Again::Return
@@ -14927,6 +15205,7 @@ fn a_registry_access_that_always_fails_refuses_at_its_deadline_naming_the_count_
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -14972,6 +15251,7 @@ fn a_registry_access_passes_two_failures_and_returns_the_success_after_them() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15002,6 +15282,7 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Undecidable {
             why: "the destination now holds a file".to_owned(),
         },
@@ -15039,6 +15320,7 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let result = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || Again::Attempt,
         &mut || {
             made += 1;
@@ -15072,6 +15354,7 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || answers.next().unwrap_or(Again::Return),
         &mut || {
             made += 1;
@@ -15098,6 +15381,7 @@ fn a_veto_that_blocks_past_the_deadline_is_followed_by_no_attempt() {
     let result: Result<(), _> = tolerant_registry_access(
         &key,
         RegistryHold::Unheld,
+        &mut crate::workspace_manager::sleep_for,
         &mut || {
             std::thread::sleep(blocked);
             Again::Attempt
@@ -15155,10 +15439,16 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             .expect("the other thread holds R-X");
         let mut made = 0_u32;
         let started = std::time::Instant::now();
-        let result = tolerant_registry_access(&key, hold, &mut || Again::Attempt, &mut || {
-            made += 1;
-            Ok(made)
-        });
+        let result = tolerant_registry_access(
+            &key,
+            hold,
+            &mut crate::workspace_manager::sleep_for,
+            &mut || Again::Attempt,
+            &mut || {
+                made += 1;
+                Ok(made)
+            },
+        );
         let took = started.elapsed();
         let _ = release.send(());
         holder.join().expect("the holder thread");
@@ -15191,16 +15481,6 @@ fn r_x_held_alone_refuses_a_shared_access_with_no_attempt_and_passes_an_unheld_o
             );
         }
     }
-}
-
-/// `path` as Git writes it into a registration's `gitdir` and a checkout's
-/// `.git`: a plant on Windows must use Git for Windows' `/`, or Git lists it
-/// with `.git` still on (the path's own bytes elsewhere).
-fn as_git_writes_it(path: &Path) -> String {
-    String::from_utf8(
-        crate::runner::host::GitdirRule::native().spelling(path.as_os_str().as_encoded_bytes()),
-    )
-    .expect("a fixture's path is UTF-8")
 }
 
 /// A foreign registration half written, as the design-recast lens of design
@@ -15797,14 +16077,18 @@ fn an_add_beside_a_torn_entry_whose_destination_cannot_be_removed_refuses_and_is
     assert!(message.contains("commondir"), "{message}");
 }
 
-/// T16 (§8.2, FUB-D8-POPULATED): a destination that is not an empty directory
-/// when the access begins is Git state at once, and no Git command runs. The
-/// reviewers' construction: beside it, a sibling torn so that Git's sibling
-/// scan, which runs before Git checks the destination, dies on it. The answer
-/// names the destination, never the sibling's `commondir`; the store and what
-/// was at the destination are untouched.
+/// T16 (§8.2, FUB-D8-POPULATED): after the add's gate has passed, a
+/// destination that is not an empty directory when the access begins is Git
+/// state at once, before `git worktree add` runs. The reviewers' construction:
+/// beside it, a sibling torn — after the gate's list, at the add's `Before`
+/// hook — so that Git's sibling scan, which runs before Git checks the
+/// destination, would die on it. The answer names the destination, never the
+/// sibling's `commondir`; the store and what was at the destination are
+/// untouched. A sibling already torn when the gate lists the registry is met
+/// by the gate first
+/// (`a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first`).
 #[test]
-fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_run() {
+fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add() {
     for (label, file) in [("directory-holding-entries", false), ("file", true)] {
         let fixture = Fixture::created(&format!("registry-populated-{label}"));
         let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
@@ -15841,7 +16125,7 @@ fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_r
             UpstrokeError::Git { message } => {
                 assert!(
                     message.contains(&slot.display().to_string())
-                        && message.contains("no Git command ran")
+                        && message.contains("`git worktree add` did not run")
                         && !message.contains("commondir"),
                     "{label}: names the destination, not the sibling: {message}"
                 );
@@ -15866,9 +16150,52 @@ fn an_add_whose_destination_is_not_an_empty_directory_is_git_state_with_no_git_r
     }
 }
 
+/// T16, the order (the record's §9.13, R4): the add's gate lists the registry
+/// before the destination is read. So a destination already populated beside
+/// a sibling already torn meets the sibling first: the gate's list is attempted
+/// again to its deadline and refuses as the registry's, naming the sibling's
+/// `commondir`, never Git state naming the destination, and what is at the
+/// destination stays. The populated answer of
+/// `an_add_whose_destination_is_not_an_empty_directory_is_git_state_before_git_worktree_add`
+/// holds after a gate that passed.
+#[test]
+fn a_populated_destination_beside_a_registration_already_torn_meets_the_gate_first() {
+    let fixture = Fixture::created("registry-populated-gate-first");
+    let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
+    let beta = fixture.task("beta", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &beta)
+        .expect("the intent");
+    let slot = fixture.manager.slot_path(&beta);
+    fs::create_dir_all(&slot).expect("the destination");
+    fs::write(slot.join("paid-output"), b"keep\n").expect("an entry in it");
+    tear_registration(&fixture.manager, &fixture.manager.slot_path(&foreign));
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let before = contended_attempts(&common);
+    let result = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &beta, &fixture.head);
+    let message = registry_refusal(result, "a populated destination beside a torn sibling");
+    assert!(
+        message.contains("commondir") && !message.contains(&slot.display().to_string()),
+        "the gate's list names the sibling, never the destination: {message}"
+    );
+    assert!(
+        contended_attempts(&common) > before,
+        "the gate's list was attempted again"
+    );
+    assert_eq!(
+        fs::read(slot.join("paid-output")).expect("the destination's entry"),
+        b"keep\n",
+        "what was at the destination stays"
+    );
+}
+
 /// T16, the link case (§8.2): Git's own check follows a link to an empty
-/// directory and checks out through it, and the access refuses it with no Git
-/// run. Through the funnel a link at the slot is refused first by the
+/// directory and checks out through it, and the destination step refuses it
+/// before `git worktree add` runs. Through the funnel a link at the slot is
+/// refused first by the
 /// acted-through walk (`SlotCheckoutEntry`), so the destination step is
 /// witnessed directly; the walk's refusal is witnessed beside it.
 #[cfg(unix)]
@@ -15887,7 +16214,8 @@ fn a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git() {
     std::os::unix::fs::symlink(&target, &slot).expect("a link at the slot");
     match Destination::prepare(&slot) {
         Err(UpstrokeError::Git { message }) => assert!(
-            message.contains("a link or reparse point") && message.contains("no Git command ran"),
+            message.contains("a link or reparse point")
+                && message.contains("`git worktree add` did not run"),
             "{message}"
         ),
         Err(other) => panic!("Git state, not {other:?}"),
@@ -15912,8 +16240,8 @@ fn a_destination_that_is_a_link_to_an_empty_directory_is_refused_before_git() {
 }
 
 /// T16: a destination that cannot be made is Git state at once, naming the
-/// path and the OS error, with no Git command run: where Git's own add would
-/// have failed to make it, so a verification defers on it as before.
+/// path and the OS error, before `git worktree add` runs: where Git's own add
+/// would have failed to make it, so a verification defers on it as before.
 #[cfg(unix)]
 #[test]
 fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
@@ -15936,7 +16264,7 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
         Err(UpstrokeError::Git { message }) => assert!(
             message.contains(&slot.display().to_string())
                 && message.contains("could not be made")
-                && message.contains("no Git command ran"),
+                && message.contains("`git worktree add` did not run"),
             "{message}"
         ),
         other => panic!("Git state at once, not {other:?}"),
@@ -15949,7 +16277,10 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
 /// hand first with a mode no `mkdir` here gives, a torn sibling fails the
 /// first attempt, and once the access has answered `Attempt` the destination
 /// is read: an empty directory with the ordinary mode, which only its removal
-/// and making again explain. Then the sibling is repaired and the add passes.
+/// and making again explain. The access is held at that answer until the
+/// destination has been read ([`hold_next_contended`]), so no second attempt
+/// and veto can remove it under the read. Then the sibling is repaired, the
+/// access released, and the add passes.
 #[cfg(unix)]
 #[test]
 fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
@@ -15968,6 +16299,7 @@ fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
     fs::set_permissions(&slot, fs::Permissions::from_mode(0o711)).expect("a mark on it");
     let common = fixture.manager.common_git_dir().to_path_buf();
     let before = contended_attempts(&common);
+    let release = hold_next_contended(&common);
     let observer = {
         let (common, slot, foreign_admin) = (common.clone(), slot.clone(), foreign_admin.clone());
         std::thread::spawn(move || {
@@ -15978,6 +16310,7 @@ fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
             let empty = matches!(AtDestination::read(&slot), AtDestination::EmptyDirectory);
             fs::write(foreign_admin.join("commondir"), "../..\n").expect("repair the sibling");
             fs::remove_file(foreign_admin.join("locked")).expect("and unlock it");
+            drop(release);
             (mode, empty)
         })
     };
@@ -16865,82 +17198,6 @@ fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry
 // The bounded `LinkedChild` (PR328-LINKED-CHILD-KILL-WAITS-WITHOUT-A-DEADLINE)
 // ---------------------------------------------------------------------------
 
-/// Refuse the syscall `number` for this thread and every process it forks,
-/// answering `errno` instead: four seccomp instructions, installed the way
-/// `rundir`'s tests install theirs (`PR_SET_NO_NEW_PRIVS`, then
-/// `PR_SET_SECCOMP` in filter mode). A policy cannot be removed, so it is for
-/// an isolated child's thread alone.
-#[cfg(target_os = "linux")]
-fn refuse_syscall_on_this_thread(number: libc::c_long, errno: libc::c_int) {
-    let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
-        code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
-        jt,
-        jf,
-        k,
-    };
-    let word = |value: libc::c_long| {
-        u32::try_from(value).expect("a syscall number or errno fits the kernel's field")
-    };
-    let mut program = [
-        instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
-        instruction(
-            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
-            0,
-            1,
-            word(number),
-        ),
-        instruction(
-            libc::BPF_RET | libc::BPF_K,
-            0,
-            0,
-            libc::SECCOMP_RET_ERRNO | word(libc::c_long::from(errno)),
-        ),
-        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
-    ];
-    let filter = libc::sock_fprog {
-        len: u16::try_from(program.len()).expect("the program fits the count"),
-        filter: program.as_mut_ptr(),
-    };
-    // SAFETY: `prctl` takes its five arguments by value and reads through no
-    // pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel refuses unless the
-    // remaining four are 1, 0, 0 and 0.
-    let allowed = unsafe {
-        libc::syscall(
-            libc::SYS_prctl,
-            libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
-            1_i64,
-            0_i64,
-            0_i64,
-            0_i64,
-        )
-    };
-    assert_eq!(
-        allowed,
-        0,
-        "PR_SET_NO_NEW_PRIVS: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
-    // argument and the instructions behind that program's own pointer; both
-    // live for the call and the kernel copies them.
-    let installed = unsafe {
-        libc::syscall(
-            libc::SYS_prctl,
-            libc::c_long::from(libc::PR_SET_SECCOMP),
-            libc::c_long::from(libc::SECCOMP_MODE_FILTER),
-            std::ptr::from_ref(&filter),
-            0_i64,
-            0_i64,
-        )
-    };
-    assert_eq!(
-        installed,
-        0,
-        "PR_SET_SECCOMP: {}",
-        std::io::Error::last_os_error()
-    );
-}
-
 /// The linked child the next test's kill cannot end: it ignores its link
 /// closing, as a child busy elsewhere does, and ends when its parent does, or
 /// after a minute.
@@ -16975,7 +17232,7 @@ fn linked_child_whose_kill_is_refused_child() {
         &stderr,
     );
     line_from(&lines, "B329_WAITING", &stderr);
-    refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
+    super::fixture::refuse_syscall_on_this_thread(libc::SYS_kill, libc::EPERM);
     let panic_text = |panic: Box<dyn std::any::Any + Send>| {
         panic
             .downcast_ref::<String>()

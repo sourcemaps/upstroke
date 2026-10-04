@@ -2270,6 +2270,7 @@ fn the_production_emitter_reaches_the_append_error_protocol() {
             },
 
             clock: &fixture.clock,
+            stopped: None,
         };
         emitter
             .emit(budget_body(), &mut fixture.hooks)

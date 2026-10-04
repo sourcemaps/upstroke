@@ -17,10 +17,22 @@ Found by PR #329's design review round 9, in its gitenv lens (`gpt-6-astra` at `
 `/home/ubuntu/orch-pr11/reviews/review-329-d9-gitenv-8df42436.review.md`, triaged as FUB-D9-ENV, P1, in
 `/home/ubuntu/orch-pr11/reviews/review-329-d9-triage.md:58`. Each step below carries the label its source gives it.
 
-1. The coordinator's environment holds an absolute `GIT_INDEX_FILE` naming the main checkout's ordinary index. Ordinary
-   Git supplies such a name with no export: a commit hook or a `!` alias in a linked checkout, or the `pre-commit` hook of
-   `git commit -a` in a main checkout. That precondition was executed for the host runner's twin, under "The
-   precondition" in `PR329-HOST-ROLES-INHERIT-THE-COORDINATORS-GIT-REPOSITORY-CONTEXT`'s file.
+1. **The precondition, which an explicit export supplies.** The coordinator's environment holds an absolute
+   `GIT_INDEX_FILE` naming the main checkout's ordinary index, `<main>/.git/index`: a wrapper script that sets it, or an
+   alternate-index workflow. This is the precondition of the destructive sequence below, and it is the only one.
+   - **The ordinary invocations do not supply it.** Until repair round 3 this step said a commit hook or a `!` alias in
+     a linked checkout, or the `pre-commit` hook of `git commit -a` in a main checkout, supplied it. PR #329's
+     implementation review (regression lens, on `54a1ff14`) executed each on Git 2.43.0 in disposable repositories
+     (`/home/ubuntu/orch-pr11/reviews/329-i1-witnesses/review329-regression-schedule-2y5awc8_/WITNESSES.txt`; executed
+     again at repair round 3 with the same three results, `/home/ubuntu/orch-pr11/logs/pr11_fub_impl3/r5/env-shapes.txt`):
+     - a linked checkout's `pre-commit` hook receives `GIT_INDEX_FILE=<main>/.git/worktrees/linked/index`, that
+       checkout's own index, with `GIT_DIR` its administrative directory;
+     - a linked checkout's `!` alias receives `GIT_DIR` and leaves `GIT_INDEX_FILE` unset;
+     - a main checkout's `pre-commit` hook under `git commit -a` receives `GIT_INDEX_FILE=<main>/.git/index.lock`.
+   - None names the main checkout's ordinary index. They are the shapes
+     `PR329-HOST-ROLES-INHERIT-THE-COORDINATORS-GIT-REPOSITORY-CONTEXT`'s file executes under "The precondition", for
+     the host runner's roles: a repository or an index other than a role's own. What the manager's builders do under
+     them was not executed for this file, and steps 3 and 4 do not rest on them.
 2. The manager builds every Git child in two places, and neither removes any inherited Git variable:
    - `WorkspaceManager::command` (`src/workspace_manager.rs:4994-5009` at `8df42436`), through which `git`,
      `git_with_identity`, `git_ok`, `git_line` and `update_ref` run. It passes `-C <dir>`, `core.hooksPath`,
@@ -116,6 +128,11 @@ At PR #329's repair round 2, on the PR11 orchestrator's direction
 (`/home/ubuntu/orch-pr11/answers/pr11_fub_impl2-2.md`). The orchestrator carried the supervisor's correction: every
 review finding is filed. The implementation round had recorded FUB-D9-ENV only as a deferred ledger row, and this file
 corrects that. Filing it decides nothing about its repair route, which is the owner's.
+
+**Corrected at repair round 3** (`/home/ubuntu/orch-pr11/briefs/pr11_fub_impl3.md`, item R5): step 1's precondition,
+from the implementation review's executed facts (its regression lens's finding 3,
+`/home/ubuntu/orch-pr11/reviews/review-329-i1-regression-54a1ff14.review.md`). The P1, its grade, its guard and its
+discovery pin `reviewed_sha` are unchanged.
 
 ## Extended at PR11 follow-up C's implementation (2026-10-03): FUC-D5-GITINDEXFILE
 
