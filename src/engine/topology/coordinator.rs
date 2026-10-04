@@ -4426,6 +4426,10 @@ mod tests {
         }
 
         fn tear(&self) -> Prober {
+            self.tear_sampling_every(Duration::from_millis(1))
+        }
+
+        fn tear_sampling_every(&self, every: Duration) -> Prober {
             match self.torn {
                 Torn::CommondirEmpty => {
                     self.whole();
@@ -4462,33 +4466,109 @@ mod tests {
             let handle = std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + BOUND;
                 loop {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    let cancelled_now = !matches!(
+                        cancelled.recv_timeout(left.min(every)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
                     if progress(&runner) > before {
                         finishing.finish_tear();
                         return Ok(());
                     }
-                    let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    if left.is_zero() {
+                    if cancelled_now {
                         return Err(format!(
-                            "no invocation reached or left the runner within {BOUND:?} of the \
-                             tear planted at {}, so nothing finished it",
+                            "{} before the prober of the tear planted at {} was cancelled, so \
+                             the registration stayed torn",
+                            wakes.not_seen(),
                             admin.display()
                         ));
                     }
-                    match cancelled.recv_timeout(left.min(Duration::from_millis(1))) {
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            return Err(format!(
-                                "no invocation reached or left the runner while the \
-                                 registration planted at {} stayed torn: the coordinator \
-                                 served nothing while its access waited on it",
-                                admin.display()
-                            ));
-                        }
+                    if left.is_zero() {
+                        return Err(format!(
+                            "{} within {BOUND:?} of the tear planted at {}, so nothing finished \
+                             it",
+                            wakes.not_seen(),
+                            admin.display()
+                        ));
                     }
                 }
             });
             Prober { cancel, handle }
         }
+    }
+
+    impl Wakes {
+        fn not_seen(self) -> &'static str {
+            match self {
+                Wakes::Entered => "no invocation reached the runner",
+                Wakes::Ended => "no invocation left the runner",
+                Wakes::Contended => "no registry access failed on the tear",
+                Wakes::Never => "nothing was awaited",
+            }
+        }
+    }
+
+    fn lone_plant(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, Plant) {
+        let tree = crate::workspace_manager::fixture::scratch(tag);
+        let common = tree.path().join("common");
+        let plant = Plant {
+            admin: common.join("worktrees").join("foreign"),
+            head: "a".repeat(40),
+            runner: Arc::new(RecordingRunner::new()),
+            wakes: Wakes::Contended,
+            common,
+            torn: Torn::CommondirEmpty,
+        };
+        (tree, plant)
+    }
+
+    fn cancelled_and_joined(prober: Prober) -> Result<(), String> {
+        let _ = prober.cancel.send(());
+        prober
+            .handle
+            .join()
+            .unwrap_or_else(|_| Err("the prober panicked".to_owned()))
+    }
+
+    #[test]
+    fn a_prober_cancelled_after_the_attempt_it_waits_for_reports_it_and_finishes_the_tear() {
+        let (_tree, plant) = lone_plant("prober-cancelled-after");
+        let prober = plant.tear_sampling_every(BOUND);
+        {
+            let mut table = crate::workspace_manager::CONTENDED_ATTEMPTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let count = table.entry(plant.common.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+        assert_eq!(
+            cancelled_and_joined(prober),
+            Ok(()),
+            "an attempt counted before the cancel was sent is what the prober waited for, however \
+             long the wait the cancel ended"
+        );
+        assert_eq!(
+            std::fs::read(plant.admin.join("commondir")).expect("the finished commondir"),
+            b"../..\n",
+            "the prober finished the tear"
+        );
+    }
+
+    #[test]
+    fn a_prober_cancelled_before_anything_it_waits_for_leaves_the_tear_and_says_so() {
+        let (_tree, plant) = lone_plant("prober-cancelled-before");
+        let prober = plant.tear_sampling_every(BOUND);
+        let ended = cancelled_and_joined(prober);
+        assert!(
+            matches!(&ended, Err(why) if why.contains("no registry access failed on the tear")
+                && why.contains("stayed torn")),
+            "the prober says what it did not see: {ended:?}"
+        );
+        assert_eq!(
+            std::fs::read(plant.admin.join("commondir")).expect("the planted commondir"),
+            b"",
+            "the tear stands as planted"
+        );
     }
 
     type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);

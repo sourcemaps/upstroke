@@ -1743,7 +1743,8 @@ precedes directly.
 ## `mod tests` › `struct Prober {`
 
 The writer that finishes the tear, owned by `TearHeld`: the sender that cancels it and the handle
-its `finish` or its drop joins (standards §10).
+its `finish` or its drop joins (standards §10). What it reports, and after which sample, is under
+`fn tear_sampling_every`.
 
 ## `mod tests` › `enum Wakes {`
 
@@ -1771,6 +1772,52 @@ once what it waits for happened after the tear and otherwise writes nothing.
 Complete the registration the tear left, as its writer would: the whole registration for the
 `locked` shape, then `commondir`, then the lock removed. The prober calls it, and a shutdown witness
 calls it from inside the wait, right after it injects the shutdown.
+
+## `mod tests` › `impl Plant` › `fn tear_sampling_every(&self, every: Duration) -> Prober {`
+
+Plant the tear and start its prober. The prober waits at most `every` at a time, a cancel ending the
+wait early, and after each wait it samples what it waits for (`Wakes`). Every report follows such a
+sample: `Ok`, the tear finished, when the sample shows that what it waits for happened after the
+plant; otherwise the cancel, or its deadline once `BOUND` has passed. A witness cancels it only after
+the call it watches has returned, so anything that call counted happened before the cancel was sent,
+and the sample after the cancel sees it however long the wait was. `tear` samples every millisecond.
+
+Before repair round 7 (the follow-up B record's §9.17) the prober sampled before each wait and
+reported a cancel without sampling again, so what happened during its last wait was reported as
+nothing. The integration witness below counts its attempt about 1.2 ms before its cancel on Linux
+(the coordinator's first backoff, then the return), longer than one millisecond-sampler period, so
+it passed there. A wait that ends only at Windows' clock tick, commonly 15.625 ms, mostly misses
+such a window: that is the reasoned cause of `test (winguest)`'s failure of the witness at
+`a337efa7`, and a 15.625 ms sampler reproduces it on Linux. The witnesses whose access cannot pass
+until the prober has finished the tear (the R1 witnesses, the width-1 control, and the closure and
+finalization waits) were never exposed: their prober has reported before the run they drive ends.
+
+## `mod tests` › `impl Wakes` › `fn not_seen(self) -> &'static str {`
+
+What a prober's report says it did not see, by what it waits for. Before repair round 7 every
+report said that no invocation reached or left the runner, whatever the prober waited for.
+
+## `mod tests` › `fn lone_plant(tag: &str) -> (crate::rundir::scratch_tree::ScratchTree, Plant) {`
+
+A tear with an empty `commondir` in a store of its own, in a scratch tree, its prober waiting for a
+contended attempt on that store: the two tests below.
+
+## `mod tests` › `fn cancelled_and_joined(prober: Prober) -> Result<(), String> {`
+
+Cancel a prober, join it, and return its report.
+
+## `mod tests` › `fn a_prober_cancelled_after_the_attempt_it_waits_for_reports_it_and_finishes_the_tear() {`
+
+Repair round 7's order, forced: the prober's wait is as long as the test, so the attempt is counted
+and the cancel sent while it waits, with no sample between them. It reports the attempt and
+finishes the tear. A prober that reports a cancel before it samples, as it did before round 7,
+reports the tear standing here, every time.
+
+## `mod tests` › `fn a_prober_cancelled_before_anything_it_waits_for_leaves_the_tear_and_says_so() {`
+
+The other side of that order: cancelled with nothing counted, the prober leaves the tear as planted
+and says what it did not see. A prober that took a cancel for progress fails here.
+
 ## `mod tests` › `type FoldAct = (fn(&TopologyEventBody) -> bool, Box<dyn FnMut()>);`
 
 An act `TearHeld` runs once when an event is folded, besides the tear: a broken worktree before a
@@ -2226,7 +2273,11 @@ error, and no pipeline, no handle and no worker exist.
 
 The regression review's integration witness at `a58c2ce3`, kept: a prepared candidate's integration
 meets a tear with a shutdown queued, and a prober finishes the tear. Nothing is appended, the ref is
-unmoved, and the interrupted integration ends the admission pass.
+unmoved, and the interrupted integration ends the admission pass. Its access ends at the shutdown,
+not at the tear, so nothing waits for the prober: that the access failed on the tear first rests on
+the sample the prober takes after the cancel (`fn tear_sampling_every`, repair round 7). Should the
+wait not stop the integration, the prober still finishes the tear in time for the access's next
+attempt, and the integration then appends and publishes, which the witness refuses.
 
 ## `mod tests` › `fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {`
 
