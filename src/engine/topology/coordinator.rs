@@ -5938,8 +5938,67 @@ mod tests {
         );
     }
 
+    // Protocol (standards §10): the slow witness owns the worker that holds its
+    // access's first contended answer. The build step spawns the worker and
+    // sends it, with the sender that cancels its wait for that answer, over a
+    // channel to the check step, its one owner past the run. `finish` cancels
+    // what is left of that wait and joins the worker; a worker that panicked
+    // dropped its release unsent, which let the held access go on at once, and
+    // the witness fails on it rather than passing without the delay it is
+    // about. A scenario that unwinds first drops the channel, and the drop
+    // cancels and joins the worker in the same way, saying what it found.
+    struct DelayedRelease {
+        cancel: std::sync::mpsc::Sender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DelayedRelease {
+        fn finish(&mut self) -> Result<(), String> {
+            let Some(worker) = self.worker.take() else {
+                return Ok(());
+            };
+            let _ = self.cancel.send(());
+            worker.join().map_err(|_| {
+                "the worker that held the access's first contended answer panicked, so its \
+                 release dropped unsent and the access went on without the delay"
+                    .to_owned()
+            })
+        }
+    }
+
+    impl Drop for DelayedRelease {
+        fn drop(&mut self) {
+            if let Err(why) = self.finish() {
+                if std::thread::panicking() {
+                    crate::workspace_manager::fixture::say(&why);
+                } else {
+                    panic!("{why}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_delayed_release_whose_worker_panicked_fails_its_witness() {
+        let (cancel, _cancelled) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(|| {
+            panic!("an injected failure of a delayed release's worker, before its delay");
+        });
+        let mut delayed = DelayedRelease {
+            cancel,
+            worker: Some(worker),
+        };
+        let finished = delayed.finish();
+        assert!(
+            matches!(&finished, Err(why) if why.contains("panicked")
+                && why.contains("without the delay")),
+            "a worker that panicked is reported, not taken for its delay: {finished:?}"
+        );
+    }
+
     #[test]
     fn a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing() {
+        let (handing, handed) = std::sync::mpsc::channel::<DelayedRelease>();
         stopped_in_its_wait(
             "shutdown-wait-intent-slow",
             StoppedInItsWait {
@@ -5947,14 +6006,16 @@ mod tests {
                 torn: Torn::CommondirEmpty,
                 finish_at_shutdown: true,
             },
-            |tag| {
+            move |tag| {
                 let wide = two_held(tag);
                 let common = wide.env.fixture.manager.common_git_dir().to_path_buf();
                 let before = crate::workspace_manager::contended_attempts(&common);
                 let release = crate::workspace_manager::hold_next_contended(&common);
-                std::thread::spawn(move || {
+                let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+                let worker = std::thread::spawn(move || {
                     let deadline = std::time::Instant::now() + BOUND;
                     while crate::workspace_manager::contended_attempts(&common) == before
+                        && cancelled.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty)
                         && std::time::Instant::now() < deadline
                     {
                         std::thread::sleep(Duration::from_millis(1));
@@ -5962,10 +6023,22 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(700));
                     let _ = release.send(());
                 });
+                handing
+                    .send(DelayedRelease {
+                        cancel,
+                        worker: Some(worker),
+                    })
+                    .expect("the check step holds the worker's channel");
                 wide
             },
             first_released,
-            |wide, _| {
+            move |wide, _| {
+                let mut delayed = handed
+                    .try_recv()
+                    .expect("the build step handed its worker over");
+                if let Err(why) = delayed.finish() {
+                    panic!("{why}");
+                }
                 let events = wide.run.events();
                 assert_eq!(
                     of_key(events, "attempt_started", 1),
