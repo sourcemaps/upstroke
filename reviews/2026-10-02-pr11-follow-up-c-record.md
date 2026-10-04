@@ -45,7 +45,9 @@ cited as `c6/…`. Repair round 2 (§6.9), after CI on `1fc0c911`, is `pr11_fuc_
 session on this branch at `1fc0c911`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl2/`, cited as `c6r2/…`.
 Repair round 3 (§6.10), after the implementation review of `83516466`, is `pr11_fuc_impl3`'s (the same model and effort,
 a fresh session on this branch at `83516466`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl3/`, cited as
-`c6r3/…`.
+`c6r3/…`. Repair round 4 (§6.11), which merges #329's final head, routes C's cleanup through the coordinator and
+proposes the frozen hunk C-R1, is `pr11_fuc_impl4`'s (the same model and effort, a fresh session on this branch at
+`778abee6`); its figures are under `~/orch-pr11/logs/pr11_fuc_impl4/`, cited as `c6r4/…`.
 
 **The evidence plan was conservative, by direction.** Read our code, read Git's source at the three versions that
 matter, cite the corruption witnesses #329 already executed at base rather than rebuild them, and run one new witness
@@ -68,7 +70,7 @@ signal no process (§5, opening).
 
 | Phase | State |
 |---|---|
-| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1) AND REPAIRED IN ROUND 3 (§6.10); THE REPAIR NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's head, merged in at `e46b71d3`, and uses #329's targeted removal and tolerant registry access as they are. No frozen file changes, and D4 did not trigger (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition) and O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. |
+| Implementation (§6) | **IMPLEMENTED; REVIEWED AT `83516466` (CHANGES_REQUIRED, ONE P1); REPAIRED IN ROUND 3 (§6.10), WHOSE DELTA REVIEW AT `778abee6` PASSED WITH ONE P3; INTEGRATED WITH #329'S FINAL HEAD IN ROUND 4 (§6.11), NOT YET REVIEWED — U as §4 and §5 specify, with the PR11 decision appendix's §11 rows for this change.** It is built on #329's final head `ce55ca91`, merged in at `905ed0c8` (corrected at repair round 4: first merged at `e46b71d3`), and uses #329's targeted removal, tolerant registry access and coordinator pause as they are. **Two frozen changes are on the branch, each proposed, conditional on the owner's freeze ruling and not adopted: #329's H1 and this change's C-R1 (§6.11)**; D4 did not trigger, as no frozen test changed (§6.3). Accounting, the packet and every Git child's inherited environment are unchanged. Its merge is the orchestrator's once the owner's decisions it waits on are made: #329 merged, E-FUC-3's adoption, O4, O7 (or R-REF's disposition), O3's or O3-R's route for FUC-D5-GITINDEXFILE (§6.9), and the freeze ruling for C-R1 (§6.11). Repair round 2 (§6.9) fixed CI's one red leg on `1fc0c911`, a pre-existing Windows-only test whose fixture planted its file under the slot's untagged name, and audited every platform-gated test for the same derivation: there is no other. Repair round 3 (§6.10) fixed the implementation review's five items: the torn-registration repair removes the proven torn instance alone, a resume's recreate reclaims every earlier incarnation's intent before its replacement, Q's three open findings are filed, and two test-only items. Repair round 4 (§6.11) merged #329's final head, routed every registry wait of C's cleanup through the coordinator (the repair's and the final sweep's instance removal, the sweep's and the walks' discovery read), proposed C-R1 for the two frozen walks that make the discovery read, and corrected the body's validation paragraph (C-I2-1). |
 | Design, round 5 (§5) | Reviewed by design review round 5 on `30026823` (`~/orch-pr11/reviews/review-330-d5-triage.md`), whose items against U §6 takes. Round 5 read: **PROPOSED — the last design round before the owner's consolidated question; the owner's decisions D1 to D5 (§5.9).** It answers design review round 4, whose three lenses returned CHANGES_REQUIRED on `12375c7e` with one P1: Git's shared rerere state crosses U's instance boundary. Every engine Git command now runs with rerere disabled, executed on 2.43.0 and 2.55.0 for its effect: no engine pick reads or writes `rr-cache` (§5.2). The common git dir is censused path by path, by plain listings and trace2 on both versions, and the census adds `worktree.useRelativePaths=false` (§5.3). Terminal finalization's last step sweeps every earlier incarnation's instance in non-frozen manager code, and the window after it is R-UR, P3, with E-FUC-3's stated exception (§5.4). R-REF is the owner's decision D5 and blocks G6 until it is made (§5.5). This head changes no production code. |
 | Design, round 4 (§4) | Superseded in part by §5; §5.11 lists what it replaces. Round 4 read: **PROPOSED — U repaired, retention withdrawn, Q frozen; the owner's decisions D1 to D4 (§4.15).** It answers design review round 3, whose three lenses returned CHANGES_REQUIRED on `a0464f43` with one P1, in U's tag, and the looping signal raised the third time (§4.1). The production incarnation id now carries host randomness through the standard library's `RandomState`, and the tag is 60 bits of a hash of it (§4.2). Every walk discovers other incarnations' instances no intent names, executed again with saved evidence on 2.43.0 and 2.55.0 (§4.3). A dead instance that cannot be removed refuses the command, so Q1's order and the outcome equations stand (§4.5). The frozen oracles' replacements are specified fixture by fixture (§4.6). R-REF is regraded and filed (§4.8), Q's open items are restated (§4.9), and R-GU is analysed from DESC's side and filed by #329 (§4.11). This head changes no production code. |
 | Design, round 3 (§3) | Superseded in part by §4; §4.17 lists what it replaces. Round 3 read: **PROPOSED — the closure choice, framed for the owner's decisions D1 to D4 (§3.8).** It answers design review round 2, whose three lenses returned CHANGES_REQUIRED on `a9be94bc`, and the looping signal (§3.1): it proposes the smaller change. Recovery recomputes every slot from non-frozen code and never reads the recorded `worktree_path`, so slot paths and registration names can be unique per coordinator incarnation with no frozen code changed; the packet's T-DISPATCH, R9 and naming texts change instead (erratum E-FUC-3, revised, §3.3.7). Executed with git commands only on 2.43.0 and 2.55.0: a dead incarnation's late add, its `remove_junk` and a `setsid` helper damage a same-path replacement and leave a uniquely named one intact (§3.3.3). R-G is P1, and its in-window variant needs follow-up D's legacy change (§3.4). Q is repaired where no new layer is needed, with PGIDREUSE left open (§3.5). This head changes no production code. |
@@ -3646,7 +3648,8 @@ records what the code does.
 **The merge with #329.** `e46b71d3` merges #329's head `54a1ff147ee99ac1a61f47d483cf7b3852fe4158` into this branch's
 design head `30026823`, with no rebase, so no finding's `reviewed_sha` is re-stamped. The DESC finding was added on both
 sides; #329's text, which carries its dated note, is taken (blob `81ec6201`). U builds on #329's tolerant registry
-access, its targeted removal and its deletion of every engine prune.
+access, its targeted removal and its deletion of every engine prune. (Corrected at repair round 4: #329's final head
+`ce55ca91` is merged at `905ed0c8`, and U's cleanup now waits through #329's coordinator pause; §6.11.)
 
 ### 6.1 Per file: what changed
 
@@ -3876,6 +3879,10 @@ condition does not hold.
   (`c6/frozen/legacy-activation-61b018bf.txt`): `TOPOLOGY_ACTIVATION` is `Inactive` and `MAX_READABLE_SCHEMA` 3,
   unchanged; no legacy module (`src/workspace.rs`, the legacy engine, `src/main.rs`, `src/rundir.rs`) changed; every
   changed path under `src/` and `effects/` is one this section names.
+- **Corrected at repair round 4** (§6.11): this branch now carries two frozen changes, each proposed, conditional on the
+  owner's freeze ruling and not adopted: #329's H1 in `integrate.rs`, carried in by the merge of #329's final head, and
+  this change's C-R1, one line each in `finalize.rs` and `integrate.rs`. No frozen test child changes, and D4 still did
+  not trigger.
 
 ### 6.4 The whole suite, and residue base against head
 
@@ -3938,6 +3945,7 @@ As §5.8 leaves them, with the implementation's changes:
 | **The two frozen oracles** | Replaced and demonstrated (R-O1 to R-O3, M-O1, M-O2) | closed |
 | **RERERE, CONFIG** | The switches built (T-RR1, T-RR2, T-CFG1) | closed |
 | **Q's items** (PGIDREUSE, the sentinel fallback, observation identity) | Q is not built; under U they do not arise. Filed at repair round 3, each guarded on O5 selecting Q (§6.10) | O5, if the owner chooses Q |
+| **C-R1** (corrected at repair round 4) | The proposed frozen hunk: the finalizer's scrub and the merge module's snapshot reclaim enumerate through their hooks, two lines; not adopted (§6.11) | the owner's freeze ruling |
 
 ### 6.7 Findings at this touch
 
@@ -3977,7 +3985,8 @@ As §5.8 leaves them, with the implementation's changes:
 - **Discovery reads the registry, and refuses as #329's removal scan refuses.** `intents()` reads every registration's
   `gitdir` through #329's tolerant access. An entry whose `gitdir` cannot be decoded, which #329's forced removal
   already refuses after the access's deadline, now refuses every walk the same way. No discovery path runs `git worktree
-  list`.
+  list`. Its waits go through the walk's hooks wherever the walk holds them (corrected at repair round 4, §6.11): on the
+  coordinator they answer its messages, and only a resume's recovery walks, before any coordinator exists, sleep.
 - **Nothing is retained** (§4.5). A removal of an instance that fails refuses the whole command resumably, as any
   removal does; the next walk retries it. On Windows, an instance a process outside the dead job holds open refuses each
   resume until the handle closes (R-1W, corrected in place).
@@ -4072,7 +4081,8 @@ four paths (`c6r2/frozen/frozen-proof-3e891d55.txt`). No legacy module or activa
   - O4;
   - O7, or R-REF's disposition;
   - the O3 or O3-R route for FUC-D5-GITINDEXFILE;
-  - #329 merged.
+  - #329 merged;
+  - (corrected at repair round 4, §6.11) the owner's freeze ruling for C-R1.
 - **No other merge permission is needed.**
 - **Corrected in place**, each marked "corrected at repair round 2": §1.9, §2.7.4, §3.3.6 and §6.1.
 
@@ -4278,3 +4288,318 @@ none failed.
 
 §0, the header, §6.1 (the torn plan), §6.6 (Q's row), §6.7 (Q's findings, filed) and §6.8 (E-FUC-3's item 3, which now
 holds as written), each marked "corrected at repair round 3".
+
+### 6.11 Repair round 4: #329's final head merged, C's cleanup routed through the coordinator, C-R1 proposed, and C-I2-1
+
+**What this subsection is.** The work of `pr11_fuc_impl4` (`claude-opus-5-5`, `max`), a fresh repairer the PR11
+orchestrator spawned on this branch at `778abee6` under `~/orch-pr11/briefs/pr11_fuc_impl4.md`. Its scope: merge #329's
+final head with history intact; the synchronous-cleanup obligation the delta review of round 3 left for this round
+(`~/orch-pr11/reviews/review-330-i2-triage.md`, with its two dated addenda); C-I2-1; the integrated head's witnesses,
+mutations, frozen proof and the classification of every new refusal or loss against master `5c222ff2`. Its evidence is
+under `~/orch-pr11/logs/pr11_fuc_impl4/`, cited as `c6r4/…`. It asked one question
+(`~/orch-pr11/questions/pr11_fuc_impl4-1.md`), which the orchestrator answered (`~/orch-pr11/answers/pr11_fuc_impl4-1.md`):
+option 3, the proposed frozen hunk C-R1 below. It adopts no owner decision.
+- **Still not in this round, by the brief:** E-FUC-3 and O4 stay unadopted, the packet is untouched, accounting is
+  unchanged and O7's method stays stopped. #329's code is not changed beyond the merge; follow-up D, review lenses and
+  cleanup are not this round's.
+- **The commits:** `905ed0c8` (the merge), `2c3e413c` (`fix(workspace)`, the routing), `f6bea03e` (`fix(topology)`,
+  C-R1 alone, so that the owner's "no" is one revert), `b5bf4683` (`test(topology)`, C-R1's witnesses and notes), and
+  this record's commit.
+
+**CI on `778abee6`** (`c6r4/ci/summary-37169832065.txt`, `c6r4/ci/runs-778abee6.json`): run 37169832065, green on every
+leg.
+- `lint`, `lint (windows)`, `lint (macos)`, the three `msrv (Rust 1.85, …)` legs and `upstroke-ci`: success.
+- `test (ubuntu-latest)`: the library passed 3,100 and ignored 132. `test (winguest)`: 2,872 passed and 88 ignored.
+  `test (macos-latest)`: 3,031 passed and 104 ignored.
+- The pull-request policy run 37169832103: success. Runs 37169830932 and 37169830957, at the same head, were cancelled
+  by the body edit that followed the push.
+
+**The delta review of round 3** (`~/orch-pr11/reviews/review-330-i2-{regular,regression}-778abee6.review.md`, hashed in
+`SHA256SUMS-330-i2-lenses`; witnesses in `330-i2-witnesses/`, hashed in `SHA256SUMS-330-i2-witnesses`). The regular lens
+passed; the regression lens returned CHANGES_REQUIRED with one P3, C-I2-1, fixed below. The triage carried a note, not a
+finding, for this round: C's cleanup still waited on the coordinator's thread.
+
+#### The merge of #329's final head
+
+`905ed0c8` merges #329's head `ce55ca91aa686628bb61f0fb2f56c23f7ebf7f9e` (its repair rounds 3 to 8 over `54a1ff14`) into
+`778abee6`, with no rebase: no `reviewed_sha` is re-stamped (`c6r4/merge/`). #329's code is final at `519cfc9e`; round 8
+corrected text only.
+- **The conflicts, each resolved keeping both sides** (the merge's message records each):
+  - `remove_execution_root`: #329's `revalidate_pausing(hooks)`, then C's final sweep, as C had them after its own
+    revalidation;
+  - `add_worktree`: C's Windows `$GIT_DIR` refusal first, before any registry access as FUC-D5-WINPATHBYTES requires,
+    then #329's `revalidate_pausing(hooks)`;
+  - `repair_torn_registrations`: C's per-instance plan (C-I1) with #329's pause argument;
+  - `instances_with_torn_registrations`: C's name and return type, #329's `pause_for` parameter;
+  - FUB-D9-ENV's finding: #329's "Corrected at repair round 3" paragraph continues its "Filed" section, and C's
+    "Extended … FUC-D5-GITINDEXFILE" section follows it unchanged.
+- **Not a conflict, but needed to compile:** #329's `tolerant_registry_access` takes the pause as a new argument, and
+  C's two accesses #329's head has no counterpart of — the registry read that discovers earlier incarnations' instances
+  and the instance removal — passed `sleep_for` at the merge, the sleep they made before it.
+- **What the merge left unrouted, executed** (`c6r4/suites/merge-905ed0c8/`): the whole library at `905ed0c8` passed
+  3,170, failed 1 and ignored 132. The one failure is #329's own
+  `a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration`: under C-I1 the repair
+  removes through C's instance removal, whose scan slept on the coordinator's thread, served no pipeline and was
+  refused at its 500 ms test deadline after 16 attempts. That is the obligation this round meets.
+
+#### The census: every C path to a registry access or a retry
+
+Every registry access a C function makes, every caller that reaches it, whether it runs on the coordinator's thread, and
+what routes its waits (`src/workspace_manager.rs` at the code head; the executed call stacks, `c6r4/probe/ACCESS-MAP.txt`):
+
+| Access (its retry is `tolerant_registry_access`) | Reached from | On the coordinator? | Its waits go through |
+|---|---|---|---|
+| the instance removal's scan, `remove_instance_proving` (`:4126`) | the torn-registration repair (from `remove_intent` and `verify_worktree`, so from dispatch, retry, settlement, integration, closure and finalization), and the final sweep | yes, pipelines live but at closure and finalization | the call's hooks (`2c3e413c`) |
+| the registry read, `registered_instances` (`:3278`) | the final sweep (`:2887`) | yes, at finalization | the sweep's hooks (`2c3e413c`) |
+| the same read, through `intents_pausing` (`:3152`) | `reclaim_intents` (`:3377`), a closure's snapshot reclaim (`run.rs:2389`), an attempt's residue discard (`attempt.rs:542`, reached from tests only) | the closure's, yes | the walk's hooks (`2c3e413c`) |
+| the same read, through `intents_pausing` | the finalizer's scrub (`finalize.rs:247`) and the merge module's snapshot reclaim (`integrate.rs:1033`), both frozen | yes; the reclaim with pipelines live | the walk's hooks, **under C-R1** (`f6bea03e`), proposed |
+| the same read, through the hookless `intents()` (`:3139`) | a resume's recovery walks (`recover.rs:1162`, `:1212`, `:1451`, frozen) and tests | **no**: recovery runs before any coordinator exists | a sleep on the calling thread, as before |
+| the slot removal's scan, `remove_worktree_proving` (`:4059`), over every instance (`bind_instances`) | every walk's retirement of a slot | yes | the call's hooks (#329's, kept by the merge) |
+| the torn plan, `instances_with_torn_registrations` (`:6680`) | the repair | yes | the call's hooks (#329's, kept by the merge's resolution) |
+
+#### The routing (`2c3e413c`)
+
+Each C access now waits through the hooks of the call that makes it, as #329's convention has every manager function
+that takes hooks do: `remove_instance_proving`'s scan; `registered_instances` takes the pause, and the final sweep passes
+its hooks; `intents_pausing(hooks)`, `intents()`'s pausing twin, enumerates for every walk that holds hooks. The hookless
+`intents()` keeps its tolerant read and its waits for the callers that hold none. On the coordinator the hooks are the
+coordinator itself, so each of these waits answers its messages, and one that answers a shutdown ends the access and
+its transition there (#329's record §9.13 and §9.16). `effects/wrappers.toml` classifies `intents_pausing` as
+`effect_free`, a first-limb instrument row like #329's pausing twins'.
+
+#### C-R1: the proposed frozen hunk
+
+**Why it exists.** With every non-frozen path routed, two frozen walks still called the hookless `intents()` on the
+coordinator's thread (`c6r4/probe/ACCESS-MAP.txt`): the finalizer's scrub is the first three registry accesses after
+`run_finished`, and the merge module's snapshot reclaim the eighth and the twenty-seventh after gamma's candidate in a
+three-task integration, with pipelines live. Executed in #329's harness with a registration whose `gitdir` cannot be
+read planted at those accesses (`c6r4/probe/FROZEN-PATH-PROBES.txt`; the probe diff `c6r4/probe/coordinator-with-probes.diff`):
+the finalization's read slept twice on the coordinator's thread; the integration's slept to its 500 ms deadline over 16
+attempts, served no pipeline, and the integration was refused. Without a frozen change those waits could only be removed
+by changing what the hookless read does: refusing at once (a new Windows refusal of R7's class, during an integration
+with live pipelines, where master refuses nothing), or not reading the registry in frozen walks (narrowing §4.3 and
+weakening P-1). The orchestrator chose the frozen hunk, as no-loss and as #329's H1 precedent has it.
+
+**PROPOSED RULING C-R1 (on two G6-frozen modules), in RULING P-1's form. NOT ADOPTED.**
+
+> The owner permits exactly two production lines to change in modules G6 requires byte-identical to the G5 range:
+> in `src/engine/topology/finalize.rs`, `scrub_slots`'s enumeration (master `5c222ff2` `:247`)
+> `for slot in manager.intents()? {` becomes `for slot in manager.intents_pausing(hooks.effects())? {`; and in
+> `src/engine/topology/integrate.rs`, `reclaim_snapshots`' enumeration (master `:1021`, `:1033` beside #329's H1)
+> `for slot in manager.intents()? {` becomes `for slot in manager.intents_pausing(journal.hooks().effects())? {`.
+> `intents_pausing` is the workspace manager's non-frozen twin of `intents()`, whose registry read waits through the
+> hooks it is handed. Nothing else in either file changes; `recover.rs` and every other frozen file are unchanged; the
+> frozen test children stay byte-identical, and nothing is appended to them. G6's module diff proof reads these two lines,
+> beside #329's H1, as the only differences permitted beyond those of erratum E-G6-1 (the decision appendix's §8.5),
+> bound to the merge SHA of the change that makes them.
+
+**The exact hunk** is `f6bea03e`, alone (`c6r4/frozen/frozen-proof-b5bf4683.txt`, Parts B and D):
+
+```diff
+--- a/src/engine/topology/finalize.rs
++++ b/src/engine/topology/finalize.rs
+@@ -244,7 +244,7 @@ fn scrub_slots(
+     keep: impl Fn(&Slot) -> bool,
+ ) -> Result<usize, UpstrokeError> {
+     let mut count = 0;
+-    for slot in manager.intents()? {
++    for slot in manager.intents_pausing(hooks.effects())? {
+         if !keep(&slot) {
+             continue;
+         }
+--- a/src/engine/topology/integrate.rs
++++ b/src/engine/topology/integrate.rs
+@@ -1030,7 +1030,7 @@ fn reclaim_snapshots(
+     journal: &mut dyn IntegrationJournal,
+     manager: &WorkspaceManager,
+ ) -> Result<(), UpstrokeError> {
+-    for slot in manager.intents()? {
++    for slot in manager.intents_pausing(journal.hooks().effects())? {
+         if matches!(slot, Slot::Snapshot { .. }) {
+             manager.remove_worktree(journal.hooks().effects(), &slot)?;
+             manager.remove_intent(journal.hooks().effects(), &slot)?;
+```
+
+- **Its purpose.** The two walks' registry reads answer the coordinator's messages, as the removals that follow them
+  already did, and a shutdown answered in one ends the walk there.
+- **Its size.** +1/−1 in each file. Each file at the head, with C-R1's line reversed, hashes to the blob before it:
+  `finalize.rs` to master's (`f18abdd8`), `integrate.rs` to #329's H1 blob (`bf62256e`).
+- **It is not adopted.** The canonical packet and every owner grant are untouched. Admitting the hunk is the owner's
+  freeze ruling, and until it this pull request does not meet G6's frozen-set rule; **C's merge also waits on it.**
+- **What a "no" would mean:** revert `f6bea03e`. The library compiles and its tests run; the three C-R1 witnesses below
+  fail, and the two walks' reads sleep on the coordinator's thread again, each bounded by the access's 10 s deadline and
+  reached only when the store holds a registration the read cannot read. That is the bounded wait as a contract
+  disposition, which #329's precedent calls a waiver and not this lane's to choose.
+- **Two frozen changes are now on this branch, both proposed:** #329's H1 (`integrate.rs`, +16/−4, carried in by the
+  merge) and C-R1 (+2/−2 over two files). Against master the frozen set differs in `integrate.rs` (+17/−5: H1 and C-R1)
+  and `finalize.rs` (+1/−1), 32 of 34 files byte-identical; against #329's head, in C-R1's two lines alone.
+
+#### Witnesses and mutations
+
+**The witnesses** (`CO` is `coordinator::tests`, `WM` `workspace_manager::tests`). Each coordinator call is bounded by
+#329's `bounded`, 120 s. A new tear shape, `Torn::GitdirUnreadable` — a registration whose `gitdir` is a directory —
+fails the store reads C makes directly (the discovery read, the removal's scan) where #329's two shapes pass over them;
+Git's own list passes over it.
+- **A live pipeline is served while C's cleanup waits on a torn registration:**
+  `CO::a_pipeline_is_served_while_an_earlier_instances_repair_removal_waits_on_a_torn_registration` and
+  `CO::a_pipeline_is_served_while_a_verifications_earlier_instance_repair_removal_waits`. The residue is an earlier
+  incarnation's intent and its own instance's registration, torn; C-I1's plan names that instance by its tag, and the
+  removal that takes it meets a foreign registration left `locked` with no `gitdir` (a killed add's shape) at its own
+  start.
+- **The final sweep:** `CO::a_final_sweeps_registry_read_answers_on_the_coordinator` and
+  `CO::a_shutdown_answered_inside_a_final_sweeps_wait_removes_nothing_further`.
+- **A closure's snapshot reclaim:** `CO::a_closures_snapshot_discovery_answers_on_the_coordinator`.
+- **C-R1:** `CO::a_finalizations_scrub_discovery_answers_on_the_coordinator`,
+  `CO::a_pipeline_is_served_while_an_integrations_snapshot_discovery_waits_on_an_unreadable_registration` and
+  `CO::a_shutdown_answered_inside_a_finalizations_scrub_discovery_finalizes_nothing_further`.
+- **The manager's routing, deterministic:** `WM::intents_pausing_reads_the_registry_through_the_hooks_it_is_handed`,
+  `WM::a_reclaims_walk_reads_the_registry_through_the_hooks_it_is_handed`,
+  `WM::the_final_sweeps_registry_read_waits_through_the_hooks_it_is_handed` and
+  `WM::the_final_sweeps_removal_waits_through_the_hooks_it_is_handed`, whose hooks heal the store at their first wait and
+  never sleep.
+
+**Red before, green after.** The routing rows ran first at `2c3e413c` (`c6r4/mutation/VERDICTS-2c3e413c.txt`); the whole
+matrix then ran at the code head `b5bf4683` (`c6r4/mutation-int/VERDICTS.txt`; `c6r4/tools/r4-integrated.py`, judged
+against each row's expected red set). Each row is a copy of the worktree as it was on disk, built and run through
+`upstroke-build` on this lane's mutation pool.
+
+| Row | What | Expected red | Red | Green | Verdict |
+|---|---|---|---|---|---|
+| `control` | the code head, unmutated: every witness below, #329's 34 R1 witnesses, its finalization and closure routing and their shutdown witnesses, and the R-T controls | 0 | 0 | 56 | PASS |
+| `m-r4-all-waits-sleep` | every C routing point waits by sleeping again (the merge's behaviour, the API kept) | 13 | 13 | 4 | PASS |
+| `m-r4-instance-removal-sleeps` | the instance removal's scan sleeps | 4 | 4 | 13 | PASS |
+| `m-r4-sweep-read-sleeps` | the final sweep's registry read sleeps | 3 | 3 | 14 | PASS |
+| `m-r4-intents-pausing-sleeps` | `intents_pausing` ignores its hooks and sleeps | 6 | 6 | 11 | PASS |
+| `m-r4-run-reclaim-hookless` | a closure's snapshot reclaim enumerates hookless (`run.rs`) | 1 | 1 | 16 | PASS |
+| `m-r4-reclaim-intents-hookless` | `reclaim_intents` enumerates hookless | 1 | 1 | 16 | PASS |
+| `m-r4-cr1-finalize-hookless` | C-R1 undone in `finalize.rs`: the scrub enumerates hookless | 2 | 2 | 15 | PASS |
+| `m-r4-cr1-integrate-hookless` | C-R1 undone in `integrate.rs`: the snapshot reclaim enumerates hookless | 1 | 1 | 16 | PASS |
+| `firstbad-2c3e413c-frozen` | both frozen files as at `2c3e413c`, before C-R1 | 3 | 3 | 14 | PASS |
+| `b3-r1-a4-add-gate` | #329's round-3 row `r1-a4-add-gate`, re-expressed at this head | #329's head's 2 | 2 | 50 | PASS |
+| `b3-r1-a4-add-attempt` | #329's round-3 row `r1-a4-add-attempt`, re-expressed at this head | #329's head's 2 | 2 | 50 | PASS |
+| `b3-r1-removal-scan` | #329's round-3 row `r1-removal-scan`, re-expressed at this head | #329's head's 8, less 1 moved by C-I1 | 7 | 45 | PASS |
+| `b3-r1-intent-removal-gate` | #329's round-3 row `r1-intent-removal-gate`, re-expressed at this head | #329's head's 8; and 1 C witness(es) on the mutated path | 9 | 43 | PASS |
+| `b3-r1-intent-second-revalidate` | #329's round-3 row `r1-intent-second-revalidate`, re-expressed at this head | #329's head's 1 | 1 | 51 | PASS |
+| `b3-r1-verify-gate` | #329's round-3 row `r1-verify-gate`, re-expressed at this head | #329's head's 4; and 1 C witness(es) on the mutated path | 5 | 47 | PASS |
+| `b3-r1-verify-second-revalidate` | #329's round-3 row `r1-verify-second-revalidate`, re-expressed at this head | #329's head's 1 | 1 | 51 | PASS |
+| `b3-r1-verify-quiescence` | #329's round-3 row `r1-verify-quiescence`, re-expressed at this head | #329's head's 1 | 1 | 51 | PASS |
+| `b3-r1-repair-plan` | #329's round-3 row `r1-repair-plan`, re-expressed at this head | #329's head's 2 | 2 | 50 | PASS |
+| `b3-r1-revalidate-pausing` | #329's round-3 row `r1-revalidate-pausing`, re-expressed at this head | #329's head's 25; and 2 C witness(es) on the mutated path | 27 | 25 | PASS |
+| `b6-h1-reverted-cr1-kept` | #329's round-6 row `h1-reverted-cr1-kept`, re-expressed at this head | 5 | 5 | 47 | PASS |
+| `b6-i22-finalize-raw-hooks` | #329's round-6 row `i22-finalize-raw-hooks`, re-expressed at this head | 6 | 6 | 46 | PASS |
+| `b6-i22-closure-raw-hooks` | #329's round-6 row `i22-closure-raw-hooks`, re-expressed at this head | 3 | 3 | 49 | PASS |
+| `r3-control` | C's round-3 control | 0 | 0 | 60 | PASS |
+| `r3-control-space` | C's round-3 control under space | 0 | 0 | 55 | PASS |
+| `r3-control-apostrophe` | C's round-3 control under apostrophe | 0 | 0 | 55 | PASS |
+| `r3-control-both` | C's round-3 control under both | 0 | 0 | 55 | PASS |
+| `m-torn-whole-slot` | C's round-3 mutation `m-torn-whole-slot` | any (killed) | 1 | 59 | PASS |
+| `m-recreate-keeps-intents` | C's round-3 mutation `m-recreate-keeps-intents` | any (killed) | 2 | 53 | PASS |
+| `m-filter-unquoted-space` | C's round-3 mutation `m-filter-unquoted-space` | any (killed) | 2 | 0 | PASS |
+| `m-quote-no-escape-apostrophe` | C's round-3 mutation `m-quote-no-escape-apostrophe` | any (killed) | 2 | 0 | PASS |
+| `m-dir-unescaped-apostrophe` | C's round-3 mutation `m-dir-unescaped-apostrophe` | any (killed) | 2 | 0 | PASS |
+| `m-tag-shared-space` | C's round-3 mutation `m-tag-shared-space` | any (killed) | 2 | 0 | PASS |
+| `m-tag-shared-apostrophe` | C's round-3 mutation `m-tag-shared-apostrophe` | any (killed) | 2 | 0 | PASS |
+| `m-kill-child-proceeds` | C's round-3 mutation `m-kill-child-proceeds` | any (killed) | 1 | 0 | PASS |
+| `m-tag-shared` | C's round-3 mutation `m-tag-shared` | any (killed) | 13 | 42 | PASS |
+| `m-disc-none` | C's round-3 mutation `m-disc-none` | any (killed) | 2 | 53 | PASS |
+| `m-disc-no-registry` | C's round-3 mutation `m-disc-no-registry` | any (killed) | 2 | 53 | PASS |
+| `m-disc-no-namespace` | C's round-3 mutation `m-disc-no-namespace` | any (killed) | 1 | 54 | PASS |
+| `m-own-not-excluded` | C's round-3 mutation `m-own-not-excluded` | any (killed) | 3 | 57 | PASS |
+| `m-remove-own-only` | C's round-3 mutation `m-remove-own-only` | any (killed) | 13 | 42 | PASS |
+| `m-intent-own-only` | C's round-3 mutation `m-intent-own-only` | any (killed) | 10 | 45 | PASS |
+| `m-retain` | C's round-3 mutation `m-retain` | any (killed) | 1 | 54 | PASS |
+| `m-o1-stranded-registration` | C's round-3 mutation `m-o1-stranded-registration` | any (killed) | 15 | 45 | PASS |
+| `m-o2-earlier-registration-left` | C's round-3 mutation `m-o2-earlier-registration-left` | any (killed) | 14 | 46 | PASS |
+| `m-fin-no-sweep` | C's round-3 mutation `m-fin-no-sweep` | any (killed) | 2 | 53 | PASS |
+| `m-torn-own-only` | C's round-3 mutation `m-torn-own-only` | any (killed) | 2 | 58 | PASS |
+
+47/47 rows pass (`c6r4/mutation-int/VERDICTS.txt`, which lists every red test of every row).
+
+**How #329's rows are judged.** #329's round-3 rows touch the manager functions this change edits, so they are re-run
+here, their substitutions recomputed on this head's text and `&mut std::thread::sleep` spelt `&mut sleep_for`, since a
+pause now returns a `Result`. A first judgement against #329's round-3 expected sets (its `check-r1.py`, at `4862fdf3`)
+passed 43 of 47 (`c6r4/mutation-int/check.out`): four rows also turned red #329's round-6 witnesses (closure and
+finalization routing and their shutdowns), and witnesses round 6 made assert that nothing slept, which that older table
+predates. So the same ten rows were run on #329's final head itself, a `git archive` of `ce55ca91`, never #329's
+worktree (`c6r4/tools/bhead-rows.py`, `c6r4/mutation-bhead/COMPARE.txt`). Among #329's own 44 tests each row turns the
+same set red at both heads but one: under `r1-removal-scan`,
+`a_pipeline_is_served_while_an_intent_removals_repair_removal_waits_on_a_torn_registration` is red at #329's head only,
+because C-I1's repair removes through the instance removal, whose own row turns it red here. The judgement above holds
+each #329 row to its measured red set at #329's head, less that move, and admits a C witness only where the row's
+mutated wait lies on its path (three rows: the residue's first gate wait precedes C's repair witnesses). #329's round-6
+rows are judged against their stated sets, with C's witnesses on the same paths. C's round-3 rows give the same red set
+and the same green count as at round 3, row by row (`c6r4/mutation-int/r3-rows-vs-round3.txt`).
+
+#### New refusals and losses, classified against master `5c222ff2`
+
+- **A shutdown answered inside one of C's registry waits ends the command there,** with `UpstrokeError::Refused` naming
+  it: the repair's instance removal (any transition), the final sweep's read and removals, the scrub's and a closure's
+  discovery, an integration's discovery (the last two under C-R1 where frozen). The transition appends, publishes and
+  spawns nothing further, and the run is resumable: #329's shutdown contract (§9.16.3 of its record), now true on C's
+  waits too. **Against master: new.** Master has no instances, no sweep and no discovery read, and its coordinator
+  answered a shutdown only after a transition's waits had slept out. What the stopped cleanup did not remove — an earlier
+  instance, a torn registration's instance, a snapshot — is residue the next resume's walks or the next finalization
+  remove; no output is lost, and no accounting or preservation check changes. Witnessed for the sweep and the scrub
+  above.
+- **No other new refusal.** The routing changes where a wait happens, not whether an access refuses: the deadline, the
+  attempts and the refusals at the deadline are the tolerant access's, unchanged (§4.3, §6.8). A wait may end later
+  than its length by the time the coordinator takes to answer one message, as #329's do. C-R1 adds no refusal; that is
+  why it was chosen over a hookless read that refuses at once.
+- **The merge adds none of C's own.** #329's new refusals at the paths it owns are #329's, classified in its record
+  (the timer that cannot start, §9.16.5; a listed path that stays unreadable, §9.14.3).
+
+#### The Windows `$GIT_DIR` budget, under #329's new tests
+
+U's tag adds 13 bytes to every slot path, and #329's rounds 3 to 8 added coordinator tests with fixture tags of up to
+42 characters, none of which had run under U. C's guard (`refuse_git_dir_over_budget`, Windows only) was enabled on Linux
+in a scratch copy and its budget offset by how much longer the run's temporary directory was than the CI guest's (41
+characters, `C:\Users\Administrator\AppData\Local\Temp`; PR11's measured layout), over the whole library
+(`c6r4/budget/EMULATION.txt`): no add was refused. The library's eight failures there are the seven tests that need the
+rlib a `--lib` build does not write and the budget constant's own pin, which the emulation changes. A positive control,
+the same guard at a budget of 100, refuses ("is 176 bytes in UTF-8, over Git's budget of 100"). CI's `test (winguest)` is
+the truth.
+
+#### C-I2-1 (P3): the body's validation paragraph carried earlier rounds' results
+
+`pr.md:192` at `778abee6` said round 1's residue suite "gave the same" as the gates above it, which reported round 3's
+3,100 library tests (round 1's suite at `61b018bf` passed 3,098), and that "this round's" first attempts failed, which
+were round 2's, at `3b4d1d79` and `83516466` (round 3's gates at `778abee6` passed on their first attempts). The body now
+names each run by its round, its SHA and its counts. **Its two round-2 failures, re-read:** both are the frozen helper
+assertion `recover/tests.rs:7120`, "… and no process holds the run", which #329's round 8 filed as
+`PR329-A-DROPPED-RESUMES-RUN-STILL-READ-AS-RUNNING` — at `3b4d1d79` (round 2's local first version of `83516466`,
+amended before any push) in
+`a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal`, and at
+`83516466` in the finding's own witness,
+`unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`
+(`c6r2/flake/summary.txt`, `c6r2/flake/at-83516466/summary.txt`). Round 2 attributed them to the PR281 family; they are
+sightings of the fingerprint that finding records, provenance undetermined, counted red for G6, and this record and the
+body say so. That finding's file is #329's and is not edited here; the orchestrator routes both sightings to #329's
+step-5 diagnosis.
+
+#### Not changed here, routed by the orchestrator
+
+- `WorkspaceManager::compare_and_swap_ref` takes hooks but calls the hookless `assert_publishable`, master's code that
+  #329 kept, so during an integration's publication that registry access sleeps on the coordinator's thread
+  (`c6r4/probe/ACCESS-MAP.txt`, INT 14 and 33). It is #329's R1 census, recorded as an item for #329's next code round.
+- The two round-2 sightings above.
+
+#### The frozen set, the platforms and the gates
+
+- **The frozen proof** (`c6r4/frozen/frozen-proof-b5bf4683.txt`, from `c6r4/tools/frozen-proof-r4.sh`): two proposed
+  frozen changes, #329's H1 and C-R1, each exactly as above; no frozen test child changed. Against G5's range
+  `d724fb16` the cumulative difference is six files, +259/−80: master's four enumerated paths (+241/−74) and the two
+  proposed hunks' files, which E-G6-1's rule (not adopted) reports as not enumerated.
+- **Schema 4 stays unreachable and the legacy path is unchanged** (`c6r4/frozen/legacy-activation-b5bf4683.txt`). Against
+  #329's head, `run.rs` and `attempt.rs` change one line each (the walks' enumeration), `coordinator.rs` changes in its
+  tests only, and `finalize.rs` and `integrate.rs` change by C-R1.
+- **Windows and macOS are compiled and linted here, never run** (`c6r4/platform/at-b5bf4683/`, rc 0 each: `cargo clippy --all-targets --all-features -- -D warnings` for
+  `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, and `cargo check --locked --all-targets --all-features` for
+  `x86_64-pc-windows-msvc` on stable and on 1.85.0 with `-D warnings` passed inside the wrapper (`rustflags-arrival.txt`:
+  it arrives), with the host's 1.85.0 check under the same flag). The new witnesses are not
+  platform-gated, so they run on every CI leg; CI is the truth for Windows and macOS.
+- **The ten gates** run at the head that carries this record; the pull request's body gives them.
+
+#### Corrected in place
+
+§0, the header, §6's merge paragraph, §6.3 (two proposed frozen changes), §6.6 (C-R1's row), §6.8 (discovery's waits)
+and §6.9 (the merge's prerequisites), each marked "corrected at repair round 4".
