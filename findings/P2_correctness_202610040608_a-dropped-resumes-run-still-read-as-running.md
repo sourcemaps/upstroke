@@ -8,7 +8,7 @@ reviewed_sha: 519cfc9e55ff3138585cd67ae0c733b2455a4fbd
 location: src/engine/topology/recover/tests.rs:7120
 provenance: pre_existing
 first_bad: 523dac5feb4bdefed6abf530a98653bb7a4843d7
-guard: the owner's freeze ruling on the proposed frozen hunk H3 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.20), which makes this observation wait for this process's own copies of the run's cleanup lease and name its holder; on a yes, the change that merges H3 deletes this file; until then, final-range G6 keeps this sighting apart from every other and counts any recurrence of this witness failing its run observation as red
+guard: the owner's freeze ruling on the proposed frozen hunk H3 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.20, revised at §9.22), which makes this observation wait, bounded, for this process's own copies of the run's cleanup lease, fail at once on an observation that fails, and name its holder; on a yes, the change that merges H3 deletes this file; until then, final-range G6 keeps this sighting apart from every other and counts any recurrence of this witness failing its run observation as red
 ---
 
 ## Failure sequence
@@ -131,3 +131,22 @@ sightings, round 6's s1 and C's `83516466`, stay individually unattributed.
 once, and a red names the wait's result and what acquiring the run lock answers. `recover/tests.rs` is G6-frozen, so H3
 is proposed in RULING P-1's form, conditional on the owner's freeze ruling, and **not adopted**. This file stays until
 the change that merges H3 deletes it.
+
+## H3 revised at the B4 round (2026-10-04)
+
+`pr11_fub_impl10` revised H3 after the i5 review's I5-1 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.2 and
+§9.22.3). `reviewed_sha`, provenance and first bad are unchanged, and the guard above now names the revised hunk.
+
+- **What was wrong with H3 as proposed.** The repair described above, as first proposed, made the wait every later
+  resume makes, #320's `wait_for_cleanup_hold_release_observing`. That wait observes through `cleanup::is_held`, which
+  reads an inspection error as held. So an unreadable `cleanup.lock` was waited on as a holder and, once readable
+  again, passed: this helper's observation, which failed on that error at once before H3, could pass after it.
+- **The revision.** `assert_no_process_holds_the_run` now waits through `await_own_lease_copies_release`, which keeps
+  #320's bound, rest and acknowledgement but observes through the fixture's `observe_cleanup_lease`, answering held,
+  free or the error. Only a lease found held is waited on, and an observation that fails fails the helper at once,
+  naming its error. Then `rundir::is_running` is read once, as before.
+- **Its regression test.** `a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once` is red at
+  `d7865780` with the witnesses alone, and green under the reviewer's pre-H3 control and at the revised code
+  (`~/orch-pr11/logs/pr11_fub_impl10/repro/SUMMARY.txt`).
+- **Still proposed.** The revised H3 is in RULING P-1's form, conditional on the owner's freeze ruling, and not adopted.
+  This file stays until the change that merges it deletes the file.

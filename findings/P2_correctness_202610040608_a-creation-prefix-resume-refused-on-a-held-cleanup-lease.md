@@ -8,7 +8,7 @@ reviewed_sha: 519cfc9e55ff3138585cd67ae0c733b2455a4fbd
 location: src/engine/topology/recover/tests.rs:17809
 provenance: pre_existing
 first_bad: 6a5324e72cba7440afc6024569991a81f29dc0a8
-guard: the owner's freeze ruling on the proposed frozen hunk H3 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.20), which makes this witness's first resume wait for this process's own copies of the run's cleanup lease; on a yes, the change that merges H3 deletes this file; until then, final-range G6 counts every occurrence matching this fingerprint as red and uses it to classify no other failure
+guard: the owner's freeze ruling on the proposed frozen hunk H3 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.20, revised at §9.22), which makes this witness's first resume wait, bounded, for this process's own copies of the run's cleanup lease and fail at once on an observation that fails; on a yes, the change that merges H3 deletes this file; until then, final-range G6 counts every occurrence matching this fingerprint as red and uses it to classify no other failure
 ---
 
 ## Failure sequence
@@ -119,3 +119,25 @@ funnels as a previous incarnation, so its first resume waits for this process's 
 A regression test plants a copy of P8's lease before the resume, and the body adopts the ref. `recover/tests.rs` is
 G6-frozen, so H3 is proposed in RULING P-1's form, conditional on the owner's freeze ruling, and **not adopted**. This
 file stays until the change that merges H3 deletes it.
+
+## H3 revised at the B4 round (2026-10-04)
+
+`pr11_fub_impl10` revised H3 after the i5 review's I5-1 (`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.2 and
+§9.22.3). `reviewed_sha`, provenance and first bad are unchanged, and the guard above now names the revised hunk.
+
+- **What was wrong with H3 as proposed.** It counted the creation's prefix as a previous incarnation, as the section
+  above says, so the first resume waited through #320's `await_previous_incarnations_release`. That wait observes
+  through `cleanup::is_held`, which reads an inspection error as held. So an unreadable `cleanup.lock` was waited on as
+  a holder, and the resume converged once it was readable again, where before H3 the resume refused on that error at
+  once.
+- **The revision.** The body no longer counts its prefix in `resume_attempts`. Before its first resume it waits through
+  `await_own_lease_copies_release`, which keeps #320's bound, rest and acknowledgement but observes through the
+  fixture's `observe_cleanup_lease`. Only a lease found held is waited on, and an observation that fails fails the body
+  at once, naming its error. A copy past the bound leaves the resume to production, whose refusal carries the expired
+  wait's note, as before.
+- **Its regression tests.** `a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once` is red
+  at `d7865780` with the witnesses alone, and green under the reviewer's pre-H3 control and at the revised code
+  (`~/orch-pr11/logs/pr11_fub_impl10/repro/SUMMARY.txt`).
+  `a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume` holds the expired wait's note.
+- **Still proposed.** The revised H3 is in RULING P-1's form, conditional on the owner's freeze ruling, and not adopted.
+  This file stays until the change that merges it deletes the file.
