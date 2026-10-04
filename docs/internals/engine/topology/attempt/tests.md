@@ -780,6 +780,38 @@ condition `permits.protocol` states.
 A reviewer whose completion never ran, holding the pair its role takes,
 registered with the attempt's standing read from the fold.
 
+## `struct HealsTheStoreAtAWait<'h> {`
+
+The follow-up C record's §6.13: the hooks an attempt context holds in the residue discard's
+witness below. They forward every phase, the refusal cause the run's own hooks report and their
+durability ledger, so the run's timeline and harness see what they always see, and they answer
+the registry's waits themselves. Every wait is counted, and the first that finds the planted
+registration removes it, so the attempt after that wait reads the store whole. They never sleep:
+a wait that slept on the calling thread instead (`workspace_manager`'s `sleep_for`, which the
+hookless `intents()` waits by) is one they never see, and `fixture::slept_pauses` counts it.
+
+## `fn an_interrupted_attempts_residue_discard_reads_the_registry_through_the_hooks_it_is_handed() {`
+
+The follow-up C record's §6.13 (repair round 6, the i3 review's C-I3-1). Round 4 routed an
+attempt's residue discard (`discard_residue`) through `intents_pausing(self.hooks.effects())`, so
+that its registry read waits through the hooks the attempt context holds, as every walk that holds
+hooks does. Its callers, `settle_interrupted` and `cancel_in_flight`, are reached from tests only,
+and no coordinator path reaches them. Round 4's mutation matrix gave that routing point no row of
+its own, and the discard enumerating through the hookless `intents()` left every witness green.
+
+This is its witness, through the call site itself. An attempt is started and given a snapshot of
+its own. A registration of the repository's store whose `gitdir` is a directory is planted; the
+discard's registry read fails on it on every attempt until it is gone (the shape the record's
+§6.11 calls `GitdirUnreadable`). The interruption is then settled through an attempt context whose
+hooks are `HealsTheStoreAtAWait`'s. The read waits through them, its attempt after the wait
+passes, and the discard removes the snapshot with its intent and the scrub the task's worktree.
+Nothing sleeps on the calling thread.
+
+With the discard enumerating through `intents()`, the read sleeps on the calling thread until its
+500 ms test deadline and refuses, the hooks see no wait, and the witness fails on its first
+assertion. The witness calls no coordinator, since none reaches this caller; the mutant's wait is
+bounded by the access's deadline.
+
 ## `fn stage_elements() -> Vec<ResidueElement> {`
 
 ---------------------------------------------------------------------------
