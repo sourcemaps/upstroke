@@ -1563,10 +1563,10 @@ the in-flight work its caller vouches for (`closure::Cancelled`) is settled
 interrupted — each attempt's `attempt_interrupted`, then its own snapshots and
 its task worktree reclaimed; the verification's `merge_verification_interrupted`,
 then its pin deleted expected-old, its staging removed and this sequence's
-snapshots reclaimed ([`Self::reclaim_interrupted`]) — and any other in-flight
+snapshots reclaimed ([`reclaim_interrupted`]) — and any other in-flight
 work is refused before any append (`closure::settleable`). Steps (3) and (4):
 a promoting generation is promoted and an authorized publication completed
-([`Self::complete_promotions`], [`Self::complete_publication`]). Then every
+([`complete_promotions`], [`complete_publication`]). Then every
 closable generation is closed `RunEnding { outcome }` with its close appended
 and its slot scrubbed after the append, a provisional reservation still held is
 cancelled with a warning, the derivation is confirmed against the closed fold,
@@ -2287,7 +2287,7 @@ publication's effects, and the integration reservation converted.
 
 ## `struct PausingRefs<'a, 'h> {`
 
-The `integrate::IntegrationRefs` the dispatch's head check is handed (the
+The `create::IntegrationRefs` the dispatch's head check is handed (the
 follow-up B record's §9.16, I2-7): the manager, and the operator's registry
 hooks, lent for the check. The frozen `integrate::dispatch_head` asks
 `assert_publishable` with `&self`, and the wait inside it needs the hooks
