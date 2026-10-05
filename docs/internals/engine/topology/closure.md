@@ -65,7 +65,8 @@ completes them (steps (3) and (4)), and [`blockers`] still names them.
 
 Step (2)'s work: an attempt in flight (its key, generation, attempt number and the lease its
 interruption records, by kind, as recovery records it), or a started verification (its sequence,
-its candidate's task, and — for a stale-clean basis — the pin and the proposal it pins).
+its candidate's task, and — for a stale-clean basis — the pin and the proposal it pins). A
+verification also records whether a lineage failure cancelled it (`cancelled`).
 
 ## `impl InFlight` › `pub fn describe(&self) -> String {`
 
@@ -81,10 +82,24 @@ recorded after the result arrived and before `integrate()` prepared it still int
 working record's round R2) — and that the Runner had established the end of each of its processes.
 Either is what vouching for it means.
 
+A verification a lineage failure cancelled gets its own detail, because "the candidate stays
+queued" would be false for it: a decline, or a lineage member's failed settlement, failed its
+lineage and cancelled it; its pipeline had ended, stopped by the coordinator or with a result the
+cancellation discards, and the Runner had established the end of each of its processes; nothing was
+published, and its candidate, whose task failed, is not verified again. The coordinator's own
+settlement of a cancelled verification and a halt's closure append that same terminal.
+
 ## `pub fn in_flight(fold: &TopologyFold) -> Vec<InFlight> {`
 
 Every in-flight attempt in key order, then the started verification if one is open — recovery's
-order, step (d) before step (f).
+order, step (d) before step (f). The verification's `cancelled` is [`cancelled_by_lineage`].
+
+## `pub fn cancelled_by_lineage(fold: &TopologyFold, sequence: SequenceId) -> bool {`
+
+Whether the open transaction is `sequence`'s, is `VerificationStarted`, and its candidate's task is
+`Failed`: the whole of what the fold holds for a verification a lineage failure cancelled, since
+`fail_lineage` keeps that transaction open until its one terminal. The coordinator's `open_in`
+reads it to treat the verification as closed, and [`in_flight`] to choose its terminal's detail.
 
 ## `pub struct Cancelled {`
 

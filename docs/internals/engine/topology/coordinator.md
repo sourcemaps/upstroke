@@ -102,9 +102,11 @@ less than it had been told. As repaired:
   (`R1-CONC-2`).
 - **Every admission pass stops each pipeline whose identity the fold has closed**, before it selects
   anything — a decline that does not halt fails its lineage, and so does a lineage member's failed
-  settlement — and `verify` unwinds when its transaction disappears, abandoning the integration
-  without ending the command (`R1-CONC-3`). A halt the fold records is acted on before that (round
-  R3, below).
+  settlement — and `verify` unwinds when its verification is cancelled, abandoning the integration
+  without ending the command (`R1-CONC-3`). The fold keeps a cancelled verification's transaction
+  open until its one terminal, which the integration appends before admission goes on; `open_in`
+  treats the cancelled verification as closed. A halt the fold records is acted on before that
+  (round R3, below).
 - **A verification's review spend is charged when its completion is accepted**, before the next
   selection (phase 4; `R1-CONC-4`).
 
@@ -352,12 +354,13 @@ settled by the halt either: the closure refuses what it is not vouched for.
 
 ## `impl Coordinator<'_>` › `fn abandoning(&self) -> bool {`
 
-Whether `verify` is on the stack and the fold no longer holds its transaction open — a decline, or a
-lineage member's failed settlement, failed the lineage, and `reconcile` has stopped the verification's
-pipeline. Admission ends its pass while it is, so the next thing `verify` does is wait for that
-pipeline to end and unwind. Selection would otherwise see the transaction gone and admit other work
-under a `verify` that is still returning; a candidate already queued was selected for integration and
-refused inside `verify`, which ended the command (round R2, `R2-DECLINE-QUEUED`).
+Whether `verify` is on the stack and its verification is no longer open — a decline, or a lineage
+member's failed settlement, failed the lineage and cancelled the verification, whose transaction the
+fold holds until its terminal (`closure::cancelled_by_lineage`), and `reconcile` has stopped the
+verification's pipeline. Admission ends its pass while it is, so the next thing `verify` does is wait
+for that pipeline to end and unwind. Admitting other work under a `verify` that is still returning
+once selected a candidate already queued for integration and refused it inside `verify`, which ended
+the command (round R2, `R2-DECLINE-QUEUED`).
 
 ## `impl Coordinator<'_>` › `fn integrate(&mut self, candidate: CandidateRef) -> Result<bool, UpstrokeError> {`
 
@@ -369,12 +372,16 @@ integration takes no reservation: the gate closes, admission stops, messages are
 no attempt snapshot is live selection runs afresh (an answer ingested meanwhile can put another
 candidate at the head of the queue). A fast integration never reclaims and does not wait. `false`
 ends the admission pass: nothing was started, or the command is already ending — an error the
-interrupt already accounts for is not a second error. A verification abandoned because the fold
-cancelled its transaction (`abandoned`) ends the integration without ending the command:
-`integrate()` appends nothing after `verify`'s error, and admission goes on. Its staging worktree,
-pin and snapshots are left for the terminal finalization or the next resume's reclaim, which remove
-any staging and pin no open transaction owns; the snapshots are its own sequence's, and a later
-stale integration's reclaim takes them too.
+interrupt already accounts for is not a second error. A verification abandoned because a lineage
+failure cancelled it (`abandoned`) ends the integration without ending the command: `integrate()`
+appends nothing after `verify`'s error, so the coordinator settles it here, before the gate reopens
+and admission goes on — `settle_cancelled_verification` appends its one terminal,
+`merge_verification_interrupted`, and then reclaims its pin expected-old, its staging worktree and
+intent, and its snapshots. `verify` returns `Abandoned` only with no interrupt recorded and once the
+pipeline is gone, so the Runner has established the end of each of its processes; the settlement is
+the command's next append, and its error ends the admission pass under the append-error protocol,
+leaving the resume to settle from the surviving prefix. An interrupt ends the integration with
+nothing appended, and the halt's closure or the next resume settles the verification instead.
 
 ## `impl Coordinator<'_>` › `fn idle(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -403,11 +410,11 @@ verification's result has been accepted and no attempt snapshot is live, then re
 mapped at receipt ([`verified`], the width-1 mapping; the passes were charged there too). A fatal
 completion never waits for the drain: it interrupts as it is received (round R1, `R1-CONC-2`). The
 gate grants during the verification and stops granting once its result has arrived, so every
-snapshot the reclaim that follows removes is the integration's own. When the fold stops holding
-the transaction open — a decline, or a lineage member's failed settlement, failed its lineage — the
-admission pass has stopped the verification; `verify` waits for its pipeline to end and returns an
-error that abandons the integration (`R1-CONC-3`), so it never waits on an inbox its verification
-will not write to.
+snapshot the reclaim that follows removes is the integration's own. When a lineage failure
+cancels the verification — a decline, or a lineage member's failed settlement, failed its lineage —
+the admission pass has stopped it; `verify` waits for its pipeline to end and returns an error that
+abandons the integration (`R1-CONC-3`), so it never waits on an inbox its verification will not
+write to.
 
 ### Errors
 
@@ -417,9 +424,11 @@ it — the pipeline was cancelled, and `integrate()` appends nothing further for
 recorded as cancelled, whether or not its result had already arrived, so a halt's closure settles
 the transaction with `merge_verification_interrupted` (R-AF) — a halt recorded after the result
 arrived and before this returned included (round R2: the admission pass's halt check reads the fold's
-in-flight work, not the live table). And, when the fold no longer holds the transaction open, a
-refusal naming the abandonment, which `integrate` reads through `abandoned` and does not treat as the
-command's end; admission selects nothing until then (`abandoning`).
+in-flight work, not the live table). And, when a lineage failure has cancelled the verification, a
+refusal naming the cancellation — the fold holds its transaction only until its one terminal,
+appended once its pipeline has ended — which `integrate` reads through `abandoned`, answers by
+appending that terminal, and does not treat as the command's end; admission selects nothing until
+then (`abandoning`).
 
 ## `impl Coordinator<'_>` › `fn next_message(&mut self) -> Result<(Origin, ToCoordinator), UpstrokeError> {`
 

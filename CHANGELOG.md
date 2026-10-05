@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
+  cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
+  pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the
+  coordinator appends once the verification's processes have ended (a halt's closure, or the next
+  resume's recovery, when no live process settles it) before the pin, staging worktree and snapshots
+  are reclaimed; the fold refuses that verification any other terminal, a new integration or the
+  run's end until then (INV-07, L13).
 - The four Unix helper endings that give up on a helper — the cleanup reaper that never said
   READY, the job-control guard whose descriptors could not be configured, the guard that never
   said READY, and a guard aborted after it said READY — no longer wait for that helper without a
