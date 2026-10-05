@@ -114,6 +114,7 @@ impl Identity {
                         .fold()
                         .transaction()
                         .is_some_and(|open| open.candidate == *candidate)
+                    && !closure::cancelled_by_lineage(run.fold(), *sequence)
             }
         }
     }
@@ -599,8 +600,12 @@ impl Coordinator<'_> {
         let manager = self.seams.manager;
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
         let settled = self.run.integration_settled(key, terminal);
-        self.open_gate();
         let abandoned = self.abandoned.take() == Some(request.sequence);
+        if settled.is_err() && abandoned && self.interrupt.is_none() {
+            self.run
+                .settle_cancelled_verification(request.sequence, self.seams, self.hooks)?;
+        }
+        self.open_gate();
         match settled {
             Ok(_) => Ok(true),
             Err(_) if self.interrupt.is_some() => Ok(false),
@@ -838,10 +843,11 @@ impl Coordinator<'_> {
             (VerifyEnd::Abandoned, _) => {
                 self.abandoned = Some(sequence);
                 let message = format!(
-                    "the verification of sequence {} of task {key} was abandoned: the fold no \
-                     longer holds its transaction open (a decline, or a failed settlement, \
-                     failed its lineage), so its pipeline was cancelled, its late result \
-                     discarded and nothing is appended for it",
+                    "the verification of sequence {} of task {key} was cancelled: a decline, or \
+                     a failed settlement, failed its lineage, so the fold holds its transaction \
+                     only until its one terminal, `merge_verification_interrupted`, which is \
+                     appended once its pipeline has ended; the pipeline was stopped and its late \
+                     result discarded",
                     sequence.0
                 );
                 self.run.warn(message.clone());

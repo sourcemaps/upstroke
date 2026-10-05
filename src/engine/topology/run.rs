@@ -1577,6 +1577,35 @@ impl TopologyRun {
         }
     }
 
+    pub(super) fn settle_cancelled_verification(
+        &mut self,
+        sequence: SequenceId,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), UpstrokeError> {
+        let cancelled = closure::in_flight(&self.handle.fold)
+            .into_iter()
+            .find(|item| {
+                matches!(
+                    item,
+                    closure::InFlight::Verification {
+                        sequence: held,
+                        cancelled: true,
+                        ..
+                    } if *held == sequence
+                )
+            })
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "the verification of sequence {} was abandoned, and the fold holds no \
+                     verification of it that a lineage failure cancelled; nothing was appended",
+                    sequence.0
+                ),
+            })?;
+        self.emit(cancelled.interrupted(), seams, hooks)?;
+        self.reclaim_interrupted(&cancelled, seams, hooks)
+    }
+
     fn complete_promotions(
         &mut self,
         seams: &RunSeams<'_>,
