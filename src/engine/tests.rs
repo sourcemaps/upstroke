@@ -10875,3 +10875,294 @@ fn v1_shapes_helper() {
         );
     }
 }
+
+#[cfg(unix)]
+const INHERITED_RUN_ROOT: &str = "UPSTROKE_INHERITED_RUN_ROOT";
+#[cfg(unix)]
+const INHERITED_RUN_PRIVATE: &str = "UPSTROKE_INHERITED_RUN_PRIVATE";
+#[cfg(unix)]
+const WORKER_ONLY_PLAN: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n";
+#[cfg(unix)]
+const WORKER_ONLY_CONFIG: &str = "[routing]\nreview = { enabled = false }\n";
+#[cfg(unix)]
+const ONE_GATE_PLAN: &str = "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n";
+#[cfg(unix)]
+const ONE_GATE_CONFIG: &str = "[[gates]]\nname = \"version\"\ncmd = \"git --version\"\n";
+
+#[cfg(unix)]
+fn copy_tree_for_a_layout(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("a copy's directory");
+    for entry in fs::read_dir(from).expect("read a directory to copy") {
+        let entry = entry.expect("a directory entry");
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().expect("an entry's type");
+        if kind.is_dir() {
+            copy_tree_for_a_layout(&entry.path(), &target);
+        } else if kind.is_symlink() {
+            let link = fs::read_link(entry.path()).expect("a link's target");
+            std::os::unix::fs::symlink(link, &target).expect("copy a link");
+        } else {
+            fs::copy(entry.path(), &target).expect("copy a file");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn layout_bytes(at: &Path, into: &mut Vec<(PathBuf, Vec<u8>)>) {
+    let Ok(metadata) = fs::symlink_metadata(at) else {
+        return;
+    };
+    if metadata.is_dir() {
+        into.push((at.to_path_buf(), Vec::new()));
+        let mut entries: Vec<PathBuf> = fs::read_dir(at)
+            .expect("read a watched directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            layout_bytes(&entry, into);
+        }
+    } else {
+        into.push((at.to_path_buf(), fs::read(at).expect("read a watched file")));
+    }
+}
+
+#[cfg(unix)]
+fn other_repository_bytes(other: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    for watched in ["objects", "refs", "packed-refs"] {
+        layout_bytes(&other.join(".git").join(watched), &mut bytes);
+    }
+    bytes
+}
+
+#[cfg(unix)]
+fn link_the_registry_into(registry: &Path, repository: &Path, other: &Path) {
+    copy_tree_for_a_layout(repository, other);
+    fs::create_dir(other.join(".git").join("worktrees")).expect("the other registry");
+    std::os::unix::fs::symlink(other.join(".git").join("worktrees"), registry)
+        .expect("the run's registry, a link into the other repository");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository() {
+    let tree = temp_engine_scratch("inherited-selection-run");
+    let enclosing = tree.path().join("A");
+    let work = enclosing.join("work");
+    fs::create_dir_all(&work).expect("the started directory");
+    git_in(&enclosing, &["init", "-q", "-b", "main"]);
+    git_in(&enclosing, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&enclosing, &["config", "user.name", "upstroke tests"]);
+    fs::write(enclosing.join("README.md"), "A\n").expect("A's readme");
+    fs::write(work.join("shared.txt"), "base\n").expect("the shared file");
+    git_in(&enclosing, &["add", "-A"]);
+    git_in(&enclosing, &["commit", "-q", "-m", "A"]);
+    fs::write(work.join("shared.txt"), "user-staged\n").expect("the user's version");
+    git_in(&enclosing, &["add", "work/shared.txt"]);
+    fs::write(work.join("shared.txt"), "base\n").expect("the file as committed");
+    let selected = tree.path().join("B.git");
+    for args in [
+        ["init", "-q", "-b", "main"].as_slice(),
+        ["add", "shared.txt"].as_slice(),
+        [
+            "-c",
+            "user.name=upstroke tests",
+            "-c",
+            "user.email=test@upstroke.local",
+            "commit",
+            "-q",
+            "-m",
+            "B: initial",
+        ]
+        .as_slice(),
+    ] {
+        let output = Command::new("git")
+            .current_dir(&work)
+            .env("GIT_DIR", &selected)
+            .env("GIT_WORK_TREE", &work)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+    let index = fs::read(enclosing.join(".git").join("index")).expect("A's index");
+    let head = fs::read(enclosing.join(".git").join("HEAD")).expect("A's HEAD");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::inherited_selection_run_helper",
+        &[
+            ("GIT_DIR", selected.as_os_str()),
+            ("GIT_WORK_TREE", work.as_os_str()),
+            ("GIT_AUTHOR_NAME", std::ffi::OsStr::new("upstroke tests")),
+            (
+                "GIT_AUTHOR_EMAIL",
+                std::ffi::OsStr::new("test@upstroke.local"),
+            ),
+            ("GIT_COMMITTER_NAME", std::ffi::OsStr::new("upstroke tests")),
+            (
+                "GIT_COMMITTER_EMAIL",
+                std::ffi::OsStr::new("test@upstroke.local"),
+            ),
+            (INHERITED_RUN_ROOT, work.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the run under the inherited selection completed and committed into B.git: {ended}"
+    );
+    assert_eq!(
+        fs::read(enclosing.join(".git").join("index")).expect("A's index"),
+        index,
+        "the enclosing repository's index is byte-identical"
+    );
+    assert_eq!(
+        fs::read(enclosing.join(".git").join("HEAD")).expect("A's HEAD"),
+        head,
+        "the enclosing repository's HEAD is byte-identical"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn inherited_selection_run_helper() {
+    let Some(work) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    seed(&work, WORKER_ONLY_PLAN, Some(WORKER_ONLY_CONFIG));
+    let mut opts = options(&work);
+    opts.config_path = Some(work.join("upstroke.toml"));
+    let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+    assert!(
+        report.gates.is_empty(),
+        "a worker-only task: {:?}",
+        report.gates
+    );
+    let edited = git_in(
+        &work,
+        &["show", &format!("{}:agent-output.txt", report.branch)],
+    );
+    assert!(
+        edited.contains("edited"),
+        "B.git's run branch holds the worker's edit: {edited}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gated_legacy_run_under_an_absolute_common_dir_keeps_its_snapshot_in_the_run_repository() {
+    let (tree, repo) = temp_engine_repo("absolute-common-registry");
+    seed(&repo, ONE_GATE_PLAN, Some(ONE_GATE_CONFIG));
+    let other = tree.path().join("other");
+    link_the_registry_into(&repo.join(".git").join("worktrees"), &repo, &other);
+    let before = other_repository_bytes(&other);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::absolute_common_dir_run_helper",
+        &[
+            ("GIT_COMMON_DIR", repo.join(".git").as_os_str()),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_PRIVATE, private_root_for(&repo).as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the gated run under an absolute GIT_COMMON_DIR completed: {ended}"
+    );
+    assert!(
+        repo.join("agent-output.txt").is_file(),
+        "the worker's file is still in the checkout"
+    );
+    assert!(
+        other_repository_bytes(&other) == before,
+        "the other repository's objects and refs are byte-identical"
+    );
+    drop(tree);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn absolute_common_dir_run_helper() {
+    gated_run_under_an_inherited_common_dir();
+}
+
+#[cfg(unix)]
+fn gated_run_under_an_inherited_common_dir() {
+    let Some(repo) = std::env::var_os(INHERITED_RUN_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let private = PathBuf::from(std::env::var_os(INHERITED_RUN_PRIVATE).expect("the private root"));
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.private_root = Some(private);
+    let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert_eq!(report.gates, ["version"], "{report:?}");
+    let edited = git_in(
+        &repo,
+        &["show", &format!("{}:agent-output.txt", report.branch)],
+    );
+    assert!(
+        edited.contains("edited"),
+        "the run branch holds the worker's file: {edited}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gated_legacy_run_under_a_relative_common_dir_through_a_linked_registry_keeps_its_snapshot_in_the_run_repository()
+ {
+    let tree = temp_engine_scratch("relative-common-registry");
+    let root = tree.path();
+    let repo = root.join("source/a/b/c/d/repo");
+    fs::create_dir_all(&repo).expect("the repository, six levels below the scratch root");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    seed(&repo, ONE_GATE_PLAN, Some(ONE_GATE_CONFIG));
+    let common = root.join("common");
+    copy_tree_for_a_layout(&repo.join(".git"), &common);
+    let other = root.join("other");
+    link_the_registry_into(&common.join("worktrees"), &repo, &other);
+    let private = root.join("private");
+    fs::create_dir(&private).expect("the private root, one level below the scratch root");
+    let before = other_repository_bytes(&other);
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::relative_common_dir_run_helper",
+        &[
+            (
+                "GIT_COMMON_DIR",
+                std::ffi::OsStr::new("../../../../../../common"),
+            ),
+            (INHERITED_RUN_ROOT, repo.as_os_str()),
+            (INHERITED_RUN_PRIVATE, private.as_os_str()),
+        ],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "the gated run under a relative GIT_COMMON_DIR completed: {ended}"
+    );
+    assert!(
+        repo.join("agent-output.txt").is_file(),
+        "the worker's file is still in the checkout"
+    );
+    assert!(
+        other_repository_bytes(&other) == before,
+        "the other repository's objects and refs are byte-identical"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn relative_common_dir_run_helper() {
+    gated_run_under_an_inherited_common_dir();
+}
