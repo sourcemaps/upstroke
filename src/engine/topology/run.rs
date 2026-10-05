@@ -385,7 +385,7 @@ pub fn verification_body(
                     })?;
                 let staging = work.manager.slot_path(&job.staging);
                 work.input_policy
-                    .problem(&staging, &tree)
+                    .problem_in_work_tree(&staging, work.manager.base(), &tree)
                     .map_err(JudgeError::Other)?
                     .map(crate::engine::classify::review_input_failure)
             }

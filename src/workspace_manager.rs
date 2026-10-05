@@ -60,7 +60,7 @@
 #![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -105,6 +105,51 @@ use crate::util::{DurabilityLedger, DurableStep, EntryObserved};
 /// the key and the value cannot be separated and a new spawn site names the
 /// fact rather than restating it.
 pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
+
+/// The four variables that select one work tree's Git context -- its
+/// administrative directory, its work tree and its index. A Git child the
+/// engine runs in a work tree it made goes without them, and so does a role
+/// started in one: they belong to the checkout the coordinator was started
+/// in, where they keep the meaning they had there. Without them, Git takes
+/// the work tree's administrative directory and index from the `.git` file
+/// `git worktree add` wrote at its top. The other repository-wide names stay,
+/// because the work tree was made under them; [`COMMON_DIR`] stays as
+/// [`keeps_common_dir`] says.
+pub(crate) const WORK_TREE_SELECTORS: [&str; 4] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    INDEX_SELECTOR,
+];
+
+/// The variable that names the repository's common directory.
+pub(crate) const COMMON_DIR: &str = "GIT_COMMON_DIR";
+
+/// Whether an inherited [`COMMON_DIR`] of this value reaches a Git child the
+/// engine runs in a work tree it made, or a role started in one, as it is.
+///
+/// An absolute path does: Git takes it as the common directory exactly as the
+/// started checkout did, from any directory, before the `commondir` file
+/// `git worktree add` wrote in the work tree's administrative directory. That
+/// file holds `../..`, which Git resolves against the real path of the
+/// administrative directory, so a `worktrees` directory that is a symbolic
+/// link into another repository would make it that repository's. Any other
+/// value names a path from the directory of the process that reads it, which
+/// in a work tree the engine made is not the started checkout. Such a process
+/// is given instead the absolute path the value names at the started
+/// checkout -- the checkout's directory joined with the value, or the common
+/// directory the host runner holds -- so that it addresses the started
+/// checkout's common directory whatever its own record names. Absolute is the
+/// platform's rule, [`Path::is_absolute`].
+pub(crate) fn keeps_common_dir(value: &OsStr) -> bool {
+    Path::new(value).is_absolute()
+}
+
+/// The one selector `git worktree add` hands on to the checkout it runs in the
+/// work tree it is creating: it replaces `GIT_DIR` and `GIT_WORK_TREE` for that
+/// child and nothing else. A `git worktree` command run from the started
+/// checkout therefore goes without it.
+pub(crate) const INDEX_SELECTOR: &str = "GIT_INDEX_FILE";
 
 /// The root of every run's ref namespace: a run's refs live under
 /// `refs/upstroke/runs/<run-id>/`, and the engine writes nothing else there.
@@ -1623,7 +1668,7 @@ impl WorkspaceManager {
         refuse_unreal_directory(base)?;
         refuse_unreal_directory(private_root)?;
 
-        let common_git_dir = common_git_dir(base)?;
+        let common_git_dir = common_git_dir(ReadAt::Base, base)?;
         let repo_key = repo_key_v1(&common_git_dir);
         let private_root = canonical_prefix(private_root)?;
         let execution_root = execution_root_of(&private_root, &repo_key, run_id);
@@ -2777,7 +2822,12 @@ impl WorkspaceManager {
         let Some(git_dir) = self.worktree_git_dir(path)? else {
             return Ok(Err(VerifyFailure::Missing));
         };
-        match common_git_dir(path) {
+        match common_git_dir(
+            ReadAt::WorkTree {
+                checkout: &self.base,
+            },
+            path,
+        ) {
             Ok(common) if common == self.common_git_dir => {}
             Ok(_) => return Ok(Err(VerifyFailure::ForeignRepository)),
             Err(_) => return Ok(Err(VerifyFailure::Missing)),
@@ -2844,13 +2894,24 @@ impl WorkspaceManager {
     ///
     /// A Git error other than "the index differs" or "the tree is absent".
     fn index_differs_from(&self, path: &Path, tree: &str) -> Result<Option<String>, UpstrokeError> {
-        let quiet = read_only_git(path, &["diff-index", "--cached", "--quiet", tree, "--"])?;
+        let quiet = read_only_git(
+            ReadAt::WorkTree {
+                checkout: &self.base,
+            },
+            path,
+            &["diff-index", "--cached", "--quiet", tree, "--"],
+        )?;
         match quiet.status.code() {
             Some(0) => return Ok(None),
             Some(1) => {}
             _ => {
-                let present =
-                    read_only_git(path, &["cat-file", "-e", &format!("{tree}^{{tree}}")])?;
+                let present = read_only_git(
+                    ReadAt::WorkTree {
+                        checkout: &self.base,
+                    },
+                    path,
+                    &["cat-file", "-e", &format!("{tree}^{{tree}}")],
+                )?;
                 if present.status.success() {
                     return Err(UpstrokeError::Git {
                         message: format!(
@@ -2869,6 +2930,9 @@ impl WorkspaceManager {
         // NUL-separated, because a path may contain a newline and a diagnostic
         // that split on one would name paths that do not exist.
         let names = read_only_git_ok(
+            ReadAt::WorkTree {
+                checkout: &self.base,
+            },
             path,
             &["diff-index", "--cached", "--name-only", "-z", tree, "--"],
         )?;
@@ -4995,6 +5059,16 @@ impl WorkspaceManager {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(self.hooks_dir());
         let mut command = Command::new("git");
+        if cwd == self.base.as_path() {
+            if args
+                .first()
+                .is_some_and(|first| first.as_os_str() == OsStr::new("worktree"))
+            {
+                command.env_remove(INDEX_SELECTOR);
+            }
+        } else {
+            in_work_tree(&mut command, &self.base);
+        }
         command
             .arg("-C")
             .arg(cwd)
@@ -5449,8 +5523,12 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
 /// into a `TreeMismatch` -- so this is not a second copy of a manager
 /// precaution but the same one, at the reads the manager makes outside its
 /// builder.
-fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
-    Command::new("git")
+fn read_only_git(at: ReadAt<'_>, cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
+    let mut command = Command::new("git");
+    if let ReadAt::WorkTree { checkout } = at {
+        in_work_tree(&mut command, checkout);
+    }
+    command
         .arg("-C")
         .arg(cwd)
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
@@ -5463,8 +5541,8 @@ fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
         })
 }
 
-fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
-    let output = read_only_git(cwd, args)?;
+fn read_only_git_ok(at: ReadAt<'_>, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError> {
+    let output = read_only_git(at, cwd, args)?;
     if !output.status.success() {
         return Err(UpstrokeError::Git {
             message: format!(
@@ -5478,6 +5556,29 @@ fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError>
     Ok(output.stdout)
 }
 
+/// Where a read outside the builder runs: in the managed base, whose inherited
+/// Git context it keeps as the coordinator received it, or in a work tree the
+/// manager made from `checkout`, the managed base, where it is given what
+/// [`in_work_tree`] gives.
+#[derive(Debug, Clone, Copy)]
+enum ReadAt<'a> {
+    Base,
+    WorkTree { checkout: &'a Path },
+}
+
+/// What a Git child the manager runs in a work tree it made goes without, and
+/// the common directory it is given: [`WORK_TREE_SELECTORS`] are removed, and
+/// an inherited [`COMMON_DIR`] that [`keeps_common_dir`] does not keep is
+/// replaced by the absolute path it names at `checkout`, the managed base.
+fn in_work_tree(command: &mut Command, checkout: &Path) {
+    for name in WORK_TREE_SELECTORS {
+        command.env_remove(name);
+    }
+    if let Some(value) = std::env::var_os(COMMON_DIR).filter(|value| !keeps_common_dir(value)) {
+        command.env(COMMON_DIR, checkout.join(value));
+    }
+}
+
 /// Every object `git fsck --unreachable` reports, and nothing else.
 ///
 /// # Errors
@@ -5485,6 +5586,7 @@ fn read_only_git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, UpstrokeError>
 /// A Git error.
 pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError> {
     let output = read_only_git(
+        ReadAt::Base,
         worktree,
         &[
             "fsck",
@@ -5716,6 +5818,7 @@ fn fan_out_directories(object_dir: &Path) -> impl Iterator<Item = Result<PathBuf
 /// A Git error.
 pub fn object_directory(worktree: &Path) -> Result<PathBuf, UpstrokeError> {
     let output = read_only_git_ok(
+        ReadAt::Base,
         worktree,
         &[
             "rev-parse",
@@ -5731,12 +5834,20 @@ pub fn object_directory(worktree: &Path) -> Result<PathBuf, UpstrokeError> {
 }
 
 fn object_exists(worktree: &Path, object: &str) -> Result<bool, UpstrokeError> {
-    let output = read_only_git(worktree, &["cat-file", "-e", &format!("{object}^{{}}")])?;
+    let output = read_only_git(
+        ReadAt::Base,
+        worktree,
+        &["cat-file", "-e", &format!("{object}^{{}}")],
+    )?;
     Ok(output.status.success())
 }
 
-fn head_commit(worktree: &Path) -> Result<Option<String>, UpstrokeError> {
-    let output = read_only_git(worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
+fn head_commit(checkout: &Path, worktree: &Path) -> Result<Option<String>, UpstrokeError> {
+    let output = read_only_git(
+        ReadAt::WorkTree { checkout },
+        worktree,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+    )?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -5746,12 +5857,13 @@ fn head_commit(worktree: &Path) -> Result<Option<String>, UpstrokeError> {
 }
 
 /// Whether anything in the working tree is not yet in the index.
-fn worktree_has_unstaged_changes(worktree: &Path) -> Result<bool, UpstrokeError> {
+fn worktree_has_unstaged_changes(checkout: &Path, worktree: &Path) -> Result<bool, UpstrokeError> {
     // `--no-renames` is load-bearing, not tidiness: `status --porcelain -z`
     // detects renames by default and then emits `R  <new>\0<old>\0`, so the
     // *old path* arrives as a bare field whose second byte is a path character
     // and would be read as an unstaged status.
     let output = read_only_git_ok(
+        ReadAt::WorkTree { checkout },
         worktree,
         &[
             "status",
@@ -5774,8 +5886,12 @@ fn worktree_has_unstaged_changes(worktree: &Path) -> Result<bool, UpstrokeError>
 }
 
 /// Whether the index has anything staged against HEAD.
-fn index_differs_from_head(worktree: &Path) -> Result<bool, UpstrokeError> {
-    let output = read_only_git(worktree, &["diff", "--cached", "--quiet"])?;
+fn index_differs_from_head(checkout: &Path, worktree: &Path) -> Result<bool, UpstrokeError> {
+    let output = read_only_git(
+        ReadAt::WorkTree { checkout },
+        worktree,
+        &["diff", "--cached", "--quiet"],
+    )?;
     Ok(!output.status.success())
 }
 
@@ -5946,7 +6062,7 @@ fn registration_for(
     repository: &Path,
     worktree: &Path,
 ) -> Result<Option<Registration>, UpstrokeError> {
-    let store = common_git_dir(repository)?.join("worktrees");
+    let store = common_git_dir(ReadAt::Base, repository)?.join("worktrees");
     let entries = match fs::read_dir(&store) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -6327,8 +6443,9 @@ fn read_prefix(path: &Path, bound: u64) -> std::io::Result<Vec<u8>> {
 /// spells is a valid repository — read as text here until PR10's round 4,
 /// an absent add target in such a repository errored where the merge base
 /// classified it (the round-4 regression lens, P2-2; §8).
-fn common_git_dir(inside: &Path) -> Result<PathBuf, UpstrokeError> {
+fn common_git_dir(at: ReadAt<'_>, inside: &Path) -> Result<PathBuf, UpstrokeError> {
     let output = read_only_git_ok(
+        at,
         inside,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;

@@ -27,6 +27,7 @@ use crate::runner::{
 };
 use crate::topology::effects::ProcessSite;
 use crate::topology::events::RunnerPolicy;
+use crate::workspace_manager::{COMMON_DIR, WORK_TREE_SELECTORS, keeps_common_dir};
 
 mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
@@ -69,6 +70,53 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
     }
 }
 
+const fn starts_in_the_started_checkout(role: &ExecutionRole, worker_in_checkout: bool) -> bool {
+    match role {
+        ExecutionRole::Probe(_) => true,
+        ExecutionRole::Implement => worker_in_checkout,
+        ExecutionRole::Gate | ExecutionRole::Review => false,
+    }
+}
+
+fn give_work_tree_context(
+    composed: &mut Vec<(OsString, OsString)>,
+    overlay: &[(String, String)],
+    case: KeyCase,
+    run_common_dir: Option<&Path>,
+) -> Result<(), UpstrokeError> {
+    let overlaid = |name: &OsStr| {
+        overlay
+            .iter()
+            .any(|(key, _)| case.same_key(OsStr::new(key), name))
+    };
+    composed.retain(|(name, _)| {
+        !WORK_TREE_SELECTORS
+            .iter()
+            .any(|selector| case.same_key(name, OsStr::new(selector)))
+            || overlaid(name)
+    });
+    for (name, value) in composed.iter_mut() {
+        if !case.same_key(name.as_os_str(), OsStr::new(COMMON_DIR))
+            || overlaid(name.as_os_str())
+            || keeps_common_dir(value.as_os_str())
+        {
+            continue;
+        }
+        let Some(common) = run_common_dir else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "refusing to start a role in a work tree the engine made: the inherited \
+                     `{COMMON_DIR}` is not an absolute path, so there it would name a directory \
+                     beside the work tree rather than the started checkout's, and this runner \
+                     holds no managed repository whose common directory it could give instead"
+                ),
+            });
+        };
+        *value = common.as_os_str().to_os_string();
+    }
+    Ok(())
+}
+
 // This runner owns both locks. `resolved` serializes each program lookup and
 // caches its success or error before releasing the guard. Concurrent callers
 // reuse that result. It is released before `hooks` is acquired; the locks never
@@ -83,6 +131,7 @@ pub struct HostRunner {
     policy: RunnerPolicy,
     digest: String,
     environment: HostEnvironment,
+    worker_in_checkout: bool,
     hooks: Option<Mutex<Box<dyn SpawnHooks + Send>>>,
     resolved: Mutex<BTreeMap<ProgramQuestion, Result<PathBuf, String>>>,
 }
@@ -119,6 +168,7 @@ impl HostRunner {
             policy,
             digest,
             environment: HostEnvironment::from_process(),
+            worker_in_checkout: false,
             hooks: None,
             resolved: Mutex::new(BTreeMap::new()),
         }
@@ -126,9 +176,12 @@ impl HostRunner {
 
     #[must_use]
     pub fn for_legacy_workspace(repository: ManagedRepository) -> Self {
-        Self::new().with_environment(
-            HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
-        )
+        Self {
+            worker_in_checkout: true,
+            ..Self::new().with_environment(
+                HostEnvironment::from_process().reading(ObjectGraph::RecordedIn(repository)),
+            )
+        }
     }
 
     #[must_use]
@@ -234,10 +287,23 @@ impl HostRunner {
                 .verify_include()
                 .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         }
-        let composed = self
+        let mut composed = self
             .environment
             .compose(&request.role, request.agent.as_ref(), &request.command.env)
             .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
+        if !starts_in_the_started_checkout(&request.role, self.worker_in_checkout) {
+            let run_common_dir = match self.environment.objects() {
+                ObjectGraph::RecordedIn(repository) => Some(repository.common_dir()),
+                ObjectGraph::Recorded | ObjectGraph::AsReplaced => None,
+            };
+            give_work_tree_context(
+                &mut composed,
+                &request.command.env,
+                self.environment.case(),
+                run_common_dir,
+            )
+            .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
+        }
         let program = self
             .program_for(&request.command.program, &composed)
             .map_err(|error| RunnerError::never_started(&request.invocation, error))?;

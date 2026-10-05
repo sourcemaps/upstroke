@@ -100,6 +100,15 @@ pub trait ReviewInputPolicy {
         worktree: &std::path::Path,
         tree: &str,
     ) -> Result<Option<String>, UpstrokeError>;
+
+    fn problem_in_work_tree(
+        &self,
+        worktree: &std::path::Path,
+        _checkout: &std::path::Path,
+        tree: &str,
+    ) -> Result<Option<String>, UpstrokeError> {
+        self.problem(worktree, tree)
+    }
 }
 
 pub trait ReviewPasses {
@@ -469,6 +478,7 @@ impl AttemptContext<'_> {
         Assessor {
             adapters: self.adapters,
             input_policy: self.input_policy,
+            checkout: self.manager.base(),
         }
         .assess(site, plan, run, capture, diff, kind)
     }
@@ -620,6 +630,7 @@ fn capture_tree(
 struct Assessor<'a> {
     adapters: &'a dyn AdapterSource,
     input_policy: &'a dyn ReviewInputPolicy,
+    checkout: &'a std::path::Path,
 }
 
 impl Assessor<'_> {
@@ -665,7 +676,11 @@ impl Assessor<'_> {
             );
         }
         if failure.is_none() {
-            if let Some(problem) = self.input_policy.problem(site.worktree, &capture.tree)? {
+            if let Some(problem) = self.input_policy.problem_in_work_tree(
+                site.worktree,
+                self.checkout,
+                &capture.tree,
+            )? {
                 failure = Some(crate::engine::classify::review_input_failure(problem));
             }
         }
@@ -749,6 +764,7 @@ pub fn attempt_body(work: &mut Work<'_>, job: &AttemptJob) -> Result<Judged, Ups
     let assessed = Assessor {
         adapters: work.adapters,
         input_policy: work.input_policy,
+        checkout: work.manager.base(),
     }
     .assess(site, &job.plan, &run, &capture, &diff, job.entry.spec.kind)?;
     let inputs = work.plans.inputs(&InputsRequest {
