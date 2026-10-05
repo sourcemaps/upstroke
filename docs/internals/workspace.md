@@ -839,10 +839,32 @@ suite one `git worktree remove` still holding its end took all three of the
 cleanup witness's readings.) The four commands it serves each open another
 registration's `commondir` once, on Git 2.43.0 and 2.55.0. When the act returns,
 the server is stopped and, if it is still waiting for a reader, released by a
-reader the test opens without blocking; a server that fails releases any reader
-waiting on its FIFO and puts the whole file in place; the act's panic is carried
-out after both. Linux-only, as its tests are: they assert the `Success` line,
-whose rendering was executed only on Linux with glibc.
+reader the test opens without blocking. A server that fails, by an error or by
+a panic, releases every reader of its FIFO and puts the whole file in place
+(`release_commondir_readers`) before its failure goes on: its own thread
+catches the unwinding, releases, and resumes it, so the act's next Git reads
+the whole file rather than waiting on a FIFO nobody serves, the act returns,
+and the join carries the server's panic or error out. The act's panic is
+carried out first. (Until the B9 round only an error released: a panic, such as
+an `on_serve` callback's failed `expect`, closed the writer, the act's next
+attempt opened the abandoned FIFO and waited for ever, and the join that would
+carry the panic out was never reached. B-I8-2, the follow-up B record's §9.26.)
+Linux-only, as its tests are: they assert the `Success` line, whose rendering
+was executed only on Linux with glibc.
+
+## `fn release_commondir_readers(commondir: &Path, whole: &Path) {`
+
+The fixture's release, in an order meant to strand no reader: a reader opened
+on the path without blocking, which is what lets the writer opened next without
+blocking succeed; that writer, whose arrival wakes every Git blocked opening the
+FIFO; the whole file renamed over the path, so every later open reads it; then
+both closed, so every reader of the FIFO reads end of file, which Git takes for
+a torn read and attempts again, now of the whole file. Whatever is at the path,
+the FIFO the server was serving or the next one, it is released; if the whole
+file is already in place the rename fails and is ignored. The order is reasoned
+from Linux's FIFO semantics: the tests do not force a reader into the gap
+between a writer's close and the rename, which the earlier order (a writer
+opened without blocking, then the rename) left open.
 
 ## `fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {`
 
@@ -888,6 +910,47 @@ Bounded: if the add has not returned at three deadlines, the test writes the
 The add's destination written to while Git is blocked reading the tear: the
 add is not run again, and its first failure is returned unchanged. Run again,
 it would fail on the destination instead.
+
+## `fn serving_commondir_under_containment(`
+
+TEST-HARNESS CONTAINMENT, not the repair. Runs `serving_commondir` with a
+snapshot as the act, beside a containment thread that waits for the act's end:
+if it has not ended at three times `REGISTRY_TEAR_DEADLINE`, the containment
+releases the fixture's readers itself and puts the whole file in place, so that
+the act's Git can end, every later read is whole and nothing is left waiting,
+and reports that it had to. It carries its own copy of the release rather than
+calling `release_commondir_readers`, so that a defect in the fixture's release
+cannot disable it: a mutation of that function that skips the rename wedged
+the witness for good while the containment called it (the B9 round's matrix).
+The bound bounds a wedged fixture, not a healthy one: a healthy server's act
+ends in milliseconds. It returns what `serving_commondir` carried out, the
+snapshot's own result, and whether the containment released. The containment
+thread is joined.
+
+## `fn a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller() {`
+
+The B-I8-2 witness. The server's `on_serve` callback panics at the first
+reading, after the add's Git has opened the FIFO: the add's first attempt reads
+end of file and dies, and the server's own unwinding releases the FIFO and puts
+the whole file in place, so the add's next attempt reads it and the snapshot is
+made. The containment did not release, the panic that reaches the caller is the
+callback's own, and the add succeeded. Before the repair the add's next Git
+waited on the abandoned FIFO until the containment released it, thirty seconds
+in, and the test fails on that.
+
+## `fn a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller() {`
+
+A control: an ordinary error of the server, a file planted where its next FIFO
+would go, so its `mkfifo` fails at the first reading. The add's first attempt
+reads end of file, the release puts the whole file in place, the add's next
+attempt reads it, the containment does not release, and the caller receives the
+server's error through `serving_commondir`'s `expect`, naming `mkfifo`.
+
+## `fn a_commondir_server_that_serves_its_script_ends_without_the_containment() {`
+
+A control: the same harness with a server that serves its one torn reading and
+fails nothing. The containment does not release, the server reports the tear
+it served, and the add goes on past it.
 
 ## `fn only_another_registrations_empty_commondir_reads_as_attempted_again() {`
 

@@ -4081,15 +4081,11 @@ mod tests {
         };
         let (acted, served) = std::thread::scope(|scope| {
             let server = scope.spawn(|| {
-                let served = serve();
-                if served.is_err() {
-                    let _ = OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NONBLOCK)
-                        .open(&commondir);
-                    let _ = fs::rename(&whole, &commondir);
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&serve));
+                if !matches!(served, Ok(Ok(_))) {
+                    release_commondir_readers(&commondir, &whole);
                 }
-                served
+                served.unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
             });
             let acted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(act));
             stopped.store(true, Ordering::SeqCst);
@@ -4108,6 +4104,22 @@ mod tests {
             .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked))
             .expect("the commondir's server");
         (acted, served)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn release_commondir_readers(commondir: &Path, whole: &Path) {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(commondir);
+        let _ = fs::rename(whole, commondir);
+        drop((writer, reader));
     }
 
     #[cfg(target_os = "linux")]
@@ -4330,6 +4342,142 @@ mod tests {
             error.ends_with(&named),
             "a destination Git may have taken returns the first error, unchanged: {error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serving_commondir_under_containment(
+        fixture: &SnapshotRepo,
+        entry: &Path,
+        script: &[Served],
+        on_serve: &(dyn Fn(usize) + Sync),
+    ) -> (
+        std::thread::Result<Vec<Served>>,
+        Option<Result<(), String>>,
+        bool,
+    ) {
+        let (ended, wait) = std::sync::mpsc::channel();
+        let mut added = None;
+        std::thread::scope(|scope| {
+            let containment = scope.spawn(move || {
+                let wedged = wait.recv_timeout(REGISTRY_TEAR_DEADLINE * 3)
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+                if wedged {
+                    use std::os::unix::fs::OpenOptionsExt;
+
+                    let commondir = entry.join("commondir");
+                    let reader = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let writer = OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&commondir);
+                    let _ = fs::rename(entry.join("commondir.whole"), &commondir);
+                    drop((writer, reader));
+                }
+                wedged
+            });
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serving_commondir(entry, script, on_serve, || {
+                    added = Some(
+                        fixture
+                            .snapshot()
+                            .map(drop)
+                            .map_err(|error| error.to_string()),
+                    );
+                })
+                .1
+            }));
+            let _ = ended.send(());
+            let contained = containment
+                .join()
+                .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked));
+            (served, added, contained)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_panics_releases_its_reader_and_its_panic_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-panics");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {
+                panic!("w924: the commondir's server failed")
+            });
+        assert!(
+            !contained,
+            "the server's unwinding left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that panicked returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        assert_eq!(
+            panicked.downcast_ref::<&str>(),
+            Some(&"w924: the commondir's server failed"),
+            "the server's own panic reached the caller"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_fails_releases_its_reader_and_its_error_reaches_the_caller() {
+        let fixture = SnapshotRepo::new("w924-server-fails");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) = serving_commondir_under_containment(
+            &fixture,
+            &entry,
+            &[Served::Torn, Served::Whole],
+            &|_| {
+                fs::write(entry.join("commondir.next"), "")
+                    .expect("a file where the next FIFO would go");
+            },
+        );
+        assert!(
+            !contained,
+            "the server's failure left the add's next Git waiting on its FIFO, until the \
+             witness's containment released it"
+        );
+        let panicked = match served {
+            Ok(served) => panic!("a server that failed returned {served:?}"),
+            Err(panicked) => panicked,
+        };
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("the commondir's server: ") && message.contains("mkfifo"),
+            "the server's own error reached the caller: {message:?}"
+        );
+        assert_eq!(
+            added,
+            Some(Ok(())),
+            "the add read the tear, and then the whole commondir the release put in place"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_commondir_server_that_serves_its_script_ends_without_the_containment() {
+        let fixture = SnapshotRepo::new("w924-server-serves");
+        let entry = fixture.plant_another_registration("w924-other");
+        let (served, added, contained) =
+            serving_commondir_under_containment(&fixture, &entry, &[Served::Torn], &|_| {});
+        assert!(
+            !contained,
+            "a server that serves its script needs no release"
+        );
+        assert_eq!(served.ok(), Some(vec![Served::Torn]), "it served the tear");
+        assert_eq!(added, Some(Ok(())), "and the add went on past it");
     }
 
     #[test]
