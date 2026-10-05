@@ -19958,6 +19958,356 @@ mod tests {
         });
     }
 
+    fn f_gate_of(subject: FSubject, invocation: &InvocationId) -> bool {
+        matches!(
+            (invocation, subject),
+            (
+                InvocationId::Attempt {
+                    role: AttemptRole::Gate(_),
+                    ..
+                },
+                FSubject::Attempt,
+            ) | (
+                InvocationId::Sequence {
+                    role: crate::runner::invocation::SequenceRole::Gate(_),
+                    ..
+                },
+                FSubject::Verification,
+            )
+        )
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FLaunch {
+        HeadRemoved,
+        PrunedWhole,
+        Intact,
+        CreateFailing,
+        Lost,
+        Cancelled,
+        Unresolved,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FLaunched {
+        failed: Option<(crate::error::ProcessFate, bool)>,
+        message: String,
+        head: PathBuf,
+        head_after: bool,
+    }
+
+    type FLaunches = Arc<std::sync::Mutex<Vec<FLaunched>>>;
+
+    fn f_launch(
+        request: &crate::runner::RunnerRequest,
+        launch: FLaunch,
+    ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
+        match launch {
+            FLaunch::HeadRemoved | FLaunch::Lost | FLaunch::Cancelled | FLaunch::Unresolved => {
+                crate::workspace_manager::fixture::remove_file(
+                    &f_entry_of(&request.workspace).join("HEAD"),
+                );
+            }
+            FLaunch::PrunedWhole => f_prune_own_entry(&request.workspace),
+            FLaunch::Intact | FLaunch::CreateFailing => {}
+        }
+        let stub = |what: &str| UpstrokeError::Refused {
+            message: format!("the stub gate's run {what}"),
+        };
+        match launch {
+            FLaunch::Lost => {
+                return Err(crate::runner::RunnerError::gone(
+                    &request.invocation,
+                    stub("lost its process after it started"),
+                ));
+            }
+            FLaunch::Cancelled => {
+                return Err(crate::runner::RunnerError::cancelled(
+                    &request.invocation,
+                    crate::error::ProcessFate::NeverStarted,
+                ));
+            }
+            FLaunch::Unresolved => {
+                return Err(crate::runner::RunnerError::unresolved(
+                    &request.invocation,
+                    stub("could not establish that its process ended"),
+                ));
+            }
+            FLaunch::HeadRemoved
+            | FLaunch::PrunedWhole
+            | FLaunch::Intact
+            | FLaunch::CreateFailing => {}
+        }
+        let context = crate::workspace_manager::fixture::Fixture::new("f-container-gate");
+        let runtime = crate::engine::topology::scaffold::container_host()
+            .starting(crate::engine::topology::scaffold::exiting());
+        if launch == FLaunch::CreateFailing {
+            runtime.set_failing(crate::runner::container::runtime::RuntimeOp::Create);
+        }
+        let runner = crate::engine::topology::scaffold::container_runner(
+            crate::runner::container::exec::RunIdentity {
+                private_root: context.private.clone(),
+                run_id: crate::workspace_manager::fixture::RUN_ID.to_owned(),
+                run_dir: context.root.join("container-run"),
+                incarnation: "f_container_gate".to_owned(),
+                repo_key: "f_container_gate".to_owned(),
+            },
+            &context.base,
+            Box::new(runtime),
+            Duration::from_millis(1),
+        )
+        .with_view(Box::new(crate::runner::container::view::RoleGitView::new(
+            crate::runner::container::runtime::ContainerTrace::off(),
+        )));
+        runner.run_blocking(request)
+    }
+
+    fn f_launching_gate_responder(
+        tasks: &[WideTask],
+        subject: FSubject,
+        launch: FLaunch,
+        launched: FLaunches,
+    ) -> crate::engine::topology::scaffold::Responder {
+        let base = wide_responder(tasks, &[]);
+        Box::new(move |request: &crate::runner::RunnerRequest| {
+            if !f_gate_of(subject, &request.invocation) {
+                return base(request);
+            }
+            let head = f_entry_of(&request.workspace).join("HEAD");
+            let result = f_launch(request, launch);
+            launched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(FLaunched {
+                    failed: result
+                        .as_ref()
+                        .err()
+                        .map(|error| (error.fate, error.is_cancelled())),
+                    message: result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    head_after: head.exists(),
+                    head,
+                });
+            result
+        })
+    }
+
+    fn f_first_launch(launched: &FLaunches) -> Result<FLaunched, String> {
+        launched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .first()
+            .cloned()
+            .ok_or_else(|| "no gate of the subject was launched".to_owned())
+    }
+
+    fn f_launch_witnessed(launched: &FLaunches, launch: FLaunch) -> Result<(), String> {
+        let first = f_first_launch(launched)?;
+        let fate = match launch {
+            FLaunch::Lost => crate::error::ProcessFate::Gone,
+            _ => crate::error::ProcessFate::NeverStarted,
+        };
+        let names_head =
+            launch == FLaunch::Lost || first.message.contains(&first.head.display().to_string());
+        if first.failed == Some((fate, false)) && names_head && !first.head_after {
+            Ok(())
+        } else {
+            Err(format!(
+                "the launch was not the failure the construction makes ({fate:?}, HEAD named \
+                 and still absent): {first:?}"
+            ))
+        }
+    }
+
+    #[test]
+    fn a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused() {
+        bounded("f-c1-p2-launch", || {
+            let mut cases = Vec::new();
+            for (subject, width) in F_MATRIX {
+                for launch in [FLaunch::HeadRemoved, FLaunch::PrunedWhole, FLaunch::Lost] {
+                    let tasks = f_tasks_of(subject, "src/work.txt");
+                    let launched = FLaunches::default();
+                    let responder =
+                        f_launching_gate_responder(&tasks, subject, launch, Arc::clone(&launched));
+                    let (wide, result) = f_drive_subject(
+                        &format!("f-p2-launch-{subject:?}-w{width}-{launch:?}"),
+                        &tasks,
+                        subject,
+                        width,
+                        responder,
+                        WidePlans::default(),
+                        None,
+                    );
+                    let label = format!("{subject:?} width {width}: {launch:?}");
+                    cases.push(match f_launch_witnessed(&launched, launch) {
+                        Ok(()) => {
+                            f_refused_case(label, &wide, result, &["'s run, which failed", "HEAD"])
+                        }
+                        Err(why) => (label, Err(why)),
+                    });
+                }
+            }
+            f_report(&cases);
+        });
+    }
+
+    #[test]
+    fn a_container_gate_launched_in_a_whole_snapshot_is_judged() {
+        bounded("f-c1-p2-launch-control", || {
+            for (subject, width) in F_MATRIX {
+                let tasks = f_tasks_of(subject, "src/work.txt");
+                let launched = FLaunches::default();
+                let responder = f_launching_gate_responder(
+                    &tasks,
+                    subject,
+                    FLaunch::Intact,
+                    Arc::clone(&launched),
+                );
+                let (wide, result) = f_drive_subject(
+                    &format!("f-p2-launch-control-{subject:?}-w{width}"),
+                    &tasks,
+                    subject,
+                    width,
+                    responder,
+                    WidePlans::default(),
+                    None,
+                );
+                let progress =
+                    result.unwrap_or_else(|error| panic!("{subject:?} width {width}: {error}"));
+                assert_eq!(outcome_of(&progress), RunOutcome::Complete);
+                let launched = launched
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                assert!(
+                    !launched.is_empty() && launched.iter().all(|one| one.failed.is_none()),
+                    "{subject:?} width {width}: the real Git-view reader materialized every \
+                     gate's view: {launched:?}"
+                );
+                let events = wide.env.durable_events();
+                assert_eq!(
+                    count(&events, "merge_verification_unavailable"),
+                    0,
+                    "{subject:?} width {width}: no outage: {:?}",
+                    kinds_of(&events)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was() {
+        bounded("f-c1-p2-launch-outage", || {
+            for (subject, width) in F_MATRIX {
+                let tasks = f_tasks_of(subject, "src/work.txt");
+                let launched = FLaunches::default();
+                let responder = f_launching_gate_responder(
+                    &tasks,
+                    subject,
+                    FLaunch::CreateFailing,
+                    Arc::clone(&launched),
+                );
+                let (wide, result) = f_drive_subject(
+                    &format!("f-p2-launch-outage-{subject:?}-w{width}"),
+                    &tasks,
+                    subject,
+                    width,
+                    responder,
+                    WidePlans::default(),
+                    None,
+                );
+                let first = f_first_launch(&launched)
+                    .unwrap_or_else(|why| panic!("{subject:?} width {width}: {why}"));
+                assert!(
+                    first.failed == Some((crate::error::ProcessFate::NeverStarted, false))
+                        && first.head_after,
+                    "{subject:?} width {width}: the create fails in a whole snapshot: {first:?}"
+                );
+                let events = wide.env.durable_events();
+                match subject {
+                    FSubject::Attempt => assert!(
+                        matches!(
+                            result,
+                            Err(UpstrokeError::Runner {
+                                fate: crate::error::ProcessFate::NeverStarted,
+                                ..
+                            })
+                        ),
+                        "width {width}: the Runner's error ends the command as it did: {result:?}"
+                    ),
+                    FSubject::Verification => {
+                        let progress =
+                            result.unwrap_or_else(|error| panic!("width {width}: {error}"));
+                        assert!(matches!(progress, Progress::Finished { .. }));
+                        assert!(
+                            count(&events, "merge_verification_unavailable") >= 1,
+                            "width {width}: the failed launch settles an outage: {:?}",
+                            kinds_of(&events)
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_cancelled_or_unresolved_gate_run_ends_the_command_as_it_did_whatever_the_registration() {
+        bounded("f-c1-p2-launch-fates", || {
+            let mut cases = Vec::new();
+            for (subject, width) in F_MATRIX {
+                for launch in [FLaunch::Cancelled, FLaunch::Unresolved] {
+                    let tasks = f_tasks_of(subject, "src/work.txt");
+                    let launched = FLaunches::default();
+                    let responder =
+                        f_launching_gate_responder(&tasks, subject, launch, Arc::clone(&launched));
+                    let (wide, result) = f_drive_subject(
+                        &format!("f-p2-launch-fates-{subject:?}-w{width}-{launch:?}"),
+                        &tasks,
+                        subject,
+                        width,
+                        responder,
+                        WidePlans::default(),
+                        None,
+                    );
+                    let as_it_did = match (launch, &result) {
+                        (FLaunch::Cancelled, Err(UpstrokeError::Runner { source, .. })) => {
+                            source.to_string().contains("cancelled")
+                        }
+                        (
+                            FLaunch::Unresolved,
+                            Err(UpstrokeError::Runner {
+                                fate: crate::error::ProcessFate::Unresolved,
+                                ..
+                            }),
+                        ) => width == 1,
+                        (FLaunch::Unresolved, Err(UpstrokeError::Refused { message })) => {
+                            width != 1 && message.contains("ended with its process unresolved")
+                        }
+                        _ => false,
+                    };
+                    let witnessed = f_first_launch(&launched)
+                        .map(|first| first.failed.is_some() && !first.head_after)
+                        .unwrap_or(false);
+                    cases.push((
+                        format!("{subject:?} width {width}: {launch:?}"),
+                        if as_it_did && witnessed {
+                            Ok(())
+                        } else {
+                            Err(format!(
+                                "{result:?}; the launch removed HEAD and failed: {witnessed}; {:?}",
+                                kinds_of(&wide.env.durable_events())
+                            ))
+                        },
+                    ));
+                }
+            }
+            f_report(&cases);
+        });
+    }
+
     fn f_two_reviewers() -> WidePlans {
         WidePlans {
             reviewers: 2,

@@ -1006,7 +1006,27 @@ impl Judge<'_> {
                     gate.timeout,
                     invocation,
                 );
-                let verdict = self.verdict(&request, None)?;
+                let verdict = match self.verdict(&request, None) {
+                    Ok(verdict) => verdict,
+                    Err(JudgeError::Runner(error))
+                        if !error.is_cancelled() && !error.fate.is_unresolved() =>
+                    {
+                        if let super::dispatch::Whole::No(found) =
+                            super::dispatch::registration_whole(
+                                snapshot.path(),
+                                self.manager.common_git_dir(),
+                            )
+                        {
+                            return Err(JudgeError::Other(super::dispatch::read_refused(
+                                snapshot.path(),
+                                &format!("gate `{}`'s run, which failed ({error})", gate.name),
+                                &found,
+                            )));
+                        }
+                        return Err(JudgeError::Runner(error));
+                    }
+                    Err(error) => return Err(error),
+                };
                 let refused = !verdict.passed();
                 if refused && failure.is_none() {
                     failure = Some(crate::engine::classify::gate_failure(&GateFailure {
