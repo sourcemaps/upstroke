@@ -627,3 +627,29 @@ compatibility promise that a defaulted field would be protecting; one written be
 refused at parse rather than folded to a total it cannot account for, which is the safe direction
 for a ceiling. This remains a Class C wire change under the `src/topology/**` freeze and it is the
 whole subject of the pull request that makes it, which is what the classification asks for.
+
+#### A verification in a checkout a prune emptied
+
+*Conditional draft: the external-prune follow-up's (F), under O1 option A, with O14 open. It is
+not adopted, and it takes effect only if the owner adopts it; its last sentence is O14(a)'s or
+O14(b)'s, whichever the owner chooses.*
+
+Added under §13's same-change rule; not part of the verbatim record above. It records which outcome an
+integration reaches when a prune that no engine process starts deletes the registration of a checkout
+it uses (`design/15`, the external-prune paragraph).
+
+The classification of a stale candidate's failed proposal pick is read from its staging checkout; a
+verification's staging diff and review-input read, and its gates and reviews, from its checkouts.
+Each, failure or answer, is read against the worktree registration of the checkout it was read in.
+When that registration is not whole, nothing read there is used: a deleted index reads as an empty
+one, so a conflict would read as an empty pick and a review-input problem as none. The read is a
+registry refusal (`UpstrokeError::RegistryRefused`), which ends the command resumably. No terminal
+is appended for it, no deferral is spent and no repair is registered; a refused classification
+opens no verification, and the next resume reclaims its staging checkout and integrates the
+candidate again; a refused verification is settled interrupted by the next resume and verified
+again under a new sequence. A removed `index` or `HEAD` that Git wrote again before the read, or a
+file the read does not check, is not seen, and the read's answer is then used as before.
+
+*Under O14(a):* The review passes such a refusal had charged are forgotten, as the exception in
+"The unavailable terminal's spend" says. *Under O14(b):* The review passes it had charged are
+recorded as "The unavailable terminal's spend" says.

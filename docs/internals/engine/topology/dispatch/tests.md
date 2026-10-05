@@ -594,3 +594,31 @@ from; the merged index with no state file — also the completed after
 phase — is reused, and the re-run pick starts from the restored base tree
 and reports the same observation, for a clean source and for a conflicting
 one.
+
+## `fn closure_one_readers_agree_on_every_registration_construction() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-READERS: both copies of closure 1's reader — this module's and the manager's (`fixture::manager_registration_found`) — over every construction of `fixture::registration_constructions`, each answering as #329's §8.4 says and the two agreeing, text included.
+
+## `fn prune_whole_entry(base: &Path, checkout: &Path) {`
+
+A whole-entry prune (`.git` set aside, `git worktree prune --expire=now`, put back).
+
+## `fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {`
+
+Every file under a directory with its bytes.
+
+## `fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN (closure 2's first boundary): at C the slot is removed and recreated and the file lost; under F the reuse refuses, the slot and file are kept byte for byte, the intent kept, nothing removed or added.
+
+## `fn a_pruned_open_generation_holding_nothing_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control: an emptied slot is recreated.
+
+## `fn a_whole_open_generation_whose_head_moved_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control: a whole registration whose `HEAD` moved is recreated.
+
+## `fn a_residue_failure_in_an_open_generation_whose_registration_is_not_whole_is_recreated() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN's control (M-C2a's witness): a residue failure is recreated whatever the registration — #329's rule names three failures.

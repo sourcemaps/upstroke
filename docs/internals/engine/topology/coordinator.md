@@ -2457,3 +2457,383 @@ The control beside T15: a destination that cannot be made is Git state at once, 
 runs (`workspace_manager`'s destination step, after the add's gate), so `decisions.repairs.not_repairs` applies as it did:
 one `merge_verification_unavailable` (Deferred), and the run completes with both candidates
 merged. Green before #329 too, where Git's own add failed to make the destination.
+
+## `mod tests` › `struct FEffects {`
+
+F's coordinator-thread effect hooks: forward every phase to the harness, run an act once at a site's phase, arm an act before the next registry access of this thread (`fixture::before_registry_access`) at a site's phase, or inject one error at a site's phase.
+
+## `mod tests` › `struct FHooks {`
+
+F's coordinator `TopologyHooks`: the harness's hooks with `FEffects` for the effects and one-shot acts after a matching event is folded.
+
+## `mod tests` › `fn f_entry_of(checkout: &std::path::Path) -> PathBuf {`
+
+The registration entry a checkout's `.git` pointer names, read from the file (it works while the entry itself is gone).
+
+## `mod tests` › `fn f_only_checkout_under(namespace: &std::path::Path) -> PathBuf {`
+
+The one checkout under a slot namespace (`tasks/`, `merge/`), whichever incarnation's instance it is.
+
+## `mod tests` › `fn f_prune_whole(base: &std::path::Path, checkout: &std::path::Path) {`
+
+A prune no engine process started, deleting the whole entry of a checkout: its `.git` set aside, `git worktree prune --expire=now` from the base, the `.git` put back (#329's d9 construction).
+
+## `mod tests` › `fn f_cls_tasks() -> [WideTask; 3] {`
+
+T-C1-CLS-RUN's tasks: beta deletes every tracked file, so its fast merge leaves an integration head whose tree is empty; gamma, dispatched at the base, modifies `a.txt`, so its stale pick stops on a modify/delete conflict.
+
+## `mod tests` › `fn f_stale_tasks() -> [WideTask; 3] {`
+
+Three independent tasks whose third, gamma, is integrated stale behind beta.
+
+## `mod tests` › `fn f_step_to_error(`
+
+The width-1 `step` loop until the run finishes or a step errs.
+
+## `mod tests` › `fn f_gamma_queued(tag: &str, tasks: &[WideTask], runner: RecordingRunner) -> Wide {`
+
+Width 1 cannot make a stale candidate (selection integrates before it dispatches), so: a durable width-3 run whose first command ends at gamma's pick (an injected error there leaves nothing durable: the pick is classified unclassified and the staging reclaimed), resumed so that gamma's stale integration is the resumed run's next step.
+
+## `mod tests` › `fn f_finish(mut wide: Wide, incarnation: &str, tasks: &[WideTask]) -> Wide {`
+
+Resume in a new incarnation and drive the run to its end.
+
+## `mod tests` › `fn f_delete_staging_index_at_the_classification(`
+
+Arms, at the proposal pick's `Before` phase, an act for the next registry access of the coordinator's thread: the classification's revalidation, since the pick's primitive makes none. The act deletes the staging entry's `index` (and, for RESIDUAL (iii), writes it again with `git read-tree HEAD`).
+
+## `mod tests` › `fn f_cls_run_width_three(tag: &'static str, concurrency: bool) {`
+
+T-C1-CLS-RUN at width 3, and T-CONC-5 with `concurrency`: at C, gamma's conflict reads as an empty pick and is published already present at the unchanged head; under F the command ends `RegistryRefused` with nothing appended for gamma's sequence, the live attempt's completion discarded (T-CONC-5), and the next resume integrates gamma again and rejects the conflict.
+
+## `mod tests` › `fn a_stale_conflict_read_through_a_deleted_staging_index_ends_the_command_at_width_three() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-CLS-RUN, width 3 (C1-CLS, FUF-R1-1).
+
+## `mod tests` › `fn a_classification_refused_beside_a_live_attempt_cancels_it_and_the_resume_integrates_again() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-5.
+
+## `mod tests` › `fn a_stale_conflict_read_through_a_deleted_staging_index_ends_the_step_at_width_one() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-CLS-RUN, width 1: the refusal leaves through `TopologyRun::integrate`.
+
+## `mod tests` › `fn a_staging_index_written_again_before_the_classification_reads_as_already_present() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-RESIDUALS (iii), pinned: an index written again before the classification's check reads whole, so the conflict is published already present, at C and under F (R-REWRITE, X-1 item 1).
+
+## `mod tests` › `fn f_prune_staging_when_gamma_verification_starts(`
+
+Prunes the staging entry whole once gamma's `merge_verification_started` is folded: after the staging add, before the verification's diff.
+
+## `mod tests` › `fn f_interrupted_and_verified_again(resumed: &Wide, refused: SequenceId) {`
+
+The next resume settles the refused verification interrupted and verifies gamma under a new sequence, spending no deferral.
+
+## `mod tests` › `fn a_verification_whose_staging_entry_is_pruned_before_its_diff_ends_resumably_at_width_three()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P1-VERIFY, width 3: at C the diff's Git error is an outage and a deferral is spent; under F nothing follows `merge_verification_started`.
+
+## `mod tests` › `fn a_verification_whose_staging_entry_is_pruned_before_its_diff_ends_resumably_at_width_one() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P1-VERIFY, width 1.
+
+## `mod tests` › `struct FPolicy {`
+
+A test `ReviewInputPolicy`: acts on a checkout of one namespace (`merge` for a verification, `tasks` for an attempt) — once, or on every call — and then delegates to the legacy policy; it counts its calls.
+
+## `mod tests` › `fn f_removing(name: &'static str) -> FCheckoutAct {`
+
+An act removing one name of a checkout's entry.
+
+## `mod tests` › `fn f_pruning(base: PathBuf) -> FCheckoutAct {`
+
+An act pruning a checkout's entry whole.
+
+## `mod tests` › `fn f_corrupting() -> FCheckoutAct {`
+
+An act writing a corrupt `index` (a regular file, so the check reads whole).
+
+## `mod tests` › `fn f_unstaging(and_delete_the_index: bool) -> FCheckoutAct {`
+
+An act writing a genuine unstaged change, and optionally deleting the `index`.
+
+## `mod tests` › `fn f_keep_the_store(wide: &Wide) {`
+
+A linked checkout outside the execution root that keeps the registration store when a slot's entry is pruned.
+
+## `mod tests` › `fn f_policy_cases(width: usize) -> Vec<(String, Result<(), String>)> {`
+
+T-C1-4's cases at one width: pruned whole with the store kept, pruned whole with the store gone, `HEAD` removed, `commondir` removed. At C the policy's Git error is an outage (a deferral spent); under F a registry refusal.
+
+## `mod tests` › `fn f_report(cases: &[(String, Result<(), String>)]) {`
+
+Collects every case's outcome before asserting, so a red run reports every case's state.
+
+## `mod tests` › `fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_three()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 3.
+
+## `mod tests` › `fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_one()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 1.
+
+## `mod tests` › `fn a_review_input_git_error_in_a_whole_staging_registration_settles_an_outage_at_both_widths() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4's control: a corrupt index in a whole registration is the outage it was, at C and under F (option A, not A′).
+
+## `mod tests` › `fn a_review_input_problem_read_through_a_deleted_staging_index_is_refused_not_hidden() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS: with the staging `index` deleted the legacy policy answers no problem (E8); at C the verification is judged and published; under F the read is refused.
+
+## `mod tests` › `fn a_review_input_problem_in_a_whole_staging_registration_is_a_review_input_failure() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS's control, at C and under F.
+
+## `mod tests` › `fn f_attempt_run(`
+
+One task's run at width 1 (`step`, the caller's hooks) or 3 (`run_concurrently`, pipeline hooks from `f_pipeline_hooks`), with a test policy and an optional act at a site's phase.
+
+## `mod tests` › `struct FPipelineEffects {`
+
+Pipeline-thread effect hooks acting at one site's phase: a pipeline's capture runs on its own thread with hooks from the factory.
+
+## `mod tests` › `struct FPipelineHooks {`
+
+The pipeline-thread `TopologyHooks` over `FPipelineEffects`.
+
+## `mod tests` › `fn f_pipeline_hooks(`
+
+The `HooksFactory` producing `FPipelineHooks`.
+
+## `mod tests` › `fn f_once_in_the_task_slot(root: PathBuf, name: &'static str) -> FSharedAct {`
+
+An act, once, removing one name from the only task slot's entry.
+
+## `mod tests` › `fn an_attempts_review_input_problem_read_through_a_deleted_index_is_refused_not_hidden() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP, widths 1 and 3: at C the attempt is judged without its review-input failure; under F the read is refused.
+
+## `mod tests` › `fn an_attempts_review_input_problem_in_a_whole_registration_fails_the_attempt() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP's control, at C and under F.
+
+## `mod tests` › `fn f_no_change_responder() -> crate::engine::topology::scaffold::Responder {`
+
+A worker that completes and changes nothing (an empty diff).
+
+## `mod tests` › `fn an_attempts_failure_assessed_in_a_slot_whose_registration_is_not_whole_is_refused_not_spent()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3 (a) and (b), widths 1 and 3: a failed worker, or one with no change, the slot's `gitdir` or `index` removed at the `After` phase of `Object.CandidateWriteTree`, so that no check meets the deletion before placement 3 (the policy is bypassed and never called). At C the attempt is spent; under F placement 3 refuses. The engine suite has no seam after the assessment, so the deletion lands after the capture's last check, where nothing reads the index before placement 3.
+
+## `mod tests` › `fn an_attempts_failure_assessed_in_a_whole_registration_is_spent() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3's control, at C and under F.
+
+## `mod tests` › `struct FReview {`
+
+A `ReviewPasses` that runs an act at one call and delegates to the legacy passes.
+
+## `mod tests` › `fn a_promotions_path_read_through_a_deleted_index_ends_the_step_without_a_candidate() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-ANS-PROMO, width 1: the review pass deletes the attempt slot's `index` after its own snapshot was taken; at C the promotion records the base's paths as deletions; under F the path read is refused and no candidate is prepared.
+
+## `mod tests` › `fn f_prune_own_entry(checkout: &std::path::Path) {`
+
+Prunes a checkout's entry whole, running `git worktree prune` inside the common git dir the entry lives in.
+
+## `mod tests` › `enum FSubject {`
+
+Attempt or verification: which judge a placement-2 test drives.
+
+## `mod tests` › `fn f_gate_responder(`
+
+A runner responder whose first gate of the subject runs a stub gate in its snapshot and exits with the gate's code; everything else is the scaffold's.
+
+## `mod tests` › `fn f_construct(name: Option<&'static str>, snapshot: &std::path::Path) {`
+
+Removes one name of a snapshot's entry, or prunes it whole.
+
+## `mod tests` › `fn f_rev_parse_gate(name: Option<&'static str>) -> FGate {`
+
+A stub gate: the construction, then `git rev-parse --verify HEAD` in the snapshot.
+
+## `mod tests` › `fn f_index_gate() -> FGate {`
+
+A stub gate reading the index: `index` removed, then `git ls-files --error-unmatch a.txt`.
+
+## `mod tests` › `fn f_forbidden_gate(delete_the_index: bool) -> FGate {`
+
+T-C1-P2-PASS's gate: fails while `*.forbidden` is tracked; with the `index` deleted it reads an empty index and passes.
+
+## `mod tests` › `fn f_blind_gate_in_a_pruned_snapshot() -> FGate {`
+
+A gate that reads no Git state, passing in a snapshot pruned whole: the liveness cost of checking every verdict.
+
+## `mod tests` › `enum FAnswer {`
+
+What a stub review pass answers.
+
+## `mod tests` › `struct FReviewStub {`
+
+A `ReviewPasses` that, at one pass of the subject, prunes its own snapshot's entry and answers unavailable, a pass, or a pass with a process count that disagrees.
+
+## `mod tests` › `fn f_drive_subject(`
+
+Drives the four of `F_MATRIX`: an attempt at width 1 and 3, a verification at width 1 (via `f_gamma_queued`'s construction) and 3.
+
+## `mod tests` › `fn f_refused_case(`
+
+A case's registry refusal naming the given words, or why not.
+
+## `mod tests` › `fn a_gate_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE: pruned whole, `HEAD`, `commondir`, and the index gate's `index`. At C a verification is rejected and an attempt spent; under F placement 2 refuses.
+
+## `mod tests` › `fn a_genuinely_failing_gate_in_a_whole_snapshot_is_judged() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE's control, at C and under F.
+
+## `mod tests` › `fn a_gate_that_passes_through_a_deleted_index_is_refused_not_published() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS: at C the gate passes through the empty index and the candidate is published or promoted; under F refused.
+
+## `mod tests` › `fn a_gate_reading_a_whole_index_fails_on_the_forbidden_file() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's control, at C and under F.
+
+## `mod tests` › `fn a_passing_gate_that_reads_no_git_state_in_a_pruned_snapshot_is_refused() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's liveness control: a genuine pass in a pruned snapshot is refused under F (§3.4's cost, pinned).
+
+## `mod tests` › `fn a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW: pass 0 unavailable, pass 1 unavailable after pass 0 passed, and pass 0 passing, each after its snapshot's entry was pruned. Under F refused after the pass's charge.
+
+## `mod tests` › `fn a_review_verdict_read_in_a_whole_snapshot_is_judged() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW's control, at C and under F.
+
+## `mod tests` › `fn a_review_whose_process_count_disagrees_keeps_that_refusal_when_its_snapshot_is_not_whole() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-ORDER: the process-count refusal precedes placement 2, at C and under F.
+
+## `mod tests` › `fn a_review_input_read_over_a_lost_shared_index_settles_an_outage() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-RESIDUALS (i), pinned: a split index's shared file removed before the policy read; the check reads whole and the outage settles, at C and under F (R-OUTSIDE, X-1 item 3).
+
+## `mod tests` › `fn a_gate_index_written_again_before_the_check_reads_whole_and_is_judged() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-RESIDUALS (ii), pinned: a gate's snapshot `index` removed and written again by `git read-tree HEAD` before the check; the genuine failure is judged, at C and under F (R-REWRITE).
+
+## `mod tests` › `fn f_files(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {`
+
+Every file under a directory with its bytes, for byte comparison of a kept slot.
+
+## `mod tests` › `fn f_retained_of_alpha(body: &TopologyEventBody) -> bool {`
+
+The first task's retained `attempt_finished`.
+
+## `mod tests` › `fn f_retained_retry(`
+
+One task whose first attempt's gate fails, so its generation is retained; at that fold an act changes the slot; then the retry. Widths 1 and 3.
+
+## `mod tests` › `fn a_retained_retry_over_a_pruned_populated_slot_refuses_and_keeps_the_generation_retained() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED, widths 1 and 3: under F the retry refuses, the `Retry` reservation is cancelled (no entitlement held), nothing is appended, the generation stays `RetainedIdle` and the slot is kept byte for byte; at C the generation is closed and the slot scrubbed.
+
+## `mod tests` › `fn f_closed_worktree_missing_of_alpha(events: &[TopologyEvent]) -> bool {`
+
+A `generation_closed{WorktreeMissing}` of the first task.
+
+## `mod tests` › `fn a_retained_retry_over_a_whole_slot_that_no_longer_holds_its_tree_closes_and_scrubs() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED's control: a genuine tree mismatch in a whole registration closes and scrubs, at C and under F.
+
+## `mod tests` › `fn a_retained_retry_reading_residue_closes_and_scrubs_whatever_the_registration() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED-RESIDUE: a held `index.lock` and a lost `index` read as residue, closed and scrubbed at C and under F — the limit the K-texts and P-6′ state.
+
+## `mod tests` › `fn f_open_generation_left(tag: &str) -> Wide {`
+
+A durable run whose dispatch's add fails at its `After` phase: `task_dispatched` is durable and no attempt started (an `OpenNoAttempt` generation).
+
+## `mod tests` › `fn an_open_generation_continued_live_over_a_pruned_populated_slot_is_kept_and_refused() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN, live: after recovery's step (g) recreated the open generation, its slot is pruned and the live continuation refuses, appending nothing; the generation stays `OpenNoAttempt` and the slot is kept.
+
+## `mod tests` › `fn a_resume_over_an_open_generation_whose_populated_slot_is_pruned_refuses_before_run_resumed()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN at recovery step (g): the dead incarnation's populated instance, pruned, is kept, and the resume refuses before `run_resumed` (`try_resume_over` hands the run back).
+
+## `mod tests` › `fn f_run_finished(body: &TopologyEventBody) -> bool {`
+
+The run's `run_finished`.
+
+## `mod tests` › `fn f_converges_with_the_store_gone(tag: &str, halted: bool) {`
+
+T-C3-2: at the fold of `run_finished` a slot still populated is left with its entry pruned, the store's last, so the store is gone; at C the finalization's removal refuses (ST-18); under F closure 3 removes the checkout and the execution root goes.
+
+## `mod tests` › `fn a_complete_runs_finalization_converges_over_a_populated_slot_with_the_store_gone() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C3-2, a `Complete` run.
+
+## `mod tests` › `fn a_halted_runs_finalization_converges_over_a_populated_slot_with_the_store_gone() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C3-2, a `Halted` run.
+
+## `mod tests` › `fn a_verification_refused_at_placement_two_discards_a_waiting_attempt_and_the_resume_verifies_again()`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-1: the attempt held until gamma merges is live when gamma's verification refuses at placement 2; its completion is discarded, and the next resume settles it interrupted and verifies gamma again.
+
+## `mod tests` › `type FSignal = Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;`
+
+A one-way signal between the coordinator's hooks and a pipeline thread, waited on within `BOUND`.
+
+## `mod tests` › `fn f_beta_refusing_after(blocked: FSignal, release: FSignal) -> FPolicy {`
+
+Beta's policy act: signal that it is blocked, wait for the release, then write an unstaged change and delete the `index`, so C1-AP refuses.
+
+## `mod tests` › `fn f_only_beta(policy: FPolicy) -> FPolicy {`
+
+Applies a policy's act to the second task's slot only, on every call.
+
+## `mod tests` › `fn a_refusal_arriving_after_a_halt_is_discarded_unread_and_the_halt_scrubs_its_slot() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-2: alpha's declined question halts the run while beta waits in its policy; beta is released when `question_answered` is folded, refuses, and its completion is discarded unread (counted, named by no warning); the halt's closure scrubs the in-flight slots, the pruned one included (X-1 item 6, pinned). Nothing waits while holding the agent slot.
+
+## `mod tests` › `fn a_kept_slots_read_waits_on_a_contended_registry_through_the_coordinators_hooks() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-3 (under U): closure 2's `kept_instances` read meets a foreign registration whose `gitdir` cannot be read (the third coordinator access after the retained fold); the coordinator serves the other pipeline during the wait, no wait sleeps on its thread, and the retry then refuses for the pruned slot.
+
+## `mod tests` › `struct FEvents {`
+
+Event hooks injecting one append error at the first `Event.Append` `Synced` point after the refusing pipeline is blocked, and releasing it: its completion is then received after the fold is poisoned.
+
+## `mod tests` › `struct FAppendFailing {`
+
+`FHooks` with `FEvents` for the event hooks.
+
+## `mod tests` › `fn a_refusal_arriving_after_an_append_error_is_discarded_on_the_poisoned_fold() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-4: the append error is the command's error; beta's refusal is discarded on the poisoned fold (counted, named by no warning); the next resume follows the surviving prefix, and P-1's guard keeps beta's slot, whose `index` is gone, until the operator removes it; then the run ends.
+
+## `mod tests` › `fn f_remove_tree_by_hand(root: &std::path::Path) {`
+
+The operator removing a kept directory.
+
+## `mod tests` › `fn f_alpha_after_beta_blocks(blocked: FSignal, beta: FPolicy) -> FPolicy {`
+
+The first task's policy waits until beta is blocked, so that an append follows; beta's act as given.
+
+## `mod tests` › `fn a_verification_refused_after_its_passes_were_charged_forgets_them_under_o14a() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-O14A-F: refused at placement 2 at pass 1 (unavailable, and passing), after both passes were charged: the live spend holds both, the log neither, and the resumed replay counts neither (O14(a)'s accepted loss, pinned).
+
+## `mod tests` › `struct FCostedReviewStub {`
+
+Both verification passes cost 0.25; the target one is `FReviewStub`'s.
+
+## `mod tests` › `fn f_drive_costed(`
+
+T-O14A-F's run: two verification reviewers, width 3.
