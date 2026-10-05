@@ -449,9 +449,11 @@ even if a partially failed add populated only part of either one.
 
 ## `const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);`
 
-How long one registry command of the snapshot path is run again past another
-registration's empty `commondir`: until ten seconds after its first attempt
-began, in every build. Between attempts it sleeps one millisecond, doubling to
+The window in which one registry command of the snapshot path is begun again
+past another registration's empty `commondir`: until ten seconds after its
+first attempt began, in every build. It bounds when an attempt begins, not how
+long the command takes: the last attempt, the first to end at or past it, runs
+to its Git child's exit. Between attempts it sleeps one millisecond, doubling to
 `REGISTRY_TEAR_BACKOFF_CEILING`, fifty. They are the values the topology's
 tolerant access gives the same writer (`crate::workspace_manager`), which this
 module neither reads nor calls. Unlike that access's deadline, this one has no
@@ -470,7 +472,8 @@ and then written, so between the open and the write the new `commondir` is
 empty. Every enumeration of the store reads each registration's `commondir`,
 and one that reads it empty dies: `fatal: failed to read
 <common>/worktrees/<id>/commondir: Success`, exit 128 (an empty read leaves the
-errno Git's own ref code set to 0 before it, and `Success` is that 0's text).
+errno Git's own ref code set to 0 before it, and `Success` is glibc's text for
+that 0).
 Two legacy runs in two linked checkouts of one repository, each adding gate and
 review snapshots, can meet each other's adds so. B-W924, the CI failure at
 `9bcfb3f3`, carries that message; its diagnosis forced the interleaving through
@@ -480,12 +483,15 @@ establish that CI's run took that schedule (the record's §9.25 states both).
 **What it does.** It runs the command the caller hands it, and runs it again
 while the command dies with exactly that one line, naming another registration's
 `commondir` (`read_anothers_empty_commondir`), the caller agrees
-(`may_repeat`), and the deadline has not passed
-(`output_past_anothers_empty_commondir_until`). The attempt after a sleep the
-deadline cut short is made, and is the last. It returns the first attempt that
-ends any other way, unchanged, and at the deadline the last attempt, which
+(`may_repeat`), and the attempt ended before the deadline
+(`output_past_anothers_empty_commondir_until`). A sleep the deadline would cross
+is cut short to end at it, and the attempt after it is made; the first attempt
+to end at or past the deadline is the last. It returns the first attempt that
+ends any other way, unchanged, and past the deadline the last attempt, which
 fails as the first would have: Git's own message, naming the registration it
-read. A command that cannot be started is returned at once.
+read. A command that cannot be started is returned at once. The deadline
+bounds when an attempt begins, not how long one runs: each attempt waits for
+its Git child to exit and its output to close.
 
 **Its three callers,** each a command that read the store before it changed
 anything, and that reads another registration's `commondir` once:
@@ -505,17 +511,24 @@ so a failure on its own registration is never run again: that one is no
 other process's write in flight.
 
 **What it costs.** On a success, and on any other failure, nothing: no
-further command and no read. Past another's write in flight, the time that
-write takes, and up to fifty milliseconds of sleep after it. Past a
-registration that stays empty, a writer that stalls or died, each command
-waits ten seconds and then fails as before, so a snapshot whose add fails so,
-followed by its own cleanup's removal and list, fails up to thirty seconds later
-than the module did before this amendment.
+further command and no read. Past another's write in flight: the rest of the
+attempt running when the write lands, a sleep of at most fifty milliseconds as
+asked (it can end later), and the next attempt's own run, again if that one
+meets another write. Past a registration that stays empty, a writer that stalls
+or died: attempts are begun for ten seconds from the first, the last one runs
+to its end, and the command fails as before; a snapshot whose add fails so,
+followed by its own cleanup's removal and list, can spend three such windows.
+None of this is an elapsed-time bound: each attempt's Git run, the add's
+destination check, the filesystem and the scheduler add time the repair does
+not limit.
 
-**Where it does not engage.** The text it reads is Git's English message with
-`Success` for errno 0, glibc's rendering. A translated Git, or a C library that
-renders errno 0 otherwise, gets the module's earlier behaviour: the first
-failure, at once. It deletes, repairs and prunes nothing, turns no failure into
+**Where it engages.** Only on the line as written: Git's English message with
+`Success` for errno 0, glibc's rendering, the only one executed here (Linux). A
+failure rendered any other way, by a translated Git or a C library that renders
+errno 0 otherwise, does not engage it and gets the module's earlier behaviour:
+the first failure, at once. What macOS's and Windows' Git print for this state
+was not executed here, so whether it engages there is not established. It
+deletes, repairs and prunes nothing, turns no failure into
 a success, and leaves every other Git command of the module as it was:
 `switch_branch`'s `git switch` among them.
 
@@ -826,8 +839,8 @@ registration's `commondir` once, on Git 2.43.0 and 2.55.0. When the act returns,
 the server is stopped and, if it is still waiting for a reader, released by a
 reader the test opens without blocking; a server that fails releases any reader
 waiting on its FIFO and puts the whole file in place; the act's panic is carried
-out after both. Linux-only, as its tests are: the repair reads glibc's
-`Success`.
+out after both. Linux-only, as its tests are: they assert the `Success` line,
+whose rendering was executed only on Linux with glibc.
 
 ## `fn a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir() {`
 
@@ -861,10 +874,11 @@ directory`, and the add returns that at once. Only an empty read is waited on.
 ## `fn another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error() {`
 
 Another registration's `commondir` left empty: `add_gate_worktree`, called
-directly so that the snapshot's cleanup after it is not timed with it, runs
-until its deadline and no more than five seconds past it, then returns Git's
-message naming the registration, and the destination is still empty. Bounded:
-if the add has not returned at three deadlines, the test writes the
+directly so that the snapshot's cleanup after it is not timed with it, returns
+no earlier than its deadline, with Git's message naming the registration, and
+the destination is still empty. The test allows the return five seconds past
+the deadline: an allowance for this fixture, not a bound the repair sets.
+Bounded: if the add has not returned at three deadlines, the test writes the
 `commondir` whole so that the add ends, and fails.
 
 ## `fn a_destination_no_longer_empty_returns_the_adds_first_error() {`

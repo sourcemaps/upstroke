@@ -2872,7 +2872,8 @@ the same run met the add itself (what ended the first attempt was not observed
 directly). The product's snapshot commands now run again past
 such a read (B-W924-R1, `src/workspace.rs`), and this probe runs again on the
 same terms: another registration's `commondir` read at zero bytes, the gate's own
-snapshot never, one millisecond's sleep doubling to fifty, ten seconds. Every
+snapshot never, one millisecond's sleep doubling to fifty, probes begun for ten
+seconds from the first (a window, not a bound on how long a probe runs). Every
 other answer is the probe's own, and the check and its record are unchanged: a
 setting that never lands still records `worktree-true FAIL` with Git's message.
 It sits after the siblings' helpers so that the witness's own lines keep their
