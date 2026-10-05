@@ -156,6 +156,7 @@ effect_free = [
     "intent_path",
     "intents",
     "intents_pausing",
+    "kept_instances",
     "names",
     "names_in_another_case",
     "object_directory",

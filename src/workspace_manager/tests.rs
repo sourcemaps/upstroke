@@ -4357,6 +4357,10 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             "resolved_conflicts",
             Box::new(|slot| manager.resolved_conflicts(slot).map(drop)),
         ),
+        (
+            "kept_instances",
+            Box::new(|slot| manager.kept_instances(&mut NoHooks, slot).map(drop)),
+        ),
     ];
 
     let covered: BTreeSet<String> = primitives
