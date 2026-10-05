@@ -377,8 +377,11 @@ fn declining_an_embedded_question_cancels_its_lineages_unprepared_verification()
     for key in [ALPHA, TaskKey(3), TaskKey(4)] {
         assert_eq!(trace.fold.task_state(key), Some(TaskState::Failed));
     }
-    assert_eq!(trace.fold.transaction(), None);
-    assert_eq!(trace.fold.pipeline_held(), 0);
+    assert_eq!(
+        trace.fold.transaction().map(|open| open.sequence),
+        Some(SequenceId(1))
+    );
+    assert_eq!(trace.fold.pipeline_held(), 1);
     assert!(trace.fold.queue().expect("started").is_empty());
     assert!(
         !trace
@@ -387,6 +390,16 @@ fn declining_an_embedded_question_cancels_its_lineages_unprepared_verification()
             .expect("started")
             .any_candidate_or_lineage()
     );
+    refuse(&trace.fold, &verified_repair_publication());
+    assert_eq!(trace.fold.derived_outcome(), DerivedOutcome::NotEnding);
+    trace.record(ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: MergeVerificationInterrupted {
+            sequence: SequenceId(1),
+            detail: "  a decline cancelled the verification  ".to_owned(),
+        },
+    }));
+    assert_eq!(trace.fold.transaction(), None);
+    assert_eq!(trace.fold.pipeline_held(), 0);
     refuse(&trace.fold, &verified_repair_publication());
     assert_eq!(
         trace.fold.derived_outcome(),
@@ -843,4 +856,370 @@ fn terminal_tasks_refuse_new_questions_without_resurrecting_work() {
         Some(TaskState::Failed)
     );
     declined_trace.replay();
+}
+
+#[test]
+fn a_cancelled_verification_admits_only_the_interrupted_terminal() {
+    let mut trace = sibling_attempts();
+    queue_repair(&mut trace, TaskKey(3));
+    trace.record(verification_started(
+        TaskKey(3),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.record(park_sibling());
+    trace.record(decline_sibling());
+
+    let code_rejection = ev(TopologyEventBody::MergeRejected {
+        data: Box::new(MergeRejected {
+            sequence: SequenceId(1),
+            candidate: candidate_of(TaskKey(3), 0),
+            rejecting_head: sha("head"),
+            disposition: RejectionDisposition::CodeRejected {
+                verification: verification_record(Verdict::Rejected),
+            },
+            repair: repair_spawn(TaskKey(5), ALPHA, TaskKey(3)),
+            lease_effect: RejectionLeaseEffect::WidensLineage {
+                root: ALPHA,
+                paths: region(TaskKey(3)),
+            },
+        }),
+    });
+    let outage = unavailable_event(1, outage(), UnavailableOutcome::Deferred { defers: 1 });
+    for (kind, terminal) in [
+        ("merge_prepared", verified_repair_publication()),
+        ("merge_rejected", code_rejection),
+        ("merge_verification_unavailable", outage),
+    ] {
+        let mut appended = trace.events.clone();
+        appended.push(terminal.clone());
+        for (how, refusal) in [
+            ("live", refuse(&trace.fold, &terminal)),
+            (
+                "on replay",
+                TopologyFold::replay(trace.inputs.clone(), &appended)
+                    .expect_err("the log with that line appended is refused"),
+            ),
+        ] {
+            match &refusal {
+                FoldError::InconsistentRecord {
+                    kind: refused,
+                    detail,
+                } => {
+                    assert_eq!(*refused, kind, "{how}: {refusal}");
+                    assert!(
+                        detail.contains(
+                            "task 3 failed while integration sequence 1 was verifying its \
+                             candidate"
+                        ) && detail.contains("one terminal is `merge_verification_interrupted`"),
+                        "{how}: `{kind}` is refused by the cancellation's own rule: {refusal}"
+                    );
+                }
+                other => panic!("{how}: `{kind}` is refused as inconsistent, not as {other:?}"),
+            }
+        }
+    }
+
+    let interrupted = ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: MergeVerificationInterrupted {
+            sequence: SequenceId(1),
+            detail: "  a decline cancelled the verification  ".to_owned(),
+        },
+    });
+    trace.record(interrupted.clone());
+    assert!(matches!(
+        refuse(&trace.fold, &interrupted),
+        FoldError::WrongSequence { sequence: 1, .. }
+    ));
+    trace.replay();
+}
+
+#[test]
+fn a_failed_lineage_members_settlement_cancels_its_verification_as_a_decline_does() {
+    let mut trace = sibling_attempts();
+    queue_repair(&mut trace, TaskKey(3));
+    trace.record(verification_started(
+        TaskKey(3),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.record(settle_failing(
+        TaskKey(4),
+        0,
+        1,
+        crate::ladder::FailureKind::GateFailed,
+        AttemptSettlement::Closed {
+            transition: SettlementTransition::Failed {
+                halts_run: false,
+                reason: "  the sibling's gates failed for good  ".to_owned(),
+            },
+            lease: LeaseDisposition::LineageHeld,
+        },
+    ));
+
+    for key in [ALPHA, TaskKey(3), TaskKey(4)] {
+        assert_eq!(trace.fold.task_state(key), Some(TaskState::Failed));
+    }
+    assert_eq!(
+        trace.fold.transaction().map(|open| open.sequence),
+        Some(SequenceId(1)),
+        "the failed settlement cancels the verification and does not release it"
+    );
+    assert_eq!(trace.fold.pipeline_held(), 1);
+    assert_eq!(trace.fold.derived_outcome(), DerivedOutcome::NotEnding);
+    trace.record(ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: MergeVerificationInterrupted {
+            sequence: SequenceId(1),
+            detail: "  a failed settlement cancelled the verification  ".to_owned(),
+        },
+    }));
+    assert_eq!(trace.fold.transaction(), None);
+    assert_eq!(trace.fold.pipeline_held(), 0);
+    assert_eq!(
+        trace.fold.derived_outcome(),
+        DerivedOutcome::Ending(RunOutcome::Complete)
+    );
+    trace.replay();
+}
+
+#[test]
+fn a_halting_decline_ends_the_run_halted_only_after_the_cancelled_verifications_terminal() {
+    let mut trace = sibling_attempts();
+    queue_repair(&mut trace, TaskKey(3));
+    trace.record(verification_started(
+        TaskKey(3),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.record(park_sibling());
+    trace.record(answered(
+        TaskKey(4),
+        "sibling",
+        Answer4::Declined {
+            decline_halts_run: true,
+        },
+    ));
+
+    assert_eq!(trace.fold.halted_at(), Some(TaskKey(4)));
+    assert_eq!(
+        trace.fold.transaction().map(|open| open.sequence),
+        Some(SequenceId(1))
+    );
+    assert_eq!(trace.fold.derived_outcome(), DerivedOutcome::NotEnding);
+    assert!(matches!(
+        refuse(
+            &trace.fold,
+            &run_finished(RunOutcome::Halted, Some(TaskKey(4)))
+        ),
+        FoldError::OutcomeMismatch { .. }
+    ));
+    trace.record(ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: MergeVerificationInterrupted {
+            sequence: SequenceId(1),
+            detail: "  the halting decline cancelled the verification  ".to_owned(),
+        },
+    }));
+    assert_eq!(
+        trace.fold.derived_outcome(),
+        DerivedOutcome::Ending(RunOutcome::Halted)
+    );
+    trace.record(run_finished(RunOutcome::Halted, Some(TaskKey(4))));
+    trace.replay();
+}
+
+#[test]
+fn a_cancelled_verification_holds_both_entitlements_until_its_terminal() {
+    let mut trace = Trace::wide_started();
+    trace.queue(ALPHA);
+    let mut rejection = reject_into_question(ALPHA, TaskKey(4), "unused");
+    if let TopologyEventBody::MergeRejected { data } = &mut rejection.body {
+        data.repair.admission = SpawnAdmission::Runnable;
+    }
+    trace.record(rejection);
+    trace.record(spawn_event(runnable_repair(TaskKey(5))));
+    start_repair(&mut trace, TaskKey(4));
+    start_repair(&mut trace, TaskKey(5));
+    queue_repair(&mut trace, TaskKey(4));
+    trace.record(verification_started(
+        TaskKey(4),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.queue(MID);
+    trace.record(park_repair(TaskKey(5), "sibling"));
+    trace.record(answered(
+        TaskKey(5),
+        "sibling",
+        Answer4::Declined {
+            decline_halts_run: false,
+        },
+    ));
+
+    assert_eq!(trace.fold.task_state(TaskKey(4)), Some(TaskState::Failed));
+    assert!(trace.fold.queue().expect("started").holds_task(MID));
+    assert_eq!(
+        trace.fold.transaction().map(|open| open.sequence),
+        Some(SequenceId(1)),
+        "the merge entitlement stays with the cancelled verification"
+    );
+    assert_eq!(
+        trace.fold.pipeline_held(),
+        1,
+        "the pipeline entitlement stays with the cancelled verification"
+    );
+    assert_eq!(trace.fold.eligible_integration_candidate(), None);
+    assert!(!trace.fold.integration_admissible());
+    let start = verification_started(MID, 0, 2, &sha("head"), &sha("proposal"));
+    for opening in [
+        start.clone(),
+        fast_publication(MID, 0, 2, &sha("base"), vec![MID]),
+    ] {
+        assert!(
+            matches!(
+                refuse(&trace.fold, &opening),
+                FoldError::TransactionAlreadyOpen {
+                    sequence: 2,
+                    open: 1,
+                    ..
+                }
+            ),
+            "`{}` waits for the cancelled verification's terminal",
+            opening.body.kind()
+        );
+    }
+
+    trace.record(ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: MergeVerificationInterrupted {
+            sequence: SequenceId(1),
+            detail: "  a decline cancelled the verification  ".to_owned(),
+        },
+    }));
+    assert_eq!(trace.fold.transaction(), None);
+    assert_eq!(trace.fold.pipeline_held(), 0);
+    assert_eq!(
+        trace.fold.eligible_integration_candidate(),
+        Some(&candidate_of(MID, 0))
+    );
+    trace.record(start);
+    trace.replay();
+}
+
+#[test]
+fn an_l13_prefix_replays_with_its_verification_held_for_recovery_to_settle() {
+    let mut trace = sibling_attempts();
+    queue_repair(&mut trace, TaskKey(3));
+    trace.record(verification_started(
+        TaskKey(3),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.record(park_sibling());
+    trace.record(decline_sibling());
+
+    let parsed = TopologyFold::parse_log(&wire(&trace.events)).expect("checked log parses");
+    let replayed =
+        TopologyFold::replay(trace.inputs.clone(), &parsed).expect("an L13 prefix replays");
+    let open = replayed
+        .transaction()
+        .expect("the replayed fold holds the cancelled verification");
+    assert_eq!(open.sequence, SequenceId(1));
+    assert!(matches!(
+        open.class,
+        TransactionClass::VerificationStarted { .. }
+    ));
+    assert_eq!(
+        replayed.task_state(open.candidate.key),
+        Some(TaskState::Failed)
+    );
+    accepts(
+        &replayed,
+        &ev(TopologyEventBody::MergeVerificationInterrupted {
+            data: MergeVerificationInterrupted {
+                sequence: SequenceId(1),
+                detail: "  recovery step (f) settles it interrupted  ".to_owned(),
+            },
+        }),
+    );
+}
+
+#[test]
+fn a_log_that_went_on_past_a_cancelled_verification_is_refused_at_that_line() {
+    let mut wide = Trace::wide_started();
+    wide.queue(ALPHA);
+    let mut rejection = reject_into_question(ALPHA, TaskKey(4), "unused");
+    if let TopologyEventBody::MergeRejected { data } = &mut rejection.body {
+        data.repair.admission = SpawnAdmission::Runnable;
+    }
+    wide.record(rejection);
+    wide.record(spawn_event(runnable_repair(TaskKey(5))));
+    start_repair(&mut wide, TaskKey(4));
+    start_repair(&mut wide, TaskKey(5));
+    queue_repair(&mut wide, TaskKey(4));
+    wide.record(verification_started(
+        TaskKey(4),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    wide.queue(MID);
+    wide.record(park_repair(TaskKey(5), "sibling"));
+    wide.record(answered(
+        TaskKey(5),
+        "sibling",
+        Answer4::Declined {
+            decline_halts_run: false,
+        },
+    ));
+    TopologyFold::replay(wide.inputs.clone(), &wide.events).expect("the prefix replays");
+    let mut started = wide.events.clone();
+    started.push(verification_started(
+        MID,
+        0,
+        2,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    assert!(matches!(
+        TopologyFold::replay(wide.inputs.clone(), &started)
+            .expect_err("a new transaction start after the decline is refused"),
+        FoldError::TransactionAlreadyOpen {
+            sequence: 2,
+            open: 1,
+            ..
+        }
+    ));
+
+    let mut trace = sibling_attempts();
+    queue_repair(&mut trace, TaskKey(3));
+    trace.record(verification_started(
+        TaskKey(3),
+        0,
+        1,
+        &sha("head"),
+        &sha("proposal"),
+    ));
+    trace.record(park_sibling());
+    trace.record(decline_sibling());
+    TopologyFold::replay(trace.inputs.clone(), &trace.events).expect("the prefix replays");
+    let mut finished = trace.events.clone();
+    finished.push(run_finished(RunOutcome::Complete, None));
+    match TopologyFold::replay(trace.inputs.clone(), &finished)
+        .expect_err("a run end after the decline is refused")
+    {
+        FoldError::OutcomeMismatch { recorded, derived } => {
+            assert_eq!((recorded, derived.as_str()), ("complete", "not ending"));
+        }
+        other => panic!("the run end is refused as not ending, not as {other:?}"),
+    }
 }
