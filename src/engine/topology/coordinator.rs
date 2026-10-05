@@ -20241,12 +20241,16 @@ mod tests {
                     .and_then(|task| task.generations.first())
                     .map(|generation| generation.class.clone());
                 let root = wide.env.fixture.manager.execution_root().to_path_buf();
-                let checkout = f_only_checkout_under(&root.join("tasks"));
                 let before = kept
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()
                     .expect("the retained fold acted");
+                let slot_kept = || {
+                    std::fs::read_dir(root.join("tasks"))
+                        .is_ok_and(|mut entries| entries.next().is_some())
+                        && f_files(&f_only_checkout_under(&root.join("tasks"))) == before
+                };
                 let outcome = match result {
                     Err(UpstrokeError::RegistryRefused { message })
                         if message.contains("the retry of retained generation")
@@ -20257,7 +20261,7 @@ mod tests {
                                 class,
                                 Some(crate::topology::fold::GenerationClass::RetainedIdle { .. })
                             )
-                            && f_files(&checkout) == before =>
+                            && slot_kept() =>
                     {
                         Ok(())
                     }
