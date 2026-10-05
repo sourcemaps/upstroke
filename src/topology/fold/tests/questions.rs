@@ -880,7 +880,11 @@ fn a_cancelled_verification_admits_only_the_interrupted_terminal() {
             disposition: RejectionDisposition::CodeRejected {
                 verification: verification_record(Verdict::Rejected),
             },
-            repair: repair_spawn(TaskKey(5), ALPHA, TaskKey(3)),
+            repair: {
+                let mut repair = repair_spawn(TaskKey(5), ALPHA, TaskKey(3));
+                repair.entry.display_id = TaskId::from("repair-5");
+                repair
+            },
             lease_effect: RejectionLeaseEffect::WidensLineage {
                 root: ALPHA,
                 paths: region(TaskKey(3)),
