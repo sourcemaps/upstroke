@@ -4666,19 +4666,33 @@ mod tests {
         );
         assert_eq!((runs, asked), (1, 1));
 
-        let started = std::time::Instant::now();
-        let deadline = started + Duration::from_millis(30);
-        let (got, runs, _) = attempt(deadline, true, vec![torn.clone(); 1000]);
+        let deadline = std::time::Instant::now() + Duration::from_millis(30);
+        let mut ended: Vec<std::time::Instant> = Vec::new();
+        let got =
+            output_past_anothers_empty_commondir_until(deadline, own, &mut || true, &mut || {
+                if ended.last().is_some_and(|end| *end >= deadline) {
+                    return Err(std::io::Error::other(
+                        "attempted after an attempt that ended at or past the deadline",
+                    ));
+                }
+                ended.push(std::time::Instant::now());
+                Ok(torn.clone())
+            });
         let returned = std::time::Instant::now();
         assert_eq!(
             got.expect("the last attempt"),
             torn,
             "the tear at the deadline, as it read"
         );
-        assert!(runs >= 2, "attempted again before the deadline: {runs}");
         assert!(
             returned >= deadline,
             "the last attempt is the one at the deadline"
+        );
+        let (_, before_the_last) = ended.split_last().expect("one attempt at least");
+        assert!(
+            before_the_last.iter().all(|end| *end < deadline),
+            "attempted again only after an attempt that ended before the deadline: {ended:?}, \
+             the deadline {deadline:?}"
         );
 
         let (got, runs, asked) = attempt(far(), true, Vec::new());

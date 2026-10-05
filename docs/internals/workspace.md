@@ -964,8 +964,18 @@ death, an unfinished line and an `error:` refused; and any status but 128, and a
 ## `fn a_registry_command_is_attempted_again_only_while_its_answer_allows() {`
 
 The loop against a scripted command: past two tears to the success, with the
-caller asked once per tear; any other failure, a caller that answers no and a
-deadline already past each return the first attempt; at a deadline thirty
-milliseconds away it runs more than once and returns the tear as the last
-attempt read it, at or after the deadline; and a command that cannot start
-returns its error at once.
+caller asked once per tear, which is where attempting again is shown; any other
+failure, a caller that answers no and a deadline already past each return the
+first attempt; and a command that cannot start returns its error at once.
+
+At a deadline thirty milliseconds away, against tears without end, it asserts
+only what holds however the test is scheduled: the loop returns the tear as the
+last attempt read it, no earlier than the deadline; every attempt before the
+last ended, by the time the command recorded, before the deadline; and no
+attempt follows one whose recorded end is at or past it (the command answers
+such an attempt with an error, which the loop would return). How many attempts
+fit before the deadline is the scheduler's, and is not asserted. (Until the B9
+round this case required two attempts or more, which a pause outlasting the
+deadline before the first attempt ended made false for correct code; the
+reviewer's witness paused sixty milliseconds: B-I8-3, the follow-up B record's
+§9.26.)
