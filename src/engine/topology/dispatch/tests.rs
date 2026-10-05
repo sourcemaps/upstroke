@@ -1945,10 +1945,26 @@ fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+fn keep_the_store(run: &Run) {
+    let keeper = run.fixture.root.join("store-keeper");
+    git(
+        &run.fixture.base,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            keeper.to_str().expect("a fixture path is UTF-8"),
+            &run.fixture.head,
+        ],
+    );
+}
+
 #[test]
 fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {
     let mut run = Run::started("f-c2-open-kept");
     let dispatched = run.dispatch(ALPHA, 0);
+    keep_the_store(&run);
     write_file(
         &dispatched.worktree.join("untracked.txt"),
         b"the operator's file\n",

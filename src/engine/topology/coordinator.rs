@@ -18688,6 +18688,7 @@ mod tests {
                 &tasks,
                 RecordingRunner::new().answering(wide_responder(&tasks, &[])),
             );
+            f_keep_the_store(&wide);
             let root = wide.env.fixture.manager.execution_root().to_path_buf();
             let base = wide.env.fixture.base.clone();
             let mut hooks = FHooks::over(&wide);
@@ -20192,6 +20193,7 @@ mod tests {
             WidePlans::default(),
             RecordingRunner::new().answering(wide_responder(&tasks, &[(0, 1)])),
         );
+        f_keep_the_store(&wide);
         let root = wide.env.fixture.manager.execution_root().to_path_buf();
         let kept = Arc::new(std::sync::Mutex::new(None));
         let mut hooks = FHooks::over(&wide);
@@ -20347,6 +20349,7 @@ mod tests {
             WidePlans::default(),
             RecordingRunner::new().answering(wide_responder(&tasks, &[])),
         );
+        f_keep_the_store(&wide);
         let mut first = FHooks::over(&wide);
         first.effects.fail_at = Some((
             FSite::Worktree(crate::topology::effects::WorktreeSite::Add),
