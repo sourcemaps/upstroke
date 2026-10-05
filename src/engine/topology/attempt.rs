@@ -467,6 +467,7 @@ impl AttemptContext<'_> {
         kind: crate::ir::TaskKind,
     ) -> Result<Assessment, UpstrokeError> {
         Assessor {
+            manager: self.manager,
             adapters: self.adapters,
             input_policy: self.input_policy,
         }
@@ -618,6 +619,7 @@ fn capture_tree(
 }
 
 struct Assessor<'a> {
+    manager: &'a WorkspaceManager,
     adapters: &'a dyn AdapterSource,
     input_policy: &'a dyn ReviewInputPolicy,
 }
@@ -665,7 +667,12 @@ impl Assessor<'_> {
             );
         }
         if failure.is_none() {
-            if let Some(problem) = self.input_policy.problem(site.worktree, &capture.tree)? {
+            if let Some(problem) = super::dispatch::read_in_whole_checkout(
+                self.manager,
+                site.worktree,
+                "the attempt's review-input read",
+                self.input_policy.problem(site.worktree, &capture.tree),
+            )? {
                 failure = Some(crate::engine::classify::review_input_failure(problem));
             }
         }
@@ -747,6 +754,7 @@ pub fn attempt_body(work: &mut Work<'_>, job: &AttemptJob) -> Result<Judged, Ups
         .manager
         .candidate_diff(site.slot, &capture.parent, &capture.tree)?;
     let assessed = Assessor {
+        manager: work.manager,
         adapters: work.adapters,
         input_policy: work.input_policy,
     }
@@ -963,6 +971,17 @@ impl Judge<'_> {
             prior_failure: assessed.failure.clone(),
             invocations,
         };
+        if assessed.failure.is_some() {
+            if let super::dispatch::Whole::No(found) =
+                super::dispatch::registration_whole(site.worktree, self.manager.common_git_dir())
+            {
+                return Err(super::dispatch::read_refused(
+                    site.worktree,
+                    "the attempt's assessed failure",
+                    &found,
+                ));
+            }
+        }
         Ok(self.judge(&subject, &mut NoReviewAccount)?)
     }
 
@@ -1018,6 +1037,15 @@ impl Judge<'_> {
                 if refused {
                     break;
                 }
+            }
+            if let super::dispatch::Whole::No(found) =
+                super::dispatch::registration_whole(snapshot.path(), self.manager.common_git_dir())
+            {
+                return Err(JudgeError::Other(super::dispatch::read_refused(
+                    snapshot.path(),
+                    "the gates' verdicts",
+                    &found,
+                )));
             }
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
                 self.release(subject.names, &snapshot)
@@ -1111,6 +1139,16 @@ impl Judge<'_> {
                          ran outside it"
                     ),
                 }));
+            }
+
+            if let super::dispatch::Whole::No(found) =
+                super::dispatch::registration_whole(snapshot.path(), self.manager.common_git_dir())
+            {
+                return Err(JudgeError::Other(super::dispatch::read_refused(
+                    snapshot.path(),
+                    &format!("the verdict of review pass {pass}"),
+                    &found,
+                )));
             }
 
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {

@@ -5679,3 +5679,89 @@ fn the_registration_notes_keep_an_invocation_whose_process_is_unresolved() {
         );
     }
 }
+
+struct ActAtPhase<'a> {
+    inner: &'a mut crate::engine::topology::scaffold::Hooks,
+    at: (EffectSiteId, HookPhase),
+    act: Option<Box<dyn FnOnce()>>,
+}
+
+impl crate::workspace_manager::EffectHooks for ActAtPhase<'_> {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if (site, phase) == self.at {
+            if let Some(act) = self.act.take() {
+                act();
+            }
+        }
+        crate::engine::topology::seams::TopologyHooks::effects(&mut *self.inner).phase(site, phase)
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+impl crate::engine::topology::seams::TopologyHooks for ActAtPhase<'_> {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+}
+
+#[test]
+fn a_capture_over_a_deleted_index_is_refused_at_its_first_read() {
+    let mut run = Run::started("f-capture-index");
+    let dispatched = run.dispatch(ALPHA, 0);
+    agent_edits(&dispatched.worktree);
+    let entry = git_dir(&dispatched.worktree);
+    remove_file(&entry.join("index"));
+    match super::capture_tree(&run.fixture.manager, &mut run.hooks, dispatched.site()) {
+        Err(UpstrokeError::RegistryRefused { message }) => assert!(
+            message.contains("unresolved conflicts") && message.contains("index"),
+            "{message}"
+        ),
+        other => panic!("the capture's first read refuses: {other:?}"),
+    }
+    assert!(
+        !entry.join("index").exists(),
+        "nothing the capture ran wrote the index again"
+    );
+}
+
+#[test]
+fn a_capture_whose_index_is_deleted_before_its_write_tree_is_refused_at_the_check_before_it() {
+    let mut run = Run::started("f-capture-write-tree");
+    let dispatched = run.dispatch(ALPHA, 0);
+    agent_edits(&dispatched.worktree);
+    let index = git_dir(&dispatched.worktree).join("index");
+    let manager = run.fixture.manager.clone();
+    let mut hooks = ActAtPhase {
+        inner: &mut run.hooks,
+        at: (WRITE_TREE, HookPhase::Before),
+        act: Some(Box::new(move || remove_file(&index))),
+    };
+    match super::capture_tree(&manager, &mut hooks, dispatched.site()) {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            assert!(
+                message.contains("write-tree") && message.contains("index"),
+                "{message}"
+            );
+        }
+        other => panic!("the check before the write refuses: {other:?}"),
+    }
+}

@@ -341,6 +341,26 @@ pub(super) fn begin_retry<O: Operator + ?Sized>(
         &request.slot,
         &crate::workspace_manager::Quiescence::HoldsTree(request.retained_tree.clone()),
     );
+    let verified = match verified {
+        Ok(Err(failure)) if super::dispatch::may_follow_a_deletion(&failure) => {
+            match super::dispatch::kept(manager, operator.registry().effects(), &request.slot) {
+                Ok(kept) if kept.is_empty() => Ok(Err(failure)),
+                Ok(kept) => Err(super::dispatch::kept_slot_refusal(
+                    &request.slot,
+                    &format!(
+                        "the retry of retained generation {} of task {key}, whose worktree failed \
+                         verification ({failure})",
+                        generation.0
+                    ),
+                    &kept,
+                    "the retained session's unpinned output",
+                    "the next resume closes the generation and reclaims the slot",
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        other => other,
+    };
     let outcome = {
         let run = operator.parts().0;
         super::settle::retry_end(
@@ -874,10 +894,14 @@ pub fn verification_body(
                         })
                     })?;
                 let staging = work.manager.slot_path(&job.staging);
-                work.input_policy
-                    .problem(&staging, &tree)
-                    .map_err(JudgeError::Other)?
-                    .map(crate::engine::classify::review_input_failure)
+                super::dispatch::read_in_whole_checkout(
+                    work.manager,
+                    &staging,
+                    "the verification's review-input read",
+                    work.input_policy.problem(&staging, &tree),
+                )
+                .map_err(JudgeError::Other)?
+                .map(crate::engine::classify::review_input_failure)
             }
         };
 

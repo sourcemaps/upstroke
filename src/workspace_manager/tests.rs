@@ -6690,9 +6690,11 @@ fn a_repair_the_removal_gate_cannot_plan_removes_nothing_and_keeps_the_refusal()
 /// Git's enumeration skips that entry and `git worktree prune` deletes it.
 /// `charlie`'s forced removal converges from it while `<common git
 /// dir>/worktrees` exists
-/// (`an_absent_registration_gitdir_is_already_gone_for_forced_cleanup`) and
-/// refuses the checkout once that directory is absent
-/// (`a_missing_stored_worktree_directory_refuses_before_checkout_deletion`).
+/// (`an_absent_registration_gitdir_is_already_gone_for_forced_cleanup`), and,
+/// since closure 3 of the external-prune follow-up, once that directory is
+/// absent too, its checkout's `.git` naming an entry of the absent store
+/// (`a_missing_stored_worktree_directory_converges_removing_only_the_checkout`;
+/// until then it refused there).
 struct TornBesideUnbound {
     bravo: Slot,
     charlie: Slot,
@@ -7526,8 +7528,13 @@ fn an_absent_registration_gitdir_is_already_gone_for_forced_cleanup() {
     assert!(!path.exists(), "the exact contained checkout is reclaimed");
 }
 
+/// T-C3-1, #329's pinned refusal changed by closure 3: the store moved aside,
+/// the target populated with a `.git` naming the absent store's entry. At C the
+/// removal refuses with the checkout kept, and every resume's finalization
+/// with it; under F the scan binds nothing for it, the checkout is removed and
+/// nothing of the store is touched.
 #[test]
-fn a_missing_stored_worktree_directory_refuses_before_checkout_deletion() {
+fn a_missing_stored_worktree_directory_converges_removing_only_the_checkout() {
     let fixture = Fixture::created("missing-worktrees-store");
     let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
     let path = fixture.manager.slot_path(&slot);
@@ -7539,13 +7546,21 @@ fn a_missing_stored_worktree_directory_refuses_before_checkout_deletion() {
     let worktrees = admin.parent().expect("worktrees directory").to_path_buf();
     let moved = fixture.root.join("stored-worktrees-moved");
     fs::rename(&worktrees, &moved).expect("move the stored metadata");
+    let store_before = tree_bytes(&moved);
 
-    fixture
-        .manager
-        .remove_worktree(&mut NoHooks, &slot)
-        .expect_err("missing stored metadata refuses");
-    assert!(path.exists(), "refusal precedes checkout deletion");
-    fs::rename(moved, worktrees).expect("restore fixture metadata");
+    let removed = fixture.manager.remove_worktree(&mut NoHooks, &slot);
+    let outcome = match removed {
+        Ok(()) if !path.exists() => Ok(()),
+        Ok(()) => Err("the removal answered Ok and left the checkout".to_owned()),
+        Err(error) => Err(format!("the removal refused, the checkout kept: {error}")),
+    };
+    report_cases(&[("the store absent".to_owned(), outcome)]);
+    assert!(!worktrees.exists(), "no store was made");
+    assert_eq!(
+        tree_bytes(&moved),
+        store_before,
+        "nothing of the store is touched"
+    );
 }
 
 #[test]
@@ -13406,7 +13421,14 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
              sampled `add -A` take their argv from `DeclaredResolution::argv`, whose fixed \
              words are `RESOLUTION_ADD_ARGV` and `RESOLUTION_RM_ARGV`",
         ),
-        ("pub fn candidate_write_tree(", 0, 0, "none of either"),
+        (
+            "pub fn candidate_write_tree(",
+            0,
+            1,
+            "no dynamic argument; the one literal is the name closure 1's check before the \
+             write gives the read in its refusal (`answered_whole`, the external-prune \
+             follow-up), not a Git argument",
+        ),
         (
             "pub fn proposal_cherry_pick(",
             1,
@@ -16883,8 +16905,10 @@ fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
 /// add's destination leaves when the repository has no other linked checkout.
 /// The forced removal binds nothing for the empty directory and takes it,
 /// where master's scan answered the store's absence as an I/O error on every
-/// attempt. A populated slot with a `.git` file and no store still refuses
-/// (`a_missing_stored_worktree_directory_refuses_before_checkout_deletion`).
+/// attempt. A populated slot whose `.git` names no entry of this
+/// repository's store still refuses with no store; one whose `.git` names an
+/// entry of it converges (closure 3 of the external-prune follow-up,
+/// `a_missing_stored_worktree_directory_converges_removing_only_the_checkout`).
 #[test]
 fn a_removal_with_no_store_takes_an_empty_destination_and_still_refuses_a_checkout() {
     let fixture = Fixture::created("registry-store-absent");
@@ -20140,4 +20164,798 @@ fn a_git_dir_over_the_byte_budget_is_refused_before_any_registry_access_on_windo
         .add_worktree(&mut NoHooks, &at, &fixture.head)
         .expect("a 220-byte $GIT_DIR is within Git for Windows' budget");
     assert!(added.join(".git").exists());
+}
+
+// ---------------------------------------------------------------------------
+// The external-prune follow-up (F): closure 1 at the manager — its reader,
+// placement 1's error arm, answer arm and write-tree pre-check, and C1-CLS —
+// and closure 3, each red at C `66e8a393` where the defect lives
+// (`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`).
+// ---------------------------------------------------------------------------
+
+/// Acts once at `phase` of `site`, then proceeds.
+struct AtPhase<F: FnMut()> {
+    site: EffectSiteId,
+    phase: HookPhase,
+    act: Option<F>,
+}
+
+impl<F: FnMut()> AtPhase<F> {
+    fn new(site: EffectSiteId, phase: HookPhase, act: F) -> Self {
+        Self {
+            site,
+            phase,
+            act: Some(act),
+        }
+    }
+}
+
+impl<F: FnMut()> EffectHooks for AtPhase<F> {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == self.site && phase == self.phase {
+            if let Some(mut act) = self.act.take() {
+                act();
+            }
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+/// A prune that no engine process started, deleting the whole entry of the
+/// checkout at `checkout` the way #329's d9 witnesses do: its `.git` set aside,
+/// `git worktree prune --expire=now` from the base, and the `.git` put back.
+/// When the entry was the store's last, Git removes the store too.
+fn prune_entry_of(fixture: &Fixture, checkout: &Path) {
+    let pointer = checkout.join(".git");
+    let aside = checkout.join(".git-set-aside");
+    fs::rename(&pointer, &aside).expect("set the checkout's .git aside");
+    git(&fixture.base, &["worktree", "prune", "--expire=now"]);
+    fs::rename(&aside, &pointer).expect("put the checkout's .git back");
+}
+
+/// Collect each case's outcome before asserting, so that a red run reports
+/// every case's answer and not only the first.
+fn report_cases(cases: &[(String, Result<(), String>)]) {
+    let failed: Vec<String> = cases
+        .iter()
+        .filter_map(|(label, outcome)| outcome.as_ref().err().map(|why| format!("{label}: {why}")))
+        .collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// The registry refusal a case expects, naming `words`, or why not.
+fn refused_naming<T: std::fmt::Debug>(
+    result: Result<T, UpstrokeError>,
+    words: &[&str],
+) -> Result<(), String> {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            match words.iter().find(|word| !message.contains(**word)) {
+                None => Ok(()),
+                Some(word) => Err(format!("a registry refusal not naming `{word}`: {message}")),
+            }
+        }
+        other => Err(format!("expected a registry refusal, got {other:?}")),
+    }
+}
+
+/// T-C1-READERS, the manager's reader: closure 1's predicate (#329's record
+/// §8.4) over every construction `fixture::registration_constructions` makes —
+/// whole; each name of the entry removed, or the first three empty; the `.git`
+/// removed, a directory or no pointer; an entry outside the store; `commondir`
+/// or `gitdir` naming another repository or checkout; relative pointers; a link
+/// in place of `index`. The topology twin is run over the same constructions
+/// beside it (`dispatch::tests`).
+#[test]
+fn closure_one_reader_answers_every_registration_construction_as_the_check_states() {
+    let fixture = Fixture::created("f-readers-manager");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let cases: Vec<(String, Result<(), String>)> =
+        super::fixture::registration_constructions(&fixture)
+            .into_iter()
+            .map(|construction| {
+                let found =
+                    super::fixture::manager_registration_found(&construction.checkout, &common);
+                let outcome = match (construction.expected, &found) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(words), Err(text)) if text.contains(words) => Ok(()),
+                    (expected, found) => Err(format!("expected {expected:?}, found {found:?}")),
+                };
+                (construction.label.to_owned(), outcome)
+            })
+            .collect();
+    assert!(cases.len() >= 15, "every construction was made");
+    report_cases(&cases);
+}
+
+/// T-C1-CLS-MGR's construction, W-CLS-GIT's (the design's executed E4
+/// `md_empty_head`) at the manager: the candidate changes `a.txt` on `seed`, the
+/// integration head is a commit of the empty tree on `seed`, the staging slot is
+/// added at the head and the proposal pick stops on a modify/delete conflict.
+/// Returns the staging slot, its checkout, its registration entry and the head.
+fn a_conflicted_staging_pick_on_an_empty_head(
+    fixture: &Fixture,
+) -> (Slot, PathBuf, PathBuf, String) {
+    let base = &fixture.base;
+    git(base, &["checkout", "-q", "-b", "candidate", &fixture.seed]);
+    fs::write(base.join("a.txt"), "changed\n").expect("the candidate's change");
+    git(
+        base,
+        &["commit", "-q", "-am", "the candidate changes a.txt"],
+    );
+    let candidate = git(base, &["rev-parse", "HEAD"]);
+    git(base, &["checkout", "-q", "main"]);
+    let empty = git(base, &["hash-object", "-t", "tree", "-w", "/dev/null"]);
+    let head = git(
+        base,
+        &[
+            "commit-tree",
+            &empty,
+            "-p",
+            &fixture.seed,
+            "-m",
+            "the head deletes every file",
+        ],
+    );
+    let staging = Slot::Staging { sequence: 1 };
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &staging)
+        .expect("the staging intent");
+    let checkout = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &staging, &head)
+        .expect("the staging worktree at the empty head");
+    fixture
+        .manager
+        .proposal_cherry_pick(&mut NoHooks, &staging, &candidate)
+        .expect_err("the pick stops on the modify/delete conflict");
+    let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+    (staging, checkout, entry, head)
+}
+
+/// T-C1-CLS-MGR (FUF-R1-1): with the staging entry's `index` deleted after the
+/// pick, Git reads an empty index, and the modify/delete conflict on an empty
+/// head reads as the empty pick. At C the classification answers
+/// `Ok(ProposalState::Empty)`; under F it is a registry refusal naming the
+/// staging checkout and `index`, and the classification wrote no index.
+#[test]
+fn a_staging_conflict_read_through_a_deleted_index_is_refused_not_classified_as_an_empty_pick() {
+    let fixture = Fixture::created("f-cls-index");
+    let (staging, checkout, entry, head) = a_conflicted_staging_pick_on_an_empty_head(&fixture);
+    fs::remove_file(entry.join("index")).expect("a prune deletes the staging entry's index");
+    let outcome = refused_naming(
+        fixture.manager.proposal_state(&staging, &head),
+        &[&checkout.display().to_string(), "index"],
+    );
+    report_cases(&[("index deleted after the pick".to_owned(), outcome)]);
+    assert!(
+        !entry.join("index").exists(),
+        "the classification wrote no index"
+    );
+}
+
+/// T-C1-CLS-MGR's control: with the registration whole, the same pick is
+/// classified as the conflict on `a.txt`, at C and under F.
+#[test]
+fn a_staging_conflict_in_a_whole_registration_is_classified_as_the_conflict() {
+    let fixture = Fixture::created("f-cls-whole");
+    let (staging, _, _, head) = a_conflicted_staging_pick_on_an_empty_head(&fixture);
+    match fixture.manager.proposal_state(&staging, &head) {
+        Ok(ProposalState::Conflict { paths }) => {
+            assert!(format!("{paths:?}").contains("a.txt"), "{paths:?}");
+        }
+        other => panic!("the genuine conflict: {other:?}"),
+    }
+}
+
+/// T-C1-CLS-MGR, `gitdir` deleted: Git still reads the conflict genuinely
+/// (E4), so at C the classification answers `Conflict`; under F the check finds
+/// the registration not whole and refuses it — the liveness cost the design
+/// pins (§9.2).
+#[test]
+fn a_staging_conflict_read_with_its_gitdir_deleted_is_refused_though_git_reads_it_genuinely() {
+    let fixture = Fixture::created("f-cls-gitdir");
+    let (staging, _, entry, head) = a_conflicted_staging_pick_on_an_empty_head(&fixture);
+    fs::remove_file(entry.join("gitdir")).expect("a prune deletes the staging entry's gitdir");
+    let outcome = refused_naming(fixture.manager.proposal_state(&staging, &head), &["gitdir"]);
+    report_cases(&[("gitdir deleted after the pick".to_owned(), outcome)]);
+}
+
+/// T-C1-CLS-MGR, `HEAD` deleted: the classification's first read fails, which
+/// at C is a Git error and under F a registry refusal naming `HEAD`.
+#[test]
+fn a_staging_classification_whose_head_is_deleted_is_a_registry_refusal_not_a_git_error() {
+    let fixture = Fixture::created("f-cls-head");
+    let (staging, _, entry, head) = a_conflicted_staging_pick_on_an_empty_head(&fixture);
+    fs::remove_file(entry.join("HEAD")).expect("a prune deletes the staging entry's HEAD");
+    let outcome = refused_naming(fixture.manager.proposal_state(&staging, &head), &["HEAD"]);
+    report_cases(&[("HEAD deleted after the pick".to_owned(), outcome)]);
+}
+
+/// T-C1-P1-DIFF: `candidate_diff` in a slot whose entry was pruned whole (the
+/// store kept by another registration, and the store gone with it), or that
+/// lost `HEAD` or `commondir`, fails in Git; at C that is `UpstrokeError::Git`,
+/// which the verification settles as an outage, and under F a registry refusal
+/// naming what the check found missing.
+#[test]
+fn a_candidate_diff_in_a_slot_whose_registration_is_not_whole_is_a_registry_refusal() {
+    let mut cases = Vec::new();
+    {
+        let fixture = Fixture::created("f-diff-pruned-store-kept");
+        let _keeper = fixture.add_task(&mut NoHooks, "keeper", 1);
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let checkout = fixture.manager.slot_path(&slot);
+        prune_entry_of(&fixture, &checkout);
+        assert!(
+            fixture.manager.common_git_dir().join("worktrees").is_dir(),
+            "the keeper keeps the store"
+        );
+        let outcome = refused_naming(
+            fixture
+                .manager
+                .candidate_diff(&slot, &fixture.seed, &fixture.head),
+            &["gitdir"],
+        );
+        cases.push(("pruned whole, the store kept".to_owned(), outcome));
+    }
+    {
+        let fixture = Fixture::created("f-diff-pruned-store-gone");
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let checkout = fixture.manager.slot_path(&slot);
+        prune_entry_of(&fixture, &checkout);
+        assert!(
+            !fixture.manager.common_git_dir().join("worktrees").exists(),
+            "the last entry's prune took the store"
+        );
+        let outcome = refused_naming(
+            fixture
+                .manager
+                .candidate_diff(&slot, &fixture.seed, &fixture.head),
+            &["worktrees"],
+        );
+        cases.push(("pruned whole, the store gone".to_owned(), outcome));
+    }
+    for name in ["HEAD", "commondir"] {
+        let fixture = Fixture::created(&format!("f-diff-{name}"));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let checkout = fixture.manager.slot_path(&slot);
+        let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+        fs::remove_file(entry.join(name)).expect("remove one name");
+        let outcome = refused_naming(
+            fixture
+                .manager
+                .candidate_diff(&slot, &fixture.seed, &fixture.head),
+            &[name],
+        );
+        cases.push((format!("{name} removed"), outcome));
+    }
+    report_cases(&cases);
+}
+
+/// T-C1-P1-DIFF's control: in a whole registration a diff against a tree that
+/// is not an object is the Git error it was, at C and under F.
+#[test]
+fn a_candidate_diff_failing_in_a_whole_registration_stays_a_git_error() {
+    let fixture = Fixture::created("f-diff-whole");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let absent = "0123456789abcdef0123456789abcdef01234567";
+    match fixture.manager.candidate_diff(&slot, &fixture.seed, absent) {
+        Err(UpstrokeError::Git { .. }) => {}
+        other => panic!("the Git error, unrefused: {other:?}"),
+    }
+}
+
+/// T-C1-P1-OWNERR (M-C1b's witness): a materialization whose source is no
+/// object, in a slot whose `gitdir` alone is removed. `read-tree` and
+/// `diff-files` succeed and the pick, run through `git` rather than `git_ok`,
+/// fails without unmerged entries (E5 `mc1b_own_error`), so the only Git error
+/// is the one `repair_materialize` constructs itself: at C it is returned as
+/// `UpstrokeError::Git`; under F the error arm, applied to the function's own
+/// error as it returns, refuses it.
+#[test]
+fn a_materializations_own_git_error_in_a_slot_whose_gitdir_is_gone_is_a_registry_refusal() {
+    let fixture = Fixture::created("f-ownerr-gitdir");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+    fs::remove_file(entry.join("gitdir")).expect("a prune deletes gitdir alone");
+    let outcome = refused_naming(
+        fixture.manager.repair_materialize(
+            &mut NoHooks,
+            &slot,
+            "0123456789abcdef0123456789abcdef01234567",
+        ),
+        &["left no unmerged entry", "gitdir"],
+    );
+    report_cases(&[("the pick's source is no object".to_owned(), outcome)]);
+}
+
+/// T-C1-P1-OWNERR's control: in a whole registration the function's own Git
+/// error is returned unrefused, at C and under F.
+#[test]
+fn a_materializations_own_git_error_in_a_whole_registration_stays_a_git_error() {
+    let fixture = Fixture::created("f-ownerr-whole");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    match fixture.manager.repair_materialize(
+        &mut NoHooks,
+        &slot,
+        "0123456789abcdef0123456789abcdef01234567",
+    ) {
+        Err(UpstrokeError::Git { message }) => {
+            assert!(message.contains("left no unmerged entry"), "{message}");
+        }
+        other => panic!("the function's own Git error: {other:?}"),
+    }
+}
+
+/// T-C1-P1-CLASSIFIED (control; M-C1c's witness, with #329's T16): a populated
+/// destination at `add_snapshot` is Git state before `git worktree add` runs,
+/// at C and under F: placement 1 is not applied to the adds, whose answers are
+/// #329's access's.
+#[test]
+fn a_populated_snapshot_destination_stays_git_state_and_is_not_read_as_a_registration() {
+    let fixture = Fixture::created("f-classified-snapshot");
+    let name = SnapshotName::gates(0, 1, 1);
+    let slot = Slot::Snapshot { name: name.clone() };
+    let destination = fixture.manager.slot_path(&slot);
+    fs::create_dir_all(&destination).expect("the destination");
+    fs::write(destination.join("leftover"), b"x\n").expect("an entry in it");
+    match fixture.manager.add_snapshot(
+        &mut NoHooks,
+        &name,
+        &SnapshotInput::Commit(oid(&fixture.head)),
+    ) {
+        Err(UpstrokeError::Git { message }) => {
+            assert!(
+                message.contains("`git worktree add` did not run"),
+                "{message}"
+            );
+        }
+        other => panic!("Git state, as #329's access answers it: {other:?}"),
+    }
+    assert!(destination.join("leftover").exists(), "the entry is kept");
+}
+
+/// A commit on `parent` whose `a.txt` holds `text`, made in the base.
+fn commit_changing_a(fixture: &Fixture, parent: &str, text: &str, branch: &str) -> String {
+    let base = &fixture.base;
+    git(base, &["checkout", "-q", "-b", branch, parent]);
+    fs::write(base.join("a.txt"), text).expect("change a.txt");
+    git(base, &["commit", "-q", "-am", branch]);
+    let commit = git(base, &["rev-parse", "HEAD"]);
+    git(base, &["checkout", "-q", "main"]);
+    commit
+}
+
+/// A task slot added at `at`, with its checkout and registration entry.
+fn task_slot_at(fixture: &Fixture, key: &str, at: &str) -> (Slot, PathBuf, PathBuf) {
+    let slot = fixture.task(key, 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the intent");
+    let checkout = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, at)
+        .expect("the worktree");
+    let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+    (slot, checkout, entry)
+}
+
+/// T-C1-ANS-MATERIALIZE (a): a repair's materialization that conflicts as
+/// expected, in a slot whose `gitdir` alone is removed, reads the conflict
+/// genuinely (E5): at C `Materialized::Conflict`; under F the observation is
+/// not used, and the materialization is a registry refusal.
+#[test]
+fn a_materialization_observed_with_its_gitdir_deleted_is_a_registry_refusal() {
+    let fixture = Fixture::created("f-materialize-gitdir");
+    let ours = commit_changing_a(&fixture, &fixture.seed, "ours\n", "ours");
+    let theirs = commit_changing_a(&fixture, &fixture.seed, "theirs\n", "theirs");
+    let (slot, _, entry) = task_slot_at(&fixture, "alpha", &ours);
+    fs::remove_file(entry.join("gitdir")).expect("a prune deletes gitdir alone");
+    let outcome = refused_naming(
+        fixture
+            .manager
+            .repair_materialize(&mut NoHooks, &slot, &theirs),
+        &["materialization", "gitdir"],
+    );
+    report_cases(&[("a conflicting pick, gitdir deleted".to_owned(), outcome)]);
+}
+
+/// T-C1-ANS-MATERIALIZE (b) and (c): the materialization's observation is
+/// returned only while the registration is whole. The engine's suite has no
+/// seam between the pick and the observation inside the funnel, so the slot's
+/// `index` is removed at the funnel's `After` phase, after the observation's
+/// reads and before the answer is returned: at C the function returns its
+/// observation (`Empty` for an already-present change, `Clean` for a change
+/// that applies onto an empty head) with the registration not whole; under F it
+/// is a registry refusal naming `index`. (E5 executed the misread itself: read
+/// through the deleted index the two answers swap.)
+#[test]
+fn a_materializations_observation_returned_after_its_index_is_deleted_is_a_registry_refusal() {
+    let mut cases = Vec::new();
+    {
+        let fixture = Fixture::created("f-materialize-present");
+        let (slot, _, entry) = task_slot_at(&fixture, "alpha", &fixture.side.clone());
+        let index = entry.join("index");
+        let mut hooks = AtPhase::new(
+            EffectSiteId::Object(ObjectSite::RepairMaterialize),
+            HookPhase::After,
+            || fs::remove_file(&index).expect("delete the index after the observation"),
+        );
+        let outcome = refused_naming(
+            fixture
+                .manager
+                .repair_materialize(&mut hooks, &slot, &fixture.side),
+            &["index"],
+        );
+        cases.push(("(b) the change already present".to_owned(), outcome));
+    }
+    {
+        let fixture = Fixture::created("f-materialize-empty-head");
+        let empty = git(
+            &fixture.base,
+            &["hash-object", "-t", "tree", "-w", "/dev/null"],
+        );
+        let head = git(
+            &fixture.base,
+            &[
+                "commit-tree",
+                &empty,
+                "-p",
+                &fixture.seed,
+                "-m",
+                "an empty head",
+            ],
+        );
+        let (slot, _, entry) = task_slot_at(&fixture, "alpha", &head);
+        let index = entry.join("index");
+        let mut hooks = AtPhase::new(
+            EffectSiteId::Object(ObjectSite::RepairMaterialize),
+            HookPhase::After,
+            || fs::remove_file(&index).expect("delete the index after the observation"),
+        );
+        let outcome = refused_naming(
+            fixture
+                .manager
+                .repair_materialize(&mut hooks, &slot, &fixture.side),
+            &["index"],
+        );
+        cases.push((
+            "(c) a change that applies onto an empty head".to_owned(),
+            outcome,
+        ));
+    }
+    report_cases(&cases);
+}
+
+/// T-C1-ANS-MATERIALIZE's controls: with the registration whole the three
+/// shapes are observed as they are, at C and under F.
+#[test]
+fn a_materialization_in_a_whole_registration_observes_conflict_empty_and_clean() {
+    let fixture = Fixture::created("f-materialize-whole");
+    let ours = commit_changing_a(&fixture, &fixture.seed, "ours\n", "ours");
+    let theirs = commit_changing_a(&fixture, &fixture.seed, "theirs\n", "theirs");
+    let (conflict, _, _) = task_slot_at(&fixture, "conflict", &ours);
+    assert_eq!(
+        fixture
+            .manager
+            .repair_materialize(&mut NoHooks, &conflict, &theirs)
+            .expect("the conflict is a result"),
+        Materialized::Conflict
+    );
+    let (present, _, _) = task_slot_at(&fixture, "present", &fixture.side.clone());
+    assert_eq!(
+        fixture
+            .manager
+            .repair_materialize(&mut NoHooks, &present, &fixture.side)
+            .expect("an already-present change"),
+        Materialized::Empty
+    );
+    let empty = git(
+        &fixture.base,
+        &["hash-object", "-t", "tree", "-w", "/dev/null"],
+    );
+    let head = git(
+        &fixture.base,
+        &[
+            "commit-tree",
+            &empty,
+            "-p",
+            &fixture.seed,
+            "-m",
+            "an empty head",
+        ],
+    );
+    let (applies, _, _) = task_slot_at(&fixture, "applies", &head);
+    assert_eq!(
+        fixture
+            .manager
+            .repair_materialize(&mut NoHooks, &applies, &fixture.side)
+            .expect("a change that applies"),
+        Materialized::Clean
+    );
+}
+
+/// A repair slot left conflicted on `a.txt` by its materialization, with its
+/// checkout and registration entry.
+fn a_conflicted_repair_slot(fixture: &Fixture) -> (Slot, PathBuf, PathBuf) {
+    let ours = commit_changing_a(fixture, &fixture.seed, "ours\n", "ours");
+    let theirs = commit_changing_a(fixture, &fixture.seed, "theirs\n", "theirs");
+    let (slot, checkout, entry) = task_slot_at(fixture, "alpha", &ours);
+    assert_eq!(
+        fixture
+            .manager
+            .repair_materialize(&mut NoHooks, &slot, &theirs)
+            .expect("the conflict a repair materializes through"),
+        Materialized::Conflict
+    );
+    (slot, checkout, entry)
+}
+
+/// T-C1-ANS-CAPTURE, the unresolved read: a repair whose worker leaves the
+/// conflict unresolved, the slot's `index` removed before the capture. Git
+/// reads an empty index and answers no unmerged entry: at C
+/// `unresolved_conflicts` answers `[]`, hiding the conflict; under F it is a
+/// registry refusal.
+#[test]
+fn an_unresolved_conflict_read_through_a_deleted_index_is_refused_not_hidden() {
+    let fixture = Fixture::created("f-capture-unresolved");
+    let (slot, _, entry) = a_conflicted_repair_slot(&fixture);
+    assert_eq!(
+        fixture
+            .manager
+            .unresolved_conflicts(&slot)
+            .expect("the read, whole"),
+        vec!["a.txt".to_owned()],
+        "the control: the conflict is read while the registration is whole"
+    );
+    fs::remove_file(entry.join("index")).expect("a prune deletes the index");
+    let outcome = refused_naming(
+        fixture.manager.unresolved_conflicts(&slot),
+        &["unresolved conflicts", "index"],
+    );
+    report_cases(&[("index deleted before the capture".to_owned(), outcome)]);
+}
+
+/// T-C1-ANS-CAPTURE, the resolved read: a retained retry whose earlier capture
+/// resolved `a.txt`, its `index` removed. The resolve-undo record is in the
+/// index, so Git reads none: at C `resolved_conflicts` answers `[]` and a
+/// revised declaration would go unread; under F it is a registry refusal.
+#[test]
+fn a_resolved_conflict_read_through_a_deleted_index_is_refused_not_forgotten() {
+    let fixture = Fixture::created("f-capture-resolved");
+    let (slot, checkout, entry) = a_conflicted_repair_slot(&fixture);
+    fs::write(checkout.join("a.txt"), "resolved\n").expect("the worker's resolution");
+    git(&checkout, &["add", "--", "a.txt"]);
+    assert_eq!(
+        fixture
+            .manager
+            .resolved_conflicts(&slot)
+            .expect("the read, whole"),
+        vec!["a.txt".to_owned()],
+        "the control: the earlier resolution is read while the registration is whole"
+    );
+    fs::remove_file(entry.join("index")).expect("a prune deletes the index");
+    let outcome = refused_naming(
+        fixture.manager.resolved_conflicts(&slot),
+        &["resolved conflicts", "index"],
+    );
+    report_cases(&[(
+        "index deleted before the retry's capture".to_owned(),
+        outcome,
+    )]);
+}
+
+/// A task slot at a commit on `head` that tracks the resolution manifest's
+/// name, with its checkout and registration entry.
+fn a_slot_whose_repository_tracks_the_manifest(fixture: &Fixture) -> (Slot, PathBuf, PathBuf) {
+    let base = &fixture.base;
+    fs::write(base.join(RESOLUTION_MANIFEST), "resolved a.txt\n").expect("the repository's file");
+    git(base, &["add", "--", RESOLUTION_MANIFEST]);
+    git(
+        base,
+        &["commit", "-q", "-m", "the repository tracks the name"],
+    );
+    let tracking = git(base, &["rev-parse", "HEAD"]);
+    task_slot_at(fixture, "alpha", &tracking)
+}
+
+/// T-C1-ANS-CAPTURE, the manifest's name: a repository that tracks
+/// `.upstroke-resolved`, the slot's `index` removed before
+/// `resolution_manifest`. Git reads an empty index, and the repository's file
+/// reads as the worker's untracked manifest: at C its bytes are read as
+/// declarations; under F the read is a registry refusal.
+#[test]
+fn a_tracked_manifest_name_read_through_a_deleted_index_is_refused_not_read_as_declarations() {
+    let fixture = Fixture::created("f-capture-manifest");
+    let (slot, _, entry) = a_slot_whose_repository_tracks_the_manifest(&fixture);
+    match fixture.manager.resolution_manifest(&slot) {
+        Err(UpstrokeError::Refused { message }) => {
+            assert!(message.contains("tracks"), "{message}");
+        }
+        other => panic!("the control: a tracked name is refused, not read: {other:?}"),
+    }
+    fs::remove_file(entry.join("index")).expect("a prune deletes the index");
+    let outcome = refused_naming(
+        fixture.manager.resolution_manifest(&slot),
+        &["resolution manifest's name", "index"],
+    );
+    report_cases(&[("index deleted before the manifest read".to_owned(), outcome)]);
+}
+
+/// T-C1-ANS-CAPTURE, the stage: the same repository, the slot's `index`
+/// removed before `candidate_stage`. At C the stage reads the repository's
+/// file as the worker's manifest, excludes it from `add -A` and removes it, so
+/// the candidate deletes it; under F the stage refuses before it writes, and
+/// the file is kept.
+#[test]
+fn a_stage_over_a_tracked_manifest_name_and_a_deleted_index_is_refused_and_keeps_the_file() {
+    let fixture = Fixture::created("f-capture-stage");
+    let (slot, checkout, entry) = a_slot_whose_repository_tracks_the_manifest(&fixture);
+    fs::remove_file(entry.join("index")).expect("a prune deletes the index");
+    let outcome = refused_naming(
+        fixture.manager.candidate_stage(&mut NoHooks, &slot, &[]),
+        &["resolution manifest's name", "index"],
+    );
+    let kept = checkout.join(RESOLUTION_MANIFEST).is_file();
+    report_cases(&[
+        ("index deleted before the stage".to_owned(), outcome),
+        (
+            "the repository's file is kept".to_owned(),
+            if kept {
+                Ok(())
+            } else {
+                Err("the stage removed the repository's file".to_owned())
+            },
+        ),
+    ]);
+}
+
+/// T-C1-WT: the capture's `add -A` done, then the slot's `index` removed at the
+/// `Before` phase of `Object.CandidateWriteTree`. `write-tree` writes the empty
+/// tree and the index again (E5), so at C the capture's tree is the empty tree;
+/// under F the check before the write refuses.
+#[test]
+fn a_write_tree_over_a_deleted_index_is_refused_before_it_writes_the_empty_tree() {
+    let fixture = Fixture::created("f-write-tree");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+    fs::write(checkout.join("d.txt"), "the worker's file\n").expect("the worker's file");
+    fixture
+        .manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("the capture's add -A");
+    let index = entry.join("index");
+    let mut hooks = AtPhase::new(
+        EffectSiteId::Object(ObjectSite::CandidateWriteTree),
+        HookPhase::Before,
+        || fs::remove_file(&index).expect("a prune deletes the index"),
+    );
+    let outcome = refused_naming(
+        fixture.manager.candidate_write_tree(&mut hooks, &slot),
+        &["write-tree", "index"],
+    );
+    report_cases(&[("index deleted before the write".to_owned(), outcome)]);
+}
+
+/// T-C1-WT's control: with the registration whole the capture's tree is the
+/// worktree's true tree, holding the worker's file, at C and under F.
+#[test]
+fn a_write_tree_in_a_whole_registration_writes_the_true_tree() {
+    let fixture = Fixture::created("f-write-tree-whole");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    fs::write(checkout.join("d.txt"), "the worker's file\n").expect("the worker's file");
+    fixture
+        .manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("the capture's add -A");
+    let tree = fixture
+        .manager
+        .candidate_write_tree(&mut NoHooks, &slot)
+        .expect("the tree");
+    let listed = git(&fixture.base, &["ls-tree", "--name-only", &tree]);
+    assert!(listed.lines().any(|name| name == "d.txt"), "{listed}");
+}
+
+/// T-C1-ANS-PROMO, at the manager: the promotion's path read of a slot whose
+/// `index` is deleted. Git reads an empty index, and the base's paths read as
+/// deletions while the worker's addition is lost: at C `changed_paths` answers
+/// that set; under F it is a registry refusal. The run-level form is in
+/// `coordinator::tests`.
+#[test]
+fn a_promotions_path_read_through_a_deleted_index_is_refused_not_recorded_as_deletions() {
+    let fixture = Fixture::created("f-promotion-paths");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let checkout = fixture.manager.slot_path(&slot);
+    let entry = super::fixture::registration_of(&fixture.manager, &checkout);
+    fs::write(checkout.join("d.txt"), "the worker's file\n").expect("the worker's file");
+    fixture
+        .manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("the capture's add -A");
+    let whole = fixture
+        .manager
+        .changed_paths(&slot, &fixture.head)
+        .expect("the read, whole");
+    assert!(format!("{whole:?}").contains("d.txt"), "{whole:?}");
+    fs::remove_file(entry.join("index")).expect("a prune deletes the index");
+    let outcome = refused_naming(
+        fixture.manager.changed_paths(&slot, &fixture.head),
+        &["changed paths", "index"],
+    );
+    report_cases(&[(
+        "index deleted before the promotion's read".to_owned(),
+        outcome,
+    )]);
+}
+
+/// T-C3-CONTROLS: with the store absent, closure 3's arm binds nothing only for
+/// a checkout whose `.git` names an entry of this repository's own store. A
+/// target whose `.git` names another repository's store, and a populated
+/// target with no `.git`, keep the scan's I/O failure, which the tolerant
+/// access refuses at its deadline; an empty directory and an absent target
+/// converge as they did. The same at C and under F.
+#[test]
+fn a_removal_with_no_store_refuses_every_target_that_names_no_entry_of_its_own_store() {
+    let fixture = Fixture::created("f-closure3-controls");
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    let _ = fs::remove_dir(&store);
+    let other = fixture.root.join("other-store");
+    let shapes: [(&str, Option<String>, bool); 4] = [
+        (
+            "another repository's store",
+            Some(format!(
+                "gitdir: {}\n",
+                as_git_writes_it(&other.join(".git").join("worktrees").join("kalpha-g1"))
+            )),
+            false,
+        ),
+        ("no .git", None, false),
+        ("an empty directory", None, true),
+        ("absent", None, true),
+    ];
+    let mut cases = Vec::new();
+    for (generation, (label, pointer, converges)) in (1_u32..).zip(shapes) {
+        let slot = fixture.task("control", generation);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &slot)
+            .expect("the intent");
+        let target = fixture.manager.slot_path(&slot);
+        match (label, &pointer) {
+            ("absent", _) => {}
+            ("an empty directory", _) => fs::create_dir_all(&target).expect("an empty directory"),
+            (_, Some(pointer)) => {
+                fs::create_dir_all(&target).expect("a populated target");
+                fs::write(target.join(".git"), pointer).expect("its .git");
+            }
+            (_, None) => {
+                fs::create_dir_all(&target).expect("a populated target");
+                fs::write(target.join("file.txt"), "x\n").expect("a file, no .git");
+            }
+        }
+        let removed = fixture.manager.remove_worktree(&mut NoHooks, &slot);
+        let outcome = match (removed, converges) {
+            (Ok(()), true) if !target.exists() => Ok(()),
+            (Err(UpstrokeError::RegistryRefused { message }), false)
+                if target.exists() && message.contains("failed to read") =>
+            {
+                Ok(())
+            }
+            (other, _) => Err(format!(
+                "{other:?}, the target present: {}",
+                target.exists()
+            )),
+        };
+        cases.push((label.to_owned(), outcome));
+    }
+    report_cases(&cases);
 }

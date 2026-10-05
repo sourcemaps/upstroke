@@ -459,6 +459,204 @@ pub(crate) fn as_git_writes_it(path: &Path) -> String {
     .expect("a fixture's path is UTF-8")
 }
 
+/// One state of a checkout's worktree registration that closure 1's two
+/// readers are run over (the external-prune follow-up's T-C1-READERS): the
+/// checkout, and what the check must find there — `Ok` for a whole
+/// registration, or words the first failed condition's text holds.
+pub(crate) struct RegistrationConstruction {
+    pub(crate) label: &'static str,
+    pub(crate) checkout: PathBuf,
+    pub(crate) expected: Result<(), &'static str>,
+}
+
+/// What the manager's own reader, [`super::registration_whole`], finds of the
+/// registration of the checkout at `checkout`: `Ok` when it is whole, or the
+/// first condition that failed. The topology twin's test compares it with its
+/// own reader on every construction.
+pub(crate) fn manager_registration_found(
+    checkout: &Path,
+    common_git_dir: &Path,
+) -> Result<(), String> {
+    match super::registration_whole(checkout, common_git_dir) {
+        Whole::Yes => Ok(()),
+        Whole::No(found) => Err(found),
+    }
+}
+
+/// `to`, spelt relative to the directory `from`, both canonicalized first:
+/// the form Git 2.48's `worktree.useRelativePaths` writes.
+fn relative_between(from: &Path, to: &Path) -> PathBuf {
+    let from = fs::canonicalize(from).expect("a fixture path resolves");
+    let to = fs::canonicalize(to).expect("a fixture path resolves");
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let shared = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in shared..from.len() {
+        relative.push("..");
+    }
+    for component in to.iter().skip(shared) {
+        relative.push(component.as_os_str());
+    }
+    relative
+}
+
+/// Every construction closure 1's readers are run over, each in a task slot of
+/// its own added to `fixture`'s repository at its head: a whole registration;
+/// each of the entry's four names removed, or the first three empty; the
+/// checkout's `.git` removed, made a directory, or not a pointer; an entry
+/// outside this repository's store; `commondir` naming another repository;
+/// `gitdir` naming another checkout; the relative pointers Git 2.48 writes;
+/// and, where the platform makes one without privilege, a link in place of
+/// `index`.
+pub(crate) fn registration_constructions(fixture: &Fixture) -> Vec<RegistrationConstruction> {
+    let manager = &fixture.manager;
+    // Every slot is added before any is damaged: Git's worktree list dies on
+    // some of the damaged entries, and an add lists the registry first.
+    let mut slots: Vec<(PathBuf, PathBuf)> = (1..=16)
+        .map(|generation| {
+            let slot = fixture.add_task(&mut NoHooks, "readers", generation);
+            let checkout = manager.slot_path(&slot);
+            let entry = registration_of(manager, &checkout);
+            (checkout, entry)
+        })
+        .collect();
+    let mut next = move || slots.remove(0);
+    let mut constructions = Vec::new();
+
+    let (whole, _) = next();
+    constructions.push(RegistrationConstruction {
+        label: "whole",
+        checkout: whole.clone(),
+        expected: Ok(()),
+    });
+    for name in ["HEAD", "commondir", "index", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::remove_file(entry.join(name)).expect("remove one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("cannot be read"),
+        });
+    }
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let (checkout, entry) = next();
+        fs::write(entry.join(name), []).expect("empty one name of the entry");
+        constructions.push(RegistrationConstruction {
+            label: name,
+            checkout,
+            expected: Err("is empty"),
+        });
+    }
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git removed",
+        checkout,
+        expected: Err(".git cannot be read"),
+    });
+
+    let (checkout, _) = next();
+    fs::remove_file(checkout.join(".git")).expect("remove the checkout's .git");
+    fs::create_dir(checkout.join(".git")).expect("a directory in its place");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git a directory",
+        checkout,
+        expected: Err("is a directory, not a regular file"),
+    });
+
+    let (checkout, _) = next();
+    fs::write(checkout.join(".git"), "not a pointer\n").expect("a .git that names nothing");
+    constructions.push(RegistrationConstruction {
+        label: "the checkout's .git not a gitdir pointer",
+        checkout,
+        expected: Err("does not begin `gitdir:`"),
+    });
+
+    let (checkout, entry) = next();
+    let elsewhere = fixture.root.join("elsewhere").join("readers");
+    fs::create_dir_all(&elsewhere).expect("a directory outside the store");
+    for name in ["gitdir", "commondir", "HEAD", "index"] {
+        fs::copy(entry.join(name), elsewhere.join(name)).expect("copy the entry's names");
+    }
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&elsewhere)),
+    )
+    .expect("point the checkout outside the store");
+    constructions.push(RegistrationConstruction {
+        label: "an entry outside this repository's store",
+        checkout,
+        expected: Err("not an entry of this repository's registration store"),
+    });
+
+    let other = fixture.root.join("other-repository");
+    fs::create_dir_all(&other).expect("another repository's directory");
+    git(&other, &["init", "-q"]);
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("commondir"),
+        format!("{}\n", as_git_writes_it(&other.join(".git"))),
+    )
+    .expect("name another repository");
+    constructions.push(RegistrationConstruction {
+        label: "commondir naming another repository",
+        checkout,
+        expected: Err("not this repository's common git dir"),
+    });
+
+    let (checkout, entry) = next();
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&whole.join(".git"))),
+    )
+    .expect("name another checkout");
+    constructions.push(RegistrationConstruction {
+        label: "gitdir naming another checkout",
+        checkout,
+        expected: Err("not this checkout's"),
+    });
+
+    let (checkout, entry) = next();
+    let to_entry = relative_between(&checkout, &entry);
+    let to_checkout = relative_between(&entry, &checkout.join(".git"));
+    fs::write(
+        checkout.join(".git"),
+        format!("gitdir: {}\n", as_git_writes_it(&to_entry)),
+    )
+    .expect("a relative pointer to the entry");
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}\n", as_git_writes_it(&to_checkout)),
+    )
+    .expect("a relative pointer back to the checkout");
+    constructions.push(RegistrationConstruction {
+        label: "relative pointers",
+        checkout,
+        expected: Ok(()),
+    });
+
+    #[cfg(unix)]
+    {
+        let (checkout, entry) = next();
+        let index = entry.join("index");
+        let real = entry.join("index.real");
+        fs::rename(&index, &real).expect("move the index aside");
+        std::os::unix::fs::symlink(&real, &index).expect("a link in place of index");
+        constructions.push(RegistrationConstruction {
+            label: "a link in place of index",
+            checkout,
+            expected: Err("is a symbolic link, not a regular file"),
+        });
+    }
+    constructions
+}
+
 /// A real repository, a real private root, and a manager over both.
 /// The fixture's run id: a canonical ULID, as `derive` requires
 /// (`DESIGN.md` §15, "run-id = ULID"), spelt to be recognisable in a path.

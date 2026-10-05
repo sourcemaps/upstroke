@@ -1877,3 +1877,208 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     );
     run.replay_twice_equal();
 }
+
+#[test]
+fn closure_one_readers_agree_on_every_registration_construction() {
+    let fixture = crate::workspace_manager::fixture::Fixture::created("f-readers-topology");
+    let common = fixture.manager.common_git_dir().to_path_buf();
+    let constructions = crate::workspace_manager::fixture::registration_constructions(&fixture);
+    let mut failed = Vec::new();
+    for construction in &constructions {
+        let topology = match registration_whole(&construction.checkout, &common) {
+            Whole::Yes => Ok(()),
+            Whole::No(found) => Err(found),
+        };
+        let manager = crate::workspace_manager::fixture::manager_registration_found(
+            &construction.checkout,
+            &common,
+        );
+        if topology != manager {
+            failed.push(format!(
+                "{}: the readers disagree: topology {topology:?}, manager {manager:?}",
+                construction.label
+            ));
+        }
+        let as_stated = match (construction.expected, &topology) {
+            (Ok(()), Ok(())) => true,
+            (Err(words), Err(text)) => text.contains(words),
+            _ => false,
+        };
+        if !as_stated {
+            failed.push(format!(
+                "{}: expected {:?}, the topology reader found {topology:?}",
+                construction.label, construction.expected
+            ));
+        }
+    }
+    assert!(constructions.len() >= 15, "every construction was made");
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+fn prune_whole_entry(base: &Path, checkout: &Path) {
+    let pointer = checkout.join(".git");
+    let bytes = std::fs::read(&pointer).expect("the checkout's .git");
+    remove_file(&pointer);
+    git(base, &["worktree", "prune", "--expire=now"]);
+    write_file(&pointer, &bytes);
+}
+
+fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a kept directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a kept file");
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_path_buf(),
+                    bytes,
+                );
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {
+    let mut run = Run::started("f-c2-open-kept");
+    let dispatched = run.dispatch(ALPHA, 0);
+    write_file(
+        &dispatched.worktree.join("untracked.txt"),
+        b"the operator's file\n",
+    );
+    prune_whole_entry(&run.fixture.base, &dispatched.worktree);
+    let before = files_under(&dispatched.worktree);
+    let mark = run.mark();
+    let result = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    );
+    let message = match result {
+        Err(UpstrokeError::RegistryRefused { message }) => message,
+        other => panic!("the reuse refuses resumably and keeps the slot: {other:?}"),
+    };
+    assert!(
+        message.contains("kept for the operator")
+            && message.contains(&dispatched.worktree.display().to_string()),
+        "{message}"
+    );
+    assert_eq!(
+        files_under(&dispatched.worktree),
+        before,
+        "the slot and its file are kept, byte for byte"
+    );
+    assert!(
+        run.fixture.manager.intent_path(&dispatched.slot).exists(),
+        "the intent is kept"
+    );
+    assert_eq!(
+        run.count_after(mark, REMOVE, HookPhase::Before),
+        0,
+        "nothing removed"
+    );
+    assert_eq!(
+        run.count_after(mark, ADD, HookPhase::Before),
+        0,
+        "nothing added"
+    );
+}
+
+#[test]
+fn a_pruned_open_generation_holding_nothing_is_recreated() {
+    let mut run = Run::started("f-c2-open-empty");
+    let dispatched = run.dispatch(ALPHA, 0);
+    prune_whole_entry(&run.fixture.base, &dispatched.worktree);
+    let held: Vec<PathBuf> = std::fs::read_dir(&dispatched.worktree)
+        .expect("the slot")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    for path in held {
+        if path.is_dir() {
+            panic!("the base checkout holds only files: {}", path.display());
+        }
+        remove_file(&path);
+    }
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("an emptied slot is recreated");
+    assert_eq!(
+        reuse,
+        Reuse::Recreated {
+            failure: VerifyFailure::NotRegistered
+        }
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
+
+#[test]
+fn a_whole_open_generation_whose_head_moved_is_recreated() {
+    let mut run = Run::started("f-c2-open-head-moved");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let side = run.fixture.side.clone();
+    git(&dispatched.worktree, &["checkout", "-q", "--detach", &side]);
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("a whole registration whose HEAD moved is recreated");
+    assert!(
+        matches!(
+            reuse,
+            Reuse::Recreated {
+                failure: VerifyFailure::HeadMismatch { .. }
+            }
+        ),
+        "{reuse:?}"
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
+
+#[test]
+fn a_residue_failure_in_an_open_generation_whose_registration_is_not_whole_is_recreated() {
+    let mut run = Run::started("f-c2-open-residue");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let entry = git_dir(&dispatched.worktree);
+    plant(&dispatched.worktree, ResidueElement::IndexLock);
+    remove_file(&entry.join("index"));
+    let reuse = verify_or_recreate(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &dispatched.open_generation(),
+        &dispatched.quiescence(),
+    )
+    .expect("a residue failure is recreated whatever the registration");
+    assert_eq!(
+        reuse,
+        Reuse::Recreated {
+            failure: VerifyFailure::Residue(ResidueElement::IndexLock)
+        }
+    );
+    assert!(healthy_at(
+        &run.fixture.manager,
+        &dispatched.worktree,
+        &dispatched.base.0
+    ));
+}
