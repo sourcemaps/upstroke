@@ -292,13 +292,25 @@ verification backoff remains a separate fact.
 A decline fails every unmerged lineage member, including the root. It closes
 their generations, removes candidates and questions, clears execution backoff,
 and releases their generation, candidate and lineage holdings. A matching
-`VerificationStarted` transaction is cancelled; late results for closed
-generations or sequences are refused. A `Prepared` transaction has already
-authorized publication, so a decline affecting it is refused before append
-until that publication completes. Already merged ancestors remain merged.
-Unrelated transactions and holdings survive. `decline_halts_run` additionally
-records a run halt; it does not decide whether the lineage fails. New repairs
-must name a coherent root and parent and cannot revive a failed ancestor.
+`VerificationStarted` transaction is cancelled, not released, as is one a
+lineage member's failed settlement meets: it stays unresolved and keeps its
+pipeline and merge entitlements, so no other transaction starts and the run
+does not end before its one terminal record, `merge_verification_interrupted`;
+the fold refuses `merge_prepared`, `merge_rejected` and
+`merge_verification_unavailable` for a verification whose candidate's task has
+failed. The coordinator that stopped the verification appends that terminal
+once the Runner has established the end of each of its processes, a halt's
+closure appends it with the other in-flight work, and a resume's recovery
+appends it for a verification no live process settled; the pin is then deleted
+expected-old and the staging worktree and snapshots are reclaimed, as for any
+interrupted verification, and nothing is verified again, since its candidate
+was removed with its lineage. Late results for closed generations or sequences
+are refused. A `Prepared` transaction has already authorized publication, so a
+decline affecting it is refused before append until that publication completes.
+Already merged ancestors remain merged. Unrelated transactions and holdings
+survive. `decline_halts_run` additionally records a run halt; it does not
+decide whether the lineage fails. New repairs must name a coherent root and
+parent and cannot revive a failed ancestor.
 
 These are durable fold and replay rules. The topology driver ingests human
 answers: before each step it polls every open question without blocking, and
@@ -308,9 +320,13 @@ applied before any further work is selected. The driver runs one attempt at
 a time, so no agent process is running when an answer is ingested and none
 has to be cancelled on a decline. A concurrent driver that ingests answers
 must stop the affected work and discard late results before appending their
-completion. Event shapes are unchanged; schema-4 replay refuses the unsafe
-event orders excluded above, including bare questions during active lineage
-work and questions on terminal tasks.
+completion; a verification it stops because a lineage failed still receives
+its one terminal, `merge_verification_interrupted`, before the driver starts
+another integration or ends the run, as the paragraph above describes. Event
+shapes are unchanged; schema-4 replay refuses the unsafe event orders
+excluded above, including bare questions during active lineage work,
+questions on terminal tasks, and an integration start or `run_finished`
+while a cancelled verification still awaits its terminal.
 
 The live writer checks one event, appends that exact event successfully once,
 and applies its delta once to the same fold with no intervening transition.
