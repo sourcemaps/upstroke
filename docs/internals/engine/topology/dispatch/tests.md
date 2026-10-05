@@ -607,6 +607,12 @@ A whole-entry prune (`.git` set aside, `git worktree prune --expire=now`, put ba
 
 Every file under a directory with its bytes.
 
+## `fn keep_the_store(run: &Run) {`
+
+A linked checkout outside the execution root that keeps the registration store when the slot's
+entry is pruned, so that at C the removal binds nothing for the pruned slot and removes it — the
+design's base state — rather than refusing for an absent store (closure 3's face).
+
 ## `fn a_pruned_open_generation_holding_a_file_is_kept_for_the_operator_not_recreated() {`
 
 The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-OPEN (closure 2's first boundary): at C the slot is removed and recreated and the file lost; under F the reuse refuses, the slot and file are kept byte for byte, the intent kept, nothing removed or added.
