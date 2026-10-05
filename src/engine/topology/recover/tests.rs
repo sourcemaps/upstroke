@@ -25919,3 +25919,426 @@ fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {
                 > 0
     );
 }
+
+fn f_prune_entry_of(fixture: &Fixture, checkout: &Path) {
+    use crate::workspace_manager::fixture::{git, remove_file, write_file};
+    let pointer = checkout.join(".git");
+    let bytes = std::fs::read(&pointer).expect("the checkout's .git");
+    remove_file(&pointer);
+    git(&fixture.repo_root, &["worktree", "prune", "--expire=now"]);
+    write_file(&pointer, &bytes);
+}
+
+fn f_keep_the_store(fixture: &Fixture) {
+    let keeper = fixture.root.join("store-keeper");
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            keeper.to_str().expect("a fixture path is UTF-8"),
+            fixture.base_sha.as_str(),
+        ],
+    );
+}
+
+fn f_files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a kept directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a kept file");
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_path_buf(),
+                    bytes,
+                );
+            }
+        }
+    }
+    files
+}
+
+fn f_remove_tree(root: &Path) {
+    use crate::workspace_manager::fixture::{remove_dir, remove_file};
+    let mut directories = vec![root.to_path_buf()];
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a directory to remove") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                directories.push(path.clone());
+                pending.push(path);
+            } else {
+                remove_file(&path);
+            }
+        }
+    }
+    for directory in directories.iter().rev() {
+        remove_dir(directory);
+    }
+}
+
+fn f_kept_refusal(
+    result: Result<(Recovered, RunHandle), UpstrokeError>,
+    checkout: &Path,
+    found: &str,
+) -> String {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            assert!(
+                message.contains("kept for the operator")
+                    && message.contains("recovery's reclaim")
+                    && message.contains(&checkout.display().to_string())
+                    && message.contains(found),
+                "{message}"
+            );
+            message
+        }
+        Err(other) => panic!("the guard's registry refusal, not {other:?}"),
+        Ok(_) => panic!("the resume refuses rather than reclaiming the kept slot"),
+    }
+}
+
+fn f_has_intent(fixture: &Fixture, slot: &crate::workspace_manager::Slot) -> bool {
+    fixture.manager().intents().expect("intents").contains(slot)
+}
+
+fn f_resume(fixture: &Fixture) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    resume_as(
+        fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+}
+
+#[test]
+fn t_pres_1_an_in_flight_attempts_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-1-in-flight",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(fixture.git_dir.join("worktrees").is_dir());
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["attempt_interrupted"]);
+
+    f_remove_tree(&worktree);
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (_, handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("once the operator removed the directory the next resume reclaims the slot");
+    assert!(!f_has_intent(&fixture, &slot));
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert_eq!(
+        repair_dispatches(&driven.log, ALPHA)
+            .iter()
+            .map(|dispatched| dispatched.generation)
+            .collect::<Vec<_>>(),
+        vec![GEN, GenerationId(1)]
+    );
+}
+
+#[test]
+fn t_pres_2_a_retained_generations_pruned_populated_slot_is_closed_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-2-retained",
+        Damage {
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Retained {
+                        retained_session: SessionId("session-of-the-dead-incarnation".to_owned()),
+                        retained_incarnation: Epoch(0),
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the retained session's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["generation_closed"]);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+}
+
+#[test]
+fn t_pres_3_one_name_removed_from_a_populated_slots_entry_keeps_the_slot() {
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let fixture = Fixture::build(
+            &format!("pres-3-{name}"),
+            Damage {
+                open_generation: true,
+                extra: vec![attempt_started(1)],
+                ..Damage::default()
+            },
+        );
+        let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+        crate::workspace_manager::fixture::write_file(
+            &worktree.join("worker.txt"),
+            b"the attempt's unpinned output\n",
+        );
+        let entry =
+            crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+        crate::workspace_manager::fixture::remove_file(&entry.join(name));
+        let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+        let before = f_files_under(&worktree);
+        f_kept_refusal(f_resume(&fixture), &worktree, name);
+        assert_eq!(f_files_under(&worktree), before, "{name}");
+        assert!(f_has_intent(&fixture, &slot), "{name}");
+    }
+}
+
+#[test]
+fn t_pres_4_a_whole_populated_slot_is_reclaimed_as_before() {
+    let fixture = Fixture::build(
+        "pres-4-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (recovered, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert_eq!(recovered.interrupted, 1);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_5_an_empty_slot_whose_registration_is_gone_is_reclaimed() {
+    let fixture = Fixture::build(
+        "pres-5-empty",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_prune_entry_of(&fixture, &worktree);
+    let held: Vec<PathBuf> = std::fs::read_dir(&worktree)
+        .expect("the slot")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    for path in held {
+        assert!(!path.is_dir(), "the base checkout holds only files");
+        crate::workspace_manager::fixture::remove_file(&path);
+    }
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("an empty slot is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+fn f_earlier_manager(fixture: &Fixture) -> crate::workspace_manager::WorkspaceManager {
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo_root,
+        &fixture.private_root,
+        &fixture.started.run_id,
+        "01KZT0EARLIER0INCARNATION0",
+    )
+    .expect("a manager of an earlier incarnation")
+}
+
+fn f_plant_earlier_instance(
+    fixture: &Fixture,
+) -> (crate::workspace_manager::WorkspaceManager, PathBuf) {
+    let earlier = f_earlier_manager(fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    earlier
+        .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+        .expect("the earlier incarnation's intent");
+    let worktree = earlier
+        .add_worktree(
+            &mut crate::workspace_manager::NoHooks,
+            &slot,
+            fixture.base_sha.as_str(),
+        )
+        .expect("the earlier incarnation's instance");
+    assert_ne!(worktree, fixture.manager().slot_path(&slot));
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the earlier incarnation's unpinned output\n",
+    );
+    (earlier, worktree)
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_pruned_populated_instance_is_kept() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-pruned",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_whole_populated_instance_is_removed() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("a whole earlier instance is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_7_an_earlier_instance_reached_only_through_its_directory_is_kept() {
+    let fixture = Fixture::build(
+        "pres-7-directory-only",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (earlier, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    crate::workspace_manager::fixture::remove_file(&earlier.intent_path(&slot));
+    assert!(
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_8_a_promoted_candidates_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build("pres-8-promoted", Damage::default());
+    plant_queued_candidate(&fixture);
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_holds() {
+    let fixture = Fixture::build(
+        "pres-9-repaired",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let entry = crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+    crate::workspace_manager::fixture::remove_file(&entry.join("gitdir"));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert!(worktree.join("worker.txt").exists() && f_has_intent(&fixture, &slot));
+
+    let repaired = crate::workspace_manager::fixture::git_out(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "repair",
+            worktree.to_str().expect("a fixture path is UTF-8"),
+        ],
+    );
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        entry.join("gitdir").is_file(),
+        "the repair wrote gitdir again"
+    );
+    let (_, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
