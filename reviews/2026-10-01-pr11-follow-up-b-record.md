@@ -9958,9 +9958,11 @@ assertions, `probe_git` and the production code are unchanged.
 **The path construction beside it, checked for the same defect.** `PATH` too was built from a display string: under a
 `TMPDIR` that is not UTF-8 it named a directory that does not exist, so the role's probe ran the system's Git and never
 the stand-in (executed below). A path holding `:` cannot be named on any `PATH`; `join_paths` now refuses it by name,
-where `format!` split it and the system's Git ran (reasoned, not executed). **Seen, not changed:** the stub of
-`src/workspace.rs`'s `git_2_40_prerequisites` test also puts display strings inside single quotes (master's,
-`98bb5c0b`); it is R1's file, which this round leaves unchanged, and another test, outside this finding; not executed.
+where `format!` split it and the system's Git ran (reasoned, not executed). **Seen, not changed:** the stub that
+`src/workspace.rs`'s `git_2_40_prerequisites_helper` (`:1948`, the subprocess helper that
+`execution_prerequisites_ask_git_its_version_and_refuse_2_40` at `:1927` runs) writes at `:1969` to `:1975` also puts
+display strings inside single quotes (master's, `98bb5c0b`); it is R1's file, which this round leaves unchanged, and
+another test, outside this finding; not executed.
 
 **Red before, green after, and the catching reversals.** Each tree a private copy verified against its own
 (`impl15/identity/verify-*.txt`), each run through `upstroke-build` with a fresh private `TMPDIR` of its shape, the
