@@ -449,11 +449,12 @@ even if a partially failed add populated only part of either one.
 
 ## `const REGISTRY_TEAR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);`
 
-The window in which one registry command of the snapshot path is begun again
-past another registration's empty `commondir`: until ten seconds after its
-first attempt began, in every build. It bounds when an attempt begins, not how
-long the command takes: the last attempt, the first to end at or past it, runs
-to its Git child's exit. Between attempts it sleeps one millisecond, doubling to
+The nominal deadline of one registry command of the snapshot path run again
+past another registration's empty `commondir`: ten seconds after its first
+attempt began, in every build, checked after each attempt. It is no hard
+wall-clock bound: the attempt after a sleep is admitted however late the sleep
+ends, and every attempt, the last included, runs to its Git child's exit.
+Between attempts it sleeps one millisecond, doubling to
 `REGISTRY_TEAR_BACKOFF_CEILING`, fifty. They are the values the topology's
 tolerant access gives the same writer (`crate::workspace_manager`), which this
 module neither reads nor calls. Unlike that access's deadline, this one has no
@@ -485,13 +486,14 @@ while the command dies with exactly that one line, naming another registration's
 `commondir` (`read_anothers_empty_commondir`), the caller agrees
 (`may_repeat`), and the attempt ended before the deadline
 (`output_past_anothers_empty_commondir_until`). A sleep the deadline would cross
-is cut short to end at it, and the attempt after it is made; the first attempt
-to end at or past the deadline is the last. It returns the first attempt that
-ends any other way, unchanged, and past the deadline the last attempt, which
-fails as the first would have: Git's own message, naming the registration it
-read. A command that cannot be started is returned at once. The deadline
-bounds when an attempt begins, not how long one runs: each attempt waits for
-its Git child to exit and its output to close.
+is asked to end at it, and the attempt after it is admitted however late it
+starts; the first attempt to end at or past the deadline is the last. It
+returns the first attempt that ends any other way, unchanged, and past the
+deadline the last attempt, which fails as the first would have: Git's own
+message, naming the registration it read. A command that cannot be started is
+returned at once. Neither the admitted attempt's start nor any Git child's
+completion has a hard wall-clock bound: each attempt waits for its Git child to
+exit and its output to close.
 
 **Its three callers,** each a command that read the store before it changed
 anything, and that reads another registration's `commondir` once:
@@ -515,12 +517,12 @@ further command and no read. Past another's write in flight: the rest of the
 attempt running when the write lands, a sleep of at most fifty milliseconds as
 asked (it can end later), and the next attempt's own run, again if that one
 meets another write. Past a registration that stays empty, a writer that stalls
-or died: attempts are begun for ten seconds from the first, the last one runs
-to its end, and the command fails as before; a snapshot whose add fails so,
-followed by its own cleanup's removal and list, can spend three such windows.
-None of this is an elapsed-time bound: each attempt's Git run, the add's
-destination check, the filesystem and the scheduler add time the repair does
-not limit.
+or died: attempts again until one ends at or past the ten-second deadline, the
+attempt admitted after the last sleep included, and the command fails as
+before; a snapshot whose add fails so, followed by its own cleanup's removal
+and list, can meet three such deadlines. None of this is an elapsed-time bound:
+each attempt's Git run, the add's destination check, a sleep that ends late,
+the filesystem and the scheduler add time the repair does not limit.
 
 **Where it engages.** Only on the line as written: Git's English message with
 `Success` for errno 0, glibc's rendering, the only one executed here (Linux). A
