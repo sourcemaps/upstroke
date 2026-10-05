@@ -1458,6 +1458,11 @@ fn reclaim_closed_generations(
             }
             let slot = task_slot(key, generation.id);
             if intents.contains(&slot) {
+                crate::engine::topology::dispatch::refuse_kept_slot(
+                    manager,
+                    &slot,
+                    &generation.base_sha,
+                )?;
                 crate::engine::topology::dispatch::scrub(manager, hooks, &slot)?;
                 reclaimed += 1;
             }
