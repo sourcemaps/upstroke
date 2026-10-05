@@ -1126,16 +1126,26 @@ pub fn finish_integration(
                 }
                 crate::topology::events::VerificationBasis::AlreadyPresent => None,
             };
+            let cancelled = fold_of(certified).task_state(transaction.candidate.key)
+                == Some(crate::topology::fold::TaskState::Failed);
             emit(
                 certified,
                 context,
                 TopologyEventBody::MergeVerificationInterrupted {
                     data: crate::topology::events::MergeVerificationInterrupted {
                         sequence,
-                        detail: "the coordinator that started this verification did not survive \
-                                 it; recovery step (f) settles it interrupted and the candidate \
-                                 re-verifies under a new sequence"
-                            .to_owned(),
+                        detail: if cancelled {
+                            "a decline, or a lineage member's failed settlement, failed this \
+                             verification's lineage and cancelled it, and the coordinator that \
+                             started it did not survive it; recovery step (f) settles it \
+                             interrupted, and its candidate, whose task failed, is not verified \
+                             again"
+                        } else {
+                            "the coordinator that started this verification did not survive \
+                             it; recovery step (f) settles it interrupted and the candidate \
+                             re-verifies under a new sequence"
+                        }
+                        .to_owned(),
                     },
                 },
             )?;

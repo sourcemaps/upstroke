@@ -125,6 +125,27 @@ validator.
 
 --- merge_verification_interrupted ------------------------------------
 
+## `impl RunState` › `fn check_candidate_not_failed(`
+
+The rule that gives a verification a lineage failure cancelled its one
+terminal, `merge_verification_interrupted`: a `VerificationStarted`
+transaction whose candidate's task is `Failed` is refused
+`merge_prepared`, `merge_rejected` and `merge_verification_unavailable`,
+each with this one error. A failed task's candidate is never published,
+rejected into a repair, deferred or parked.
+
+The state is reachable only through `fail_lineage` meeting an open
+verification of its lineage: the task's own generation closed at
+`task_candidate_created`, so no attempt of the task itself can fail it,
+and a candidate whose task has already failed holds no queue position, so
+no verification starts for it. The verified arm of `check_merge_prepared`,
+the code arm of `check_merge_rejected` and `check_verification_unavailable`
+call it once they know the transaction is `VerificationStarted`; the
+interrupted terminal's check does not. Without it the held transaction
+would admit a verified publication of the failed task's candidate, and
+the other two would be refused only incidentally, by the repair's failed
+ancestor and by the lost queue position.
+
 ## `impl RunState` › `pub(super) fn check_merge_prepared(&self, prepared: &MergePrepared) -> Result<(), FoldErr…`
 
 --- merge_prepared ----------------------------------------------------

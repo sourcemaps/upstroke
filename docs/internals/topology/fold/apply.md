@@ -108,10 +108,16 @@ Decline, or a member's terminal failure, terminates all unpublished work
 in the lineage. Already merged work stays merged; a human answer cannot
 undo a recorded publication.
 
-## `fail_lineage` › `TransactionClass::Prepared { .. } => false,`
-
-The answer check refuses decline before append in this
-class. Its already authorized publication must survive.
+It releases no transaction. A `Prepared` one has already authorized its
+publication, which must survive, and the answer check refuses a decline
+that would meet it. A `VerificationStarted` one of this lineage is
+cancelled, not released: its candidate's task fails with the lineage and
+its queue position goes with it, but the transaction stays unresolved,
+keeping its pipeline and merge entitlements, until its one terminal,
+`merge_verification_interrupted` (`design/26`). Nothing records the
+cancellation: the transaction is `VerificationStarted` and its
+candidate's task is `Failed`, which only a lineage failure makes true,
+and `check_integration.rs` refuses the other three terminals for it.
 
 ## `fail_lineage` › `let members: Vec<TaskKey> = self`
 
