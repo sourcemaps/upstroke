@@ -2706,6 +2706,50 @@ The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-
 
 The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's liveness control: a genuine pass in a pruned snapshot is refused under F (§3.4's cost, pinned).
 
+## `mod tests` › `fn f_gate_of(subject: FSubject, invocation: &InvocationId) -> bool {`
+
+Whether an invocation is one of the subject's gates: an attempt's, or a verification's.
+
+## `mod tests` › `enum FLaunch {`
+
+How a gate run fails, or does not, in F-R1's constructions: through the production container runner and Git-view reader over a fake container runtime (`HEAD` removed, the entry pruned whole, intact, the runtime's create failing), or as a stub Runner error after `HEAD` is removed (lost after it started, cancelled, unresolved).
+
+## `mod tests` › `struct FLaunched {`
+
+One gate launch as the responder saw it: whether it failed, with its fate and whether it was a cancellation; its error; the snapshot's `HEAD`, and whether it was there after the launch.
+
+## `mod tests` › `fn f_launch(`
+
+Runs one gate as the construction says. The container cases build the production `ContainerRunner` with `RoleGitView` over `container_host()`, in a context fixture of their own (an underscored incarnation and repo key, which `ContainerName` accepts), and make the deletion immediately before the launch, as the review's witness did; the stub cases remove `HEAD` and answer the Runner error.
+
+## `mod tests` › `fn f_launching_gate_responder(`
+
+A runner responder sending every gate of the subject through `f_launch` and recording each launch; everything else is the scaffold's.
+
+## `mod tests` › `fn f_first_launch(launched: &FLaunches) -> Result<FLaunched, String> {`
+
+The first recorded launch, or why there is none.
+
+## `mod tests` › `fn f_launch_witnessed(launched: &FLaunches, launch: FLaunch) -> Result<(), String> {`
+
+The construction's premise: the first launch failed with the fate it makes (`NeverStarted` from the container's view, `Gone` from the stub) and not as a cancellation, the container's error names the deleted `HEAD`, and `HEAD` was still absent after it.
+
+## `mod tests` › `fn a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
+
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION` — the regression test of the review's F-R1 (#333 at `157c9cab`), placement 2 at a gate's failed run, at `F_MATRIX`'s four cells: the container gate's launch with `HEAD` removed, and with the entry pruned whole, just before it; and a stub run lost after it started. At `157c9cab` a verification settles `merge_verification_unavailable`, and, repeated, parks (`Finished { outcome: Parked }`), and an attempt ends with the Runner's error; under the repair each is the registry refusal naming the gate's run.
+
+## `mod tests` › `fn a_container_gate_launched_in_a_whole_snapshot_is_judged() {`
+
+F-R1's control: the same production container runner and Git-view reader over an intact registration materialize every gate's view, and the run completes with no outage, at `157c9cab` and under the repair.
+
+## `mod tests` › `fn a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was() {`
+
+F-R1's control: a container gate whose create the runtime refuses in a whole snapshot (`NeverStarted`) settles a verification's outage as it did, and ends an attempt's command with the Runner's error, at `157c9cab` and under the repair (option A, not A′).
+
+## `mod tests` › `fn a_cancelled_or_unresolved_gate_run_ends_the_command_as_it_did_whatever_the_registration() {`
+
+F-R1's control: with `HEAD` removed, a cancelled gate run ends the command with the Runner's cancellation at every cell, and an unresolved one with the Runner's error at width 1 and with the coordinator's refusal for the unresolved process at width 3, at `157c9cab` and under the repair: the check reads neither.
+
 ## `mod tests` › `fn a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
 The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW: pass 0 unavailable, pass 1 unavailable after pass 0 passed, and pass 0 passing, each after its snapshot's entry was pruned. Under F refused after the pass's charge.
@@ -2798,9 +2842,25 @@ Beta's policy act: signal that it is blocked, wait for the release, then write a
 
 Applies a policy's act to the second task's slot only, on every call.
 
+## `mod tests` › `struct FAfterBetaBlocks {`
+
+T-CONC-2's runner: alpha's worker waits, within `BOUND`, until beta is blocked in its deletion policy, then runs on the scaffold's runner; every other invocation runs at once. So alpha's question, and the halt it brings, follow beta's entry into its policy by construction: no schedule runs alpha first, and one forced fails loudly.
+
+## `mod tests` › `struct FHanded {`
+
+What beta's policy handed back to the engine: whether the unstaged change was written and the `index` gone, whether the answer is one the check after it refuses while the registration is not whole (an answer, or a Git error), and what that registration check found.
+
+## `mod tests` › `struct FBetaRead {`
+
+T-CONC-2's policy: beta's, then a record of the checkout it hands back, read with the production registration check (`dispatch::registration_whole`) as the policy returns; C1-AP runs that check next, on the same thread and over the same checkout.
+
+## `mod tests` › `struct FInputsOf {`
+
+`AttemptPlans` counting one task's review-input requests, and delegating: a pipeline whose review-input read is refused returns before it asks for its inputs.
+
 ## `mod tests` › `fn a_refusal_arriving_after_a_halt_is_discarded_unread_and_the_halt_scrubs_its_slot() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-2: alpha's declined question halts the run while beta waits in its policy; beta is released when `question_answered` is folded, refuses, and its completion is discarded unread (counted, named by no warning); the halt's closure scrubs the in-flight slots, the pruned one included (X-1 item 6, pinned). Nothing waits while holding the agent slot.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-CONC-2: alpha's declined question halts the run while beta waits in its policy; beta is released when `question_answered` is folded, damages its checkout, is refused, and its completion is discarded unread (counted, named by no warning); the halt's closure scrubs the in-flight slots, the damaged one included (X-1 item 6, pinned). The order is the test's, not the scheduler's (the repair of the review's F-R2 at `157c9cab`, where alpha could end first and beta be cancelled before its policy, and the test passed with no refusal): alpha's worker answers only once beta is blocked in its policy (`FAfterBetaBlocks`; it waits holding one of the three agent slots the width gives, and beta holds another). The test asserts that beta entered its policy, that the policy handed back the checkout damaged with its registration not whole (`FBetaRead`), and that beta's pipeline never asked for its review inputs (`FInputsOf`): it ended at its refused read. A refused completion is read by nothing after the halt, by design, so the refusal is observed where it is made.
 
 ## `mod tests` › `fn a_kept_slots_read_waits_on_a_contended_registry_through_the_coordinators_hooks() {`
 

@@ -160,8 +160,11 @@ what a coordinator killed after making an add's destination leaves.
   - A Git error from a manager command in a slot; an answer the engine reads from a checkout's index
     (the classification of a failed proposal pick, the capture's reads of conflicts and of the
     resolution manifest, the promotion's changed paths, a materialization's observation, a
-    review-input read); a gate's or a review's verdict; and an attempt's failure assessed in its own
-    slot, met while the registration is not whole, end the command as a registry refusal, resumably.
+    review-input read); a gate's or a review's verdict, and a gate's run that fails without one, its
+    launch included; and an attempt's failure assessed in its own slot, met while the registration is
+    not whole, end the command as a registry refusal, resumably. A gate's run that was cancelled, or
+    whose process may still be running, is handled as before whatever the registration: neither is
+    judged or settles an outage.
     The capture reads the registration before it writes its tree. Nothing is judged, published,
     deferred, parked or rejected for them, and no attempt or deferral is spent; the next resume
     settles or reclaims what the command left and runs the work again. Review passes a refused

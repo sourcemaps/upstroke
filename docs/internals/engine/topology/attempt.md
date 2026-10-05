@@ -1489,9 +1489,10 @@ say what they decided.
 
 ### Errors
 
-[`JudgeError::Runner`] when the Runner could not run a gate process;
-[`JudgeError::Other`] for a snapshot funnel refusal, an adapter no pass
-answers to, or a review pass that could not be run.
+[`JudgeError::Runner`] when the Runner could not run a gate process, except
+where placement 2 refuses that run (below); [`JudgeError::Other`] for a
+snapshot funnel refusal, an adapter no pass answers to, a review pass that
+could not be run, or a placement-2 registry refusal.
 
 ## `impl Judge<'_> {` › `if let super::dispatch::Whole::No(found) =`
 
@@ -1523,6 +1524,36 @@ process-count check, and before its snapshot is released.
 
 A refusal leaves its snapshot unreleased, as the process-count refusal does;
 the next resume reclaims it with the rest of the interrupted command.
+
+## `impl Judge<'_> {` › `if !error.is_cancelled() && !error.fate.is_unresolved() =>`
+
+**Placement 2 at a gate's failed run** (the external-prune follow-up, F; the
+repair of the review's F-R1 at `157c9cab`): a gate run the Runner could not
+complete leaves the gate loop at once, so the check after the loop never meets
+it. A container gate's launch fails that way when its snapshot's registration
+is not whole: the container runner reads the snapshot's `HEAD` to build the
+role's Git view, and with `HEAD` deleted the launch fails before any process
+starts. That error would settle an outage — `verified` reads a `NeverStarted`
+fate as a spawn failure and a `Gone` one as another infrastructure outage —
+spending a deferral, and repeated, parking valid work. So the error is read
+against the snapshot's registration where it leaves the loop: while the
+registration is not whole it is the registry refusal a verdict read there is
+(`JudgeError::Other(RegistryRefused)`, naming the gate's run and its error),
+and the command ends resumably; while it is whole, the Runner's error is
+returned as it was, and settles as it did.
+
+- **Cancellation and process fate are kept.** A cancelled run, and one whose
+  process may still be running (`ProcessFate::Unresolved`), are returned
+  unread, whatever the registration: neither settles an outage (`verified`
+  returns both as the command's error), the registrar has already recorded the
+  run's end and fate (`execute_typed` settles it before it returns), and an
+  unresolved process stays held as it was. It is the partition
+  `src/review.rs` makes of a review pass's Runner error: a cancelled or
+  unresolved one is an error, every other one an outcome.
+- **Both judges.** A verification's outage is what this prevents. An
+  attempt's gate run that fails ends the attempt's command with the Runner's
+  error either way; it ends with the refusal instead while the snapshot's
+  registration is not whole.
 
 ## `impl Judge<'_> {` › `fn execute_typed(`
 
