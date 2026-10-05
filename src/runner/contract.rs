@@ -2487,31 +2487,37 @@ fn charge_allowance(&mut self) {}
             (
                 "src/workspace.rs",
                 1,
-                5,
+                6,
                 0,
                 "authoritative Git, which DESIGN.md:612 keeps off the boundary \
                  entirely: `std::process::Command` methods on git invocations, \
-                 not a CommandSpec. Of the five `.env(`, four are the fixed \
-                 author and committer identity on `commit-tree` and one is \
-                 `NO_REPLACEMENT_OBJECTS` on `git_command`, the builder every \
-                 Git child of this module comes from",
+                 not a CommandSpec. Of the six `.env(`, four are the fixed \
+                 author and committer identity on `commit-tree` and two are on \
+                 `git_command`, the builder every Git child of this module \
+                 comes from: `NO_REPLACEMENT_OBJECTS` on every child, and, on \
+                 a child in a work tree the engine made, the absolute path an \
+                 inherited `GIT_COMMON_DIR` that is not absolute names at the \
+                 started checkout",
             ),
             (
                 "src/workspace_manager.rs",
                 2,
-                8,
+                9,
                 0,
                 "authoritative Git again, and the same answer: \
                  `std::process::Command` methods on git invocations, never a \
                  CommandSpec. The two `.stdin(` are `Stdio::null()` on the two \
                  builders — these funnels feed no payload to a child — and of \
-                 the eight `.env(`, six are the fixed author/committer identity \
+                 the nine `.env(`, six are the fixed author/committer identity \
                  and dates that make a commit-tree a function of its inputs \
-                 rather than of the machine, and the other two are \
-                 `NO_REPLACEMENT_OBJECTS` on the shared builder and on \
-                 `read_only_git`, so that every command this manager spawns \
-                 reads the objects the repository holds rather than whatever \
-                 `git replace` has been pointed at them. A gate or reviewer \
+                 rather than of the machine, two are `NO_REPLACEMENT_OBJECTS` \
+                 on the shared builder and on `read_only_git`, so that every \
+                 command this manager spawns reads the objects the repository \
+                 holds rather than whatever `git replace` has been pointed at \
+                 them, and one, in `in_work_tree`, gives a Git child in a work \
+                 tree the manager made the absolute path an inherited \
+                 `GIT_COMMON_DIR` that is not absolute names at the managed \
+                 base. A gate or reviewer \
                  process gets the environment this runner composes, and \
                  `HostEnvironment::compose` and `ContainerEnvironment::compose` \
                  put the same pair there — a composed vector, not a \

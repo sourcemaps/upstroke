@@ -3918,14 +3918,60 @@ mod tests {
              whoever adds it names its function here"
         );
 
-        for undo in ["env_remove(", "env_clear("] {
-            assert_eq!(
-                code.matches(undo).count(),
-                0,
-                "`{undo}` can take the pair back off a child `git_command` built"
+        assert_eq!(
+            code.matches("env_clear(").count(),
+            0,
+            "`env_clear(` can take the pair back off a child `git_command` built"
+        );
+        let removals_elsewhere: Vec<usize> = code
+            .match_indices("env_remove(")
+            .map(|(at, _)| at)
+            .filter(|at| !(start..=close).contains(at))
+            .collect();
+        assert!(
+            removals_elsewhere.is_empty(),
+            "`env_remove(` outside `git_command` at byte offsets {removals_elsewhere:?} can take \
+             the pair back off a child it built"
+        );
+        assert_eq!(
+            builder.matches("env_remove(").count(),
+            2,
+            "`git_command` removes the work tree's names and nothing else: {builder}"
+        );
+        assert!(
+            builder.contains("command.env_remove(INDEX_SELECTOR);")
+                && builder.contains("fornameinWORK_TREE_SELECTORS{command.env_remove(name);}"),
+            "the two removals are the index selector, for a `git worktree` command, and each of \
+             the four work-tree selectors, for a child in a work tree the engine made: {builder}"
+        );
+        assert_eq!(
+            WORK_TREE_SELECTORS.as_slice(),
+            [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INDEX_FILE"
+            ],
+            "the census blanks string literals, so the names removed are read here"
+        );
+        assert_eq!(INDEX_SELECTOR, "GIT_INDEX_FILE");
+        assert!(
+            WORK_TREE_SELECTORS
+                .iter()
+                .chain([&INDEX_SELECTOR, &COMMON_DIR])
+                .all(|name| *name != NO_REPLACEMENT_OBJECTS.0),
+            "a name `git_command` removes or replaces must never be the replacement variable"
+        );
+        let pair = builder
+            .find(".env(NO_REPLACEMENT_OBJECTS.0,NO_REPLACEMENT_OBJECTS.1)")
+            .expect("the pair, asserted above");
+        for scoped in ["env_remove(", ".env(COMMON_DIR,"] {
+            assert!(
+                builder.rfind(scoped).is_some_and(|at| at < pair),
+                "the replacement variable is set after the work tree's names, `{scoped}` \
+                 included: {builder}"
             );
         }
-    }
     }
 
     #[cfg(unix)]
