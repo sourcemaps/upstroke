@@ -71,7 +71,9 @@ fix P routed to it; its figures are under `~/orch-pr11/logs/pr11_fub_impl10/`, c
 (§9.23) is `pr11_fub_impl11`'s (`claude-opus-5-5`, `max`), spawned on `83006dc4` after the i6 delta review; its
 figures are under `~/orch-pr11/logs/pr11_fub_impl11/`, cited as `impl11/…`. **Its B6b round** (§9.24) is
 `pr11_fub_impl12`'s (`claude-opus-5-5`, `max`), spawned on `9bcfb3f3` after CI there was red on its ubuntu leg; its
-figures are under `~/orch-pr11/logs/pr11_fub_impl12/`, cited as `impl12/…`.
+figures are under `~/orch-pr11/logs/pr11_fub_impl12/`, cited as `impl12/…`. **Its B8 round** (§9.25) is `pr11_fub_impl13`'s
+(`claude-opus-5-5`, `max`), spawned on `17bd5652` by `orch_pr11b` under the supervisor's B-W924 repair direction, to
+prepare B-W924's conditional repair; its figures are under `~/orch-pr11/logs/pr11_fub_impl13/`, cited as `impl13/…`.
 
 ## 0. Status
 
@@ -85,7 +87,7 @@ figures are under `~/orch-pr11/logs/pr11_fub_impl12/`, cited as `impl12/…`.
 | Design round 7 (§6) | **Superseded by §7 where §7's banner says.** Design review round 7 (three `gpt-6-astra` lenses at `max` on `85f5b09b`: design, concurrency and regression in round 6's recast conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d7-triage.md`). It found three P1s: SPLITINDEX and CONFIG, executed in round 7's own probe, and R13, an applicable high the G6 table omitted. It also found two P2s (ENVCENSUS, R9WIN) and a note on the widened store-absent exception. The P1s in round 7's own machinery raised the looping signal a seventh time, in its strongest form. Round 7 published the helper's three-way contract, the final attempt, the end-to-end bound and `CONTENDED_ATTEMPTS`, and all three lenses accepted them. Its Git-level evidence ran on Linux only (§6.10). |
 | Design round 8 (§7) | **Superseded by §8 where §8's banner says.** Design review round 8 (three `gpt-6-astra` lenses at `max` on `f7a9256c`: design, concurrency and regression in the conformance-reading form, none refused) returned CHANGES_REQUIRED from all three (`~/orch-pr11/reviews/review-329-d8-triage.md`). All three found that the narrowing holds. The P1s were in the external-prune finding's candidate closures (closure 1 passed a partly deleted registration and missed failed gates; closure 2 missed `Missing`) and in face 2's boundary (a deletion before the add returns still gives Ok). Five P2s and P3s: the populated destination, scheduled maintenance, R14's G6 row, the host width, T15. Round 8's narrowing (§7.2, §7.3) stands. |
 | Design round 9 (§8) | **Implemented where §9 says.** Design review round 9 (three `gpt-6-astra` lenses at `max` on `8df42436`: design, concurrency and regression; then two added focused lenses, preserve and gitenv) returned CHANGES_REQUIRED from all five (`~/orch-pr11/reviews/review-329-d9-triage.md`). B's own narrowed mechanism holds in all three general lenses. Every P1 is in the external-prune finding's candidate closures, except FUB-D9-ENV, a pre-existing defect of the Git builders, which is O3's. Round 9 was the last design round before the owner's consolidated question. It adds no machinery and implements no closure. A destination that is not an empty directory at the start is Git state before Git's add runs, once the add's prevalidation has passed (§8.2, as qualified at repair round 3). Face 2 starts at the prune's decision (§8.3). The external-prune finding's closures are made accurate: closure 1 a whole-registration check at every durable negative outcome, stated as a partial mitigation with two P1 residuals after the orchestrator's addendum (§8.4), closure 2 preservation at the destructive boundaries, a retained retry's included (§8.5), closure 4 qualified for scheduled maintenance, effective configuration and a prune already running (§8.6); the host width is reconciled (§8.7); R14 needs the owner's disposition before G6 (§8.8); the G6 table is given again (§8.9); T15 is fixed (§8.10); and the owner gets options with a recommendation (§8.11). The witnesses ran ordinary Git commands on Linux, on upstream 2.43.0, 2.50.1 and 2.55.0. This head changes no production code. |
-| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. **Repair round 9** (§9.19) answers the delta review of round 8 (two `gpt-6-astra` lenses at `max` on `ce55ca91`: the regression lens PASS, the regular lens one P3). §9.18.4's conclusion that step 5's rule for a witnessed finding did not apply to round 8's two findings is withdrawn. In its place stand round 8's text-only scope and the deferred investigation, and whether those findings, each carrying an archived failing test, must be fixed before B's merge or are carried by their guards is left to B's merge triage, neither asserted nor waived. It changes no source file and no finding. **The step-5 round** (§9.20) follows the supervisor's step-5 merge triage, which made those two findings mandatory merge work. Its isolated diagnosis reads both as one pre-existing class: a fork that another test thread makes during this test process's own ref write keeps a copy of the run's cleanup lease, and a single observation reads it held. One natural failure of each shape was attributed by deduction to the lease branch, with no holder captured: W2's at this head, and at master the helper's observation in a different test that shares W1's helper. W1's own test failed before this change only by construction, and the first-bad controls are constructions too. The fork construct's counts are an injected construct's, not natural failure rates, and the heterogeneous natural suites establish no rate effect and no absence of exposure this change induces. The class attribution, the first-bad controls, and whether H3 repairs the tests faithfully without weakening their obligation await independent review, and nothing here claims a production cause or a closure (restated at the CAS-1 round, §9.21.9). It proposes **H3**, a frozen hunk in `recover/tests.rs` alone (+133/−3 as first proposed; revised at the B4 round, §9.22.3): W1's observation and W2's first resume make the bounded wait #320 makes before every later resume, with three regression tests. H3 is in RULING P-1's form (PROPOSED RULING B-W), not adopted, and the merge waits on its freeze ruling as on H1's. Both findings stay filed, provenance `pre_existing`, until the change that merges H3 deletes them. **The CAS-1 round** (§9.21) routes the publishability re-check that `compare_and_swap_ref` makes before its funnel through the call's own hooks. The frozen `publish` hands the swap the coordinator's hooks, and the re-check had asked the hook-less check, so during an integration's publication its waits slept on the coordinator's thread. The call is master's, but the waits are this change's: its tolerant access (`58c7c203`) gave that list its backoff, and R1's census missed the site. Follow-up C's integration round found it. Its four witnesses are red at `4253b2ca` and green after. R1's census gains row C6, and a census over the manager now reports any function that takes hooks and reaches a sleeping registry wait. A probe over the topology suite finds no other coordinator-thread access that sleeps. It changes no frozen file and adds no kind of refusal. It also restates step 5's evidence where the record read beyond it (§9.21.9). **The B4 round** (§9.22) answers the i5 delta review (two `gpt-6-astra` lenses at `max` on `d7865780`: the regression lens PASS, the regular lens two findings). I5-1 (P2, executed): H3's waits read an inspection error as a held lease and retried it to success, so H3 is revised, still proposed and not adopted. Its waits tell an inspection error from lease contention before any wait, an observation that fails fails at once, and the reviewer's two witnesses are regression tests, red at `d7865780` and green after, with the pre-H3 controls. I5-2 (P3): CAS-1's census builds its paths with `Path`. The round also applies follow-up C's fix P, routed to it: a tear witness's repository waits to the production deadline, and a new witness reproduces the Linux stand-in's mechanism behind #330's guest failure, with production behaviour unchanged. The two Windows retries carry the reviewer's reading, undecided. **The B6 round** (§9.23) answers the i6 delta review (two `gpt-6-astra` lenses at `max` on `83006dc4`, both CHANGES_REQUIRED). I6-1 (P3, both lenses, executed with fault injection): fix P's slow witness discarded its delay worker's handle, so a worker that panicked released the held access early, unseen, and the witness passed falsely; the witness now owns and joins the worker and fails on its panic, in test code only. I6-2 (P3): the body's proof summary keeps each claim to its rounds, the B4 round's survivor stated. **The B6b round** (§9.24) records CI at `9bcfb3f3`, red on its ubuntu leg alone, in master's `engine::tests::sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded`, which starts two legacy runs at once: its child's message matches the signature the filed `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` records. Its cause and attribution are not established. Seven runs of the test alone, on Git 2.43.0 and 2.55.0, passed and do not dispose of it: it carries into B's next review and the final-range review. The round changes no source file and no finding, and condenses the body. |
+| Implementation (§9) | **Implemented; the pull request stays a draft.** `58c7c203`, on a merge of master `5c222ff2` (§9.2), with repair round 2's two test-only commits after CI was red at `59d206b3`: rustc 1.99.0's deprecation of `fetch_update` in three test policies, and two tests' planted registrations on Windows. The same round files FUB-D9-ENV (§9.12). It contains the tolerant registry access, the add's destination and veto, targeted removal with no engine prune, the typed refusal, the one instrument row, B's `design/15` paragraph in force and FUB-D9-TAKEOVERWORD, with #328's `LinkedChild` bound carried in. The merge waits on O9, O14 and O11, and `design/26` is untouched pending them (§9.11). It does not depend on follow-up C or D. D's implementation follows this change's merge, because D calls the helper (§5.5, §6.4). **Repair round 3** (§9.13) fixes the implementation review's R1 to R6 (two `gpt-6-astra` lenses at `max` on `54a1ff14`, CHANGES_REQUIRED, no P1). R1: no registry retry waits on the coordinator's thread; the coordinator answers its messages during the wait, on every census path. Four of those paths are in the frozen `integrate.rs`, so the round carries **a proposed frozen hunk, H1 and H2 (`e369b251`, +33/−7), conditional on the owner's freeze ruling and not adopted** (§9.13.1). The merge also waits on that ruling. R2 to R6 are a held retry, an owned writer, a qualified guarantee, a corrected precondition and Git's spelling. **Repair round 4** (§9.14) fixes R7, the shared Windows CI failure that #331's `test (winguest)` met in this change's manager code: the add's gate, and a verification's lookup, resolve the paths a worktree list names inside the list's registry access, so a sibling whose checkout another removal is deleting no longer fails them, and a path that stays unreadable refuses resumably. The read is master's; this change's lock-free lists and removals widened its window. It changes no frozen file. **Repair round 5** (§9.15) fixes R8: round 3's R-T census matched a line break in `run.rs` as read from disk, so the Windows guest's CRLF checkout failed it at `f9c88fdb` and `c8aab155`. It now normalises the line endings first, and no other source census in the crate depends on them. It changes no frozen file and no production code. **Repair round 6** (§9.16) fixes the delta review's I2-1 to I2-7 (two `gpt-6-astra` lenses at `max` on `a58c2ce3`, CHANGES_REQUIRED, no P1). A shutdown answered inside a registry access's wait now stops its transition, and closure and finalization wait through the coordinator. One timer thread is started ahead of need, and where none can start the coordinator refuses, typed and resumable, never sleeping. R-T is checked for every call, every coordinator witness is bounded, and the body's populated-destination sentence is corrected. It withdraws H2 through a non-frozen adapter, so **the proposed frozen change is H1 alone** (+16/−4, §9.13.1 amended), and the merge waits on the freeze ruling for H1. **Repair round 7** (§9.17) fixes `test (winguest)`'s failure of round 6's integration witness at `a337efa7`. The tear's prober reported a cancel without sampling after it, so a contended attempt counted during its last wait, about 1.2 ms before the cancel, read as none wherever its waits are as coarse as Windows' clock tick. It now samples after every wait. The fix is test code only, and no frozen file changes. **Repair round 8** (§9.18) answers the delta review of rounds 6 and 7 (two `gpt-6-astra` lenses at `max` on `519cfc9e`, CHANGES_REQUIRED, two P3 evidence findings and no production defect). Round 6's failure of a frozen recovery test is recorded as an unexplained candidate regression of undetermined provenance, and round 7's lease refusal as the fingerprint the filed PR281 records, its cause in that sighting unproven. Each is filed as its own finding with its G6 obligation, and every sentence that set either aside or attributed it beyond the evidence, or did so to a sibling sighting of the same shape, is corrected in place. It changes no source file. **Repair round 9** (§9.19) answers the delta review of round 8 (two `gpt-6-astra` lenses at `max` on `ce55ca91`: the regression lens PASS, the regular lens one P3). §9.18.4's conclusion that step 5's rule for a witnessed finding did not apply to round 8's two findings is withdrawn. In its place stand round 8's text-only scope and the deferred investigation, and whether those findings, each carrying an archived failing test, must be fixed before B's merge or are carried by their guards is left to B's merge triage, neither asserted nor waived. It changes no source file and no finding. **The step-5 round** (§9.20) follows the supervisor's step-5 merge triage, which made those two findings mandatory merge work. Its isolated diagnosis reads both as one pre-existing class: a fork that another test thread makes during this test process's own ref write keeps a copy of the run's cleanup lease, and a single observation reads it held. One natural failure of each shape was attributed by deduction to the lease branch, with no holder captured: W2's at this head, and at master the helper's observation in a different test that shares W1's helper. W1's own test failed before this change only by construction, and the first-bad controls are constructions too. The fork construct's counts are an injected construct's, not natural failure rates, and the heterogeneous natural suites establish no rate effect and no absence of exposure this change induces. The class attribution, the first-bad controls, and whether H3 repairs the tests faithfully without weakening their obligation await independent review, and nothing here claims a production cause or a closure (restated at the CAS-1 round, §9.21.9). It proposes **H3**, a frozen hunk in `recover/tests.rs` alone (+133/−3 as first proposed; revised at the B4 round, §9.22.3): W1's observation and W2's first resume make the bounded wait #320 makes before every later resume, with three regression tests. H3 is in RULING P-1's form (PROPOSED RULING B-W), not adopted, and the merge waits on its freeze ruling as on H1's. Both findings stay filed, provenance `pre_existing`, until the change that merges H3 deletes them. **The CAS-1 round** (§9.21) routes the publishability re-check that `compare_and_swap_ref` makes before its funnel through the call's own hooks. The frozen `publish` hands the swap the coordinator's hooks, and the re-check had asked the hook-less check, so during an integration's publication its waits slept on the coordinator's thread. The call is master's, but the waits are this change's: its tolerant access (`58c7c203`) gave that list its backoff, and R1's census missed the site. Follow-up C's integration round found it. Its four witnesses are red at `4253b2ca` and green after. R1's census gains row C6, and a census over the manager now reports any function that takes hooks and reaches a sleeping registry wait. A probe over the topology suite finds no other coordinator-thread access that sleeps. It changes no frozen file and adds no kind of refusal. It also restates step 5's evidence where the record read beyond it (§9.21.9). **The B4 round** (§9.22) answers the i5 delta review (two `gpt-6-astra` lenses at `max` on `d7865780`: the regression lens PASS, the regular lens two findings). I5-1 (P2, executed): H3's waits read an inspection error as a held lease and retried it to success, so H3 is revised, still proposed and not adopted. Its waits tell an inspection error from lease contention before any wait, an observation that fails fails at once, and the reviewer's two witnesses are regression tests, red at `d7865780` and green after, with the pre-H3 controls. I5-2 (P3): CAS-1's census builds its paths with `Path`. The round also applies follow-up C's fix P, routed to it: a tear witness's repository waits to the production deadline, and a new witness reproduces the Linux stand-in's mechanism behind #330's guest failure, with production behaviour unchanged. The two Windows retries carry the reviewer's reading, undecided. **The B6 round** (§9.23) answers the i6 delta review (two `gpt-6-astra` lenses at `max` on `83006dc4`, both CHANGES_REQUIRED). I6-1 (P3, both lenses, executed with fault injection): fix P's slow witness discarded its delay worker's handle, so a worker that panicked released the held access early, unseen, and the witness passed falsely; the witness now owns and joins the worker and fails on its panic, in test code only. I6-2 (P3): the body's proof summary keeps each claim to its rounds, the B4 round's survivor stated. **The B6b round** (§9.24) records CI at `9bcfb3f3`, red on its ubuntu leg alone, in master's `engine::tests::sibling_v1_runs_in_one_repository_share_one_include_and_keep_their_roles_recorded`, which starts two legacy runs at once: its child's message matches the signature the filed `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` records. Its cause and attribution are not established. Seven runs of the test alone, on Git 2.43.0 and 2.55.0, passed and do not dispose of it: it carries into B's next review and the final-range review. The round changes no source file and no finding, and condenses the body. **The B8 round** (§9.25) prepares B-W924's conditional repair after its causal diagnosis, which established a reachable mechanism matching the fingerprint and not CI's schedule, the historical cause, a rate or the absence of B's indirect effect. The legacy snapshot's add, removal and list run their Git command again, bounded at ten seconds, while it dies reading another registration's empty `commondir` (B-W924-R1, `src/workspace.rs`), and the siblings witness's gate probe does the same (B-W924-R2, `src/engine/tests.rs`): each a PROPOSED and conditional ruling on a PR5-frozen file, in a commit of its own, not adopted. The diagnosis's own interventions fail at the base and pass on the repaired head, and each half's reversal fails the order that exercises it. B-W924 stays OPEN, and the round's package went to the orchestrator before any push. |
 
 ## 1. Design
 
@@ -6380,6 +6382,7 @@ heading. §0's last row, the authors' paragraph, and this section.
 | CAS1 | The CAS-1 round (§9.21): census C6's `a_pipeline_is_served_while_a_publications_swap_recheck_waits_on_a_torn_registration` and `a_shutdown_answered_inside_a_publications_swap_recheck_publishes_nothing` (inside R1's and I2's ranges above); the manager's `a_swaps_publishability_recheck_waits_through_the_calls_hooks` and `a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref`; the census `no_function_that_takes_hooks_reaches_a_registry_wait_that_sleeps_by_default` and its positive control `the_hooks_routing_census_reports_a_swap_that_drops_its_hooks` | CO `:4985`, `:6292`; WM `:4837`, `:4877`, `:5174`, `:5241` | all |
 | B4 | The B4 round (§9.22): I5-1's `a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once` and `a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once`, and `a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume`, in the frozen recovery tests (H3, revised); the probe's `the_lease_waits_observation_tells_a_failed_inspection_from_a_held_lease`; fix P's `a_shutdown_answered_inside_a_slow_dispatchs_intent_starts_no_attempt_and_spawns_nothing` | `src/engine/topology/recover/tests.rs` `:18078`, `:18128`, `:18182`; `src/rundir/tests.rs` `:6129`; CO `:6000` | Unix; Unix; all |
 | B6 | The B6 round (§9.23): the slow dispatch witness's worker owned and joined (`DelayedRelease`), and the test of its owner, `a_delayed_release_whose_worker_panicked_fails_its_witness` | CO `:5982` | all |
+| B8 | The B8 round (§9.25), proposed and conditional: B-W924-R1's `a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir`, `a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir`, `an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once`, `another_registrations_commondir_git_cannot_read_is_returned_at_once`, `another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error`, `a_destination_no_longer_empty_returns_the_adds_first_error`, `only_another_registrations_empty_commondir_reads_as_attempted_again` and `a_registry_command_is_attempted_again_only_while_its_answer_allows`; B-W924-R2's `a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir` | `src/workspace.rs` `:4115-4437`; `src/engine/tests.rs` `:10800` | Linux, the last two of R1's on all; all |
 
 **How they wait.** Each waits on a handshake or a seam, with time only as a watchdog.
 - A tear an access must fail on first is finished only after `contended_attempts` has moved. An add's own tear is
@@ -9196,3 +9199,283 @@ processes up.
   records them.
 
 **Not verified here:** the Windows and macOS legs, the guest, and CI's stable 1.99.0. CI is the truth for them.
+
+### 9.25 The B8 round: B-W924's conditional repair, B-W924-R1 and B-W924-R2, prepared and tested
+
+**Who and why.** This round is `pr11_fub_impl13`'s (`claude-opus-5-5`, `max`), spawned by `orch_pr11b` on `17bd5652`
+under the supervisor's direction `~/babysit-pr11/evidence/b-w924-repair-direction-20261004.md` (sha256 `03e3aa5f…`,
+checked), which binds over the brief `~/orch-pr11/briefs/pr11_fub_impl13.md`, and the orchestrator's evidence precision
+`~/orch-pr11/answers/pr11_fub_impl13-0.md` (`27afd84e…`).
+- **The scope.** A separately scoped B repair of the demonstrated transient registration-read failure, prepared and
+  validated as a **conditional** patch: transient, other-registration reads on the legacy snapshot path. It does not
+  unfreeze `src/workspace.rs`, and borrows nothing from follow-up D.
+- **What it adopts.** No owner decision. H1 (`bf62256e`) and the revised H3 (`407b27cb`) are unchanged, proposed and
+  conditional. B-W924-R1 and B-W924-R2 are proposed and conditional, not adopted. **B-W924 stays OPEN.**
+- Figures are under `~/orch-pr11/logs/pr11_fub_impl13/`, cited as `impl13/…`. The remote heads at the start: the PR at
+  `17bd5652`, master at `5c222ff2` (`impl13/00-ls-remote-start.txt`).
+
+#### 9.25.1 The diagnosis, summarized, with its limits
+
+`pr11_fub_w924d`'s diagnosis (`~/orch-pr11/logs/pr11_fub_w924d/DIAGNOSIS.md`, `c265ae86…`; its plan `4d293df9…`, hashed
+before any execution) ran the unchanged target alone at master and at B, with Git 2.55.0, under an `LD_PRELOAD` shim
+active only in Git processes.
+- **Forced (`pre`)**: sibling a's real gate-snapshot `git worktree add` held between its `commondir` open and its write,
+  and sibling b's real gate-snapshot add released into that hold: b read a's `commondir` at 0 bytes, died "failed to
+  read …/commondir: Success", and the target produced CI's three fingerprint elements element for element, E1 naming
+  sibling a's registration. 6 of 6 at the two bases; the matched control (`post`, the same hold after the write) passed
+  6 of 6. **Half-forced (`wpre`**, a's write delayed 1.5 s, b unsteered): the same fingerprint at both bases, the gate
+  probe's `git config --worktree` and b's cleanup's removal and list meeting the window first, and a later attempt's add
+  producing E1. Unforced, the window lasted 1 to 11 µs and no cross-sibling read fell in it.
+- **The instrument, precisely** (the supervisor's precision): in `pre` and `post` the shim also gated sibling b's Git
+  **startup** until the writer was held. The writer's `commondir` write is the sole file operation held, but it is not
+  the only scheduling intervention.
+- **What it establishes** (the supervisor's precision): **a reachable mechanism matching the observed fingerprint.** It
+  does not establish CI's actual schedule, the unique historical cause, a natural rate, or the absence of B's indirect
+  effect. B-W924 stays OPEN, and these limits carry into everything below.
+
+#### 9.25.2 The repair: what runs again, and why it is safe to
+
+**The state it answers is the demonstrated one only:** another registration's `commondir` read at zero bytes. Git
+writes a registration's `commondir` by `open(O_TRUNC)` and then `write`, and an enumeration that reads it between the
+two dies with `die_errno("failed to read %s")` (Git 2.55.0 `setup.c:332`), errno 0 rendered `Success`, exit 128.
+
+**The predicate** (`read_anothers_empty_commondir`): exit 128; standard error exactly one line ended by its newline;
+that line `fatal: failed to read `, a path whose last components are `worktrees`, a registration's name and
+`commondir`, then `: Success`; and the name neither the caller's own registration nor that name with anything after
+it (Git's numbered spelling of a taken name). Not retried: a removal's `No such file or directory`, a file Git cannot
+read (`Is a directory`, `Permission denied`), `gitdir` and `locked` failures, any other errno, any other exit, a second
+line. The probes (`impl13/probes/git-reads.txt`, synthetic, plain scratch repositories): on Git 2.43.0 and 2.55.0 an
+empty `commondir` of another registration gives exactly that line, from the main worktree (relative path) and from a
+linked one (absolute); a directory gives `Is a directory`; a FIFO closed unwritten gives `Success`; and a linked
+worktree's own empty `commondir`, read at discovery, gives `No such file or directory`.
+
+**The three callers, and the safety of repeating each Git operation** (`src/workspace.rs` at `9f8b5a46`; Git 2.55.0
+lines in `impl13/probes/git-source-lines.txt`):
+- **`add_gate_worktree`'s `git worktree add -q --detach --force`** (the gate and review snapshots, both store modes).
+  `add_worktree` enumerates the registry first (`builtin/worktree.c:478`) and makes its registration's directory only
+  after (`:507`), its `commondir` at `:545`; so a death reading another registration's `commondir` comes before the
+  add changed anything. It is run again only while its destination is still the empty directory the snapshot made
+  (`is_an_empty_directory`): anything else there returns the first failure unchanged.
+- **`cleanup_gate_workspace`'s `git worktree remove --force`** (`GateWorkspace::drop`, `PendingGateWorkspace::drop`
+  and `reclaim_gate_workspaces`). `remove_worktree` enumerates (`:1397`) before it deletes the work tree (`:1420`) and
+  the registration (`:1426`). Its exit status is not the cleanup's answer; the list after it is.
+- **`worktree_is_registered`'s `git worktree list --porcelain -z`** (the cleanup's success decision). It enumerates
+  (`:1106`) and writes nothing.
+- Each of the three reads another registration's `commondir` once, on 2.43.0 and 2.55.0 (`impl13/probes/git-reads.txt`,
+  `strace -f -e openat`), so a run that died on it repeats nothing the first run did.
+- **Own and other.** Each passes its snapshot's directory name, which is the name Git gives its registration. A
+  failure on its own registration is never repeated: a registration this process made and finished is no write in
+  flight, and a torn one of its own is static. An unknown own name matches every registration and repeats nothing.
+
+**The bound.** 1 ms, doubling to 50 ms, between attempts; ten seconds from the first attempt; the attempt after a
+sleep the deadline cut short is made and is the last (`output_past_anothers_empty_commondir_until`). The values are the
+topology's tolerant access's for the same writer (`REGISTRY_ACCESS_DEADLINE`, `REGISTRY_BACKOFF_CEILING`), which this
+module neither reads nor calls; unlike it, there is no shorter deadline under test, so the target runs the product's.
+
+**What the module returns, against master.** A success, any other failure, a failure on its own registration, and a
+command that cannot start: as before, at once. At the deadline: the last attempt's failure, in the module's form ("git
+worktree add failed: …", "could not reclaim registered gate worktree …", "verifying gate-worktree reclamation failed:
+…"), Git's message naming the registration it read. No argv, environment, error type or message changes. Nothing is
+deleted, repaired or pruned, and no failure becomes a success.
+
+**The shape.** Each call site keeps its Git command's builder as it is at master and hands the built command's
+`.output()` to the helper, which spawns it again per attempt; `git_command` stays the only builder, and the module's
+census of its Git children passes unchanged (`every_git_child_of_this_module_is_built_where_replacements_are_refused`).
+
+#### 9.25.3 The non-frozen alternative considered, and why `src/workspace.rs`
+
+- **A test-side change alone** (serialise the siblings, or retry the target): it would mask the product's failure and
+  weaken the witness's purpose, two legacy runs at once. Rejected.
+- **A non-frozen caller:** there is none. Every Git child on this path is built and run inside `src/workspace.rs`, and
+  its engine callers, `src/engine/attempt.rs`, `coordinator.rs` and `resume.rs`, are frozen at PR5 too
+  (`effects::FROZEN_LEGACY_ALLOWLIST`).
+- **This change's `tolerant_registry_access`:** calling it still changes the module's call sites, and its contract
+  attempts every failure again and refuses `RegistryRefused` at the deadline, a new legacy error type and outcome
+  beyond the demonstrated state; it is also the route the filed P1's guard names for follow-up D. Not taken.
+- **A non-frozen pure predicate, the loop in the module:** about twenty fewer frozen lines, but a "no" to the frozen
+  half would strand the other as dead code, which `-D warnings` refuses. Not taken: the frozen commit stays revertable
+  alone.
+- **A Git or environment control:** Git has none that tolerates a half-written registration, and a Git child's
+  environment is O3's.
+
+So the smallest change is in `src/workspace.rs`, in a commit of its own: **B-W924-R1**.
+
+#### 9.25.4 PROPOSED / CONDITIONAL RULING B-W924-R1 (on a PR5-frozen legacy module), in RULING P-1's form. NOT ADOPTED.
+
+> The owner permits exactly one change to `src/workspace.rs`, a legacy module frozen at PR5 (`effects/allowlist.toml`'s
+> legacy section, `invariants_preserved[1]`), amended once before (`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`).
+> **B-W924-R1:** the gate and review snapshots' `git worktree add` (`add_gate_worktree`), the snapshot cleanup's
+> `git worktree remove --force` (`cleanup_gate_workspace`) and its `git worktree list` (`worktree_is_registered`) each
+> run their built command again, after a sleep of one millisecond doubling to fifty, while it exits 128 with exactly
+> one standard-error line `fatal: failed to read <…>/worktrees/<id>/commondir: Success`, `<id>` neither the caller's
+> own registration nor that name with anything after it, and, for the add, while its destination is still an empty
+> directory; until ten seconds after its first attempt, the attempt after a sleep the deadline cut short being the
+> last (`output_past_anothers_empty_commondir`, `output_past_anothers_empty_commondir_until`,
+> `read_anothers_empty_commondir`, `is_an_empty_directory`, `REGISTRY_TEAR_DEADLINE`, `REGISTRY_TEAR_BACKOFF_CEILING`);
+> and the module's regression tests of that rule. Every other outcome is returned as before; at the deadline the last
+> attempt's failure, in the module's form. No argv, environment, error type or message changes, and nothing else in
+> the module. The adopting change records this second amendment in the module's `legacy_effect` text. No other legacy
+> file changes under this ruling (B-W924-R2 is its own), no file of PR11's R-D set changes, and H1 and H3 are
+> unaffected.
+
+**The exact hunk** (`impl13/frozen/frozen-proof-dab7dc4c.txt`, `impl13/frozen/workspace-rs-split.txt`):
+- commit `9f8b5a46`, alone: `src/workspace.rs` +686/−27, blob `8d69989f` → `6f9746f3`; `docs/internals/workspace.md`
+  +192 (the module's notes); `design/15_design_event_log_resume_run_layout.md` +5/−1, one sentence in the legacy bullet
+  marked proposed and conditional on this ruling;
+- of `src/workspace.rs`'s +686/−27, the production region (before `#[cfg(test)] mod tests`) is +103/−27, 64 lines of
+  them the helper, its predicate, its destination check and two constants, and the test module +583/−0;
+- incremental against this round's start and cumulative against master are the same: B never changed the file before.
+
+**Changed behaviour against master, production-visible** (the module is reached only by the v0.1 engine):
+- **A snapshot's add**, gate or review, durable or ephemeral, that dies on another registration's empty `commondir`
+  while its destination is untouched now runs again: it succeeds once the writer has written (within up to 50 ms of
+  it), where master failed at once and the coordinator discarded the attempt.
+- **A snapshot's cleanup**, on drop or at a resume's `reclaim_gate_workspaces`, whose removal or list dies that way
+  now runs again and completes, where master left the snapshot registered, its directories and its intent (in a drop),
+  or failed the resume (in a reclamation).
+- **Added waits, only on that one failure:** past a write in flight, its length plus up to 50 ms; past another
+  registration that stays empty (a stalled writer, or one that died and left it), ten seconds per command, then the
+  same failure as master's. A snapshot whose add fails so, followed by its own cleanup's removal and list, fails up to
+  thirty seconds later than master's.
+- **Unchanged:** every success and every other failure, at once; the module's own registration; argv, environment,
+  error types, messages and refusals (none added); every other Git child of the module (`switch_branch`'s `git
+  switch` among them); the topology engine and its registry access.
+- **Where it does not engage:** a translated Git, or a C library that renders errno 0 other than as `Success`; there
+  the module behaves as master's. The engagement tests are Linux-only for that reason (glibc).
+
+**What a "no" would mean.** Revert `9f8b5a46`: `src/workspace.rs` is master's byte for byte, and the notes and the
+design sentence go with it. R2 compiles and passes without it. The `pre` interventions fail again (§9.25.6, `rev-r1`),
+and B-W924's witnessed class has no repair through B.
+
+#### 9.25.5 The role-probe reader: PROPOSED / CONDITIONAL RULING B-W924-R2 (on a PR5-frozen legacy test module). NOT ADOPTED.
+
+The direction makes the gate probe's reader an explicit obligation: `wpre` reached it before the eventual production add
+error. Its `git config --worktree core.useReplaceRefs true` enumerates the registrations before it writes (Git 2.55.0
+`builtin/config.c:977`), so beside a sibling's add in flight it dies on the sibling's empty `commondir`, the gate
+records `worktree-true FAIL`, and the siblings witness fails on its record assertion whatever the product does
+(§9.25.6, `rev-r2`). It is test code, the witness's own reader, and it is not masked: the check, its assertion and its
+Git command stay.
+
+> The owner permits exactly one change to `src/engine/tests.rs`, the legacy engine's test module frozen at PR5
+> (`effects::FROZEN_LEGACY_ALLOWLIST`). **B-W924-R2:** the role-probe gate's `git config --worktree
+> core.useReplaceRefs true` (`v1_role_probe`'s `worktree-true` check) is made through
+> `probe_git_past_another_registrations_write`, which runs that same Git command again on B-W924-R1's terms, from its
+> own copy of the rule (`past_another_registrations_write`, `anothers_empty_commondir_in`): Git's death with one line
+> naming another registration's `commondir` read at zero bytes, never the gate's own snapshot's; one millisecond
+> doubling to fifty; ten seconds. Every other answer is the probe's own, and a value that never lands still records
+> `worktree-true FAIL` with Git's message. With the helper's unit test. No other test changes, and the target's lines
+> stay where they are.
+
+**The exact hunk:** commit `dab7dc4c`, alone: `src/engine/tests.rs` +116/−1, blob `bb4ed835` → `a4ff6c1d` (one call
+renamed at `:9912`, the three helpers and their test after `v1_sibling_run_helper`, from `:10751`);
+`docs/internals/engine/tests.md` +44/−1. The target's E3, E2 and E1 stay at `:10627`, `:10714` and `:10747`
+(`impl13/identity/target-lines.txt`). **What a "no" would mean:** revert `dab7dc4c`; the probe can again meet a
+sibling's add in flight first and fail the target (the `rev-r2` runs). **Its own copy of the rule** keeps the two
+rulings separable: either commit reverts alone and the tree compiles.
+
+#### 9.25.6 The interventions: the base, the repaired head and the reversals
+
+The diagnosis's instrument, unchanged and read in place (`w924d_hold.so` `927e2c1c…`, `launch.sh` `1c6c6732…`, checked:
+`impl13/identity/w924d-tools-check.txt`), driven by path-only copies of its `runenv.sh` and `run_case.sh`
+(`impl13/tools/*-delta-vs-w924d.txt`); rustc 1.99.0 and Git 2.55.0, as CI's ubuntu leg; each tree a verified private
+copy (`impl13/identity/`), its test binary built once and unchanged through each schedule; every run valid, every hold
+engaged, and trace2's process count equal to the shim's in every instrumented run. A plan hashed before each schedule
+(`impl13/PLAN.md`, `PLAN-s2.md`, `PLAN-s3.md`; `impl13/TIMELINE.md`). Three schedules of 29, once each:
+- **schedule 1** on R1 `ce3d7b99` and R2 `25ae8ba9`, **schedule 2** on `41c6c04d` and `218fd9dc`, **schedule 3** on the
+  commits proposed, `9f8b5a46` and `dab7dc4c` (`impl13/interventions/RESULTS.md`, `RESULTS-s2.md`, `RESULTS-s3.md`).
+  Between them R1's test fixture and one test case changed (§9.25.7), then its call sites' shape; R2 never changed.
+
+| Tree | `pre` | `wpre` | `post`, `wpost`, `none`, `observe` |
+|---|---|---|---|
+| base `17bd5652` | FP-EXACT 9 of 9 | FP-EXACT 6 of 6 | PASS 6 of 6 (`post`, `wpost`) |
+| repaired (each schedule's) | PASS 9 of 9 | PASS 9 of 9 | PASS 24 of 24 |
+| R1 reverted, R2 kept (tree `304dc8f7`) | FP-EXACT 9 of 9 | FP-EXACT 1, PASS 5 | — |
+| R2 reverted, R1 kept | PASS 3 of 3 | FP-PARTIAL 6 of 6 (`gate worktree-true FAIL`) | — |
+
+- **The repaired `pre` trace** (schedule 3, `s3-b01`): b's designated add read a's `commondir` at size 0, its read
+  returned 0, and it exited 128; a's add, released on `r_done`, wrote 6 bytes; b's next add, 2.9 ms after the first,
+  read 6 and exited 0, and the run completed. At the base the same first read ended the run with E1, E2 and E3, the
+  registration a's.
+- **`wpre`: which of b's readers meets a's held write is b's own timing, and the schedules saw both.** Where b's add
+  met it, the base died at once, the repaired head ran the add again 35 times and passed 42 to 43 ms after a's write,
+  and with R1 reverted it died (`s3-c04`). Where the probe met it first, the base took the diagnosis's path (the probe,
+  then the cleanup, then a later attempt's add: `s2-a07`, `s3-a04`, `s3-a07`), the repaired head ran the probe again 35
+  times and passed, R1 reverted passed (R2 carried the probe), and R2 reverted failed on the probe's record.
+- **The reversals.** The whole repair reverted is the base tree exactly, and both interventions fail there. Each half's
+  reversal fails the order that exercises it.
+- **A prediction falsified.** Schedule 1's plan predicted that R1 reverted would fail `wpre`; in its two runs the probe
+  met the window first and they passed. Recorded as falsified; nothing was re-run to change it. Schedules 2 and 3
+  predicted by order.
+
+#### 9.25.7 The regression tests, the synthetic controls and the mutations
+
+**R1's tests** (`src/workspace.rs`'s test module; the engagement tests Linux-only, as the repair is glibc's). The
+Git-level ones use **SYNTHETIC CONTROLS**: another checkout's registration planted in a scratch repository, its
+`commondir` a FIFO the test serves one reading at a time, empty or whole, each reading through a FIFO of its own (Git
+writes no FIFO; this makes exactly the reads a test names empty). None is a residue-recovery experiment or claim.
+- `a_snapshot_add_is_attempted_again_past_another_registrations_empty_commondir`: the add reads the tear once and
+  passes after it.
+- `a_snapshots_removal_and_its_list_are_attempted_again_past_another_registrations_empty_commondir`: the removal and the
+  list each read a tear once; the cleanup ends with nothing left.
+- `an_empty_commondir_of_the_snapshots_own_registration_is_returned_at_once`: own, at once, Git's message.
+- `another_registrations_commondir_git_cannot_read_is_returned_at_once`: `Is a directory`, at once.
+- `another_registrations_empty_commondir_that_outlasts_the_deadline_returns_the_adds_error`: an empty `commondir`
+  nobody ends: the add returns at its deadline and within five seconds of it, unchanged, its destination untouched.
+- `a_destination_no_longer_empty_returns_the_adds_first_error`: the destination written to mid-tear: the first error.
+- `only_another_registrations_empty_commondir_reads_as_attempted_again` and
+  `a_registry_command_is_attempted_again_only_while_its_answer_allows` (every platform): the predicate against Git's
+  own exit statuses, and the loop against scripted outputs, a deadline thirty milliseconds away among them.
+
+**R2's test:** `a_gates_worktree_setting_is_attempted_again_only_past_another_registrations_empty_commondir`, the loop
+against a scripted probe.
+
+**The mutations** (`impl13/mutation/matrix4/MATRIX.md`, at `dab7dc4c`; each row an exact replacement in
+`impl13/tools/mutate13.py`, the file restored from HEAD and its blob checked): the control green; all thirteen of R1's
+rows killed: the predicate never yes; each call site never repeating (add, removal, list); a wrong or unknown own
+name at the add and the removal; the own exclusion gone; any errno; the destination unguarded; no deadline; a deadline
+of zero; a second line accepted; any exit accepted. R2's three rows on its rule and loop killed by its test. **One
+survivor, by design of the evidence:** `r2m1-probe-direct`, R2's call site put back to `probe_git`, survives the
+committed tests, which drive R2's loop and not the role process's call site; the interventions kill it (R2 reverted:
+`wpre` FP-PARTIAL 6 of 6).
+
+**What the first matrix found** (`impl13/mutation/matrix1-superseded/`). The first fixture opened the same FIFO for
+each reading; in a loaded suite one `git worktree remove` still holding its end took all three of the cleanup test's
+readings, and the test passed under the predicate-never mutation (alone it failed). The readers were identified from
+`/proc` (`debug-m01-suite/readers.log`). Each reading now goes through a fresh FIFO; the same mutation fails the test in
+the suite 3 of 3. A case for two `fatal` lines was added after `m10-lines-unchecked` survived matrix 2
+(`impl13/mutation/matrix2/`). R1 was rewritten for each (local, unpushed), each recomposition checked
+(`impl13/dev/*.patch`), and matrix 4 and schedule 3 ran on the commits proposed.
+
+#### 9.25.8 The frozen proof, the platforms, and what else ran
+
+- **The frozen proof** (`impl13/frozen/`, `impl13/tools/frozen-proof-impl13.sh`): PR11's R-D set 34 of 34 unchanged this
+  round; H1 `bf62256e` and H3 `407b27cb` unchanged; part 2 FAIL as before, its two proposed hunks unenumerated. **The
+  PR5-frozen paths this round touches:** `src/workspace.rs` (B-W924-R1) and `src/engine/tests.rs` (B-W924-R2), both in
+  `FROZEN_LEGACY_ALLOWLIST`; every other path of that list unchanged. Not frozen, in the same commits:
+  `docs/internals/workspace.md`, `docs/internals/engine/tests.md` and `design/15`'s one sentence.
+- **The platforms** (`impl13/platform/code-dab7dc4c/`, clean tree at `dab7dc4c`): clippy `-D warnings` for
+  `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`; `RUSTFLAGS=-D warnings cargo +1.85.0 check --locked` for Windows
+  and Linux; and clippy `-D warnings` with rustc 1.99.0, CI's stable (`pr11_fub_w924c`'s toolchain, read-only). All
+  passed. Type-checked and linted, not run, on Windows and macOS.
+- **At this round's head, the ten gates and both body validators**, each validator with a negative control. The body
+  records them.
+
+#### 9.25.9 What is not addressed, and where B-W924 stands
+
+- **B-W924 stays OPEN.** It now carries a conditional repair pending the owner's rulings on B-W924-R1 and B-W924-R2,
+  B's reviews (two fresh lenses, regular and regression, independent of the held D task) and all-platform CI. B is
+  not closed, final or merge-ready, and nothing here claims the historical CI failure's cause, a rate, or the absence
+  of B's indirect effect.
+- **The role-probe reader:** B-W924-R2 (§9.25.5), proposed and conditional, separately identified and validated.
+- **Not addressed:** a registration that stays torn (static residue) beyond waiting ten seconds and failing as before;
+  the coordinator's discard after an attempt's failure (its protection and durability questions are held); every other
+  legacy Git child (`switch_branch`, `create_branch`, …); a removal's `No such file or directory`, `gitdir` and
+  `locked`; Git translated, and C libraries that render errno 0 otherwise, macOS's and Windows' included, where the
+  module behaves as master's; follow-up D in any form.
+- **Unchanged:** the filed `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and
+  `PR128-COMMONDIR-UNWRITTEN-READ-AS-AN-INSPECTION-FAILURE`, their grades and guards; no finding is closed, filed or
+  edited; the topology's registry access.
+- **An instrument left as it is:** `effects/allowlist.toml`'s `legacy_effect` text for `src/workspace.rs` still records
+  one amendment. An instrument's wording is the ruling's; the adopting change records the second.
+- **Published only after the scope check.** This round's package went to the orchestrator, and through it to the
+  supervisor, before any push; whether and when it is published is their answer's.
