@@ -636,8 +636,11 @@ withholds explicitly.
 This is the one structural asymmetry between the two boundaries
 and it is stated rather than skipped (`PR6-CORRECTNESS-007`): the
 host runner calls `env_clear()` and installs the composed vector
-as the *whole* environment, so a key it omits is genuinely
-absent; the container runner's vector is `docker create --env`,
+as the *whole* environment -- less, in a work tree the engine
+made, the work-tree context it sheds there, the four selectors,
+and with a relative `GIT_COMMON_DIR` given as the absolute path
+it names at the started checkout -- so a key it omits is
+genuinely absent; the container runner's vector is `docker create --env`,
 which **overlays** the image's environment, so a key it omits is
 a key the image decides. Naming what is withheld is how the
 container reaches the same *effective* environment the host

@@ -2202,8 +2202,11 @@ pub(crate) const REPLACEMENT_DISABLED_EXIT: i32 = 3;
 /// costs a loud failure rather than a false green.
 ///
 /// The child is `read_only_git`'s and `HostEnvironment::from_process`'s own
-/// child: both inherit this process's environment, which is why measuring this
-/// process is measuring theirs.
+/// child: both inherit this process's environment, less the work-tree context a
+/// Git child or a role in a work tree the engine made sheds there, the four
+/// selectors, and with a relative `GIT_COMMON_DIR` given as the absolute path it
+/// names at the started checkout, which is why measuring this process is
+/// measuring theirs.
 ///
 /// **Every `git` here runs in this process's environment, `git init`
 /// included.** That is deliberate, and it is what closes `GIT_TEMPLATE_DIR`

@@ -417,12 +417,26 @@ agent output.
 
 `CommandSpec.env` overlays a runner-defined base; it is never a replacement for
 the process environment. The host base starts from the Upstroke process
-environment, while the container base starts from the image environment. The
-runner then supplies role-scoped `HOME`, `PATH`, and credential locations before
-applying non-reserved adapter overrides. An adapter that conflicts with a
-runner-reserved environment key is a pre-flight error rather than an
-order-dependent override. Probes and real processes use the same composed
-environment and mounts.
+environment, while the container base starts from the image environment. **On
+the host, a process started in a work tree the engine made — a slot, or a gate
+or review snapshot — goes without the values the Upstroke process inherited for
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE`, and
+an inherited `GIT_COMMON_DIR` whose value is not an absolute path reaches it as
+the absolute path that value names at the checkout the coordinator was started
+in. The four select that checkout, so its Git takes that work tree's own
+administrative directory and index. Its common directory is the one that
+checkout resolved wherever a `GIT_COMMON_DIR` is inherited, and otherwise the
+one the work tree records; Git takes shared refs from that record in either
+case. A value the request's own overlay sets for one of them is kept, and every
+other inherited variable stays. A `git worktree` command the engine runs from
+that checkout goes without the inherited `GIT_INDEX_FILE`. The container base is
+not changed: a value its image provides stays.** The runner then supplies
+role-scoped `HOME`, `PATH`, and credential locations before applying
+non-reserved adapter overrides. An adapter that conflicts with a runner-reserved
+environment key is a pre-flight error rather than an order-dependent override.
+Probes and real processes use the same composed environment and mounts; on the
+host, a process in a work tree the engine made then goes without the inherited
+values above, which select nothing pre-flight certifies.
 
 Pre-flight probes also execute through the selected runner. The capability and
 version snapshot must describe the CLI that will run, not a similarly named host

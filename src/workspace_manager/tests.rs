@@ -7701,7 +7701,10 @@ fn a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_
 ///
 /// **The work is in a neutralised child** (PR #271, round 4), for the reason
 /// [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`] is: the
-/// manager's own `git` children inherit this process's environment, so an
+/// manager's own `git` children inherit this process's environment, less the
+/// work-tree context they shed in a work tree the engine made, the four
+/// selectors, and with a relative `GIT_COMMON_DIR` given as the absolute path it
+/// names at the started checkout, so an
 /// operator's `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request
 /// makes upstroke's own gates supply -- would hand this witness the very
 /// protection it exists to prove the manager installs, and the checkout would
@@ -7837,7 +7840,10 @@ fn base_without_replacement_isolation() -> HostEnvironment {
 /// [`assert_replacement_controls_pinned`] answers for *this* process, and this
 /// process is not where the claim lives: `HostRunner::run` calls `env_clear`
 /// and installs what `compose` returned, so the only environment a role process
-/// has is the composed one. This probe is that exact runner --
+/// has is the composed one, less the work-tree context the runner sheds in a
+/// work tree the engine made, the four selectors, and with a relative
+/// `GIT_COMMON_DIR` given as the absolute path it names at the started
+/// checkout. This probe is that exact runner --
 /// [`base_without_replacement_isolation`], read as [`ObjectGraph::AsReplaced`],
 /// which is the one setting that makes `compose` leave the pair off -- run over
 /// a throwaway repository carrying a replacement. It must read the

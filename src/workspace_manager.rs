@@ -5045,7 +5045,10 @@ impl WorkspaceManager {
     /// snapshot of a tree with a replacement installed reads the replacement,
     /// and `git status --porcelain` calls an untouched snapshot modified. A
     /// gate or a reviewer gets the environment its runner composes, which
-    /// clears the ambient one; the free functions [`read_only_git`] and
+    /// clears the ambient one, less the work-tree context the runner sheds in
+    /// a work tree the engine made, the four selectors, and with a relative
+    /// `GIT_COMMON_DIR` given as the absolute path it names at the started
+    /// checkout; the free functions [`read_only_git`] and
     /// [`read_only_git_ok`], which `quiescence` uses, are outside this builder
     /// as they are outside the hooks-path walk. Each of those now sets the same
     /// pair from the same [`NO_REPLACEMENT_OBJECTS`] constant, so the snapshot's

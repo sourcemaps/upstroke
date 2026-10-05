@@ -51,6 +51,8 @@ rustdoc; this section is it.
 | `reserved_keys()` | Every key an overlay may not name: `RESERVED_ALWAYS` plus every credential location. |
 | `credential_location(agent)` | The credential-location variable of one agent, if the host knows one. |
 | `supplies_credentials(role)` | Whether `host-v1` tells this role where an agent's credentials live. Exhaustive with no wildcard: a role added later has to be classified here rather than defaulting into the side that hands out credentials. |
+| `starts_in_the_started_checkout(role, worker_in_checkout)` | Whether this role starts in the checkout the coordinator was started in, and so keeps the inherited Git context: every probe, and the implement role of a runner built for the legacy workspace. Exhaustive with no wildcard. |
+| `give_work_tree_context(composed, overlay, case, run_common_dir)` | For a role in a work tree the engine made: removes the four inherited work-tree selectors from the composed vector and replaces an inherited `GIT_COMMON_DIR` that is not an absolute path with `run_common_dir`, by the runner's `KeyCase`, leaving any name the request's overlay sets as the overlay set it. Refuses, before anything starts, when it would have to give such a `GIT_COMMON_DIR` and `run_common_dir` is `None`. |
 
 ### `HostRunner`
 
@@ -234,6 +236,33 @@ grandchild hold a fifo open, and the fifo reads end of file once the Runner has 
 
 **The observer.** The call's own `SpawnHooks` observer when it carries one, with no lock; otherwise
 the runner-level observer under its guard when one is installed; otherwise a local `NoHooks`.
+
+**The work-tree context.** Right after `compose`, and only for a role that does not start in the
+checkout the coordinator was started in (`starts_in_the_started_checkout`), the composed vector
+goes through `give_work_tree_context`: the values the Upstroke process inherited for `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and `GIT_INDEX_FILE` are removed, and an inherited
+`GIT_COMMON_DIR` whose value is not an absolute path is replaced by the common directory of the
+managed repository this runner holds. A gate and a review pass always run in a gate or review
+snapshot, and the topology worker in its slot, each a linked work tree the engine made; there the
+four selectors name the started checkout's administrative directory, index and work tree, not the
+work tree's own, while without them Git takes those from the `.git` file `git worktree add` wrote
+at the work tree's top. An absolute `GIT_COMMON_DIR` names the started checkout's common directory
+from any directory, so it is kept; a relative one names a path from whatever directory reads it,
+which in a work tree is not the checkout, so the role is given the absolute path the value named
+there instead. The common directory `ObjectGraph::RecordedIn` carries is the one the legacy
+constructor asked Git for at the started checkout and canonicalized, the directory the builders'
+joined path names too. A runner that holds no managed repository (`new()`, or any other reading)
+has nothing to give, and refuses such a role as `NeverStarted` before it starts; production builds
+`new()` only for probes, which keep the context. A probe keeps the whole composed vector: it starts
+in the coordinator's directory, or the shell probe in the run's workspace, and runs no Git there.
+The legacy worker keeps it too (`worker_in_checkout`), because it works in the started checkout,
+where the inherited names are the run's.
+
+`compose` itself is unchanged, so probe and execution still compose the same vector, which the
+composition tests pin; this step only edits what the host base inherited from the Upstroke process,
+and a name the request's own overlay sets is kept as the overlay set it. The container runner
+composes from its image and is not changed. The step starts no process and parses nothing: it
+compares names by `KeyCase` and asks of one value only whether it is an absolute path.
 
 **The leases.** The call's cleanup-lease paths go to `proc::run_with_timeout_classified`, whose
 Unix reaper holds them together with the ones the supervising thread's scope holds, deduplicated —
@@ -493,6 +522,33 @@ bounds — and the shell probe is a shell running `exit 0`. Neither runs an agen
 handed the directory an agent's credentials live in, even when the request names an agent. The
 worker, the review and an agent probe all execute an agent CLI and all need it.
 
+
+## `starts_in_the_started_checkout`
+
+Which roles keep the coordinator's inherited Git context: a probe always, and the implement role
+only for a runner whose `worker_in_checkout` is set, which `for_legacy_workspace` sets because the
+legacy worker works in the started checkout. A gate and a review pass are always started in a gate or
+review snapshot, a work tree the engine made, by either conductor; the topology worker starts in its
+slot, so a runner built by `new()` gives its implement role a work tree's context. Exhaustive with no
+wildcard, as `supplies_credentials` is: a role added later is classified here.
+
+## `give_work_tree_context`
+
+The work-tree context of a role in a work tree the engine made, applied to the composed vector
+`supervise` installs with `env_clear` and `envs`; see its section. It edits that vector rather than
+setting a `Command` value of its own, so the payload census's row for this file is unchanged. Names
+are matched by the runner's `KeyCase`, so on Windows `git_dir` and `GIT_DIR` are one name, and
+whether a value is absolute is `keeps_common_dir`'s answer, `Path::is_absolute`. A name the request's
+overlay sets is the adapter's own choice and is kept, selector or `GIT_COMMON_DIR`, relative or not.
+The refusal is typed `UpstrokeError::Refused` and reaches the caller as `RunnerError::never_started`.
+
+## `HostRunner::worker_in_checkout`
+
+Whether this runner's implement role starts in the checkout the coordinator was started in. Only
+`for_legacy_workspace` sets it: the legacy conductor's worker works at the run's root, where the
+inherited names are the run's own, as they were before the change. `new()` leaves it unset, so a
+topology runner built on it gives its worker in a slot a work tree's context.
+
 ## `ProgramQuestion`
 
 `program` is `CommandSpec::program` verbatim; `path` and `pathext` are the composed values, `None`
@@ -536,6 +592,11 @@ reading `Recorded` passed it (git 2.43). So the runner moved with its producer, 
 first to `Recorded`. Two reviews of #326 then showed that reading was wrong for v0.1: the variable
 reached the repositories a gate creates for itself, and on Git 2.41 it lost to a configured `true`.
 See [`ObjectGraph`](host/environment.md) for both, and for why producer and consumer must agree.
+
+It also sets `worker_in_checkout`, so its implement role, the legacy worker at the run's root, keeps
+the inherited Git context, while its gates and review passes, in gate and review snapshots, are given
+a work tree's context; and the `ManagedRepository` it holds is where a relative inherited
+`GIT_COMMON_DIR` is replaced from.
 
 The constructor is kept rather than folded into `HostRunner::new`, deliberately: it keeps
 the v0.1 path's choice of graph stated at the one place that path builds its runner, its

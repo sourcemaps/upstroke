@@ -2864,3 +2864,54 @@ as the entry and a `.git` that is a symbolic link to the Git directory; on
 Windows and macOS, the entry spelled in upper case. Every role of every run read
 the recorded graph, and afterwards the operator's Git still reads the
 replacements.
+
+## `fn a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository() {`
+
+D1's layout: `A` tracks `work/shared.txt` and its user has staged another
+version; `B.git`, selected by `GIT_DIR` and `GIT_WORK_TREE=A/work`, holds the
+same file. An isolated child whose environment alone carries those two names
+seeds a worker-only plan with review disabled and runs `run_with`, the real
+coordinator and the real legacy ladder: the run completes, its task commits,
+`B.git`'s run branch holds the worker's edit, and `A`'s index and `HEAD` are
+byte-identical. Green at `5c222ff2` and under the change, because the ladder
+asks the review-input seam's `problem` about its own root, which
+`Workspace::open` opens as the started checkout; red when `problem` opens its
+path as a work tree the engine made, because without the two names Git at
+`A/work` finds `A`, where the captured tree is not.
+
+## `fn inherited_selection_run_helper() {`
+
+The child of the test above.
+
+## `fn a_gated_legacy_run_under_an_absolute_common_dir_keeps_its_snapshot_in_the_run_repository() {`
+
+C4's layout through the real coordinator: the repository's `.git/worktrees`
+is a link into `other`, a copy of the repository, and an isolated child whose
+environment alone carries the repository's absolute `.git` as
+`GIT_COMMON_DIR` runs a gated `run_with`. The run completes with its gate
+reported, the run branch holds the fake worker's `agent-output.txt`, which is
+still in the checkout, and `other`'s objects and refs are byte-identical. The
+gate snapshot is registered through the link; its Git keeps the absolute value
+and reads the run's common directory. Removing `GIT_COMMON_DIR` in a work tree
+sends its verification to `other`, "bad object HEAD", and the coordinator's
+discard erases the worker's output.
+
+## `fn absolute_common_dir_run_helper() {`
+
+The child of the test above; its body is `gated_run_under_an_inherited_common_dir`.
+
+## `fn a_gated_legacy_run_under_a_relative_common_dir_through_a_linked_registry_keeps_its_snapshot_in_the_run_repository()`
+
+C5's production layout through the real coordinator: the repository six levels
+below the scratch root, its Git directory copied to `common` at the root,
+`common/worktrees` a link into `other`, and the run's private root one level
+below the root, so its gate snapshots are six levels below it too. The child
+carries `GIT_COMMON_DIR=../../../../../../common`, which names `common` from the
+repository and from the snapshot, and the same assertions hold as for the
+absolute case. Shedding a relative value in the snapshot instead of giving it
+the path it names at the checkout sends the verification through the link to
+`other`.
+
+## `fn relative_common_dir_run_helper() {`
+
+The child of the test above.

@@ -317,6 +317,31 @@ The problem with this tree as review input, or `None`.
 
 A Git or I/O error from the inspection.
 
+## `pub trait ReviewInputPolicy` › `fn problem_in_work_tree(`
+
+The same question about a work tree the engine made from `checkout`, the
+checkout the coordinator was started in: the attempt's slot, or the staging
+slot. The schema-4 driver asks this one, with the manager's base as the
+checkout; the legacy ladder asks `problem` about its own root, the started
+checkout itself.
+
+The checkout is carried because a work tree's open needs it. In a slot, the
+inherited selectors are the started checkout's, not the slot's, so the check
+must open the slot without them; and an inherited relative `GIT_COMMON_DIR`
+names a path from whatever directory reads it, so the slot's Git is given the
+absolute path that value names at the checkout. `problem` carries no checkout,
+and a path alone cannot say which checkout a work tree was made from.
+
+It is provided, and its default asks `problem`, so an implementor that answers
+for a path alone needs nothing more and keeps compiling unchanged: the recover
+tests' `DrivenPolicy` implements only `problem`. The production implementor,
+`LegacyReviewInputPolicy`, overrides it to open the slot with
+`Workspace::open_work_tree`.
+
+### Errors
+
+A Git or I/O error from the inspection.
+
 ## `pub trait ReviewPasses {`
 
 Where a review pass is executed.
@@ -1605,7 +1630,8 @@ own contract, unchanged.
 ## `struct Assessor<'a> {`
 
 The assessment's two seams, so [`AttemptContext::assess`] and [`attempt_body`]
-run one implementation.
+run one implementation, and the checkout the slot was made from, the manager's
+base, which the review-input seam's `problem_in_work_tree` is asked with.
 
 ## `pub struct AttemptJob {`
 

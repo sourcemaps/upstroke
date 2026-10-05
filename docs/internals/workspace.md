@@ -29,8 +29,9 @@ refs, and the Git-object creation contexts — live behind typed funnels in
 [`crate::workspace_manager`] instead, and nothing here calls them.
 
 The freeze was amended once, to close
-`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, and the allowlist row says what
-it covers. The Git children are built by `git_command` (its section below),
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, and a second time to give the
+coordinator's inherited Git context only to the checkout it was started in
+(option (C)); the allowlist row says what each covers. The Git children are built by `git_command` (its section below),
 which sets `crate::workspace_manager::NO_REPLACEMENT_OBJECTS` and passes
 `-c core.useReplaceRefs=false`, so they read the objects the repository holds
 rather than whatever `refs/replace/*` points at them.
@@ -95,7 +96,19 @@ reason `pin_replacement_refs_in` gives, and with the variable alone both failed
 on 2.40.0 and 2.41.0 and passed on 2.42.0 and 2.43.0 (`r3/` in the pull
 request's evidence). With this, both pass on all four.
 
-## `fn git_command(directory: &Path) -> Command {`
+## `enum GitScope<'a> {`
+
+Where a Git child `git_command` builds runs, and so which inherited Git context
+it is given. `Checkout`: the checkout `Workspace::open` opened, the one the
+coordinator was started in, whose inherited context is the run's and is kept as
+it is. `Registry`: a `git worktree` command run from that checkout, which goes
+without `GIT_INDEX_FILE`. `WorkTree { checkout }`: a work tree the engine made
+from `checkout`, a gate or review snapshot or a slot, which goes without the
+four selectors and is given a relative `GIT_COMMON_DIR` as `checkout` joined
+with it. `Copy`, and borrowed from the workspace that holds the checkout, so a
+scope is a word passed to the builder, not state of its own.
+
+## `fn git_command(directory: &Path, scope: GitScope<'_>) -> Command {`
 
 Where every Git child this file's production code starts is built, and so the
 one place their environment is set. It supplies the `-C <directory>` each of the fourteen
@@ -127,12 +140,64 @@ see.
 `every_git_child_of_this_module_is_built_where_replacements_are_refused` holds
 the shape; see its section.
 
+**The scope of the child, and the inherited Git context it is given.** The
+builder also takes the child's `GitScope` and gives it the inherited Git context
+of the work tree it runs in. A `Checkout` child keeps the process's environment
+as it is: whatever repository, work tree, object store and index the inherited
+names select at the started checkout stay the run's, as `Workspace::open`
+accepted them. A `Registry` child, the three `git worktree` commands, goes
+without `GIT_INDEX_FILE`: `git worktree add` replaces `GIT_DIR` and
+`GIT_WORK_TREE` for the checkout it runs in the new work tree and nothing else,
+so an inherited index would be the one that checkout writes. A `WorkTree` child
+goes without `GIT_DIR`, `GIT_WORK_TREE`, `GIT_IMPLICIT_WORK_TREE` and
+`GIT_INDEX_FILE`, so its Git takes the work tree's own administrative directory
+and index from the `.git` file `git worktree add` wrote at its top.
+
+Its `GIT_COMMON_DIR` is the one clause that is neither keeping nor shedding. Git
+takes an explicit `GIT_COMMON_DIR` before the work tree's own `commondir` file,
+and keeps the value as given: an absolute value names the started checkout's
+common directory from every directory, so it is kept; a relative value names a
+path from whatever directory reads it, which in a work tree is not the checkout.
+The builder therefore reads the process's own value with `std::env::var_os`,
+the value the child would otherwise inherit, and where `keeps_common_dir` does
+not keep it sets `GIT_COMMON_DIR` to `checkout` joined with it: the path the
+checkout's own children resolved, because they run there with `-C`. Shedding it
+instead would hand the child the `commondir` record, which a `worktrees`
+directory linked into another repository makes that repository's;
+keeping it as it is lets it name a directory beside the work tree. The
+variable is set before `NO_REPLACEMENT_OBJECTS`, so the replacement controls are
+set after every name the scope removes or gives.
+
 ## `impl Workspace` › `pub fn open(root: &Path) -> Result<Self, UpstrokeError> {`
 
 Open an existing git worktree, normalizing to its top level. Running
 from a subdirectory would otherwise scope `git clean` to that
 subdirectory while staging stays whole-tree, so rollback would leave
 residue above the current directory.
+
+## `impl Workspace` › `pub fn open_work_tree(root: &Path, checkout: &Path) -> Result<Self, UpstrokeError> {`
+
+Open a path as a work tree the engine made from `checkout`, the checkout the
+coordinator was started in. Every Git child of the workspace it returns is built
+with `GitScope::WorkTree { checkout }`, including the two the open itself makes,
+so an inherited selector cannot exclude the work tree or select another
+repository, and a relative `GIT_COMMON_DIR` is given its meaning at `checkout`.
+Its one caller is the review-input seam's `problem_in_work_tree`, for the slot
+the schema-4 driver checks.
+
+## `impl Workspace` › `fn open_in(root: &Path, checkout: Option<PathBuf>) -> Result<Self, UpstrokeError> {`
+
+The body `open` and `open_work_tree` share, unchanged from `open`'s but for the
+checkout it records: `None` for the started checkout, `Some` for a work tree
+the engine made from one.
+
+## `impl Workspace` › `fn scope(&self) -> GitScope<'_> {`
+
+The scope of every Git child of this workspace's own methods: `Checkout` for a
+workspace `open` opened, `WorkTree` for one made from a checkout. The one place
+that builds a gate snapshot's workspace records its source workspace's root as
+the checkout, so a Git method later called on a snapshot gets the snapshot's
+scope.
 
 ## `impl Workspace` › `pub(crate) fn worktree_git_dir(&self) -> Result<PathBuf, UpstrokeError> {`
 
@@ -637,9 +702,22 @@ empties string literals; that `Command` is never
 renamed with `as` and is named nowhere but the process import and `git_command`;
 that `git_command` is named nowhere but its definition and its calls, and that
 the functions calling it are, in source order, the fourteen it lists; and that
-neither `env_remove(` nor `env_clear(` occurs. The list of functions at its top
+`env_clear(` does not occur. The list of functions at its top
 is the positive control: a region cut short or blanked away fails there rather
 than passing every count below.
+
+`env_remove(` was refused anywhere until the inherited Git context was scoped to
+the work tree a child runs in (option (C)); the census is narrowed for that and
+no further. `env_remove(` may now occur only inside `git_command`, exactly twice:
+once on `INDEX_SELECTOR`, for a `git worktree` command, and once on each name of
+`WORK_TREE_SELECTORS`, for a child in a work tree the engine made. Because the
+blanking empties string literals, the census reads the two constants' values
+directly, and asserts that neither they nor `COMMON_DIR` is the replacement
+variable, so no removal or replacement can take the pair back off; and that the
+pair is set after the last removal and after the `GIT_COMMON_DIR` the work-tree
+arm gives, so the replacement controls are always the last word. The selector
+list is compared as a slice, so a change to its length fails this census when it
+runs rather than stopping the crate's tests from compiling.
 
 The list of callers is what a new Git child moves. Every child of this module
 comes from `git_command`, so a new one changes no `Command::new(` count, here or
@@ -698,3 +776,87 @@ type. The production region calls no function of another crate module but
 `crate::ulid::ulid`. What it reads as production and a compiler would not: a
 `#[cfg(test)]` item outside the test module. One that builds a `Command` fails
 the census rather than hiding from it.
+
+## `struct InheritedSelection {`
+
+One shape of an inherited Git selection, as the tests of option (C) below build
+it: the directory the coordinator is started in, the names its environment
+inherits, the file its worker edits, and the files outside the selected
+repository that must not change. `selection_shape` builds each of the twenty
+shapes `SELECTION_SHAPES` names with ordinary Git in this process's own
+environment, which sets none of the names, and `selection_git` gives a fixture
+command the names a shape's own setup needs, on that command only.
+
+## `fn a_legacy_workspace_keeps_the_inherited_selection_at_its_checkout_and_its_snapshots_address_themselves()`
+
+For each of the twenty shapes (D1, V1 to V4, V6, E1 contrived, E3, E4's three
+forms, E5, DOT, H2, IDX, SEL, SPELL, F4, an object directory moved out of the
+repository, and an object pool), an isolated child whose environment alone
+carries the shape's names drives `Workspace` directly: `open` returns the top
+level Git reports under those names; the capture and the commit go into the
+selected repository; the gate snapshot verifies clean, has an index of its own,
+and its Git answers `--absolute-git-dir`, `--git-path index` and
+`--show-toplevel` with the snapshot's own; and the parent finds the files
+outside the selected repository byte-identical. Each shape's failure is
+collected, so one run reports every shape that fails.
+
+At `5c222ff2` seventeen shapes fail, sixteen of them where the snapshot's
+verification refuses and IDX and SEL where the snapshot's Git addresses another
+index or work tree; F4 and the two object-directory shapes pass at both. It runs
+no role through the runner and not through the legacy ladder, so it kills
+neither the runner's mutations nor the ladder's; the two object-directory rows
+are where shedding all eighteen names fails it.
+
+## `fn legacy_selection_helper() {`
+
+The child of the test above, under one shape's names.
+
+## `fn a_snapshot_add_never_writes_an_inherited_index() {`
+
+FUD-D4-ENV (b), in an isolated child: with `GIT_INDEX_FILE` naming the
+checkout's own index, which holds a change the user staged, and again naming a
+linked work tree's index, which holds that work tree's own staged change,
+`gate_snapshot_for_candidate` leaves that index byte-identical and the snapshot
+has an index of its own. At `5c222ff2` the add's checkout child writes the
+named index; with `add_gate_worktree` passing `Checkout` it does again.
+
+## `fn snapshot_index_helper() {`
+
+The child of the test above: a snapshot of `HEAD`'s tree from the checkout.
+
+## `fn paths_with_newlines_and_undecodable_bytes_are_untouched_by_the_scope() {`
+
+F2's CR and LF and F5's non-UTF-8 and U+FFFD names, with `GIT_PREFIX` and with
+`GIT_DIR`, each in an isolated child: the workspace opens, captures and makes
+its gate snapshot, and the snapshot addresses itself, its paths read as bytes
+through `git_path`. The scope parses nothing, so no byte of a path reaches Git
+other than as it was. F5's newline name, with either name, is refused by
+`recorded_objects_scope` with the constructor's own refusal, "its path contains a
+newline, which Git cannot read in a configuration key", at `5c222ff2` and under
+the change alike, so no snapshot is made there. At `5c222ff2` the four rows with
+`GIT_DIR` fail at the snapshot's verification; the others pass at both.
+
+## `fn undecodable_scope_helper() {`
+
+The child of the test above, in its snapshot mode or its refusal mode.
+
+## `fn a_work_tree_the_engine_made_reads_the_runs_common_dir_under_a_relative_common_dir() {`
+
+A relative `GIT_COMMON_DIR` at the legacy builder, the draft's design lens's
+construction: `managed` and `common`, a copy of its Git directory, beside it;
+then a second copy at `slots/common`, made first, because Git's own checkout
+child of `git worktree add` reads objects through the relative value from the
+new work tree on Git 2.43 and 2.50; then a slot at `slots/one` registered in
+`common` under `GIT_COMMON_DIR=../common`, a file staged in it and its tree
+written into `common` by a fixture child given `common`'s absolute path. The
+child, carrying `../common` alone, asks
+`Workspace::open_work_tree(slots/one, managed)` for the review input of that
+tree, the body of the seam's `problem_in_work_tree`: it finds none, because
+the slot's Git reads `managed` joined with `../common`, and `slots/common` is
+byte-identical. Opened with `Workspace::open`, as the seam's `problem` opens a
+path at `5c222ff2`, or with the builder's `GIT_COMMON_DIR` clause deleted, the
+slot's Git reads `slots/common`, where the tree is not.
+
+## `fn relative_common_work_tree_helper() {`
+
+The child of the test above.

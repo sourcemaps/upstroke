@@ -284,7 +284,10 @@ A host runner whose base carries none of the ambient controls over
 `refs/replace/*`, reading `objects`.
 
 `HostRunner::run` clears the ambient environment and installs what
-`compose` returned, and `compose`'s base is this process's environment:
+`compose` returned -- less, for a role in a work tree the engine made,
+the work-tree context it sheds there, the four selectors, and with a
+relative `GIT_COMMON_DIR` given as the absolute path it names at the
+started checkout -- and `compose`'s base is this process's environment:
 under an exported `core.useReplaceRefs=false` a runner reading
 `AsReplaced` would read the recorded graph after all, and the witness
 below's contrast leg would pass for the wrong reason. Taking the

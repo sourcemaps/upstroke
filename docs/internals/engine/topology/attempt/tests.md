@@ -1533,3 +1533,28 @@ both of the Runner call's answers settle its registration — false since round 
 end keeps the registration running and its pair held until this process exits
 (`InvocationLedger::end`). The pin holds the retention, in both of the section's paragraphs that state
 it, and that the two retired sentences do not come back.
+
+## `fn the_review_input_seams_methods_read_a_slot_as_a_slot_and_the_checkout_as_the_checkout() {`
+
+The review-input seam under D1's inherited `GIT_DIR` and `GIT_WORK_TREE`, in
+isolated children. In D1's layout, `A/work` inside `A` with `B.git`
+selected: `problem_in_work_tree`, on a slot the manager made from the base
+with a captured tree and the base as its checkout, answers `None`, and the
+slot's work leaves `B.git`'s index as it was; `problem`, on the started
+checkout after a capture there, answers `None`, reading `B.git`; and `A`'s
+index is byte-identical. Then the driver: the scaffold's run, adopted in a child
+whose environment selects the run's own repository and checkout by the same
+two names, dispatches, captures and is assessed through `AttemptContext::assess`
+with no review-input failure, and the checkout's index is byte-identical. The
+scaffold builds its repository itself, so the driver row cannot select another
+one; what it inherits is D1's two names, naming the run's Git directory and its
+checkout.
+
+At `5c222ff2` the slot row and the driver row fail, "not a git worktree": the
+inherited `GIT_WORK_TREE` excludes the slot from the work tree the check opens.
+The checkout row passes there. Each child's rows are collected and reported
+together.
+
+## `fn review_seam_rows_helper() {`
+
+The child of the test above: the slot and checkout rows, or the driver row.

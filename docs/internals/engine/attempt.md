@@ -206,9 +206,25 @@ legacy path below, and the schema-4 driver through
 [`crate::workspace::Workspace`]'s review-input policy, for a caller that
 holds a worktree path instead of a `Workspace`.
 
-The legacy verification ladder is its first caller — through
-`run_attempt`'s own `workspace`, not through this — and the schema-4 driver
-is its second. One policy, two callers.
+The legacy verification ladder is its first caller — through the seam's
+`problem`, which opens the started checkout with `Workspace::open` — and the
+schema-4 driver is its second, through the seam's `problem_in_work_tree`. One
+policy, two callers.
+
+## `impl super::topology::attempt::ReviewInputPolicy for LegacyReviewInputPolicy {` › `fn problem_in_work_tree(`
+
+The slot's review input, read as a work tree the engine made from the
+started checkout the seam carries: the slot is opened with
+`Workspace::open_work_tree(worktree, checkout)`, so every Git child of the
+check goes without the four inherited selectors, and an inherited relative
+`GIT_COMMON_DIR` reaches it as `checkout` joined with the value, the
+absolute path the checkout's own children resolved it to. Opened with
+`Workspace::open`, as `problem` opens the started checkout, an inherited
+`GIT_DIR` or `GIT_WORK_TREE` would select another repository or exclude the
+slot altogether ("not a git worktree"), and a relative `GIT_COMMON_DIR`
+would name a directory beside the slot. `problem` itself is unchanged: the
+ladder asks it about the checkout the run was started in, where the
+inherited context is the run's.
 
 ## `pub(super) fn review_failure(`
 

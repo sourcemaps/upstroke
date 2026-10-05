@@ -60,6 +60,11 @@ image environment; each supplies role-scoped `HOME`, `PATH`, and credential
 locations. Adapter overrides may select profiles or CLI behavior but may not
 conflict with runner-reserved keys. Probe and execution compose the same base,
 mounts, reserved values, and overlay, so pre-flight certifies the environment
-that will actually spend.
+that will actually spend; on the host, an execution in a work tree the engine
+made then sheds the inherited values of the four Git work-tree selectors, and is
+given a relative inherited `GIT_COMMON_DIR` as the absolute path it names at the
+started checkout, unless its overlay sets them (§26, "Runner and concurrency
+contracts"), and none of them selects a program, credential or version a probe
+certifies.
 
 Deliberate omissions: no `Router` trait (config-evaluating struct until a second policy exists) and no `Executor` trait beyond `AgentAdapter` (a native agentic loop remains explicitly out of scope; the seam exists if that ever changes).
