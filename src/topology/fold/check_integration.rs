@@ -189,6 +189,7 @@ impl RunState {
                     .to_owned(),
             });
         }
+        self.check_candidate_not_failed(MERGE_VERIFICATION_UNAVAILABLE, transaction)?;
         unavailable
             .self_consistency()
             .map_err(|defect| FoldError::InconsistentRecord {
@@ -233,6 +234,27 @@ impl RunState {
                 detail: "the transaction is already authorized to publish; an authorized \
                          publication is completed, never abandoned"
                     .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_candidate_not_failed(
+        &self,
+        kind: &'static str,
+        transaction: &Transaction,
+    ) -> Result<(), FoldError> {
+        if self.task(kind, transaction.candidate.key)?.state == TaskState::Failed {
+            return Err(FoldError::InconsistentRecord {
+                kind,
+                detail: format!(
+                    "task {} failed while integration sequence {} was verifying its candidate: a \
+                     decline, or a lineage member's failed settlement, failed its lineage and \
+                     cancelled the verification, whose one terminal is \
+                     `merge_verification_interrupted`; a failed task's candidate is never \
+                     published, rejected into a repair, deferred or parked",
+                    transaction.candidate.key, transaction.sequence.0
+                ),
             });
         }
         Ok(())
@@ -308,6 +330,7 @@ impl RunState {
                         "the transaction is already authorized to publish".to_owned(),
                     ));
                 };
+                self.check_candidate_not_failed(MERGE_PREPARED, transaction)?;
                 if transaction.candidate != prepared.candidate() {
                     return Err(inconsistent(format!(
                         "it publishes task {} generation {} and the open transaction is verifying \
@@ -407,6 +430,7 @@ impl RunState {
                         "the transaction is already authorized to publish".to_owned(),
                     ));
                 };
+                self.check_candidate_not_failed(MERGE_REJECTED, transaction)?;
                 if transaction.candidate != rejected.candidate {
                     return Err(inconsistent(format!(
                         "it rejects task {} generation {} and the open transaction is verifying \
