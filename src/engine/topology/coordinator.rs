@@ -21037,6 +21037,118 @@ mod tests {
         }
     }
 
+    struct FAfterBetaBlocks {
+        inner: Arc<RecordingRunner>,
+        blocked: FSignal,
+    }
+
+    impl Runner for FAfterBetaBlocks {
+        fn run<'a>(
+            &'a self,
+            request: &'a crate::runner::RunnerRequest,
+            call: crate::runner::RunnerCall<'a>,
+        ) -> crate::runner::RunFuture<'a> {
+            if matches!(
+                &request.invocation,
+                InvocationId::Attempt {
+                    key: TaskKey(0),
+                    role: AttemptRole::Worker,
+                    ..
+                }
+            ) {
+                assert!(
+                    f_await(&self.blocked),
+                    "alpha's worker answers only once beta is blocked in its deletion policy"
+                );
+            }
+            self.inner.run(request, call)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FHanded {
+        changed: bool,
+        index_gone: bool,
+        answered: bool,
+        not_whole: Option<String>,
+    }
+
+    struct FBetaRead {
+        inner: FPolicy,
+        common: PathBuf,
+        handed: Arc<std::sync::Mutex<Vec<FHanded>>>,
+    }
+
+    impl ReviewInputPolicy for FBetaRead {
+        fn problem(
+            &self,
+            worktree: &std::path::Path,
+            tree: &str,
+        ) -> Result<Option<String>, UpstrokeError> {
+            let answer = self.inner.problem(worktree, tree);
+            let beta = worktree
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with("k1-"));
+            if beta {
+                let handed = FHanded {
+                    changed: std::fs::read(worktree.join("a.txt"))
+                        .is_ok_and(|bytes| bytes == b"an unstaged change\n"),
+                    index_gone: !f_entry_of(worktree).join("index").exists(),
+                    answered: matches!(answer, Ok(_) | Err(UpstrokeError::Git { .. })),
+                    not_whole: match crate::engine::topology::dispatch::registration_whole(
+                        worktree,
+                        &self.common,
+                    ) {
+                        crate::engine::topology::dispatch::Whole::No(found) => Some(found),
+                        crate::engine::topology::dispatch::Whole::Yes => None,
+                    },
+                };
+                self.handed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(handed);
+            }
+            answer
+        }
+    }
+
+    struct FInputsOf {
+        inner: Arc<dyn AttemptPlans + Send + Sync>,
+        key: TaskKey,
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AttemptPlans for FInputsOf {
+        fn inputs(
+            &self,
+            request: &crate::engine::topology::attempt::InputsRequest<'_>,
+        ) -> Result<crate::engine::topology::attempt::ReviewInputs, UpstrokeError> {
+            if request.entry.key == self.key {
+                self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.inputs(request)
+        }
+
+        fn pool_for(&self, agent: &str) -> Option<String> {
+            self.inner.pool_for(agent)
+        }
+
+        fn plan(
+            &self,
+            request: &crate::engine::topology::attempt::PlanRequest<'_>,
+        ) -> Result<crate::engine::topology::attempt::AttemptPlan, UpstrokeError> {
+            self.inner.plan(request)
+        }
+
+        fn verification(
+            &self,
+            request: &crate::engine::topology::attempt::VerificationRequest<'_>,
+        ) -> Result<crate::engine::topology::attempt::VerificationPlan, UpstrokeError> {
+            self.inner.verification(request)
+        }
+    }
+
     #[test]
     fn a_refusal_arriving_after_a_halt_is_discarded_unread_and_the_halt_scrubs_its_slot() {
         bounded("f-conc-2", || {
@@ -21063,13 +21175,56 @@ mod tests {
                 ));
             }
             let mut pipelines = wide.env.pipelines();
-            pipelines.input_policy = Arc::new(f_only_beta(f_beta_refusing_after(blocked, release)));
+            pipelines.runner = Arc::new(FAfterBetaBlocks {
+                inner: Arc::clone(&wide.env.runner),
+                blocked: Arc::clone(&blocked),
+            });
+            let handed = Arc::new(std::sync::Mutex::new(Vec::new()));
+            pipelines.input_policy = Arc::new(FBetaRead {
+                inner: f_only_beta(f_beta_refusing_after(Arc::clone(&blocked), release)),
+                common: wide.env.fixture.manager.common_git_dir().to_path_buf(),
+                handed: Arc::clone(&handed),
+            });
+            let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            pipelines.plans = Arc::new(FInputsOf {
+                inner: Arc::clone(&pipelines.plans),
+                key: TaskKey(1),
+                asked: Arc::clone(&asked),
+            });
             let progress = wide
                 .run
                 .run_concurrently(&wide.env.seams(), &pipelines, &mut hooks, None)
                 .expect("the halt's closure ends the run");
             drop(hooks);
             assert_eq!(outcome_of(&progress), RunOutcome::Halted);
+            assert!(
+                *blocked
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                "beta entered its deletion policy"
+            );
+            let handed = handed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                matches!(
+                    handed.as_slice(),
+                    [read] if read.changed
+                        && read.index_gone
+                        && read.answered
+                        && read.not_whole.as_deref().is_some_and(|found| found.contains("index"))
+                ),
+                "beta's policy handed back its checkout damaged (the change written, the index \
+                 gone, the registration not whole), so the check after it refuses: {handed:?}"
+            );
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "beta's pipeline ended at its refused review-input read: it never asked for its \
+                 review inputs"
+            );
             assert!(
                 wide.run.discarded() >= 1,
                 "the refused completion is counted"
