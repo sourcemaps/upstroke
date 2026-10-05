@@ -2942,7 +2942,16 @@ binary run as a child) in a directory named as a gate snapshot, with a spec
 asking for `worktree true` and `PATH` leading to a stand-in `git` script, which
 answers the setting once as the case says and then succeeds, records each
 setting call, and fails every other command (so the role's other checks fail
-and it exits 1, which the test does not read). The record's `worktree-true`
+and it exits 1, which the test does not read). The script reads where it records
+its calls, and the marker of its one answer, from two environment values it
+quotes (`UPSTROKE_W924_CALLS`, `UPSTROKE_W924_ANSWERED`), and `PATH` is joined
+from the paths themselves, so a temporary directory whose path holds a quote, or
+a byte that is not UTF-8, reaches the script as it is; one holding `:`, which no
+`PATH` can name, fails on `join_paths`. (Until the B10 round those paths went
+into the script as display strings inside single quotes, and `PATH` from the
+stand-in directory's display string, so a quote in the temporary path broke the
+script and failed the first case: B-I9-1, the follow-up B record's §9.27.) The
+record's `worktree-true`
 line: `ok` after two calls for another registration's tear; `FAIL` with the
 first answer's standard error after one call for the same line with exit 1,
 from a Git `SIGKILL` ended (no inherited disposition can ignore it), unfinished,

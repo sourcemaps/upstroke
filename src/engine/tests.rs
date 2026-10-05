@@ -11042,17 +11042,15 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
             format!(
                 "#!/bin/sh\n\
                  if [ \"$3 $4 $5 $6\" = 'config --worktree core.useReplaceRefs true' ]; then\n\
-                 \x20 echo probed >> '{calls}'\n\
-                 \x20 if [ ! -e '{answered}' ]; then\n\
-                 \x20   : > '{answered}'\n\
+                 \x20 echo probed >> \"$UPSTROKE_W924_CALLS\"\n\
+                 \x20 if [ ! -e \"$UPSTROKE_W924_ANSWERED\" ]; then\n\
+                 \x20   : > \"$UPSTROKE_W924_ANSWERED\"\n\
                  \x20   printf '{stderr}' >&2\n\
                  \x20   {ending}\n\
                  \x20 fi\n\
                  \x20 exit 0\n\
                  fi\n\
-                 exit 1\n",
-                calls = calls.display(),
-                answered = answered.display(),
+                 exit 1\n"
             ),
         )
         .expect("the case's Git");
@@ -11066,7 +11064,13 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
             ])
             .current_dir(&here)
             .env(ROLE_PROBE, &probe)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("UPSTROKE_W924_CALLS", &calls)
+            .env("UPSTROKE_W924_ANSWERED", &answered)
+            .env(
+                "PATH",
+                std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+                    .expect("a synthetic PATH"),
+            )
             .output()
             .expect("the gate role");
         let records: Vec<_> = fs::read_dir(probe.join("log"))
