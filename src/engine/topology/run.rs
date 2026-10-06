@@ -14,8 +14,8 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, SequenceId,
-    SessionId, TopologyEvent,
+    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, RunStarted4,
+    SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -32,8 +32,8 @@ use super::candidate::{
 };
 use super::closure;
 use super::dispatch::{
-    DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration, dispatch,
-    resume_open_no_attempt, task_slot,
+    DispatchJournal, DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration,
+    dispatch_through, resume_open_no_attempt, task_slot,
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
 use super::finalize;
@@ -47,14 +47,15 @@ use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Entitlements, Spend, Standing, Step, checkpoint, select};
 use super::settle::{
-    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, close_generation,
-    retry, settle_failed,
+    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, WorktreeVerify,
+    close_generation, settle_failed,
 };
 
 pub struct RunEmitter<'a> {
     pub identity: &'a RunIdentity,
     pub state: EmitState<'a>,
     pub clock: &'a dyn TimeSource,
+    pub stopped: Option<&'a str>,
 }
 
 impl EventEmitter for RunEmitter<'_> {
@@ -63,6 +64,11 @@ impl EventEmitter for RunEmitter<'_> {
         body: TopologyEventBody,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), EmitFailure> {
+        if let Some(why) = self.stopped {
+            return Err(EmitFailure::Clean(UpstrokeError::Refused {
+                message: format!("nothing further is appended in this process: {why}"),
+            }));
+        }
         emit(self.identity, &mut self.state, self.clock, body, hooks)?;
         Ok(())
     }
@@ -144,14 +150,518 @@ impl IntegrationJournal for IntegrationCx<'_, '_> {
     }
 }
 
-pub(super) trait Driver {
+pub(super) trait Operator {
     fn parts(&mut self) -> (&mut TopologyRun, &RunSeams<'_>, &mut dyn TopologyHooks);
 
     fn driven(&self) -> &TopologyRun;
 
+    fn registry(&mut self) -> &mut dyn TopologyHooks;
+}
+
+pub(super) trait Driver: Operator {
     fn seams(&self) -> &RunSeams<'_>;
 
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError>;
+}
+
+pub(super) struct Stepping<'a, 's> {
+    pub run: &'a mut TopologyRun,
+    pub seams: &'a RunSeams<'s>,
+    pub hooks: &'a mut dyn TopologyHooks,
+}
+
+impl Operator for Stepping<'_, '_> {
+    fn parts(&mut self) -> (&mut TopologyRun, &RunSeams<'_>, &mut dyn TopologyHooks) {
+        (&mut *self.run, self.seams, &mut *self.hooks)
+    }
+
+    fn driven(&self) -> &TopologyRun {
+        self.run
+    }
+
+    fn registry(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+}
+
+struct OperatorJournal<'o, O: ?Sized>(&'o mut O);
+
+impl<O: Operator + ?Sized> DispatchJournal for OperatorJournal<'_, O> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), EmitFailure> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit_undischarged(body, seams, hooks)
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+}
+
+impl<O: Operator + ?Sized> IntegrationJournal for OperatorJournal<'_, O> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        let (run, seams, hooks) = self.0.parts();
+        run.emit(body, seams, hooks)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.0.driven().fold()
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.0.registry()
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.0.parts().0.convert_integration(key)
+    }
+}
+
+struct PausingRefs<'a, 'h> {
+    manager: &'a WorkspaceManager,
+    hooks: std::cell::Cell<Option<&'h mut dyn crate::workspace_manager::EffectHooks>>,
+}
+
+impl<'a, 'h> PausingRefs<'a, 'h> {
+    fn new(
+        manager: &'a WorkspaceManager,
+        hooks: &'h mut dyn crate::workspace_manager::EffectHooks,
+    ) -> Self {
+        Self {
+            manager,
+            hooks: std::cell::Cell::new(Some(hooks)),
+        }
+    }
+}
+
+impl super::create::IntegrationRefs for PausingRefs<'_, '_> {
+    fn assert_publishable(&self, refname: &str) -> Result<(), UpstrokeError> {
+        let hooks = self.hooks.take().ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "the dispatch's head check asked whether `{refname}` is publishable from inside \
+                 that same check, and its hooks are lent once; nothing was dispatched"
+            ),
+        })?;
+        let checked = self
+            .manager
+            .assert_publishable_pausing(&mut *hooks, refname);
+        self.hooks.set(Some(hooks));
+        checked
+    }
+
+    fn direct_target(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
+        self.manager.direct_ref_target(refname)
+    }
+
+    fn create_zero_old(
+        &self,
+        hooks: &mut dyn crate::workspace_manager::EffectHooks,
+        refname: &str,
+        new: &str,
+    ) -> Result<(), UpstrokeError> {
+        super::create::IntegrationRefs::create_zero_old(self.manager, hooks, refname, new)
+    }
+}
+
+pub(super) fn begin_dispatch<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+    continuing: bool,
+) -> Result<AttemptJob, UpstrokeError> {
+    let dispatched = if continuing {
+        continue_open(operator, manager, key, generation)?
+    } else {
+        dispatch_ready(operator, manager, key, generation)?
+    };
+    let (run, seams, hooks) = operator.parts();
+    run.first_attempt(&dispatched, seams, hooks)
+}
+
+fn dispatch_ready<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Dispatched, UpstrokeError> {
+    let (kind, started, published) = operator.driven().dispatch_inputs(key)?;
+    let base = integrate::dispatch_head(
+        &PausingRefs::new(manager, operator.registry().effects()),
+        &started,
+        &published,
+        key,
+    )?;
+    let request = DispatchRequest {
+        key,
+        generation,
+        base,
+        kind,
+    };
+    operator.parts().0.reserve_dispatch(key)?;
+    let dispatched = dispatch_through(manager, &mut OperatorJournal(&mut *operator), &request);
+    operator.parts().0.dispatch_settled(key, dispatched)
+}
+
+fn continue_open<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Dispatched, UpstrokeError> {
+    let (open, kind) = operator.driven().open_to_continue(key, generation)?;
+    let resumed = resume_open_no_attempt(manager, operator.registry(), &open)?;
+    operator.parts().0.deferral.progressed();
+    Ok(Dispatched {
+        key,
+        generation,
+        base: open.base,
+        worktree: manager.slot_path(&open.slot),
+        slot: open.slot,
+        kind,
+        materialized: resumed.materialized,
+    })
+}
+
+pub(super) fn begin_retry<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<Retrying, UpstrokeError> {
+    let request = {
+        let (run, seams, _) = operator.parts();
+        run.retry_request(key, generation, seams)?
+    };
+    let begun = {
+        let run = operator.parts().0;
+        super::settle::retry_begin(&run.handle.fold, run.broker.halves().0, &request)?
+    };
+    let verified = ManagedWorktrees::new(manager).verify(
+        operator.registry().effects(),
+        &request.slot,
+        &crate::workspace_manager::Quiescence::HoldsTree(request.retained_tree.clone()),
+    );
+    let verified = match verified {
+        Ok(Err(failure)) if super::dispatch::may_follow_a_deletion(&failure) => {
+            match super::dispatch::kept(manager, operator.registry().effects(), &request.slot) {
+                Ok(kept) if kept.is_empty() => Ok(Err(failure)),
+                Ok(kept) => Err(super::dispatch::kept_slot_refusal(
+                    &request.slot,
+                    &format!(
+                        "the retry of retained generation {} of task {key}, whose worktree failed \
+                         verification ({failure})",
+                        generation.0
+                    ),
+                    &kept,
+                    "the retained session's unpinned output",
+                    "the next resume closes the generation and reclaims the slot",
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        other => other,
+    };
+    let outcome = {
+        let run = operator.parts().0;
+        super::settle::retry_end(
+            &run.handle.fold,
+            run.broker.halves().0,
+            &request,
+            begun,
+            verified,
+        )?
+    };
+    match outcome {
+        RetryOutcome::Start(started) => {
+            let (run, seams, hooks) = operator.parts();
+            let job = run.retry_started(generation, *started, &request.slot, seams, hooks)?;
+            Ok(Retrying::Started(Box::new(job)))
+        }
+        RetryOutcome::Close { closed, .. } => {
+            {
+                let (run, seams, hooks) = operator.parts();
+                run.retry_closed(key, closed, seams, hooks)?;
+            }
+            super::dispatch::scrub(manager, operator.registry(), &request.slot)?;
+            Ok(Retrying::Closed { key })
+        }
+    }
+}
+
+pub(super) fn settle_judged<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    job: &AttemptJob,
+    judged: &Judged,
+) -> Result<Progress, UpstrokeError> {
+    let accepted = judged.judgement.accepted();
+    let spent_attempt = settle(
+        operator,
+        manager,
+        job.site(),
+        &job.plan,
+        Produced {
+            capture: &judged.capture,
+            assessed: &judged.assessed,
+            judgement: &judged.judgement,
+        },
+    )?;
+    Ok(Progress::Settled {
+        key: job.key,
+        accepted,
+        spent_attempt,
+    })
+}
+
+fn settle<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    site: AttemptSite<'_>,
+    plan: &super::attempt::AttemptPlan,
+    produced: Produced<'_>,
+) -> Result<bool, UpstrokeError> {
+    let record = crate::engine::classify::attempt_record(
+        plan.attempt.0,
+        crate::engine::classify::AttemptFacts {
+            tier: plan.binding.tier,
+            model: &plan.binding.model,
+            pool: plan.pool.clone(),
+            resumed: plan.resume_session.is_some(),
+            outcome: &produced.assessed.outcome,
+            reviews: &produced.judgement.reviews,
+            failure: produced.judgement.failure.as_ref(),
+            feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,
+        },
+    );
+    let Some(failure) = produced.judgement.failure.as_ref() else {
+        promote_candidate(operator, manager, site, plan, produced.capture, record)?;
+        return Ok(crate::ladder::spends_allowance(None));
+    };
+    let (closed, spent_attempt) = {
+        let (run, seams, hooks) = operator.parts();
+        run.settle_failure(site, plan, produced, record, failure, seams, hooks)?
+    };
+    if closed {
+        super::dispatch::scrub(manager, operator.registry(), site.slot)?;
+    }
+    Ok(spent_attempt)
+}
+
+fn promote_candidate<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    site: AttemptSite<'_>,
+    plan: &super::attempt::AttemptPlan,
+    capture: &super::attempt::Capture,
+    record: AttemptRecord,
+) -> Result<(), UpstrokeError> {
+    let actual_paths =
+        manager.changed_paths_pausing(operator.registry().effects(), site.slot, &capture.parent)?;
+    let (judged, run_id) =
+        operator
+            .driven()
+            .judged_tree(site, plan, capture, &record, actual_paths)?;
+    let unpinned = write_candidate_commit(manager, operator.registry(), &run_id, judged)?;
+    let pinned = pin_candidate(manager, operator.registry(), unpinned)?;
+    operator.parts().0.record_promoted(site.key, &record);
+    let promoting = {
+        let (run, seams, hooks) = operator.parts();
+        run.with_journal(seams, hooks, |journal| {
+            append_candidate_prepared(journal, pinned)
+        })?
+    };
+    let referenced = create_candidates_ref(manager, operator.registry(), promoting)?;
+    let created = {
+        let (run, seams, hooks) = operator.parts();
+        run.with_journal(seams, hooks, |journal| {
+            append_candidate_created(journal, referenced)
+        })?
+    };
+    reclaim_after_creation(manager, operator.registry(), site.slot, created)?;
+    Ok(())
+}
+
+pub(super) fn hard_block<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    questions: &[QuestionId],
+) -> Result<Progress, UpstrokeError> {
+    for id in questions {
+        let asked = operator.driven().open_question(id)?;
+        let answer = match seams.answers.resolve(&asked.question)? {
+            Answer::Unanswered => continue,
+            answer => answer,
+        };
+        let answer4 = operator.driven().answer_for(id, &asked, answer, seams)?;
+        let (run, seams, hooks) = operator.parts();
+        return run.ingest_answer(id, asked.key, answer4, seams, hooks);
+    }
+    close_run(operator, seams, &closure::Cancelled::none())
+}
+
+pub(super) fn close_run<O: Operator + ?Sized>(
+    operator: &mut O,
+    seams: &RunSeams<'_>,
+    cancelled: &closure::Cancelled,
+) -> Result<Progress, UpstrokeError> {
+    let manager = seams.manager;
+    let (outcome, interrupted) = {
+        let fold = operator.driven().fold();
+        let outcome = closure::ending_outcome(fold)?;
+        let interrupted = closure::settleable(fold, &outcome, cancelled)?;
+        (outcome, interrupted)
+    };
+    for interrupted in interrupted {
+        {
+            let (run, seams, hooks) = operator.parts();
+            run.emit(interrupted.interrupted(), seams, hooks)?;
+        }
+        reclaim_interrupted(operator, manager, &interrupted)?;
+    }
+    complete_promotions(operator, manager)?;
+    complete_publication(operator, manager)?;
+
+    let reason = GenerationCloseReason::RunEnding {
+        outcome: outcome.clone(),
+    };
+    let mut closed = 0;
+    for key in closure::closable(operator.driven().fold()) {
+        let slot = {
+            let (run, seams, hooks) = operator.parts();
+            let event = close_generation(run.fold(), key, reason.clone())?;
+            let slot = task_slot(key, event.generation);
+            run.emit(
+                TopologyEventBody::GenerationClosed { data: event },
+                seams,
+                hooks,
+            )?;
+            run.retained.remove(&key);
+            slot
+        };
+        super::dispatch::scrub(manager, operator.registry(), &slot)?;
+        closed += 1;
+    }
+
+    {
+        let run = operator.parts().0;
+        if run.broker.halves().0.cancel_any() {
+            run.warnings.push(
+                "run-end closure found a provisional reservation still held and cancelled it"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let (fold, events, run_id) = {
+        let (run, seams, hooks) = operator.parts();
+        closure::confirm_derived(run.fold(), &outcome)?;
+        let finished = closure::run_finished(run.fold(), outcome.clone());
+        run.emit(
+            TopologyEventBody::RunFinished { data: finished },
+            seams,
+            hooks,
+        )?;
+        run.finished_record()
+    };
+    let finalized = finalize::finalize(
+        &finalize::Finalize {
+            manager,
+            public: &seams.paths.public,
+            private: &seams.paths.private,
+            run_id: &run_id,
+            fold: &fold,
+            events: &events,
+        },
+        operator.registry(),
+    )?;
+    Ok(Progress::Finished {
+        outcome,
+        closed,
+        report_written: finalized.report_written,
+        execution_root_removed: finalized.execution_root_removed,
+    })
+}
+
+fn reclaim_interrupted<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+    interrupted: &closure::InFlight,
+) -> Result<(), UpstrokeError> {
+    match interrupted {
+        closure::InFlight::Attempt {
+            key,
+            generation,
+            attempt,
+            ..
+        } => {
+            operator.parts().0.retained.remove(key);
+            reclaim_snapshots_of(
+                manager,
+                operator.registry(),
+                JudgeNames::Attempt {
+                    key: key.0,
+                    generation: generation.0,
+                    attempt: attempt.0,
+                },
+            )?;
+            super::dispatch::scrub(manager, operator.registry(), &task_slot(*key, *generation))
+        }
+        closure::InFlight::Verification { sequence, pin, .. } => {
+            let hooks = operator.registry();
+            if let Some((pin, proposed)) = pin {
+                integrate::prune_pin(hooks, manager, pin, proposed)?;
+            }
+            let staging = integrate::staging_slot(*sequence);
+            manager.remove_worktree(hooks.effects(), &staging)?;
+            manager.remove_intent(hooks.effects(), &staging)?;
+            reclaim_snapshots_of(
+                manager,
+                hooks,
+                JudgeNames::Integration {
+                    sequence: u64::from(sequence.0),
+                },
+            )
+        }
+    }
+}
+
+fn complete_promotions<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let (run_id, promoting) = {
+        let run = operator.driven();
+        (run.identity.run_id.clone(), closure::promoting(run.fold()))
+    };
+    for key in promoting {
+        let Some(promoting) =
+            super::candidate::recovery_for(manager, &run_id, operator.driven().fold(), key)?
+                .promotion
+        else {
+            continue;
+        };
+        let slot = task_slot(key, promoting.candidate().generation);
+        let referenced = create_candidates_ref(manager, operator.registry(), promoting)?;
+        let created = {
+            let (run, seams, hooks) = operator.parts();
+            run.with_journal(seams, hooks, |journal| {
+                append_candidate_created(journal, referenced)
+            })?
+        };
+        reclaim_after_creation(manager, operator.registry(), &slot, created)?;
+    }
+    Ok(())
+}
+
+fn complete_publication<O: Operator + ?Sized>(
+    operator: &mut O,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    let Some(authorized) = integrate::Authorized::from_fold(operator.driven().fold())? else {
+        return Ok(());
+    };
+    integrate::publish(&mut OperatorJournal(operator), manager, authorized)?;
+    Ok(())
 }
 
 pub(super) struct DrivenJournal<'d, D: ?Sized>(pub &'d mut D);
@@ -167,7 +677,7 @@ impl<D: Driver + ?Sized> IntegrationJournal for DrivenJournal<'_, D> {
     }
 
     fn hooks(&mut self) -> &mut dyn TopologyHooks {
-        self.0.parts().2
+        self.0.registry()
     }
 
     fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
@@ -384,10 +894,14 @@ pub fn verification_body(
                         })
                     })?;
                 let staging = work.manager.slot_path(&job.staging);
-                work.input_policy
-                    .problem(&staging, &tree)
-                    .map_err(JudgeError::Other)?
-                    .map(crate::engine::classify::review_input_failure)
+                super::dispatch::read_in_whole_checkout(
+                    work.manager,
+                    &staging,
+                    "the verification's review-input read",
+                    work.input_policy.problem(&staging, &tree),
+                )
+                .map_err(JudgeError::Other)?
+                .map(crate::engine::classify::review_input_failure)
             }
         };
 
@@ -719,6 +1233,7 @@ pub struct TopologyRun {
     deferral: Deferral,
     retained: BTreeMap<TaskKey, Retained>,
     brief: Brief,
+    stopped: Option<String>,
 }
 
 impl TopologyRun {
@@ -743,6 +1258,7 @@ impl TopologyRun {
             deferral: Deferral::default_backoff(),
             retained: BTreeMap::new(),
             brief,
+            stopped: None,
         }
     }
 
@@ -793,6 +1309,20 @@ impl TopologyRun {
         self.warnings.push(warning);
     }
 
+    pub(super) fn stop(&mut self, why: String) {
+        if self.stopped.is_none() {
+            self.stopped = Some(why);
+        }
+    }
+
+    pub(super) fn reopen(&mut self) {
+        self.stopped = None;
+    }
+
+    pub(super) fn stopped(&self) -> Option<&str> {
+        self.stopped.as_deref()
+    }
+
     #[must_use]
     pub fn entitlements_held(&self) -> u32 {
         self.broker.reservations().entitlements_held()
@@ -834,13 +1364,16 @@ impl TopologyRun {
             Admitted::Integrate { candidate } => self.integrate(*candidate, seams, hooks),
             Admitted::Retry {
                 key, generation, ..
-            } => match self.begin_retry(key, generation, seams, hooks)? {
-                Retrying::Started(job) => {
-                    let judged = self.judge_inline(&job, seams, hooks)?;
-                    self.settle_judged(&job, &judged, seams, hooks)
+            } => {
+                let manager = seams.manager;
+                match begin_retry(&mut self.stepping(seams, hooks), manager, key, generation)? {
+                    Retrying::Started(job) => {
+                        let judged = self.judge_inline(&job, seams, hooks)?;
+                        settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)
+                    }
+                    Retrying::Closed { key } => Ok(Progress::GenerationClosed { key }),
                 }
-                Retrying::Closed { key } => Ok(Progress::GenerationClosed { key }),
-            },
+            }
             Admitted::Dispatch {
                 key,
                 generation,
@@ -851,12 +1384,37 @@ impl TopologyRun {
                 generation,
                 continuing,
             } => {
-                let job = self.begin_dispatch(key, generation, continuing, seams, hooks)?;
+                let manager = seams.manager;
+                let job = begin_dispatch(
+                    &mut self.stepping(seams, hooks),
+                    manager,
+                    key,
+                    generation,
+                    continuing,
+                )?;
                 let judged = self.judge_inline(&job, seams, hooks)?;
-                self.settle_judged(&job, &judged, seams, hooks)
+                settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)
             }
-            Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
-            Admitted::Closure(_) => self.close_run(&closure::Cancelled::none(), seams, hooks),
+            Admitted::HardBlock { questions } => {
+                hard_block(&mut self.stepping(seams, hooks), seams, &questions)
+            }
+            Admitted::Closure(_) => close_run(
+                &mut self.stepping(seams, hooks),
+                seams,
+                &closure::Cancelled::none(),
+            ),
+        }
+    }
+
+    fn stepping<'a, 's>(
+        &'a mut self,
+        seams: &'a RunSeams<'s>,
+        hooks: &'a mut dyn TopologyHooks,
+    ) -> Stepping<'a, 's> {
+        Stepping {
+            run: self,
+            seams,
+            hooks,
         }
     }
 
@@ -897,19 +1455,13 @@ impl TopologyRun {
         Ok(Progress::Waited { waited_ms, round })
     }
 
-    pub(super) fn begin_dispatch(
+    fn first_attempt(
         &mut self,
-        key: TaskKey,
-        generation: GenerationId,
-        continuing: bool,
+        dispatched: &Dispatched,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<AttemptJob, UpstrokeError> {
-        let dispatched = if continuing {
-            self.continue_open(key, generation, seams, hooks)?
-        } else {
-            self.dispatch_ready(key, generation, seams, hooks)?
-        };
+        let key = dispatched.key;
         let run_as = RunAs {
             attempt: Self::FIRST_ATTEMPT,
             rung: self.ladder_position(key)?.0,
@@ -947,32 +1499,6 @@ impl TopologyRun {
         attempt_body(&mut work, job)
     }
 
-    pub(super) fn settle_judged(
-        &mut self,
-        job: &AttemptJob,
-        judged: &Judged,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        let accepted = judged.judgement.accepted();
-        let spent_attempt = self.settle(
-            job.site(),
-            &job.plan,
-            Produced {
-                capture: &judged.capture,
-                assessed: &judged.assessed,
-                judgement: &judged.judgement,
-            },
-            seams,
-            hooks,
-        )?;
-        Ok(Progress::Settled {
-            key: job.key,
-            accepted,
-            spent_attempt,
-        })
-    }
-
     pub(super) fn ingest_answers(
         &mut self,
         seams: &RunSeams<'_>,
@@ -1001,37 +1527,37 @@ impl TopologyRun {
         Ok(None)
     }
 
-    fn dispatch_ready(
-        &mut self,
+    fn dispatch_inputs(
+        &self,
         key: TaskKey,
-        generation: GenerationId,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Dispatched, UpstrokeError> {
-        let request = self.dispatch_request(key, generation, seams)?;
+    ) -> Result<(DispatchKind, RunStarted4, Vec<TopologyEvent>), UpstrokeError> {
+        let kind = self.dispatch_kind(key)?;
+        let published = self
+            .handle
+            .events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.body, TopologyEventBody::TaskMerged { .. }))
+            .cloned()
+            .into_iter()
+            .collect();
+        Ok((kind, self.handle.started.clone(), published))
+    }
 
+    fn reserve_dispatch(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
         self.broker.reserve(
             &Entitlements::of(&self.handle.fold),
             key,
             ReservationKind::Dispatch,
-        )?;
+        )
+    }
 
+    fn dispatch_settled(
+        &mut self,
+        key: TaskKey,
+        dispatched: Result<Dispatched, EmitFailure>,
+    ) -> Result<Dispatched, UpstrokeError> {
         let (reservations, invocations) = self.broker.halves();
-        let dispatched = {
-            let mut emitter = RunEmitter {
-                identity: &self.identity,
-                state: EmitState {
-                    fold: &mut self.handle.fold,
-                    log: &mut self.handle.log,
-                    events: &mut self.handle.events,
-                    reservations: &mut *reservations,
-                    warnings: &mut self.warnings,
-                },
-                clock: seams.clock,
-            };
-            dispatch(seams.manager, hooks, &mut emitter, &request)
-        };
-
         match dispatched {
             Ok(dispatched) => {
                 reservations.convert(key, ReservationKind::Dispatch)?;
@@ -1068,6 +1594,7 @@ impl TopologyRun {
                         warnings: &mut self.warnings,
                     },
                     clock: seams.clock,
+                    stopped: self.stopped.as_deref(),
                 },
                 hooks,
                 invocations,
@@ -1163,24 +1690,6 @@ impl TopologyRun {
         }
         self.broker = PermitBroker::for_pipelines(limits);
         Ok(())
-    }
-
-    pub(super) fn hard_block(
-        &mut self,
-        questions: &[QuestionId],
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        for id in questions {
-            let asked = self.open_question(id)?;
-            let answer = match seams.answers.resolve(&asked.question)? {
-                Answer::Unanswered => continue,
-                answer => answer,
-            };
-            let answer4 = self.answer_for(id, &asked, answer, seams)?;
-            return self.ingest_answer(id, asked.key, answer4, seams, hooks);
-        }
-        self.close_run(&closure::Cancelled::none(), seams, hooks)
     }
 
     fn answer_for(
@@ -1306,13 +1815,11 @@ impl TopologyRun {
         })
     }
 
-    fn continue_open(
-        &mut self,
+    fn open_to_continue(
+        &self,
         key: TaskKey,
         generation: GenerationId,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Dispatched, UpstrokeError> {
+    ) -> Result<(OpenGeneration, DispatchKind), UpstrokeError> {
         let base = self
             .handle
             .fold
@@ -1333,37 +1840,25 @@ impl TopologyRun {
                 source: dispatched_source(&self.handle.events, key, generation)?,
             },
         };
-        let slot = task_slot(key, generation);
         let open = OpenGeneration {
             key,
             generation,
-            base: base.clone(),
-            slot: slot.clone(),
+            base,
+            slot: task_slot(key, generation),
             source: match &kind {
                 DispatchKind::Ordinary { .. } => None,
                 DispatchKind::Repair { source, .. } => Some(source.clone()),
             },
         };
-        let resumed = resume_open_no_attempt(seams.manager, hooks, &open)?;
-        self.deferral.progressed();
-        Ok(Dispatched {
-            key,
-            generation,
-            base,
-            worktree: seams.manager.slot_path(&slot),
-            slot,
-            kind,
-            materialized: resumed.materialized,
-        })
+        Ok((open, kind))
     }
 
-    pub(super) fn begin_retry(
-        &mut self,
+    fn retry_request(
+        &self,
         key: TaskKey,
         generation: GenerationId,
         seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Retrying, UpstrokeError> {
+    ) -> Result<RetryRequest, UpstrokeError> {
         let position = self.ladder_position(key)?;
         let held = self
             .retained
@@ -1389,229 +1884,90 @@ impl TopologyRun {
                     position.0
                 ),
             })?;
-        let slot_for_run = task_slot(key, generation);
-        let slot = slot_for_run.clone();
         let pool = seams.plans.pool_for(&binding.agent);
         let materialization = self.retry_materialization(key);
-
-        let outcome = {
-            let worktrees = ManagedWorktrees::new(seams.manager);
-            retry(
-                &self.handle.fold,
-                self.broker.halves().0,
-                &worktrees,
-                hooks.effects(),
-                &RetryRequest {
-                    key,
-                    slot,
-                    retained_tree: held.tree.clone(),
-                    binding,
-                    rung: position.0,
-                    pool: pool.clone(),
-                    materialization,
-                },
-            )?
-        };
-
-        match outcome {
-            RetryOutcome::Start(started) => {
-                let run_as = RunAs {
-                    attempt: started.attempt,
-                    rung: started.rung,
-                    resume_session: started.resume_session.clone(),
-                    feedback: self.brief.lines(key),
-                    announced: true,
-                    materialized: started.materialization_observed,
-                };
-                self.emit(
-                    TopologyEventBody::AttemptStarted { data: *started },
-                    seams,
-                    hooks,
-                )?;
-                self.broker.convert(key, ReservationKind::Retry)?;
-                self.deferral.progressed();
-
-                let base = self
-                    .handle
-                    .fold
-                    .task(key)
-                    .and_then(|task| task.generations.iter().find(|held| held.id == generation))
-                    .map(|held| held.base_sha.clone())
-                    .ok_or_else(|| UpstrokeError::Refused {
-                        message: format!(
-                            "generation {} of task {} left the fold mid-retry",
-                            generation.0,
-                            key.index()
-                        ),
-                    })?;
-                let worktree = seams.manager.slot_path(&slot_for_run);
-                let site = AttemptSite {
-                    key,
-                    generation,
-                    base: &base,
-                    slot: &slot_for_run,
-                    worktree: &worktree,
-                };
-                Ok(Retrying::Started(Box::new(
-                    self.prepare_attempt(site, run_as, seams, hooks)?,
-                )))
-            }
-            RetryOutcome::Close { closed, .. } => {
-                self.emit(
-                    TopologyEventBody::GenerationClosed { data: closed },
-                    seams,
-                    hooks,
-                )?;
-                self.retained.remove(&key);
-                super::dispatch::scrub(seams.manager, hooks, &slot_for_run)?;
-                Ok(Retrying::Closed { key })
-            }
-        }
-    }
-
-    pub(super) fn close_run(
-        &mut self,
-        cancelled: &closure::Cancelled,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        let outcome = closure::ending_outcome(&self.handle.fold)?;
-        for interrupted in closure::settleable(&self.handle.fold, &outcome, cancelled)? {
-            self.emit(interrupted.interrupted(), seams, hooks)?;
-            self.reclaim_interrupted(&interrupted, seams, hooks)?;
-        }
-        self.complete_promotions(seams, hooks)?;
-        self.complete_publication(seams, hooks)?;
-
-        let reason = GenerationCloseReason::RunEnding {
-            outcome: outcome.clone(),
-        };
-        let mut closed = 0;
-        for key in closure::closable(&self.handle.fold) {
-            let event = close_generation(&self.handle.fold, key, reason.clone())?;
-            let slot = task_slot(key, event.generation);
-            self.emit(
-                TopologyEventBody::GenerationClosed { data: event },
-                seams,
-                hooks,
-            )?;
-            self.retained.remove(&key);
-            super::dispatch::scrub(seams.manager, hooks, &slot)?;
-            closed += 1;
-        }
-
-        if self.broker.halves().0.cancel_any() {
-            self.warnings.push(
-                "run-end closure found a provisional reservation still held and cancelled it"
-                    .to_owned(),
-            );
-        }
-
-        closure::confirm_derived(&self.handle.fold, &outcome)?;
-        let finished = closure::run_finished(&self.handle.fold, outcome.clone());
-        self.emit(
-            TopologyEventBody::RunFinished { data: finished },
-            seams,
-            hooks,
-        )?;
-
-        let finalized = finalize::finalize(
-            &finalize::Finalize {
-                manager: seams.manager,
-                public: &seams.paths.public,
-                private: &seams.paths.private,
-                run_id: &self.identity.run_id,
-                fold: &self.handle.fold,
-                events: &self.handle.events,
-            },
-            hooks,
-        )?;
-        Ok(Progress::Finished {
-            outcome,
-            closed,
-            report_written: finalized.report_written,
-            execution_root_removed: finalized.execution_root_removed,
+        Ok(RetryRequest {
+            key,
+            slot: task_slot(key, generation),
+            retained_tree: held.tree,
+            binding,
+            rung: position.0,
+            pool,
+            materialization,
         })
     }
 
-    fn reclaim_interrupted(
+    fn retry_started(
         &mut self,
-        interrupted: &closure::InFlight,
+        generation: GenerationId,
+        started: crate::topology::events::AttemptStarted4,
+        slot_for_run: &crate::workspace_manager::Slot,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        match interrupted {
-            closure::InFlight::Attempt {
-                key,
-                generation,
-                attempt,
-                ..
-            } => {
-                self.retained.remove(key);
-                reclaim_snapshots_of(
-                    seams.manager,
-                    hooks,
-                    JudgeNames::Attempt {
-                        key: key.0,
-                        generation: generation.0,
-                        attempt: attempt.0,
-                    },
-                )?;
-                super::dispatch::scrub(seams.manager, hooks, &task_slot(*key, *generation))
-            }
-            closure::InFlight::Verification { sequence, pin, .. } => {
-                if let Some((pin, proposed)) = pin {
-                    integrate::prune_pin(hooks, seams.manager, pin, proposed)?;
-                }
-                let staging = integrate::staging_slot(*sequence);
-                seams.manager.remove_worktree(hooks.effects(), &staging)?;
-                seams.manager.remove_intent(hooks.effects(), &staging)?;
-                reclaim_snapshots_of(
-                    seams.manager,
-                    hooks,
-                    JudgeNames::Integration {
-                        sequence: u64::from(sequence.0),
-                    },
-                )
-            }
-        }
-    }
-
-    fn complete_promotions(
-        &mut self,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        let run_id = self.identity.run_id.clone();
-        for key in closure::promoting(&self.handle.fold) {
-            let Some(promoting) =
-                super::candidate::recovery_for(seams.manager, &run_id, &self.handle.fold, key)?
-                    .promotion
-            else {
-                continue;
-            };
-            let slot = task_slot(key, promoting.candidate().generation);
-            let referenced = create_candidates_ref(seams.manager, hooks, promoting)?;
-            let created = self.with_journal(seams, hooks, |journal| {
-                append_candidate_created(journal, referenced)
-            })?;
-            reclaim_after_creation(seams.manager, hooks, &slot, created)?;
-        }
-        Ok(())
-    }
-
-    fn complete_publication(
-        &mut self,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
-        let Some(authorized) = integrate::Authorized::from_fold(&self.handle.fold)? else {
-            return Ok(());
+    ) -> Result<AttemptJob, UpstrokeError> {
+        let key = started.key;
+        let run_as = RunAs {
+            attempt: started.attempt,
+            rung: started.rung,
+            resume_session: started.resume_session.clone(),
+            feedback: self.brief.lines(key),
+            announced: true,
+            materialized: started.materialization_observed,
         };
-        self.with_journal(seams, hooks, |journal| {
-            integrate::publish(journal, seams.manager, authorized)
-        })?;
+        self.emit(
+            TopologyEventBody::AttemptStarted { data: started },
+            seams,
+            hooks,
+        )?;
+        self.broker.convert(key, ReservationKind::Retry)?;
+        self.deferral.progressed();
+
+        let base = self
+            .handle
+            .fold
+            .task(key)
+            .and_then(|task| task.generations.iter().find(|held| held.id == generation))
+            .map(|held| held.base_sha.clone())
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "generation {} of task {} left the fold mid-retry",
+                    generation.0,
+                    key.index()
+                ),
+            })?;
+        let worktree = seams.manager.slot_path(slot_for_run);
+        let site = AttemptSite {
+            key,
+            generation,
+            base: &base,
+            slot: slot_for_run,
+            worktree: &worktree,
+        };
+        self.prepare_attempt(site, run_as, seams, hooks)
+    }
+
+    fn retry_closed(
+        &mut self,
+        key: TaskKey,
+        closed: crate::topology::events::GenerationClosed,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), UpstrokeError> {
+        self.emit(
+            TopologyEventBody::GenerationClosed { data: closed },
+            seams,
+            hooks,
+        )?;
+        self.retained.remove(&key);
         Ok(())
+    }
+
+    fn finished_record(&self) -> (TopologyFold, Vec<TopologyEvent>, String) {
+        (
+            self.handle.fold.clone(),
+            self.handle.events.clone(),
+            self.identity.run_id.clone(),
+        )
     }
 
     fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {
@@ -1681,6 +2037,7 @@ impl TopologyRun {
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
+                stopped: self.stopped.as_deref(),
             };
             AttemptContext {
                 manager: seams.manager,
@@ -1706,38 +2063,25 @@ impl TopologyRun {
         })
     }
 
-    fn settle(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run's side of a failed settlement takes the attempt's site, plan, \
+                  products, record and failure, and the run's seams and hooks; the closed \
+                  slot's scrub stays with the caller, which holds the operator"
+    )]
+    fn settle_failure(
         &mut self,
         site: AttemptSite<'_>,
         plan: &super::attempt::AttemptPlan,
         produced: Produced<'_>,
+        record: AttemptRecord,
+        failure: &crate::ladder::AttemptFailure,
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
-    ) -> Result<bool, UpstrokeError> {
+    ) -> Result<(bool, bool), UpstrokeError> {
         let Produced {
-            capture,
-            assessed,
-            judgement,
+            capture, assessed, ..
         } = produced;
-        let record = crate::engine::classify::attempt_record(
-            plan.attempt.0,
-            crate::engine::classify::AttemptFacts {
-                tier: plan.binding.tier,
-                model: &plan.binding.model,
-                pool: plan.pool.clone(),
-                resumed: plan.resume_session.is_some(),
-                outcome: &assessed.outcome,
-                reviews: &judgement.reviews,
-                failure: judgement.failure.as_ref(),
-                feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,
-            },
-        );
-
-        let Some(failure) = judgement.failure.as_ref() else {
-            self.promote_candidate(site, plan, capture, record, seams, hooks)?;
-            return Ok(crate::ladder::spends_allowance(None));
-        };
-
         let policy = self.ladder_policy(site.key)?;
 
         let defers = self.deferrals_recorded(site.key)?;
@@ -1810,24 +2154,18 @@ impl TopologyRun {
             seams,
             hooks,
         )?;
-        if closed {
-            super::dispatch::scrub(seams.manager, hooks, site.slot)?;
-        }
-        Ok(settled.spent_attempt)
+        Ok((closed, settled.spent_attempt))
     }
 
-    fn promote_candidate(
-        &mut self,
+    fn judged_tree(
+        &self,
         site: AttemptSite<'_>,
         plan: &super::attempt::AttemptPlan,
         capture: &super::attempt::Capture,
-        record: AttemptRecord,
-        seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<(), UpstrokeError> {
+        record: &AttemptRecord,
+        actual_paths: crate::topology::paths::PathSet,
+    ) -> Result<(JudgedTree, String), UpstrokeError> {
         let key = site.key;
-        let actual_paths = seams.manager.changed_paths(site.slot, &capture.parent)?;
-
         let judged = JudgedTree {
             key,
             generation: site.generation,
@@ -1850,23 +2188,12 @@ impl TopologyRun {
                 },
             },
         };
+        Ok((judged, self.identity.run_id.clone()))
+    }
 
-        let run_id = self.identity.run_id.clone();
-        let unpinned = write_candidate_commit(seams.manager, hooks, &run_id, judged)?;
-        let pinned = pin_candidate(seams.manager, hooks, unpinned)?;
-
-        self.spend.record(key, &record);
-        self.brief.record(key, &record);
-
-        let promoting = self.with_journal(seams, hooks, |journal| {
-            append_candidate_prepared(journal, pinned)
-        })?;
-        let referenced = create_candidates_ref(seams.manager, hooks, promoting)?;
-        let created = self.with_journal(seams, hooks, |journal| {
-            append_candidate_created(journal, referenced)
-        })?;
-        reclaim_after_creation(seams.manager, hooks, site.slot, created)?;
-        Ok(())
+    fn record_promoted(&mut self, key: TaskKey, record: &AttemptRecord) {
+        self.spend.record(key, record);
+        self.brief.record(key, record);
     }
 
     fn with_journal<T>(
@@ -1887,6 +2214,7 @@ impl TopologyRun {
                     warnings: &mut self.warnings,
                 },
                 clock: seams.clock,
+                stopped: self.stopped.as_deref(),
             },
             hooks,
             invocations,
@@ -2016,27 +2344,6 @@ impl TopologyRun {
             .map(|lineage| lineage.root)
     }
 
-    fn dispatch_request(
-        &self,
-        key: TaskKey,
-        generation: GenerationId,
-        seams: &RunSeams<'_>,
-    ) -> Result<DispatchRequest, UpstrokeError> {
-        let kind = self.dispatch_kind(key)?;
-        let base = integrate::dispatch_head(
-            seams.manager,
-            &self.handle.started,
-            &self.handle.events,
-            key,
-        )?;
-        Ok(DispatchRequest {
-            key,
-            generation,
-            base,
-            kind,
-        })
-    }
-
     fn dispatch_kind(&self, key: TaskKey) -> Result<DispatchKind, UpstrokeError> {
         let entry = self
             .handle
@@ -2072,21 +2379,29 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<(), UpstrokeError> {
-        let (reservations, invocations) = self.broker.halves();
+        self.emit_undischarged(body, seams, hooks)
+            .map_err(|failure| failure.discharging(self.broker.halves().1))
+    }
+
+    fn emit_undischarged(
+        &mut self,
+        body: TopologyEventBody,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), EmitFailure> {
         let mut emitter = RunEmitter {
             identity: &self.identity,
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
                 events: &mut self.handle.events,
-                reservations,
+                reservations: self.broker.halves().0,
                 warnings: &mut self.warnings,
             },
             clock: seams.clock,
+            stopped: self.stopped.as_deref(),
         };
-        emitter
-            .emit(body, hooks)
-            .map_err(|failure| failure.discharging(invocations))
+        emitter.emit(body, hooks)
     }
 }
 
@@ -2095,7 +2410,7 @@ fn reclaim_snapshots_of(
     hooks: &mut dyn TopologyHooks,
     names: JudgeNames,
 ) -> Result<(), UpstrokeError> {
-    for slot in manager.intents()? {
+    for slot in manager.intents_pausing(hooks.effects())? {
         let crate::workspace_manager::Slot::Snapshot { name } = &slot else {
             continue;
         };

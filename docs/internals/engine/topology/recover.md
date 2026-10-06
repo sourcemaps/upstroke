@@ -1879,6 +1879,21 @@ is not touched, so a resume with nothing to reclaim executes no
 scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
 alike. Task slots only: staging and snapshot residue have their own steps.
 
+## `fn reclaim_closed_generations(` › `crate::engine::topology::dispatch::refuse_kept_slot(`
+
+**PROPOSED RULING P-1's one statement** (the decision appendix §3.2;
+conditional on the owner's adoption of O2(a), of P-1, and of erratum E-G6-1's
+third bullet under O12(a), which admits this hunk and its appended tests into
+G6's module diff proof, bound to the merge SHA of the change that makes them).
+Immediately before the scrub of a closed generation's slot, the non-frozen
+guard `dispatch::refuse_kept_slot` refuses, removing nothing, while an
+instance of the slot holds anything and its worktree registration is not
+whole; its refusal leaves recovery through `?`, before step (f), the
+promotions, step (g) and `run_resumed`, and recovery's earlier appends — steps
+(d) and (e) and every reclaim before it in the loop — stand. `generation` is
+the loop's closed generation, whose recorded base the guard's message names.
+Nothing else in this module changes.
+
 ## `pub fn run_resumed(`
 
 (h) `run_resumed(4)` — and the step that **consumes** the pre-flight

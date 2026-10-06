@@ -1151,6 +1151,13 @@ A sleeper that returns at once, so a backoff costs a test nothing.
 One task of a width-N plan: its id, its conflict hints, what it depends on and
 the file its worker writes.
 
+## `impl WideTask` › `pub(super) fn deleting_every_tracked_file(id: &'static str) -> Self {`
+
+A task whose worker removes every file the checkout tracks and writes nothing: the
+external-prune follow-up's T-C1-CLS-RUN merges such a task first, so the integration head's
+tree is empty and a later task's change to a tracked file is a modify/delete conflict at its
+stale pick. Plain removal is enough; the capture's `add -A` stages the deletions.
+
 ## `pub(super) fn wide_plan(tasks: &[WideTask]) -> Plan {`
 
 The plan the tasks describe, built directly rather than parsed: each task's
@@ -1186,6 +1193,12 @@ is listed as failing; every other process exits 0.
 
 [`wide_responder`], with the workers of the listed task keys asking a
 question instead of working.
+
+## `pub(super) fn wide_responder_asking(` › `if deleting.get(key.0 as usize).copied().unwrap_or(false) =>`
+
+The deleting worker (`WideTask::deleting_every_tracked_file`): it lists the checkout's tracked
+files through Git and removes each through the fixture's funnel, as every scaffold worker writes
+through `write_file`.
 
 ## `pub(super) struct WideEnv {`
 

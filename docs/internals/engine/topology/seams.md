@@ -288,6 +288,15 @@ which no durable-log assertion can pin.
 
 Production: ULIDs and the real process id.
 
+The incarnation is `crate::ulid::incarnation_ulid`, not `ulid`: its 80-bit field
+also hashes 128 bits the process draws from the host, because every slot
+instance a manager creates is named by a hash of its incarnation, and an id
+that two processes could draw equal — two PID namespaces, or two machines
+sharing a checkout, with equal clock, pid and counter — would hand one
+incarnation's slots to another (PR11 follow-up C,
+`reviews/2026-10-02-pr11-follow-up-c-record.md`, §4.2). A test's `Fixed` ids
+stay fixed, so the frozen tests' tags are deterministic.
+
 ## `mod tests` › `pub(crate) struct Fixed {`
 
 A fixed clock and fixed identities, so a durable byte can be asserted
@@ -336,6 +345,12 @@ observation in `coverage`, which is the ledger `check_bijection` reads.
 
 The production clock produces a timestamp the wire format accepts, and
 the fixed one produces exactly what it was given.
+
+## `mod tests` › `fn the_production_incarnation_is_the_host_drawn_construction() {`
+
+T-ID3: the production incarnation is exactly the host-drawn construction of what
+`incarnation_ulid` sampled, rebuilt from its observation seam. A wrapper that
+went back to `ulid` reaches no incarnation seam and fails here.
 
 ## `mod tests` › `fn an_id_source_mints_fresh_identities_and_a_fixed_one_does_not() {`
 

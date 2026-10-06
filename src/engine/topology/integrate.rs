@@ -332,8 +332,16 @@ pub fn decide(
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
 ) -> Result<Decided, UpstrokeError> {
+    decide_pausing(&mut crate::workspace_manager::NoHooks, manager, request)
+}
+
+fn decide_pausing(
+    hooks: &mut dyn crate::workspace_manager::EffectHooks,
+    manager: &WorkspaceManager,
+    request: &IntegrationRequest,
+) -> Result<Decided, UpstrokeError> {
     let refname = request.integration_ref.as_str();
-    manager.assert_publishable(refname)?;
+    manager.assert_publishable_pausing(hooks, refname)?;
     let head =
         manager
             .direct_ref_target(refname)?
@@ -461,7 +469,7 @@ pub fn publish(
     authorized: Authorized,
 ) -> Result<Published, UpstrokeError> {
     let refname = authorized.integration_ref.as_str();
-    manager.assert_publishable(refname)?;
+    manager.assert_publishable_pausing(journal.hooks().effects(), refname)?;
     let found =
         manager
             .direct_ref_target(refname)?
@@ -542,7 +550,7 @@ pub fn integrate<J: IntegrationJournal + Verification>(
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
 ) -> Result<Terminal, UpstrokeError> {
-    let decided = decide(manager, request)?;
+    let decided = decide_pausing(journal.hooks().effects(), manager, request)?;
     match decided.exact_base {
         ExactBase::Fast => {
             let authorized = prepare_fast(journal, request, decided.head)?;
@@ -594,7 +602,11 @@ fn integrate_stale<J: IntegrationJournal + Verification>(
         Ok(proposal) => Picked::Clean {
             proposal: CommitSha(proposal.clone()),
         },
-        Err(_) => match manager.proposal_state(&staging, head.as_str())? {
+        Err(_) => match manager.proposal_state_pausing(
+            journal.hooks().effects(),
+            &staging,
+            head.as_str(),
+        )? {
             ProposalState::Conflict { paths } => Picked::Conflict { paths },
             ProposalState::Empty => Picked::Empty,
             ProposalState::Unclassified { detail } => Picked::Unclassified { detail },
@@ -1018,7 +1030,7 @@ fn reclaim_snapshots(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
 ) -> Result<(), UpstrokeError> {
-    for slot in manager.intents()? {
+    for slot in manager.intents_pausing(journal.hooks().effects())? {
         if matches!(slot, Slot::Snapshot { .. }) {
             manager.remove_worktree(journal.hooks().effects(), &slot)?;
             manager.remove_intent(journal.hooks().effects(), &slot)?;

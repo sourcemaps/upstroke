@@ -1489,9 +1489,71 @@ say what they decided.
 
 ### Errors
 
-[`JudgeError::Runner`] when the Runner could not run a gate process;
-[`JudgeError::Other`] for a snapshot funnel refusal, an adapter no pass
-answers to, or a review pass that could not be run.
+[`JudgeError::Runner`] when the Runner could not run a gate process, except
+where placement 2 refuses that run (below); [`JudgeError::Other`] for a
+snapshot funnel refusal, an adapter no pass answers to, a review pass that
+could not be run, or a placement-2 registry refusal.
+
+## `impl Judge<'_> {` › `if let super::dispatch::Whole::No(found) =`
+
+**Placement 2** (the external-prune follow-up, F, under O1 option A; #329's
+record §8.4): every gate and review verdict — a failure, and a pass — is
+re-checked against its own snapshot's worktree registration before the
+snapshot is released, and a verdict read while it is not whole is a registry
+refusal (`JudgeError::Other(RegistryRefused)`), never judged. The gates' check
+runs once, after the gate loop and before the gates' snapshot is released; a
+review pass's runs after its charge (`account.charge`) and after the
+process-count check, and before its snapshot is released.
+
+- **Every verdict.** A gate is the user's process: one that reads its
+  snapshot's index answers through a deleted `index` as through an empty one
+  and can pass where it would fail. So a pass is checked as a failure is. The
+  cost, pinned: a genuine pass in a snapshot whose registration a prune
+  deleted while the role ran is refused too; a verification verifies again in
+  fresh snapshots at the next resume, and an attempt is settled interrupted
+  and runs again in a new generation, its spend possibly repeating.
+- **After the charge.** Under O14(b) the refused pass is charged and recorded,
+  as the process-count refusal's pass already is; under O14(a) the order
+  changes nothing.
+- **After the process-count check.** That refusal is master's: when both
+  apply it stays the error returned, and the snapshot is left as it leaves it.
+- **Before the release.** For an attempt the snapshot is released as each role
+  finishes, and the release removes the snapshot and its registration, after
+  which a whole registration and a deleted one look alike. A verification's
+  snapshots are kept until after the terminal, so there the order is moot.
+
+A refusal leaves its snapshot unreleased, as the process-count refusal does;
+the next resume reclaims it with the rest of the interrupted command.
+
+## `impl Judge<'_> {` › `if !error.is_cancelled() && !error.fate.is_unresolved() =>`
+
+**Placement 2 at a gate's failed run** (the external-prune follow-up, F; the
+repair of the review's F-R1 at `157c9cab`): a gate run the Runner could not
+complete leaves the gate loop at once, so the check after the loop never meets
+it. A container gate's launch fails that way when its snapshot's registration
+is not whole: the container runner reads the snapshot's `HEAD` to build the
+role's Git view, and with `HEAD` deleted the launch fails before any process
+starts. That error would settle an outage — `verified` reads a `NeverStarted`
+fate as a spawn failure and a `Gone` one as another infrastructure outage —
+spending a deferral, and repeated, parking valid work. So the error is read
+against the snapshot's registration where it leaves the loop: while the
+registration is not whole it is the registry refusal a verdict read there is
+(`JudgeError::Other(RegistryRefused)`, naming the gate's run and its error),
+and the command ends resumably; while it is whole, the Runner's error is
+returned as it was, and settles as it did.
+
+- **Cancellation and process fate are kept.** A cancelled run, and one whose
+  process may still be running (`ProcessFate::Unresolved`), are returned
+  unread, whatever the registration: neither settles an outage (`verified`
+  returns both as the command's error), the registrar has already recorded the
+  run's end and fate (`execute_typed` settles it before it returns), and an
+  unresolved process stays held as it was. It is the partition
+  `src/review.rs` makes of a review pass's Runner error: a cancelled or
+  unresolved one is an error, every other one an outcome.
+- **Both judges.** A verification's outage is what this prevents. An
+  attempt's gate run that fails ends the attempt's command with the Runner's
+  error either way; it ends with the refusal instead while the snapshot's
+  registration is not whole.
 
 ## `impl Judge<'_> {` › `fn execute_typed(`
 
@@ -1596,6 +1658,21 @@ An attempt's judgement: the captured tree on its recorded parent, snapshots as
 each role finishes, the attempt's names and identities. Shared by
 [`AttemptContext::judge`] and [`attempt_body`].
 
+## `impl Judge<'_> {` › `if assessed.failure.is_some() {`
+
+**Placement 3** (the external-prune follow-up, F): an attempt's assessed
+failure — the worker's own end, an unresolved capture, a diff-shaped verdict,
+or the review-input policy's answer — is re-checked against the attempt's own
+slot before it is judged and settled, so that `settle_judged` never spends an
+attempt on a failure read while the slot's worktree registration is not whole.
+When the failure is the policy's own answer, C1-AP checked just before, and
+placement 3 meets only a deletion after that check; when the assessment
+bypassed the policy (it reads the policy only while no failure is assessed),
+placement 3 is the first check after the capture's last one, and it meets
+every deletion that lands after the capture's last read of the index, an
+`index`-only one included: nothing in that interval reads or writes the slot's
+index.
+
 ## `fn capture_tree(`
 
 The capture, as a function of the manager, the hooks and the site, so the
@@ -1606,6 +1683,21 @@ own contract, unchanged.
 
 The assessment's two seams, so [`AttemptContext::assess`] and [`attempt_body`]
 run one implementation.
+
+## `struct Assessor<'a> {` › `manager: &'a WorkspaceManager,`
+
+The manager whose common git dir C1-AP's check reads the attempt's slot
+against (`super::dispatch::read_in_whole_checkout`).
+
+## `impl Assessor<'_>` › `if let Some(problem) = super::dispatch::read_in_whole_checkout(`
+
+**C1-AP** (the external-prune follow-up, F): the attempt's own review-input
+read is used only while the attempt's slot registration is whole. With the
+slot's `index` deleted the legacy policy reads an empty index and answers no
+problem where a genuine unstaged change is one (the design's E8), so the
+attempt would be judged on gates and reviews where a `review_input_failure`
+was due; the read is a registry refusal instead, and the command ends
+resumably. Its Git error ends the command whatever its variant, as it did.
 
 ## `pub struct AttemptJob {`
 

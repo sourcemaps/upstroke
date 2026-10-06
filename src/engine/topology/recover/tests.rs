@@ -341,6 +341,7 @@ impl Fixture {
 
     #[cfg(unix)]
     fn holder_observed(&self, observation: u32) {
+        crate::workspace_manager::fixture::a_wait_read_the_lease_held();
         if let Some(parked) = self.release_once_held.borrow_mut().take() {
             let status = parked.release();
             self.holder_released.set(Some((observation, status)));
@@ -7117,11 +7118,103 @@ fn the_runs_first_resume_by_an_incarnation_that_then_dies(fixture: &Fixture, tag
         vec!["run_started", "run_resumed"],
         "{tag}: the first resume recorded itself and nothing else"
     );
-    assert!(
-        !rundir::is_running(&fixture.public()),
-        "{tag}: and no process holds the run"
-    );
+    assert_no_process_holds_the_run(fixture, tag);
     durable_kinds(fixture).len()
+}
+
+/// The first incarnation's death, observed: no process holds the run once
+/// this process's own copies of its cleanup lease are released. The first
+/// resume's integration-ref write held the lease in this process, and a fork
+/// another thread made during it keeps a copy until it execs or exits
+/// (`rundir::hold_cleanup_lease_for_child`). So the copies are waited out
+/// first (`await_own_lease_copies_release`), with the bound every later
+/// resume's wait has, and only a lease an observation finds held is waited
+/// on: an observation that fails fails here at once, as the single
+/// observation before the wait did, and a copy that outlives the bound still
+/// fails. Then `rundir::is_running` is read once, so the run lock, this
+/// process's claim and a lock that cannot be inspected read running at once
+/// too. A failure names what the wait stopped on and what acquiring the run
+/// lock answers.
+fn assert_no_process_holds_the_run(fixture: &Fixture, tag: &str) {
+    let public = fixture.public();
+    let released = await_own_lease_copies_release(fixture);
+    assert!(
+        released.is_ok() && !rundir::is_running(&public),
+        "{tag}: and no process holds the run: the cleanup lease's wait {released:?}, the run \
+         lock's acquisition {:?}",
+        rundir::RunLock::acquire(&public).map(drop)
+    );
+}
+
+/// What [`await_own_lease_copies_release`] stopped on.
+#[derive(Debug)]
+enum LeaseCopyWait {
+    /// An observation answered neither held nor free: the lease file would
+    /// not open, or `flock` failed otherwise. `rundir::observe_cleanup_hold`
+    /// reads that held, fail-closed; it is no holder, and nothing waits on it.
+    Unobservable {
+        observation: u32,
+        error: std::io::Error,
+    },
+    /// A lease the observations found held, every one of them, to the bound.
+    PastBound(CleanupHoldPastBound),
+}
+
+impl std::fmt::Display for LeaseCopyWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unobservable { observation, error } => write!(
+                f,
+                "observation {observation} of the run's cleanup.lock answered neither held nor \
+                 free: {error}"
+            ),
+            Self::PastBound(held) => write!(f, "{held}"),
+        }
+    }
+}
+
+/// The wait for this process's own copies of the run's cleanup lease that
+/// comes before the first incarnation's death is read and before a creation
+/// body's first resume. It is #320's wait
+/// (`wait_for_cleanup_hold_release_observing`), with its bound
+/// (`release_bound`), its rest and its acknowledgement of each held reading
+/// (`Fixture::holder_observed`), over observations told apart
+/// (`workspace_manager::fixture::observe_cleanup_lease`). The production
+/// observation reads an inspection error as held, and a wait that trusted it
+/// retried the error until it passed (I5-1); here only a lease an observation
+/// finds held is waited on, and an observation that fails ends the wait at
+/// once with its error.
+fn await_own_lease_copies_release(fixture: &Fixture) -> Result<(), LeaseCopyWait> {
+    let public = fixture.public();
+    let bound = fixture.release_bound.get();
+    let started = std::time::Instant::now();
+    let mut observations = 0_u32;
+    loop {
+        observations += 1;
+        match crate::workspace_manager::fixture::observe_cleanup_lease(&public) {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(error) => {
+                return Err(LeaseCopyWait::Unobservable {
+                    observation: observations,
+                    error,
+                });
+            }
+        }
+        fixture.holder_observed(observations);
+        let waited = started.elapsed();
+        if waited >= bound {
+            return Err(LeaseCopyWait::PastBound(CleanupHoldPastBound {
+                bound,
+                waited,
+                observations,
+            }));
+        }
+        crate::workspace_manager::fixture::rest_within(
+            Duration::from_millis(50),
+            bound.saturating_sub(started.elapsed()),
+        );
+    }
 }
 
 fn assert_the_creation_prefix_is_complete(fixture: &Fixture, tag: &str) {
@@ -17738,6 +17831,7 @@ fn upstroke_refs_on_disk(fixture: &Fixture) -> Vec<String> {
 fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
     ref_created: bool,
     tag: &str,
+    before_the_resume: &dyn Fn(&Fixture),
 ) {
     let fixture = Fixture::healthy(tag);
     crate::workspace_manager::fixture::git(
@@ -17804,8 +17898,23 @@ fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         "{tag}: the log is the creator's committed prefix"
     );
 
+    before_the_resume(&fixture);
+    // This process wrote the prefix above through the funnels, as the
+    // creator's incarnation, and P8's ref write held the run's cleanup lease
+    // here: the resume is a later incarnation's, and this process's own copies
+    // of the lease are waited out first, as before every later resume, with
+    // its bound and its refusal's note. Only a lease an observation finds held
+    // is waited on: an observation that fails fails here at once.
+    let past_bound = match await_own_lease_copies_release(&fixture) {
+        Ok(()) => None,
+        Err(LeaseCopyWait::PastBound(held)) => Some(held),
+        Err(unobservable) => {
+            panic!("{tag}: the run's cleanup lease, observed before the resume: {unobservable}")
+        }
+    };
     let recovery = harness();
     let (_, handle) = resume_with_real_refs(&fixture, &recovery)
+        .map_err(|error| refusal_after_an_expired_wait(error, past_bound))
         .expect("the resume over the creation's prefix converges");
     drop(handle);
     assert_eq!(
@@ -17853,6 +17962,7 @@ fn a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_i
     a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         false,
         "creation-stopped-at-p7",
+        &|_| {},
     );
 }
 
@@ -17861,6 +17971,246 @@ fn a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adop
     a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
         true,
         "creation-stopped-at-p8",
+        &|_| {},
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_over_a_creation_prefix_waits_out_a_lease_copy_a_sibling_fork_kept_from_its_ref_write() {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        true,
+        "creation-stopped-at-p8-sibling-copy",
+        &|fixture| {
+            let parked = crate::workspace_manager::fixture::ParkedFork::holding_the_lease_of(
+                &fixture.public(),
+            );
+            assert!(
+                rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+                "the parked fork's copy alone holds the lease the prefix's ref write took"
+            );
+            fixture.release_once_held.replace(Some(parked));
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_a_sibling_fork_kept_from_the_first_resume_is_waited_out_before_its_death_is_read() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let tag = "first-dies-sibling-copy";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let holder = parked.pid();
+    assert!(
+        rundir::is_running(&fixture.public()),
+        "the copy the parked fork {holder} keeps reads the run as held, in one observation"
+    );
+    fixture.release_once_held.replace(Some(parked));
+    assert_no_process_holds_the_run(&fixture, tag);
+    let Some((released_at, status)) = fixture.holder_released.get() else {
+        panic!(
+            "the wait observed the copy held and, from inside that observation, released the \
+             fork {holder}: without the wait there is no observation and no release"
+        );
+    };
+    assert_eq!(
+        released_at, 1,
+        "the wait's first observation read the copy held, and the run was read after the release"
+    );
+    assert!(
+        status.success(),
+        "the released fork exited cleanly: {status:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let tag = "first-dies-copy-past-bound";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    fixture.release_bound.set(Duration::from_millis(500));
+    let parked = ParkedFork::holding_the_lease_of(&fixture.public());
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_no_process_holds_the_run(&fixture, tag);
+    }));
+    assert!(
+        parked.is_alive(),
+        "the copy's holder {} lived through the whole bound",
+        parked.pid()
+    );
+    drop(parked);
+    let message = failed
+        .expect_err("a copy that outlives the bound fails the observation")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!("{tag}: and no process holds the run"))
+            && message.contains("CleanupHoldPastBound")
+            && message.contains("cleanup.lock"),
+        "the failure names the lease's expired wait and the lease the run lock's acquisition \
+         refused on: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once() {
+    use crate::workspace_manager::fixture::unreadable_until_read_held;
+
+    let tag = "first-dies-lease-unobservable";
+    let fixture = Fixture::healthy(tag);
+    let (_, handle) = resume_as(
+        &fixture,
+        FIRST_RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the run's first resume");
+    drop(handle);
+    let public = fixture.public();
+    if let Err(held) = wait_for_cleanup_hold_release_within(&public, RELEASE_BOUND) {
+        panic!("this process's own copies of the lease are released first: {held}");
+    }
+    assert!(
+        !rundir::is_running(&public),
+        "no process holds the run, and no observation of it fails, before the lease is made \
+         unreadable"
+    );
+    fixture.release_bound.set(Duration::from_millis(500));
+    let unreadable = unreadable_until_read_held(&public.join("cleanup.lock"));
+    assert!(
+        rundir::is_running(&public),
+        "production reads a lease it cannot inspect as held, fail-closed"
+    );
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_no_process_holds_the_run(&fixture, tag);
+    }));
+    assert!(
+        unreadable.never_read_held(),
+        "no observation read the unreadable lease as a holder: a wait that did put its mode back \
+         and passed on the next"
+    );
+    drop(unreadable);
+    let message = failed
+        .expect_err("an observation that fails fails the first incarnation's death")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!("{tag}: and no process holds the run")),
+        "the failure is the observation's, made at once: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_observation_that_fails_still_fails_a_creation_prefixs_first_resume_at_once() {
+    use crate::workspace_manager::fixture::{UnreadableUntilReadHeld, unreadable_until_read_held};
+
+    let armed: RefCell<Option<UnreadableUntilReadHeld>> = RefCell::new(None);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+            true,
+            "creation-stopped-at-p8-lease-unobservable",
+            &|fixture| {
+                let public = fixture.public();
+                if let Err(held) = wait_for_cleanup_hold_release_within(&public, RELEASE_BOUND) {
+                    panic!("this process's own copies of P8's lease are released first: {held}");
+                }
+                assert!(
+                    !rundir::observe_cleanup_hold(&public, &mut NoHooks),
+                    "the lease is free, and its observation does not fail, before it is made \
+                     unreadable"
+                );
+                fixture.release_bound.set(Duration::from_millis(500));
+                armed.replace(Some(unreadable_until_read_held(
+                    &public.join("cleanup.lock"),
+                )));
+                assert!(
+                    rundir::observe_cleanup_hold(&public, &mut NoHooks),
+                    "production reads a lease it cannot inspect as held, fail-closed"
+                );
+            },
+        );
+    }));
+    let message = failed.err().map(|payload| {
+        payload
+            .downcast::<String>()
+            .map(|text| *text)
+            .unwrap_or_default()
+    });
+    let Some(unreadable) = armed.into_inner() else {
+        panic!("the body reached its resume, having made the lease unreadable: {message:?}");
+    };
+    assert!(
+        unreadable.never_read_held(),
+        "no observation read the unreadable lease as a holder: a wait that did put its mode back, \
+         and the resume converged"
+    );
+    drop(unreadable);
+    let message =
+        message.expect("an observation that fails fails the creation prefix's first resume");
+    assert!(
+        message.contains("cleanup lease"),
+        "the failure is the lease observation's, made at once: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lease_copy_that_outlives_the_bound_still_refuses_a_creation_prefixs_first_resume() {
+    use crate::workspace_manager::fixture::ParkedFork;
+
+    let parked: RefCell<Option<ParkedFork>> = RefCell::new(None);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+            true,
+            "creation-stopped-at-p8-copy-past-bound",
+            &|fixture| {
+                fixture.release_bound.set(Duration::from_millis(500));
+                parked.replace(Some(ParkedFork::holding_the_lease_of(&fixture.public())));
+            },
+        );
+    }));
+    let Some(parked) = parked.into_inner() else {
+        panic!("the body reached its resume, with a copy of P8's lease parked before it");
+    };
+    assert!(
+        parked.is_alive(),
+        "the copy's holder {} lived through the whole bound",
+        parked.pid()
+    );
+    drop(parked);
+    let message = failed
+        .expect_err("a copy that outlives the bound refuses the resume")
+        .downcast::<String>()
+        .map(|text| *text)
+        .unwrap_or_default();
+    assert!(
+        message.contains("still has a process of its own alive")
+            && message.contains("still held after the full 500ms bound"),
+        "the production refusal, with the wait's report that its whole bound ran out: {message}"
     );
 }
 
@@ -25568,4 +25918,427 @@ fn a_resume_over_a_torn_open_generation_recreates_its_worktree() {
                 .len()
                 > 0
     );
+}
+
+fn f_prune_entry_of(fixture: &Fixture, checkout: &Path) {
+    use crate::workspace_manager::fixture::{git, remove_file, write_file};
+    let pointer = checkout.join(".git");
+    let bytes = std::fs::read(&pointer).expect("the checkout's .git");
+    remove_file(&pointer);
+    git(&fixture.repo_root, &["worktree", "prune", "--expire=now"]);
+    write_file(&pointer, &bytes);
+}
+
+fn f_keep_the_store(fixture: &Fixture) {
+    let keeper = fixture.root.join("store-keeper");
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            keeper.to_str().expect("a fixture path is UTF-8"),
+            fixture.base_sha.as_str(),
+        ],
+    );
+}
+
+fn f_files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a kept directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a kept file");
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("under the root")
+                        .to_path_buf(),
+                    bytes,
+                );
+            }
+        }
+    }
+    files
+}
+
+fn f_remove_tree(root: &Path) {
+    use crate::workspace_manager::fixture::{remove_dir, remove_file};
+    let mut directories = vec![root.to_path_buf()];
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list a directory to remove") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                directories.push(path.clone());
+                pending.push(path);
+            } else {
+                remove_file(&path);
+            }
+        }
+    }
+    for directory in directories.iter().rev() {
+        remove_dir(directory);
+    }
+}
+
+fn f_kept_refusal(
+    result: Result<(Recovered, RunHandle), UpstrokeError>,
+    checkout: &Path,
+    found: &str,
+) -> String {
+    match result {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            assert!(
+                message.contains("kept for the operator")
+                    && message.contains("recovery's reclaim")
+                    && message.contains(&checkout.display().to_string())
+                    && message.contains(found),
+                "{message}"
+            );
+            message
+        }
+        Err(other) => panic!("the guard's registry refusal, not {other:?}"),
+        Ok(_) => panic!("the resume refuses rather than reclaiming the kept slot"),
+    }
+}
+
+fn f_has_intent(fixture: &Fixture, slot: &crate::workspace_manager::Slot) -> bool {
+    fixture.manager().intents().expect("intents").contains(slot)
+}
+
+fn f_resume(fixture: &Fixture) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    resume_as(
+        fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+}
+
+#[test]
+fn t_pres_1_an_in_flight_attempts_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-1-in-flight",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(fixture.git_dir.join("worktrees").is_dir());
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["attempt_interrupted"]);
+
+    f_remove_tree(&worktree);
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (_, handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("once the operator removed the directory the next resume reclaims the slot");
+    assert!(!f_has_intent(&fixture, &slot));
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert_eq!(
+        repair_dispatches(&driven.log, ALPHA)
+            .iter()
+            .map(|dispatched| dispatched.generation)
+            .collect::<Vec<_>>(),
+        vec![GEN, GenerationId(1)]
+    );
+}
+
+#[test]
+fn t_pres_2_a_retained_generations_pruned_populated_slot_is_closed_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build(
+        "pres-2-retained",
+        Damage {
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Retained {
+                        retained_session: SessionId("session-of-the-dead-incarnation".to_owned()),
+                        retained_incarnation: Epoch(0),
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the retained session's unpinned output\n",
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    let planted = durable_kinds(&fixture).len();
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+    assert_eq!(kinds_after(&fixture, planted), vec!["generation_closed"]);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+}
+
+#[test]
+fn t_pres_3_one_name_removed_from_a_populated_slots_entry_keeps_the_slot() {
+    for name in ["HEAD", "commondir", "gitdir"] {
+        let fixture = Fixture::build(
+            &format!("pres-3-{name}"),
+            Damage {
+                open_generation: true,
+                extra: vec![attempt_started(1)],
+                ..Damage::default()
+            },
+        );
+        let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+        crate::workspace_manager::fixture::write_file(
+            &worktree.join("worker.txt"),
+            b"the attempt's unpinned output\n",
+        );
+        let entry =
+            crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+        crate::workspace_manager::fixture::remove_file(&entry.join(name));
+        let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+        let before = f_files_under(&worktree);
+        f_kept_refusal(f_resume(&fixture), &worktree, name);
+        assert_eq!(f_files_under(&worktree), before, "{name}");
+        assert!(f_has_intent(&fixture, &slot), "{name}");
+    }
+}
+
+#[test]
+fn t_pres_4_a_whole_populated_slot_is_reclaimed_as_before() {
+    let fixture = Fixture::build(
+        "pres-4-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (recovered, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert_eq!(recovered.interrupted, 1);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_5_an_empty_slot_whose_registration_is_gone_is_reclaimed() {
+    let fixture = Fixture::build(
+        "pres-5-empty",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_prune_entry_of(&fixture, &worktree);
+    let held: Vec<PathBuf> = std::fs::read_dir(&worktree)
+        .expect("the slot")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    for path in held {
+        assert!(!path.is_dir(), "the base checkout holds only files");
+        crate::workspace_manager::fixture::remove_file(&path);
+    }
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("an empty slot is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+fn f_earlier_manager(fixture: &Fixture) -> crate::workspace_manager::WorkspaceManager {
+    crate::workspace_manager::WorkspaceManager::derive(
+        &fixture.repo_root,
+        &fixture.private_root,
+        &fixture.started.run_id,
+        "01KZT0EARLIER0INCARNATION0",
+    )
+    .expect("a manager of an earlier incarnation")
+}
+
+fn f_plant_earlier_instance(
+    fixture: &Fixture,
+) -> (crate::workspace_manager::WorkspaceManager, PathBuf) {
+    let earlier = f_earlier_manager(fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    earlier
+        .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+        .expect("the earlier incarnation's intent");
+    let worktree = earlier
+        .add_worktree(
+            &mut crate::workspace_manager::NoHooks,
+            &slot,
+            fixture.base_sha.as_str(),
+        )
+        .expect("the earlier incarnation's instance");
+    assert_ne!(worktree, fixture.manager().slot_path(&slot));
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the earlier incarnation's unpinned output\n",
+    );
+    (earlier, worktree)
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_pruned_populated_instance_is_kept() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-pruned",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_6_an_earlier_incarnations_whole_populated_instance_is_removed() {
+    let fixture = Fixture::build(
+        "pres-6-earlier-whole",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (_, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let (_, handle) = f_resume(&fixture).expect("a whole earlier instance is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_7_an_earlier_instance_reached_only_through_its_directory_is_kept() {
+    let fixture = Fixture::build(
+        "pres-7-directory-only",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let (earlier, worktree) = f_plant_earlier_instance(&fixture);
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    crate::workspace_manager::fixture::remove_file(&earlier.intent_path(&slot));
+    assert!(
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    );
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+}
+
+#[test]
+fn t_pres_8_a_promoted_candidates_pruned_populated_slot_is_kept_and_the_resume_refuses() {
+    let fixture = Fixture::build("pres-8-promoted", Damage::default());
+    plant_queued_candidate(&fixture);
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    f_keep_the_store(&fixture);
+    f_prune_entry_of(&fixture, &worktree);
+    assert!(matches!(
+        replayed(&fixture)
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.class.clone()),
+        Some(crate::topology::fold::GenerationClass::Closed)
+    ));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let before = f_files_under(&worktree);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert_eq!(f_files_under(&worktree), before);
+    assert!(f_has_intent(&fixture, &slot));
+}
+
+#[test]
+fn t_pres_9_a_registration_repaired_by_the_operator_is_reclaimed_with_what_it_holds() {
+    let fixture = Fixture::build(
+        "pres-9-repaired",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    crate::workspace_manager::fixture::write_file(
+        &worktree.join("worker.txt"),
+        b"the attempt's unpinned output\n",
+    );
+    let entry = crate::workspace_manager::fixture::registration_of(&fixture.manager(), &worktree);
+    crate::workspace_manager::fixture::remove_file(&entry.join("gitdir"));
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    f_kept_refusal(f_resume(&fixture), &worktree, "gitdir");
+    assert!(worktree.join("worker.txt").exists() && f_has_intent(&fixture, &slot));
+
+    let repaired = crate::workspace_manager::fixture::git_out(
+        &fixture.repo_root,
+        &[
+            "worktree",
+            "repair",
+            worktree.to_str().expect("a fixture path is UTF-8"),
+        ],
+    );
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        entry.join("gitdir").is_file(),
+        "the repair wrote gitdir again"
+    );
+    let (_, handle) = f_resume(&fixture).expect("a whole registration is reclaimed");
+    drop(handle);
+    assert!(!worktree.exists() && !f_has_intent(&fixture, &slot));
 }

@@ -2063,6 +2063,164 @@ fn an_interrupted_attempt_discards_its_own_snapshots_and_leaves_every_other() {
     );
 }
 
+struct HealsTheStoreAtAWait<'h> {
+    inner: &'h mut dyn TopologyHooks,
+    ledger: crate::util::DurabilityLedger,
+    cause: Option<String>,
+    admin: PathBuf,
+    waits: usize,
+    healed_at: Option<usize>,
+}
+
+impl<'h> HealsTheStoreAtAWait<'h> {
+    fn over(inner: &'h mut dyn TopologyHooks, admin: PathBuf) -> Self {
+        let ledger = inner.effects().durability_ledger();
+        Self {
+            inner,
+            ledger,
+            cause: None,
+            admin,
+            waits: 0,
+            healed_at: None,
+        }
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for HealsTheStoreAtAWait<'_> {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let effects = self.inner.effects();
+        let answer = effects.phase(site, phase);
+        self.cause = effects.refusal_cause();
+        answer
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.cause.clone()
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.ledger.clone()
+    }
+
+    fn registry_pause(&mut self, _pause: std::time::Duration) -> Result<(), UpstrokeError> {
+        self.waits += 1;
+        if self.healed_at.is_none() && self.admin.exists() {
+            remove_dir(&self.admin.join("gitdir"));
+            remove_file(&self.admin.join("commondir"));
+            remove_dir(&self.admin);
+            self.healed_at = Some(self.waits);
+        }
+        Ok(())
+    }
+}
+
+impl TopologyHooks for HealsTheStoreAtAWait<'_> {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+
+    fn folded(
+        &mut self,
+        fold: &crate::topology::fold::TopologyFold,
+        events: &[crate::topology::events::TopologyEvent],
+    ) {
+        self.inner.folded(fold, events);
+    }
+}
+
+#[test]
+fn an_interrupted_attempts_residue_discard_reads_the_registry_through_the_hooks_it_is_handed() {
+    let mut run = Run::started("discard-pausing");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("start");
+    let head = ObjectId::new(run.fixture.head.clone()).expect("the fixture's head is an object id");
+    let snapshot = run
+        .fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(ALPHA.0, 0, 1),
+            &SnapshotInput::Commit(head),
+        )
+        .expect("the attempt's own snapshot");
+    let admin = run
+        .fixture
+        .manager
+        .common_git_dir()
+        .join("worktrees")
+        .join("unreadable");
+    crate::workspace_manager::fixture::create_dir(&admin.join("gitdir"));
+    write_file(&admin.join("commondir"), b"../..\n");
+    let slept = crate::workspace_manager::fixture::slept_pauses();
+
+    let mut hooks = HealsTheStoreAtAWait::over(&mut run.hooks, admin.clone());
+    let settled = AttemptContext {
+        manager: &run.fixture.manager,
+        hooks: &mut hooks,
+        emitter: &mut run.emitter,
+        runner: &run.runner,
+        ledger: &mut process.ledger,
+        adapters: &crate::engine::topology::scaffold::ScaffoldAdapters::new(),
+        paths: &run.paths,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+    }
+    .settle_interrupted(
+        &dispatched,
+        crate::topology::events::AttemptNumber(1),
+        AttemptOutcome::Interrupted,
+    );
+
+    assert_eq!(
+        crate::workspace_manager::fixture::slept_pauses(),
+        slept,
+        "no wait of the residue discard's registry read slept on the calling thread"
+    );
+    assert_eq!(
+        hooks.healed_at,
+        Some(1),
+        "the discard's registry read failed on the store and waited through the hooks it was \
+         handed"
+    );
+    settled.expect("the settlement is passed once the store is healed");
+    assert!(
+        !admin.exists(),
+        "the planted registration was met and healed"
+    );
+    assert!(
+        !snapshot.path().exists(),
+        "the discard removed the attempt's own snapshot"
+    );
+    assert!(
+        run.fixture.manager.intents().expect("intents").is_empty(),
+        "with its intent, and the scrub the task's"
+    );
+    assert!(
+        !dispatched.worktree.exists(),
+        "the task worktree is scrubbed"
+    );
+}
+
 fn stage_elements() -> Vec<ResidueElement> {
     STAGE.residue_elements().to_vec()
 }
@@ -5519,5 +5677,91 @@ fn the_registration_notes_keep_an_invocation_whose_process_is_unresolved() {
              back — `InvocationLedger::end` keeps an unresolved invocation; found {retired:?} \
              in:\n{execute}"
         );
+    }
+}
+
+struct ActAtPhase<'a> {
+    inner: &'a mut crate::engine::topology::scaffold::Hooks,
+    at: (EffectSiteId, HookPhase),
+    act: Option<Box<dyn FnOnce()>>,
+}
+
+impl crate::workspace_manager::EffectHooks for ActAtPhase<'_> {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if (site, phase) == self.at {
+            if let Some(act) = self.act.take() {
+                act();
+            }
+        }
+        crate::engine::topology::seams::TopologyHooks::effects(&mut *self.inner).phase(site, phase)
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+impl crate::engine::topology::seams::TopologyHooks for ActAtPhase<'_> {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+}
+
+#[test]
+fn a_capture_over_a_deleted_index_is_refused_at_its_first_read() {
+    let mut run = Run::started("f-capture-index");
+    let dispatched = run.dispatch(ALPHA, 0);
+    agent_edits(&dispatched.worktree);
+    let entry = git_dir(&dispatched.worktree);
+    remove_file(&entry.join("index"));
+    match super::capture_tree(&run.fixture.manager, &mut run.hooks, dispatched.site()) {
+        Err(UpstrokeError::RegistryRefused { message }) => assert!(
+            message.contains("unresolved conflicts") && message.contains("index"),
+            "{message}"
+        ),
+        other => panic!("the capture's first read refuses: {other:?}"),
+    }
+    assert!(
+        !entry.join("index").exists(),
+        "nothing the capture ran wrote the index again"
+    );
+}
+
+#[test]
+fn a_capture_whose_index_is_deleted_before_its_write_tree_is_refused_at_the_check_before_it() {
+    let mut run = Run::started("f-capture-write-tree");
+    let dispatched = run.dispatch(ALPHA, 0);
+    agent_edits(&dispatched.worktree);
+    let index = git_dir(&dispatched.worktree).join("index");
+    let manager = run.fixture.manager.clone();
+    let mut hooks = ActAtPhase {
+        inner: &mut run.hooks,
+        at: (WRITE_TREE, HookPhase::Before),
+        act: Some(Box::new(move || remove_file(&index))),
+    };
+    match super::capture_tree(&manager, &mut hooks, dispatched.site()) {
+        Err(UpstrokeError::RegistryRefused { message }) => {
+            assert!(
+                message.contains("write-tree") && message.contains("index"),
+                "{message}"
+            );
+        }
+        other => panic!("the check before the write refuses: {other:?}"),
     }
 }

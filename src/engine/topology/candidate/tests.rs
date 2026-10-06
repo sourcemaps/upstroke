@@ -227,10 +227,12 @@ impl Fixture {
     }
 
     fn task_admin_dir(&self) -> PathBuf {
-        self.manager
-            .common_git_dir()
-            .join("worktrees")
-            .join("kalpha-g0")
+        self.manager.common_git_dir().join("worktrees").join(
+            self.manager
+                .slot_path(&self.task)
+                .file_name()
+                .expect("an instance path has a final component"),
+        )
     }
 }
 

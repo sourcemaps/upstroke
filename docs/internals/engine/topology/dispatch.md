@@ -331,7 +331,25 @@ which worktree a generation owns.
 O21 — the fresh dispatch
 ---------------------------------------------------------------------------
 
+## `pub trait DispatchJournal {`
+
+What a dispatch appends through and lends the manager, as one value: the
+dispatch's `task_dispatched`, and the hooks its registry accesses wait through.
+One value rather than an emitter and hooks apart, because on the topology
+coordinator both are the coordinator, which lends itself as the hooks so that a
+registry access's waits answer its messages (the follow-up B record's §9.13,
+R1): two parameters would be two mutable borrows of it.
+
+## `struct Emitting<'a> {`
+
+An emitter and its hooks as a [`DispatchJournal`], for the callers that hold the
+two apart.
+
 ## `pub fn dispatch(`
+
+[`dispatch_through`] over an emitter and its hooks, the form the tests drive.
+
+## `pub fn dispatch_through(`
 
 **O21.** Append `task_dispatched`, then write the intent, then add the
 worktree — and for a repair, materialize its source into it.
@@ -356,9 +374,10 @@ or on a reparse point) are the other half of that condition and are raised by
 the funnels themselves. Otherwise: whatever the emitter or a Git funnel
 returns.
 
-## `manager.revalidate()?;`
+## `manager.revalidate_pausing(journal.hooks().effects())?;`
 
-Before the append, because a refusal after it would leave an open
+Its registry list waits through the journal's hooks (R1). Before the append,
+because a refusal after it would leave an open
 generation whose worktree can never be built. `T-DISPATCH` lists "source
 candidate object missing" beside the containment refusals, so both are
 here and both are ahead of the event.
@@ -527,19 +546,69 @@ worktree reaches this module at all — [`super::settle::retry`] performs the
 retained `Worktree.Verify` through its own `WorktreeVerify` seam and writes
 the closure itself — so nothing here has one to hand the recreate branch.
 
-### The intent is re-written rather than removed and re-written
+### Every instance's intent goes before this incarnation's is written
 
 The reclaim order elsewhere is *worktree then intent*, because an intent that
 outlives its worktree is reclaimed harmlessly while a worktree that outlives
 its intent is a leak nothing can find. That reasoning applies here too, so
-the sequence is: force-remove the worktree, re-write the (idempotent) intent,
-add. At no instant does a worktree exist without a durable intent naming it.
+the sequence is: force-remove the worktree — every instance of the slot,
+whichever incarnation created it (`WorkspaceManager::remove_worktree`) — then
+every instance's intent (`WorkspaceManager::remove_intent`), then write this
+incarnation's intent, and add. At no instant does a worktree exist without a
+durable intent naming it.
+
+Under per-incarnation slot instances an intent is its creating incarnation's
+own file, and a fresh process's resume has none of its own to re-write: the
+generation's intent is the dead incarnation's. Re-writing this incarnation's
+intent over nothing left every earlier incarnation's intent of the generation
+in place, one more with every resume — 2, 3 and 4 intents after three
+resumes, measured at `83516466` (the follow-up C record, §6.10) — until the
+generation's retirement or terminal finalization. Erratum E-FUC-3's item 3
+reclaims every earlier incarnation's instance *and intent* on resume, and the
+record's §4.5 reclaims every durable record of a dead instance before any
+admission, so the recreate is the walks' own reclaim of the slot followed by
+its creation. In a live process the only intent is its own, which is removed
+and written again.
 
 ### Errors
 
 The containment refusals, or a Git or I/O error. A worktree that merely fails
 its quiescence check is `Ok(Reuse::Recreated { .. })` — that is a decision,
 not a failure.
+
+## `pub fn verify_or_recreate(` › `if may_follow_a_deletion(&failure) {`
+
+**Closure 2's first boundary** (the external-prune follow-up, F, under O2(a):
+#329's record §8.5; `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`).
+Immediately before the forced removal, when the verification failed as not
+registered, missing or, under `HoldsTree`, not holding the retained tree — the
+three failures a prune no engine process started can cause
+([`may_follow_a_deletion`]) — and an instance of the slot holds anything while
+its worktree registration is not whole ([`kept`], which under per-incarnation
+instances reads every instance the removal reaches), nothing is removed: the
+reuse refuses resumably, naming each kept instance with what the check found
+there, and keeps them for the operator ([`kept_slot_refusal`]). It is reached
+live, from `continue_open` before an open generation's first attempt, where
+nothing is appended and the generation stays `OpenNoAttempt`; and at recovery
+step (g), from the frozen `recreate_open_no_attempt`, where the refusal crosses
+its `?` and the resume refuses before `run_resumed`.
+
+Every other failure — administrative residue such as a held index lock, an
+initializing lock, another repository's registration, another `HEAD` — removes
+and recreates as before, whatever the registration: #329's rule names three
+failures, and F does not widen it. A genuine `TreeMismatch` in a whole
+registration is removed and recreated too.
+
+What it keeps here is an open generation's checkout from before its first
+attempt — the base, or a repair's materialization, which the source
+candidate's protected ref reproduces — and no attempt's output; keeping it
+costs liveness and protects no paid output, which is the reviewed rule kept as
+stated. The keeping lasts only while each check finds the instance holding
+anything with its registration not whole: once the operator has removed the
+directory, or the registration is whole again (`git worktree repair` writes a
+deleted `gitdir` again), the reuse verifies it, or removes and recreates it, as
+for any other. A deletion that lands between [`kept`]'s read and the removal is
+not seen.
 
 ## `pub fn verify_reuse(`
 
@@ -668,6 +737,114 @@ Forced removal of a worktree and then its intent.
 administrative residue left by an interrupted command … never blocks
 reclaim". Worktree first, then intent, so that the durable record naming the
 worktree outlives the worktree rather than the other way round.
+
+## `pub(super) fn refuse_kept_slot(`
+
+**PROPOSED RULING P-1's guard** (the decision appendix §3.2, conditional on the
+owner's adoption of O2(a) and of P-1, whose one statement in the frozen
+`recover.rs` calls it). Recovery's reclaim of a closed generation's slot calls
+it immediately before its scrub: it refuses, removing nothing, while an
+instance of the slot holds anything and its worktree registration is not whole
+(closure 1's check, files only), naming the slot, each kept instance's path
+with what the check found there, and `base`, the closed generation's recorded
+base, which the caller passes because neither the manager nor the slot's
+intent holds it. It appends nothing, removes nothing and starts no process, so a
+refusal leaves exactly what recovery steps (d) and (e) appended, which destroy
+nothing. Recovery runs before any coordinator exists, so the registry read's
+waits may sleep (#329's record §9.21.6), and P-1's call hands the guard no
+hooks: it reads with `NoHooks`.
+
+It keeps every closed generation's slot recovery reclaims while it is
+populated and not whole, whatever closed it: an in-flight attempt settled
+interrupted at step (d), a retained generation closed at step (e), and a
+generation closed live whose scrub did not finish before the process ended — a
+failed attempt's, or a promoted candidate's, whose tree its candidate ref
+already pins; for those last two the keeping costs liveness only. It is not
+reached by run-end closure, the halting closure or terminal finalization,
+which remove a kept slot as they remove every other. Each resume checks again:
+once a check finds the slot holding nothing, or its registration whole again
+(`git worktree repair` writes a deleted `gitdir` again), the guard answers
+`Ok` and the reclaim removes the slot with what it then holds.
+
+## `pub(super) fn kept(`
+
+The slot's instances that hold anything while their worktree registration is
+not whole, with what the check found: under per-incarnation instances
+(C's U), `WorkspaceManager::kept_instances`, whose reach is the removal's by
+construction and whose waits go through `hooks` — the coordinator's on the
+live boundaries, `NoHooks` in recovery's guard.
+
+## `pub(super) fn kept_slot_refusal(`
+
+The refusal closure 2's boundaries and the guard return for a kept slot:
+`UpstrokeError::RegistryRefused`, the variant #329's access already returns, so
+no new error kind, event, record or wire field exists. It names the refused
+operation (`what`), the slot, each kept instance with what the check found
+there, what the directory holds (`holds`) and what the next resume does once
+the operator has acted (`then`). It reports what the check observed and asserts
+no cause: the check cannot establish that a prune deleted anything (empty
+metadata, mismatched pointers and failed reads are not whole either). Its last
+sentence is precision G-1's reading of the appendix's guard specification: Git
+cannot register the checkout again when its whole entry is gone (`git worktree
+repair` exits 1 there), and when only `gitdir` is gone `git worktree repair`
+writes it again, after which the slot is treated as a whole one. No message
+here contains the words the manager's hostile-slot-name grid reserves.
+
+## `pub(super) const fn may_follow_a_deletion(failure: &VerifyFailure) -> bool {`
+
+The three verification failures #329's record §8.5 derives as ones a deletion
+of the registration can cause: not registered, missing, and (under
+`HoldsTree`) not holding the retained tree. Closure 2 keeps a populated slot
+only on these, and only while its registration is not whole.
+
+## `pub(super) fn read_in_whole_checkout<T>(`
+
+**C1-4 and C1-AP** (the external-prune follow-up, F, under O1 option A): a read
+made in a checkout — the verification's review-input read of its staging
+checkout (C1-4, the decision appendix §6.1, with the design's answer arm) and
+the attempt's own review-input read of its slot (C1-AP) — has its answer used,
+and its Git error passed on, only while the checkout's worktree registration
+is whole; otherwise it is a registry refusal ([`read_refused`]). Every other
+error passes through. Files only: it starts no process. With a checkout's
+`index` deleted, the legacy policy's `status` reads an empty index and answers
+`Ok(None)` where a genuine unstaged change is `Ok(Some(..))` (the design's E8,
+executed on Git 2.43.0 and 2.55.0); with `HEAD`, `commondir` or the whole entry
+deleted, it fails, which `run::verified` would otherwise settle as an outage.
+A present but corrupt `index` is a regular file and reads whole, so its Git
+error stays the outage it was (option A, not A′).
+
+## `pub(super) fn read_refused(checkout: &Path, what: &str, found: &str) -> UpstrokeError {`
+
+The topology twin of the manager's `read_refused`, with the same words: the
+refusal closure 1 returns for a read, a verdict or a failure in a checkout
+whose registration is not whole. It reports the failure the check observed
+(`found`) and asserts no cause.
+
+## `pub(super) enum Whole {`
+
+What closure 1's check found of a checkout's worktree registration: whole, or
+the first condition that failed with the path and what was found there or the
+read's error.
+
+## `pub(super) fn registration_whole(checkout: &Path, common_git_dir: &Path) -> Whole {`
+
+The topology twin of the manager's `registration_whole`, closure 1's check
+(#329's record §8.4): the checkout's `.git` is a regular file that begins
+`gitdir:` and names an entry of this repository's own store, a relative
+pointer resolved against the checkout; the entry holds `gitdir`, `commondir`,
+`HEAD` and `index`, each a regular file read without following a link, the
+first three non-empty; `commondir` canonicalizes to the common git dir and
+`gitdir` to the checkout's `.git`. It calls only `symlink_metadata`, `read` and
+`canonicalize`, starts no process, takes no lock and makes no registry access,
+and reads each file once.
+
+**Why two copies.** The census classifies the functions of the manager's
+modules, and a crate-visible reader there would need an `effects/wrappers.toml`
+row; the topology modules cannot reach the manager's private reader. So the
+manager keeps a private copy and this module one `pub(super)` copy, with no
+instrument, and one test runs both over every construction and requires them
+to agree (`closure_one_readers_agree_on_every_registration_construction`). The
+helpers below it are the twin's of the manager's, line for line.
 
 ## `const fn observed_kind(observed: Materialized) -> Materialization {`
 

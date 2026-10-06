@@ -204,7 +204,7 @@ impl IdSource for RealIds {
     }
 
     fn incarnation(&self) -> IncarnationId {
-        IncarnationId(crate::ulid::ulid())
+        IncarnationId(crate::ulid::incarnation_ulid())
     }
 
     fn pid(&self) -> u32 {
@@ -383,6 +383,23 @@ mod tests {
             fixed.now_rfc3339(),
             fixed.now_rfc3339(),
             "a fixed clock that moved would defeat every byte-exact assertion"
+        );
+    }
+
+    #[test]
+    fn the_production_incarnation_is_the_host_drawn_construction() {
+        let _ = crate::ulid::take_sampled_incarnation_parts();
+        let id = RealIds.incarnation();
+        let Some((now_ms, pid, nonce, draw)) = crate::ulid::take_sampled_incarnation_parts() else {
+            panic!(
+                "`RealIds::incarnation` returned {} without the incarnation constructor",
+                id.0
+            );
+        };
+        assert_eq!(
+            crate::ulid::incarnation_from_parts(now_ms, pid, nonce, draw),
+            id.0,
+            "the production incarnation is not the host-drawn construction of what it sampled"
         );
     }
 

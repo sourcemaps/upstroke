@@ -251,6 +251,201 @@ fn the_loop_selects_through_one_function() {
     );
 }
 
+const DRIVEN_TRANSITIONS: [(&str, usize, usize); 5] = [
+    ("begin_dispatch", 1, 1),
+    ("begin_retry", 1, 1),
+    ("settle_judged", 2, 1),
+    ("close_run", 2, 2),
+    ("hard_block", 1, 1),
+];
+
+fn transition_calls(code: &str, transition: &str) -> Vec<(String, bool)> {
+    let needle = format!("{transition}(");
+    let bytes = code.as_bytes();
+    code.match_indices(&needle)
+        .filter_map(|(at, _)| {
+            let before = at
+                .checked_sub(1)
+                .and_then(|index| bytes.get(index))
+                .copied();
+            if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                return None;
+            }
+            let rest = code.get(at + needle.len()..)?;
+            let mut depth = 0_usize;
+            let mut end = rest.len();
+            for (index, character) in rest.char_indices() {
+                match character {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' if depth == 0 => {
+                        end = index;
+                        break;
+                    }
+                    ')' | ']' | '}' => depth -= 1,
+                    ',' if depth == 0 => {
+                        end = index;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let operator = rest
+                .get(..end)?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some((operator, before == Some(b'.')))
+        })
+        .collect()
+}
+
+fn transition_bypasses(run: &str, coordinator: &str) -> Vec<String> {
+    let mut bypasses = Vec::new();
+    for (transition, in_run, in_coordinator) in DRIVEN_TRANSITIONS {
+        let defined = run
+            .matches(&format!(
+                "pub(super) fn {transition}<O: Operator + ?Sized>("
+            ))
+            .count();
+        if defined != 1 {
+            bypasses.push(format!(
+                "`{transition}` is defined {defined} time(s) generic over its operator, not once"
+            ));
+        }
+        let calls = transition_calls(run, transition);
+        if calls.len() != in_run {
+            bypasses.push(format!(
+                "run.rs calls `{transition}` {} time(s), not {in_run}: {calls:?}",
+                calls.len()
+            ));
+        }
+        for (operator, method) in &calls {
+            if *method
+                || !["&mut self.stepping(seams, hooks)", "operator"].contains(&operator.as_str())
+            {
+                bypasses.push(format!(
+                    "run.rs calls `{transition}` with `{operator}`, which is neither the width-1 \
+                     step's own `Stepping` nor the operator it was handed"
+                ));
+            }
+        }
+        let calls = transition_calls(coordinator, transition);
+        if calls.len() != in_coordinator {
+            bypasses.push(format!(
+                "coordinator.rs calls `{transition}` {} time(s), not {in_coordinator}: {calls:?}",
+                calls.len()
+            ));
+        }
+        for (operator, method) in &calls {
+            if *method || operator != "self" {
+                bypasses.push(format!(
+                    "coordinator.rs calls `{transition}` with `{operator}`, not with itself as the \
+                     operator"
+                ));
+            }
+        }
+    }
+    bypasses
+}
+
+fn driver_sources() -> (String, String) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |file: &str| {
+        crate::effects::production_code(
+            &std::fs::read_to_string(root.join(file))
+                .expect("a source file")
+                .replace("\r\n", "\n"),
+        )
+    };
+    (
+        read("src/engine/topology/run.rs"),
+        read("src/engine/topology/coordinator.rs"),
+    )
+}
+
+#[test]
+fn both_drivers_run_each_transition_through_the_one_generic_function() {
+    let (run, coordinator) = driver_sources();
+    for (file, code, anchors) in [
+        (
+            "run.rs",
+            &run,
+            &["pub fn step(", "fn emit_undischarged("][..],
+        ),
+        (
+            "coordinator.rs",
+            &coordinator,
+            &[
+                "fn idle(&mut self)",
+                "fn finish(&mut self)",
+                "fn registry_pause(",
+            ][..],
+        ),
+    ] {
+        for anchor in anchors {
+            assert!(
+                code.contains(anchor),
+                "the census reads {file} without `{anchor}`, so its domain is not the drivers' \
+                 production code"
+            );
+        }
+    }
+    let bypasses = transition_bypasses(&run, &coordinator);
+    assert!(
+        bypasses.is_empty(),
+        "every call of every transition runs through the one generic function, by the width-1 \
+         step's own `Stepping` or by the coordinator as itself:\n{}",
+        bypasses.join("\n")
+    );
+}
+
+#[test]
+fn the_r_t_census_reports_one_call_that_bypasses_its_driver() {
+    let (run, coordinator) = driver_sources();
+    assert!(transition_bypasses(&run, &coordinator).is_empty());
+    let retry_arm = "settle_judged(&mut self.stepping(seams, hooks), manager, &job, &judged)";
+    assert_eq!(
+        run.matches(retry_arm).count(),
+        2,
+        "the two width-1 settlements"
+    );
+    for foreign in [
+        "settle_judged(&mut Stepping { run: self, seams, hooks: &mut super::seams::NoTopologyHooks::new() }, manager, &job, &judged)",
+        "settle_judged(&mut self.stepping(seams, &mut super::seams::NoTopologyHooks::new()), manager, &job, &judged)",
+    ] {
+        let one = run.replacen(retry_arm, foreign, 1);
+        let bypasses = transition_bypasses(&one, &coordinator);
+        assert_eq!(
+            bypasses.len(),
+            1,
+            "the census reports the one settlement run through a foreign operator: {bypasses:?}"
+        );
+    }
+    let mut coordinator_bypass = coordinator.replacen(
+        "super::run::settle_judged(self, manager, &job, &judged)",
+        "super::run::settle_judged(&mut super::run::Stepping { run: self.run, seams: self.seams, hooks: self.hooks }, manager, &job, &judged)",
+        1,
+    );
+    assert_ne!(
+        coordinator_bypass, coordinator,
+        "the coordinator's settlement is spelled as expected"
+    );
+    assert_eq!(transition_bypasses(&run, &coordinator_bypass).len(), 1);
+    coordinator_bypass = coordinator.replacen(
+        "super::run::close_run(self, seams, ",
+        "self.run.close_run(",
+        1,
+    );
+    assert_ne!(
+        coordinator_bypass, coordinator,
+        "the coordinator's closure is spelled as expected"
+    );
+    assert!(
+        !transition_bypasses(&run, &coordinator_bypass).is_empty(),
+        "a closure called as the run's own method is reported"
+    );
+}
+
 #[test]
 fn the_frozen_pool_table_is_read_through_one_seam() {
     const FILE: &str = "src/engine/assembly.rs";
@@ -300,6 +495,13 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
     );
 }
 
+fn attempt_started_constructions(code: &str) -> Vec<usize> {
+    code.match_indices("AttemptStarted4 {")
+        .filter(|(at, _)| !code[..*at].trim_end().ends_with("struct"))
+        .map(|(at, _)| at)
+        .collect()
+}
+
 #[test]
 fn both_attempt_started_arms_take_their_pool_from_an_authority() {
     const SITES: &[(&str, &str)] = &[
@@ -315,23 +517,64 @@ fn both_attempt_started_arms_take_their_pool_from_an_authority() {
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_root = root.join("src");
+    let mut all = Vec::new();
+    let mut stack = vec![source_root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                all.push(path);
+            }
+        }
+    }
+    let test_modules =
+        crate::effects::census_domain::whole_file_test_modules(&source_root, &all, 13);
+    let mut arms: Vec<(String, usize)> = Vec::new();
+    for path in &all {
+        if test_modules.contains(path) {
+            continue;
+        }
+        let source = std::fs::read_to_string(path).expect("a source file");
+        let found = attempt_started_constructions(&crate::effects::production_code(&source)).len();
+        if found > 0 {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            arms.push((relative, found));
+        }
+    }
+    arms.sort();
+    assert_eq!(
+        arms,
+        SITES
+            .iter()
+            .map(|(file, _)| ((*file).to_owned(), 1))
+            .collect::<Vec<_>>(),
+        "production appends `attempt_started` from exactly these two arms, once each; an arm this \
+         list does not name is an arm whose pool nothing checks"
+    );
+
     let mut invented: Vec<String> = Vec::new();
     let mut checked = 0_usize;
     for (file, why) in SITES {
         let source = std::fs::read_to_string(root.join(file)).expect("a source file");
         let code = crate::effects::production_code(&source);
-        let at = code
-            .find("AttemptStarted4 {")
-            .unwrap_or_else(|| panic!("{file} no longer constructs an `AttemptStarted4`"));
-        let rest = &code[at..];
-        let body = &rest[..rest.find("})").unwrap_or(rest.len())];
-        let pool = body
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("pool:"))
-            .unwrap_or_else(|| panic!("{file}'s `AttemptStarted4` has no `pool` field"));
-        checked += 1;
-        if pool.trim().starts_with("None") {
-            invented.push(format!("{file} — {why}"));
+        for at in attempt_started_constructions(&code) {
+            let rest = &code[at..];
+            let body = &rest[..rest.find("})").unwrap_or(rest.len())];
+            let pool = body
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("pool:"))
+                .unwrap_or_else(|| panic!("{file}'s `AttemptStarted4` has no `pool` field"));
+            checked += 1;
+            if pool.trim().starts_with("None") {
+                invented.push(format!("{file} — {why}"));
+            }
         }
     }
 
@@ -340,6 +583,15 @@ fn both_attempt_started_arms_take_their_pool_from_an_authority() {
         invented.is_empty(),
         "these append `attempt_started` with a hard-coded `pool: None`, so the ledger and the \
          plan disagree about which pool the attempt drained: {invented:?}"
+    );
+    assert_eq!(
+        attempt_started_constructions(
+            "pub struct AttemptStarted4 {}\nfn a() { x(AttemptStarted4 { pool: None }) }\n\
+             fn b() { y(AttemptStarted4 {\n pool: None }) }\n"
+        )
+        .len(),
+        2,
+        "every construction is counted, the second as well as the first, and the definition is not"
     );
 }
 
@@ -532,7 +784,7 @@ fn the_closure_notes_say_what_closure_does_under_concurrency_and_what_it_still_r
 }
 
 #[test]
-fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_deferral_or_parks() {
+fn the_verification_notes_say_a_registry_another_process_is_writing_never_reaches_the_git_arm() {
     use crate::engine::topology::attempt::JudgeError;
     use crate::engine::topology::integrate::Verified;
     use crate::topology::events::SequenceId;
@@ -547,28 +799,36 @@ fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_def
         .unwrap_or_else(|| panic!("the notes carry no {HEADING:?} heading"));
     for (proposition, pin) in [
         (
-            "a registry another process is half-way through writing reaches this arm",
-            "A registry another process is half-way through writing is foreign Git state here too",
+            "a registry another process is half-way through writing never reaches this arm",
+            "A registry another process is half-way through writing never reaches this arm",
         ),
         (
-            "a coordinator in a linked checkout of the same repository is one such process",
+            "every registry access is attempted again until its deadline",
+            "attempted again until its deadline",
+        ),
+        (
+            "a registration still in the way then refuses as a registry refusal",
+            "refuses as `UpstrokeError::RegistryRefused`",
+        ),
+        (
+            "the command then ends resumably with nothing appended",
+            "the command ends resumably, with the transaction open and nothing appended",
+        ),
+        (
+            "a coordinator in a linked checkout of the same repository was the case",
             "`PR11-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`",
         ),
         (
-            "a host agent's own prune is another",
+            "a genuine checkout failure after Git's takeover no longer reaches it",
+            "`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`",
+        ),
+        (
+            "a prune's deletion after the add returned still does",
+            "`PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`",
+        ),
+        (
+            "a host agent's own prune is one starter of it",
             "`PR11-HOST-AGENT-PRUNE-RACES-AN-ENGINE-ADD`",
-        ),
-        (
-            "the terminal spends one of the candidate's deferrals",
-            "spends one of the candidate's deferrals",
-        ),
-        (
-            "the one that reaches `max_defers` parks the candidate with a question",
-            "parks the candidate with an unblock question",
-        ),
-        (
-            "the other process finishing undoes none of it",
-            "the other process finishing undoes none of it",
         ),
         (
             "an attempt's Git error is the pipeline's and ends the command resumably instead",
@@ -603,6 +863,27 @@ fn the_verification_notes_say_a_registry_another_process_is_writing_spends_a_def
             "the mapping the notes state: a Git error in a verification's judgement is an outage \
              of its sequence, not an error that ends the command: {error}"
         ),
+    }
+
+    let refused = super::verified(
+        Err(JudgeError::Other(
+            crate::error::UpstrokeError::RegistryRefused {
+                message: "the worktree registry kept this access from completing until its \
+                          deadline"
+                    .to_owned(),
+            },
+        )),
+        Vec::new(),
+        SequenceId(1),
+    );
+    match refused {
+        Err(crate::error::UpstrokeError::RegistryRefused { .. }) => {}
+        Ok(Verified::Unavailable { detail, .. }) => panic!(
+            "the mapping the notes state: a registry refusal is never an outage of the sequence, \
+             and this one was mapped to one: {detail}"
+        ),
+        Ok(Verified::Judged(_)) => panic!("a registry refusal is not a verdict"),
+        Err(error) => panic!("the registry refusal is passed on as it is, not as {error:?}"),
     }
 }
 
