@@ -20104,14 +20104,18 @@ mod tests {
             .ok_or_else(|| "no gate of the subject was launched".to_owned())
     }
 
+    fn f_names_path(message: &str, path: &std::path::Path) -> bool {
+        let spelled = |text: &str| text.replace('\\', "/");
+        spelled(message).contains(&spelled(&path.display().to_string()))
+    }
+
     fn f_launch_witnessed(launched: &FLaunches, launch: FLaunch) -> Result<(), String> {
         let first = f_first_launch(launched)?;
         let fate = match launch {
             FLaunch::Lost => crate::error::ProcessFate::Gone,
             _ => crate::error::ProcessFate::NeverStarted,
         };
-        let names_head =
-            launch == FLaunch::Lost || first.message.contains(&first.head.display().to_string());
+        let names_head = launch == FLaunch::Lost || f_names_path(&first.message, &first.head);
         if first.failed == Some((fate, false)) && names_head && !first.head_after {
             Ok(())
         } else {
@@ -20120,6 +20124,209 @@ mod tests {
                  and still absent): {first:?}"
             ))
         }
+    }
+
+    const F_WINGUEST_LAUNCHES: [(&str, FLaunch, &str, &str); 8] = [
+        (
+            "Attempt width 1",
+            FLaunch::HeadRemoved,
+            r"the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Attempt-w1-HeadRemoved-WT5SPRCJHR\repo\.git\worktrees\k0-g0-a1-gates_WG9T4H5MXCSP\HEAD: The system cannot find the file specified. (os error 2)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Attempt-w1-HeadRemoved-WT5SPRCJHR/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP\HEAD",
+        ),
+        (
+            "Attempt width 1",
+            FLaunch::PrunedWhole,
+            r"the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Attempt-w1-PrunedWhole-7JXKYQN9EN\repo\.git\worktrees\k0-g0-a1-gates_WG9T4H5MXCSP\HEAD: The system cannot find the path specified. (os error 3)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Attempt-w1-PrunedWhole-7JXKYQN9EN/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP\HEAD",
+        ),
+        (
+            "Attempt width 3",
+            FLaunch::HeadRemoved,
+            r"the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Attempt-w3-HeadRemoved-QTTBDR2DRH\repo\.git\worktrees\k0-g0-a1-gates_WG9T4H5MXCSP\HEAD: The system cannot find the file specified. (os error 2)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Attempt-w3-HeadRemoved-QTTBDR2DRH/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP\HEAD",
+        ),
+        (
+            "Attempt width 3",
+            FLaunch::PrunedWhole,
+            r"the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Attempt-w3-PrunedWhole-ENJM7WFVHB\repo\.git\worktrees\k0-g0-a1-gates_WG9T4H5MXCSP\HEAD: The system cannot find the path specified. (os error 3)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Attempt-w3-PrunedWhole-ENJM7WFVHB/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP\HEAD",
+        ),
+        (
+            "Verification width 1",
+            FLaunch::HeadRemoved,
+            r"the Runner could not complete `s1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Verification-w1-HeadRemoved-X183YXRX9H\repo\.git\worktrees\s1-integration_M8TPQSPRW3HB\HEAD: The system cannot find the file specified. (os error 2)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Verification-w1-HeadRemoved-X183YXRX9H/repo/.git/worktrees/s1-integration_M8TPQSPRW3HB\HEAD",
+        ),
+        (
+            "Verification width 1",
+            FLaunch::PrunedWhole,
+            r"the Runner could not complete `s1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Verification-w1-PrunedWhole-XJMT3Z76HF\repo\.git\worktrees\s1-integration_M8TPQSPRW3HB\HEAD: The system cannot find the path specified. (os error 3)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Verification-w1-PrunedWhole-XJMT3Z76HF/repo/.git/worktrees/s1-integration_M8TPQSPRW3HB\HEAD",
+        ),
+        (
+            "Verification width 3",
+            FLaunch::HeadRemoved,
+            r"the Runner could not complete `s1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Verification-w3-HeadRemoved-CEVDNZ555A\repo\.git\worktrees\s1-integration_WG9T4H5MXCSP\HEAD: The system cannot find the file specified. (os error 2)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Verification-w3-HeadRemoved-CEVDNZ555A/repo/.git/worktrees/s1-integration_WG9T4H5MXCSP\HEAD",
+        ),
+        (
+            "Verification width 3",
+            FLaunch::PrunedWhole,
+            r"the Runner could not complete `s1.gate0.o0` (no process of it was started): failed to read C:\Users\Administrator\AppData\Local\Temp\upstroke-f-p2-launch-Verification-w3-PrunedWhole-7YF46G19N6\repo\.git\worktrees\s1-integration_WG9T4H5MXCSP\HEAD: The system cannot find the path specified. (os error 3)",
+            r"C:/Users/Administrator/AppData/Local/Temp/upstroke-f-p2-launch-Verification-w3-PrunedWhole-7YF46G19N6/repo/.git/worktrees/s1-integration_WG9T4H5MXCSP\HEAD",
+        ),
+    ];
+
+    const F_LINUX_LAUNCHES: [(&str, FLaunch, &str, &str); 2] = [
+        (
+            "Attempt width 1",
+            FLaunch::HeadRemoved,
+            "the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read /tmp/upstroke-f-p2-launch-Attempt-w1-HeadRemoved-378Z7T187T/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP/HEAD: No such file or directory (os error 2)",
+            "/tmp/upstroke-f-p2-launch-Attempt-w1-HeadRemoved-378Z7T187T/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP/HEAD",
+        ),
+        (
+            "Attempt width 1",
+            FLaunch::PrunedWhole,
+            "the Runner could not complete `k0.g0.a1.gate0.o0` (no process of it was started): failed to read /tmp/upstroke-f-p2-launch-Attempt-w1-PrunedWhole-7M7TD3C7JZ/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP/HEAD: No such file or directory (os error 2)",
+            "/tmp/upstroke-f-p2-launch-Attempt-w1-PrunedWhole-7M7TD3C7JZ/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP/HEAD",
+        ),
+    ];
+
+    const F_LINUX_LOST_LAUNCH: (&str, &str) = (
+        "the Runner could not complete `k0.g0.a1.gate0.o0` (its process is gone): the stub gate's run lost its process after it started",
+        "/tmp/upstroke-f-p2-launch-Attempt-w1-Lost-TGWCYTJX30/repo/.git/worktrees/k0-g0-a1-gates_WG9T4H5MXCSP/HEAD",
+    );
+
+    fn f_premise_of(
+        launch: FLaunch,
+        failed: Option<(crate::error::ProcessFate, bool)>,
+        message: &str,
+        head: &str,
+        head_after: bool,
+    ) -> Result<(), String> {
+        let launched = FLaunches::default();
+        launched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(FLaunched {
+                failed,
+                message: message.to_owned(),
+                head: PathBuf::from(head),
+                head_after,
+            });
+        f_launch_witnessed(&launched, launch)
+    }
+
+    #[test]
+    fn the_launch_premise_names_the_deleted_head_in_either_separator_spelling_and_nothing_else() {
+        let never = Some((crate::error::ProcessFate::NeverStarted, false));
+        let gone = Some((crate::error::ProcessFate::Gone, false));
+        let mut cases = Vec::new();
+        for (spelling, launches, raw) in [
+            ("winguest", F_WINGUEST_LAUNCHES.as_slice(), false),
+            ("linux", F_LINUX_LAUNCHES.as_slice(), true),
+        ] {
+            for &(cell, launch, message, head) in launches {
+                cases.push((
+                    format!("{spelling} {cell}: {launch:?}, as printed"),
+                    match f_premise_of(launch, never, message, head, false) {
+                        Ok(()) if message.contains(head) == raw => Ok(()),
+                        other => Err(format!(
+                            "{other:?}; the raw comparison finds the head: {}",
+                            message.contains(head)
+                        )),
+                    },
+                ));
+            }
+        }
+        let [winguest, winguest_elsewhere, ..] = F_WINGUEST_LAUNCHES;
+        let [linux, linux_elsewhere] = F_LINUX_LAUNCHES;
+        for (spelling, separator, (cell, launch, message, head), (_, _, elsewhere, _)) in [
+            ("winguest", '\\', winguest, winguest_elsewhere),
+            ("linux", '/', linux, linux_elsewhere),
+        ] {
+            let swapped = |from: &str, to: &str| {
+                let text = message.replacen(from, to, 1);
+                assert_ne!(text, message, "{spelling}: {from:?} is in the message");
+                text
+            };
+            let other_entry = swapped("k0-g0-a1-gates", "k1-g0-a1-gates");
+            let gitdir = swapped(
+                &format!("{separator}HEAD: "),
+                &format!("{separator}gitdir: "),
+            );
+            let directory = swapped(&format!("{separator}HEAD: "), ": ");
+            let cut = message
+                .split_once("failed to read ")
+                .map(|(before, _)| before.to_owned())
+                .expect("the message reads a path");
+            for (what, judged) in [
+                (
+                    "another snapshot's HEAD",
+                    f_premise_of(launch, never, elsewhere, head, false),
+                ),
+                (
+                    "another entry's HEAD in the same store",
+                    f_premise_of(launch, never, &other_entry, head, false),
+                ),
+                (
+                    "the entry's gitdir instead of HEAD",
+                    f_premise_of(launch, never, &gitdir, head, false),
+                ),
+                (
+                    "the entry directory alone",
+                    f_premise_of(launch, never, &directory, head, false),
+                ),
+                (
+                    "no path: the error cut before it",
+                    f_premise_of(launch, never, &cut, head, false),
+                ),
+                (
+                    "no path: no error text",
+                    f_premise_of(launch, never, "", head, false),
+                ),
+                (
+                    "HEAD there after the launch",
+                    f_premise_of(launch, never, message, head, true),
+                ),
+                (
+                    "a cancellation",
+                    f_premise_of(
+                        launch,
+                        Some((crate::error::ProcessFate::NeverStarted, true)),
+                        message,
+                        head,
+                        false,
+                    ),
+                ),
+                (
+                    "no failure",
+                    f_premise_of(launch, None, message, head, false),
+                ),
+                (
+                    "the Lost fate under the container's construction",
+                    f_premise_of(launch, gone, message, head, false),
+                ),
+                (
+                    "the container's fate under the Lost construction",
+                    f_premise_of(FLaunch::Lost, never, message, head, false),
+                ),
+            ] {
+                cases.push((
+                    format!("{spelling} {cell}: {launch:?}, refused: {what}"),
+                    match judged {
+                        Err(_) => Ok(()),
+                        Ok(()) => Err("accepted".to_owned()),
+                    },
+                ));
+            }
+        }
+        let (lost_message, lost_head) = F_LINUX_LOST_LAUNCH;
+        cases.push((
+            "linux Attempt width 1: Lost, kept apart: its stub error names no path".to_owned(),
+            f_premise_of(FLaunch::Lost, gone, lost_message, lost_head, false),
+        ));
+        f_report(&cases);
     }
 
     #[test]
