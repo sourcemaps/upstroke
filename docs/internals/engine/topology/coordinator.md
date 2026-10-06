@@ -2730,9 +2730,33 @@ A runner responder sending every gate of the subject through `f_launch` and reco
 
 The first recorded launch, or why there is none.
 
+## `mod tests` › `fn f_names_path(message: &str, path: &std::path::Path) -> bool {`
+
+Whether an error names a path, in either separator spelling: both are spelled with `/` before the comparison. The container's Git view rebuilds the path it reads from its components, so on Windows its error spells the snapshot's `HEAD` with `\` throughout, while the test's `head` keeps the `/` of the checkout's `.git` pointer as Git wrote it, joined to `HEAD` with `\`; #333's `test (winguest)` at `629cdef5` failed F-R1's eight container cases on that difference. On Unix a `\` is a file-name character that this reads as a separator; no fixture path holds one.
+
 ## `mod tests` › `fn f_launch_witnessed(launched: &FLaunches, launch: FLaunch) -> Result<(), String> {`
 
-The construction's premise: the first launch failed with the fate it makes (`NeverStarted` from the container's view, `Gone` from the stub) and not as a cancellation, the container's error names the deleted `HEAD`, and `HEAD` was still absent after it.
+The construction's premise: the first launch failed with the fate it makes (`NeverStarted` from the container's view, `Gone` from the stub) and not as a cancellation, the container's error names the deleted `HEAD` in either separator spelling (`f_names_path`), and `HEAD` was still absent after it.
+
+## `mod tests` › `const F_WINGUEST_LAUNCHES: [(&str, FLaunch, &str, &str); 8] = [`
+
+The eight container launches of F-R1's test on the winguest at `629cdef5` (#333's CI run 37393050473, job `test (winguest)`), each error and `head` exactly as that cell's premise failure printed them.
+
+## `mod tests` › `const F_LINUX_LAUNCHES: [(&str, FLaunch, &str, &str); 2] = [`
+
+Two container launches of the same test on Linux (an attempt at width 1, `HEAD` removed and the entry pruned whole), exactly as a run printed them, in the one spelling Linux has.
+
+## `mod tests` › `const F_LINUX_LOST_LAUNCH: (&str, &str) = (`
+
+The stub's lost run from that Linux run: its error names no path.
+
+## `mod tests` › `fn f_premise_of(`
+
+`f_launch_witnessed` over one recorded launch.
+
+## `mod tests` › `fn the_launch_premise_names_the_deleted_head_in_either_separator_spelling_and_nothing_else() {`
+
+F-R1's premise, checked on exact strings: it accepts each recorded Windows and Linux launch as printed (the raw comparison of `629cdef5` finds the head in the Linux errors only), and refuses, in both spellings, another snapshot's `HEAD`, another entry's `HEAD` in the same store, the entry's `gitdir` named instead of `HEAD`, the entry directory alone, an error cut before its path and an empty one, `HEAD` there after the launch, a cancellation, no failure, the stub's `Gone` under the container's construction and the container's `NeverStarted` under the `Lost` one. The `Lost` construction, whose stub error names no path, is checked apart. It reads strings only, so it judges the Windows spelling on every platform; what the eight Windows cases end with is for the test itself to show there.
 
 ## `mod tests` › `fn a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
