@@ -5326,4 +5326,541 @@ pub(crate) mod tests {
             );
         }
     }
+
+    fn open_verification(fold: &TopologyFold) -> Option<SequenceId> {
+        fold.transaction()
+            .filter(|open| matches!(open.class, TransactionClass::VerificationStarted { .. }))
+            .map(|open| open.sequence)
+    }
+
+    fn unrecorded_state(fold: &TopologyFold) -> bool {
+        !format!("{:?}", fold.state()).contains("charged: Some(")
+    }
+
+    fn applied(fold: &TopologyFold, events: &[TopologyEvent]) -> Option<TopologyFold> {
+        let mut next = fold.clone();
+        for event in events {
+            let delta = next.plan_transition(event).ok()?;
+            next.apply_delta(delta);
+        }
+        Some(next)
+    }
+
+    fn refusal_of(fold: &TopologyFold, event: &TopologyEvent) -> crate::topology::fold::FoldError {
+        fold.plan_transition(event)
+            .err()
+            .unwrap_or_else(|| panic!("`{}` was admitted", event.body.kind()))
+    }
+
+    fn spend_already_recorded(error: &crate::topology::fold::FoldError, kind: &str) -> bool {
+        matches!(error,
+            crate::topology::fold::FoldError::InconsistentRecord { kind: refused, detail }
+                if *refused == kind && detail.contains("already records the review passes"))
+    }
+
+    fn replayed_refusal(
+        shape: PlanShape,
+        trace: &[TopologyEvent],
+        event: &TopologyEvent,
+    ) -> crate::topology::fold::FoldError {
+        let mut log = trace.to_vec();
+        log.push(event.clone());
+        TopologyFold::replay(inputs_for(shape), &log)
+            .err()
+            .unwrap_or_else(|| panic!("a log ending in `{}` replayed", event.body.kind()))
+    }
+
+    fn charged_with(sequence: u32, model: &str) -> TopologyEvent {
+        let mut event = verification_charged(sequence, 1);
+        if let TopologyEventBody::MergeVerificationCharged { data } = &mut event.body {
+            for review in &mut data.reviews {
+                review.model = model.to_owned();
+            }
+        }
+        event
+    }
+
+    fn declined_sibling_of(fold: &TopologyFold) -> Option<Vec<TopologyEvent>> {
+        use crate::topology::registry::{Lineage, Origin, repair_display_id};
+        let open = fold.transaction()?;
+        let root = open.candidate.key;
+        let registry = fold.registry()?;
+        let parent = registry.get(root)?.clone();
+        if parent.lineage.is_some() {
+            return None;
+        }
+        let key = TaskKey(u32::try_from(registry.len()).ok()?);
+        let mut entry = parent.clone();
+        entry.key = key;
+        entry.display_id =
+            crate::ir::TaskId::from(repair_display_id(1, &parent.display_id).as_str());
+        entry.origin = Origin::MergeRepair;
+        entry.deps = Vec::new();
+        entry.display_deps = Vec::new();
+        entry.lineage = Some(Lineage {
+            root,
+            parent: root,
+            index: 1,
+        });
+        let binding = fold.rung_binding(root, 0)?;
+        let question = crate::topology::events::FrozenQuestion {
+            id: QuestionId::from("q-census-sibling"),
+            key,
+            kind: QuestionKind::Clarify,
+            context: "the sibling asks which of two formats to keep".to_owned(),
+            options: vec!["keep the first".to_owned()],
+        };
+        let mut record = attempt_record(1);
+        record.failure = Some(crate::events::FailureRecord {
+            kind: crate::ladder::FailureKind::NeedsHuman,
+            origin: crate::ladder::FailureOrigin::Worker,
+            reason: "the sibling asks which of two formats to keep".to_owned(),
+            detail: None,
+        });
+        Some(vec![
+            ev(TopologyEventBody::TaskSpawned {
+                data: Box::new(crate::topology::events::TaskSpawned {
+                    spawn: crate::topology::events::FrozenSpawn {
+                        key,
+                        entry,
+                        admission: crate::topology::events::SpawnAdmission::Runnable,
+                    },
+                }),
+            }),
+            ev(TopologyEventBody::TaskDispatched {
+                data: TaskDispatched {
+                    key,
+                    generation: GenerationId(0),
+                    base_sha: open.candidate.commit_sha.clone(),
+                    worktree_path: format!("/tmp/census/sibling-{}", key.0),
+                    lease: LeaseGrant::InheritedLineage { root },
+                    source_candidate: Some(open.candidate.clone()),
+                },
+            }),
+            ev(TopologyEventBody::AttemptStarted {
+                data: AttemptStarted4 {
+                    key,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    rung: 0,
+                    binding,
+                    pool: None,
+                    resume_session: None,
+                    materialization_observed: Some(crate::topology::events::Materialization::Clean),
+                },
+            }),
+            ev(TopologyEventBody::AttemptFinished {
+                data: Box::new(AttemptFinished4 {
+                    key,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    record: Box::new(record),
+                    settlement: AttemptSettlement::Closed {
+                        transition: SettlementTransition::Parked {
+                            question: question.clone(),
+                        },
+                        lease: LeaseDisposition::LineageHeld,
+                    },
+                }),
+            }),
+            answer(
+                key,
+                &question.id,
+                crate::topology::events::Answer4::Declined {
+                    decline_halts_run: false,
+                },
+            ),
+        ])
+    }
+
+    struct Released {
+        shape: PlanShape,
+        trace: Vec<TopologyEvent>,
+        fold: TopologyFold,
+        sequence: SequenceId,
+    }
+
+    fn released_verifications() -> Vec<Released> {
+        let mut out = Vec::new();
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let Some(planted) = declined_sibling_of(&state.fold) else {
+                    continue;
+                };
+                let Some(fold) = applied(&state.fold, &planted) else {
+                    continue;
+                };
+                let mut trace = state.trace.clone();
+                trace.extend(planted);
+                out.push(Released {
+                    shape: member.shape,
+                    trace,
+                    fold,
+                    sequence,
+                });
+                if out.len() >= 256 {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    fn consumes_a_sequence(candidate: &Candidate, after: SequenceId) -> bool {
+        candidate.event.body.sequence() == Some(SequenceId(after.0 + 1))
+            && matches!(
+                candidate.event.body,
+                TopologyEventBody::MergeVerificationStarted { .. }
+                    | TopologyEventBody::MergePrepared { .. }
+                    | TopologyEventBody::MergeRejected { .. }
+            )
+    }
+
+    fn later_start(fold: &TopologyFold, after: SequenceId) -> Option<(TopologyFold, String)> {
+        use crate::topology::registry::{Lineage, Origin, repair_display_id};
+        let registry = fold.registry()?;
+        let merged = registry.entries().iter().find(|entry| {
+            entry.lineage.is_none() && fold.task_state(entry.key) == Some(TaskState::Merged)
+        })?;
+        let key = TaskKey(u32::try_from(registry.len()).ok()?);
+        let mut entry = merged.clone();
+        entry.key = key;
+        entry.display_id =
+            crate::ir::TaskId::from(repair_display_id(1, &merged.display_id).as_str());
+        entry.origin = Origin::MergeRepair;
+        entry.deps = Vec::new();
+        entry.display_deps = Vec::new();
+        entry.lineage = Some(Lineage {
+            root: merged.key,
+            parent: merged.key,
+            index: 1,
+        });
+        let spawn = ev(TopologyEventBody::TaskSpawned {
+            data: Box::new(crate::topology::events::TaskSpawned {
+                spawn: crate::topology::events::FrozenSpawn {
+                    key,
+                    entry,
+                    admission: crate::topology::events::SpawnAdmission::Runnable,
+                },
+            }),
+        });
+        let mut next = applied(fold, &[spawn])?;
+        for _ in 0..16 {
+            let candidates = classes(&next);
+            if let Some(consuming) = candidates.iter().find(|candidate| {
+                consumes_a_sequence(candidate, after)
+                    && next.plan_transition(&candidate.event).is_ok()
+            }) {
+                let label = consuming.label.clone();
+                return Some((
+                    applied(&next, std::slice::from_ref(&consuming.event))?,
+                    label,
+                ));
+            }
+            let step = candidates.into_iter().find(|candidate| {
+                candidate.event.body.key() == Some(key)
+                    && [
+                        "task_dispatched",
+                        "attempt_started",
+                        "candidate_prepared",
+                        "task_candidate_created",
+                    ]
+                    .contains(&candidate.event.body.kind())
+                    && next.plan_transition(&candidate.event).is_ok()
+            })?;
+            next = applied(&next, &[step.event])?;
+        }
+        None
+    }
+
+    #[test]
+    fn a_charged_record_is_admitted_for_the_open_verification_and_moves_only_charged() {
+        let mut admitted = 0_usize;
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let before = format!("{:?}", state.fold.state());
+                let after = applied(&state.fold, &[verification_charged(sequence.0, 1)])
+                    .unwrap_or_else(|| panic!("state {}: the record is admitted", state.id));
+                assert_eq!(after.transaction(), state.fold.transaction());
+                assert_eq!(after.queue(), state.fold.queue());
+                assert_eq!(after.leases(), state.fold.leases());
+                assert_eq!(after.pipeline_held(), state.fold.pipeline_held());
+                assert_eq!(
+                    format!("{:?}", after.state()),
+                    before.replacen(
+                        "charged: None",
+                        &format!("charged: Some(SequenceId({}))", sequence.0),
+                        1
+                    ),
+                    "state {}: the record moves `charged` and nothing else",
+                    state.id
+                );
+                admitted += 1;
+            }
+        }
+        assert!(admitted > 100, "the sweep was not vacuous: {admitted}");
+    }
+
+    #[test]
+    fn a_charged_record_is_admitted_for_the_verification_a_lineage_failure_released_until_a_sequence_is_consumed_or_the_run_resumes()
+     {
+        let released = released_verifications();
+        assert!(
+            !released.is_empty(),
+            "a declined lineage sibling released an explored verification"
+        );
+        let mut consumed = 0_usize;
+        for case in &released {
+            assert_eq!(case.fold.transaction(), None);
+            assert_eq!(
+                case.fold.next_sequence(),
+                Some(SequenceId(case.sequence.0 + 1))
+            );
+            let record = verification_charged(case.sequence.0, 1);
+            case.fold
+                .plan_transition(&record)
+                .expect("admitted for the released sequence while it is the latest");
+            let resumed = applied(
+                &case.fold,
+                &[run_resumed(run_started_unauthenticated().runner)],
+            )
+            .expect("the run resumes");
+            assert!(
+                matches!(
+                    refusal_of(&resumed, &record),
+                    crate::topology::fold::FoldError::WrongSequence { .. }
+                ),
+                "refused after `run_resumed`"
+            );
+            if let Some((next, label)) = later_start(&case.fold, case.sequence) {
+                assert_eq!(
+                    next.next_sequence(),
+                    Some(SequenceId(case.sequence.0 + 2)),
+                    "`{label}` consumed the next sequence"
+                );
+                assert!(
+                    matches!(
+                        refusal_of(&next, &record),
+                        crate::topology::fold::FoldError::WrongSequence { .. }
+                    ),
+                    "refused once `{label}` consumed a sequence"
+                );
+                consumed += 1;
+            }
+        }
+        assert!(consumed > 0, "a later start was exercised");
+    }
+
+    #[test]
+    fn a_charged_record_is_refused_with_no_pass_after_its_terminal_and_for_an_authorized_publication()
+     {
+        let mut refused: BTreeSet<&'static str> = BTreeSet::new();
+        for member in family() {
+            for state in member.census.states() {
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let last = state.trace.last().map(|event| &event.body);
+                match last {
+                    Some(
+                        TopologyEventBody::MergeRejected { .. }
+                        | TopologyEventBody::MergeVerificationUnavailable { .. }
+                        | TopologyEventBody::MergeVerificationInterrupted { .. },
+                    ) if state.fold.transaction().is_none() => {
+                        let sequence = last.and_then(TopologyEventBody::sequence).expect("seq");
+                        let error = refusal_of(&state.fold, &verification_charged(sequence.0, 1));
+                        assert!(
+                            matches!(
+                                error,
+                                crate::topology::fold::FoldError::WrongSequence { .. }
+                            ),
+                            "state {}: {error}",
+                            state.id
+                        );
+                        refused.insert(last.map_or("", TopologyEventBody::kind));
+                    }
+                    _ => {}
+                }
+                if let Some(open) = state.fold.transaction() {
+                    if matches!(open.class, TransactionClass::Prepared { .. }) {
+                        let error =
+                            refusal_of(&state.fold, &verification_charged(open.sequence.0, 1));
+                        assert!(
+                            matches!(&error,
+                                crate::topology::fold::FoldError::InconsistentRecord { detail, .. }
+                                    if detail.contains("already authorized to publish")),
+                            "state {}: {error}",
+                            state.id
+                        );
+                        refused.insert("prepared");
+                    }
+                }
+                if let Some(sequence) = open_verification(&state.fold) {
+                    let error = refusal_of(&state.fold, &verification_charged(sequence.0, 0));
+                    assert!(
+                        matches!(&error,
+                            crate::topology::fold::FoldError::InconsistentRecord { detail, .. }
+                                if detail.contains("records no review pass")),
+                        "state {}: {error}",
+                        state.id
+                    );
+                    refused.insert("empty");
+                }
+            }
+        }
+        assert_eq!(
+            refused.into_iter().collect::<Vec<_>>(),
+            vec![
+                "empty",
+                "merge_rejected",
+                "merge_verification_interrupted",
+                "merge_verification_unavailable",
+                "prepared"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_charged_record_for_a_sequence_is_refused_live_and_on_replay() {
+        let mut cases = BTreeSet::new();
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) || cases.len() >= 2 {
+                    continue;
+                }
+                let first = verification_charged(sequence.0, 1);
+                let resume = run_resumed(run_started_unauthenticated().runner);
+                for (case, prefix) in [
+                    ("open", vec![first.clone()]),
+                    ("resumed", vec![first.clone(), resume]),
+                ] {
+                    let Some(fold) = applied(&state.fold, &prefix) else {
+                        continue;
+                    };
+                    let mut trace = state.trace.clone();
+                    trace.extend(prefix);
+                    for second in [first.clone(), charged_with(sequence.0, "disjoint-model")] {
+                        let live = refusal_of(&fold, &second);
+                        assert!(
+                            spend_already_recorded(&live, "merge_verification_charged"),
+                            "{case}: {live}"
+                        );
+                        assert_eq!(replayed_refusal(member.shape, &trace, &second), live);
+                    }
+                    cases.insert(case);
+                }
+            }
+        }
+        for case in released_verifications().iter().take(1) {
+            let first = verification_charged(case.sequence.0, 1);
+            let fold =
+                applied(&case.fold, std::slice::from_ref(&first)).expect("the first is admitted");
+            let mut trace = case.trace.clone();
+            trace.push(first.clone());
+            for second in [
+                first.clone(),
+                charged_with(case.sequence.0, "disjoint-model"),
+            ] {
+                let live = refusal_of(&fold, &second);
+                assert!(
+                    spend_already_recorded(&live, "merge_verification_charged"),
+                    "abandoned: {live}"
+                );
+                assert_eq!(replayed_refusal(case.shape, &trace, &second), live);
+            }
+            cases.insert("abandoned");
+        }
+        assert_eq!(
+            cases.into_iter().collect::<Vec<_>>(),
+            vec!["abandoned", "open", "resumed"]
+        );
+    }
+
+    #[test]
+    fn a_carrying_terminal_after_a_charged_record_is_refused_and_the_interrupted_one_admitted() {
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        let mut interrupted = 0_usize;
+        for member in family() {
+            for state in member.census.states() {
+                let Some(sequence) = open_verification(&state.fold) else {
+                    continue;
+                };
+                if !unrecorded_state(&state.fold) {
+                    continue;
+                }
+                let record = verification_charged(sequence.0, 1);
+                let after = applied(&state.fold, std::slice::from_ref(&record)).expect("admitted");
+                let mut trace = state.trace.clone();
+                trace.push(record);
+                for candidate in classes(&state.fold) {
+                    let carrying = match &candidate.event.body {
+                        TopologyEventBody::MergeVerificationUnavailable { data } => {
+                            data.sequence == sequence
+                        }
+                        TopologyEventBody::MergePrepared { data } => {
+                            data.sequence == sequence
+                                && data.disposition != PreparedDisposition::Fast
+                        }
+                        TopologyEventBody::MergeRejected { data } => {
+                            data.sequence == sequence
+                                && matches!(
+                                    data.disposition,
+                                    crate::topology::events::RejectionDisposition::CodeRejected { .. }
+                                )
+                        }
+                        _ => false,
+                    };
+                    if !carrying || state.fold.plan_transition(&candidate.event).is_err() {
+                        continue;
+                    }
+                    let kind = candidate.event.body.kind();
+                    let live = refusal_of(&after, &candidate.event);
+                    assert!(
+                        spend_already_recorded(&live, kind),
+                        "`{}`: {live}",
+                        candidate.label
+                    );
+                    assert_eq!(
+                        replayed_refusal(member.shape, &trace, &candidate.event),
+                        live
+                    );
+                    covered.insert(kind);
+                }
+                let settled = ev(TopologyEventBody::MergeVerificationInterrupted {
+                    data: crate::topology::events::MergeVerificationInterrupted {
+                        sequence,
+                        detail: "the census killed the verifier".to_owned(),
+                    },
+                });
+                after
+                    .plan_transition(&settled)
+                    .expect("the interrupted terminal, which carries no cost, is admitted");
+                interrupted += 1;
+            }
+        }
+        assert_eq!(
+            covered.into_iter().collect::<Vec<_>>(),
+            vec![
+                "merge_prepared",
+                "merge_rejected",
+                "merge_verification_unavailable"
+            ]
+        );
+        assert!(interrupted > 100, "{interrupted}");
+    }
 }

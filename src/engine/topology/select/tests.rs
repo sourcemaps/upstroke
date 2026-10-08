@@ -1506,3 +1506,133 @@ fn dispatch_repair(fold: &TopologyFold, key: TaskKey) -> crate::topology::events
         },
     })
 }
+
+fn verification_started_at(sequence: u32, key: TaskKey) -> TopologyEvent {
+    ev(TopologyEventBody::MergeVerificationStarted {
+        data: crate::topology::events::MergeVerificationStarted {
+            sequence: crate::topology::events::SequenceId(sequence),
+            candidate: candidate_of(key, 0),
+            basis: crate::topology::events::VerificationBasis::StaleClean {
+                prepared_ref: GitRef(format!("refs/upstroke/select/prepared/{sequence}")),
+            },
+            expected_head: sha("head"),
+            proposed_sha: sha("proposal"),
+        },
+    })
+}
+
+fn verification_charged(sequence: u32, reviews: Vec<crate::events::ReviewRecord>) -> TopologyEvent {
+    ev(TopologyEventBody::MergeVerificationCharged {
+        data: crate::topology::events::MergeVerificationCharged {
+            sequence: crate::topology::events::SequenceId(sequence),
+            reviews,
+        },
+    })
+}
+
+fn verification_interrupted(sequence: u32) -> TopologyEvent {
+    ev(TopologyEventBody::MergeVerificationInterrupted {
+        data: crate::topology::events::MergeVerificationInterrupted {
+            sequence: crate::topology::events::SequenceId(sequence),
+            detail: "the next process settled it".to_owned(),
+        },
+    })
+}
+
+#[test]
+fn reported_spend_replays_a_charged_record_against_the_candidate_it_verified() {
+    let passes = || vec![review_costing(Some(2.5)), review_costing(Some(1.25))];
+
+    let paired = Spend::replay(&[
+        verification_started_at(1, ALEPH),
+        verification_charged(1, passes()),
+    ]);
+    assert!(
+        (paired.run_usd() - 3.75).abs() < f64::EPSILON,
+        "the record's two passes reach the run total: {}",
+        paired.run_usd()
+    );
+    assert!(
+        (paired.task_usd(ALEPH) - 3.75).abs() < f64::EPSILON,
+        "and the task its sequence's start named: {}",
+        paired.task_usd(ALEPH)
+    );
+    assert!(paired.task_usd(BET).abs() < f64::EPSILON);
+
+    let unpaired = Spend::replay(&[verification_charged(1, passes())]);
+    assert!(
+        (unpaired.run_usd() - 3.75).abs() < f64::EPSILON,
+        "a record the slice gives no start for still charges the run: {}",
+        unpaired.run_usd()
+    );
+    for key in [ALEPH, BET, GIMEL] {
+        assert!(
+            unpaired.task_usd(key).abs() < f64::EPSILON,
+            "and it is attributed to no task"
+        );
+    }
+}
+
+#[test]
+fn the_integration_ledger_reads_a_charged_record_as_a_lower_bound() {
+    let fold = started();
+    let run_id = fold.started().expect("started").run_id.clone();
+    for (costs, reviews, cost, rendered) in [
+        (
+            Some([Some(2.5), Some(1.25)]),
+            2,
+            Some(3.75),
+            "(2 review(s), cost at least $3.7500 (?))",
+        ),
+        (
+            Some([Some(2.5), None]),
+            2,
+            Some(2.5),
+            "(2 review(s), cost at least $2.5000 (?))",
+        ),
+        (
+            Some([None, None]),
+            2,
+            None,
+            "(2 review(s), cost ? (unknown))",
+        ),
+        (None, 0, None, "(0 review(s), cost ? (unknown))"),
+    ] {
+        let mut events = vec![verification_started_at(1, ALEPH)];
+        if let Some(costs) = costs {
+            events.push(verification_charged(
+                1,
+                costs.iter().map(|cost| review_costing(*cost)).collect(),
+            ));
+        }
+        events.push(verification_interrupted(1));
+        let rows = crate::engine::topology::report::integration_ledger(&events);
+        let row = rows
+            .iter()
+            .find(|row| row.sequence == 1)
+            .expect("the sequence has a ledger row");
+        assert_eq!(
+            (
+                row.reviews,
+                row.review_cost_usd,
+                row.review_cost_incomplete,
+                row.terminal.as_str()
+            ),
+            (
+                reviews,
+                cost,
+                costs.is_some(),
+                "merge_verification_interrupted"
+            ),
+            "{costs:?}"
+        );
+        let report =
+            crate::engine::topology::report::TopologyReport::derive(&run_id, &fold, &events)
+                .expect("the report derives");
+        assert!(
+            report.render().contains(rendered),
+            "{costs:?}: {}",
+            report.render()
+        );
+    }
+}
