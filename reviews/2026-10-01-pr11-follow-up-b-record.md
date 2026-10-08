@@ -10206,6 +10206,14 @@ no behaviour and no other text"):
   `git_2_40_prerequisites_helper` splices its stub's paths into single-quoted shell text; reasoned, not executed. No
   duplicate at `492325c4` (`impl16/findings-check/sibling-check.txt`, its positive control the related
   `PR11-R5-REAL-DOCKER-GATE-SCRIPT-SPLICES-PATHS`).
+  *Corrected 2026-10-08 (B12, finding B11-4): not the draft's text as a whole.* `652361fd…` is the sha256 of the
+  whole draft, 88 lines: a 14-line orchestration preamble ending with a markdown fence's opening line (lines 1-14),
+  the finding text inside the fence (15-61), the fence's closing line (62), a proposed ledger-row section (64-68) and
+  an evidence-and-limits section (70-88). The committed file is the fenced text, draft lines 15 to 61, byte for byte,
+  with nothing else changed: `sed -n '15,61p'` of the draft and the file compare equal under `cmp`, both sha256
+  `cb093d7342a1e45283039101f5f1ed62c6f7687cf052edba9c0fe10f6dbe9480`, while lines 14-61, 15-62, 16-61 and 15-60 each
+  differ. The file is unchanged since `9af3aa90` (blob `2dc3e87f`), and its ledger row is the draft's line 68, byte
+  for byte (`~/orch-pr11/logs/pr11_fub_impl17/b11-4/source-proof.txt`).
 - **The gap O9(a)'s procedure cannot close** (`ca6f0e5a`):
   `findings/P2_liveness_202610081321_a-candidate-no-environment-change-answers-has-no-clearing-procedure.md`,
   `PR329-R14-A-CANDIDATE-NO-ENVIRONMENT-CHANGE-ANSWERS-HAS-NO-CLEARING-PROCEDURE`, P2 proposed for B's review to grade
