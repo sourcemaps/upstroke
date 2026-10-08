@@ -1571,6 +1571,22 @@ pub(crate) mod tests {
                 },
             }),
         ));
+        out.push(Candidate::new(
+            "merge_verification_charged/one-pass",
+            verification_charged(sequence, 1),
+        ));
+        out.push(Candidate::new(
+            "merge_verification_charged/no-pass",
+            verification_charged(sequence, 0),
+        ));
+        if fold.transaction().is_none() {
+            if let Some(latest) = sequence.checked_sub(1) {
+                out.push(Candidate::new(
+                    "merge_verification_charged/latest",
+                    verification_charged(latest, 1),
+                ));
+            }
+        }
         if let Some(questions) = fold.open_questions() {
             for (id, open) in questions {
                 let key = open.question.key;
@@ -3344,6 +3360,27 @@ pub(crate) mod tests {
         );
     }
 
+    fn verification_charged(sequence: u32, passes: usize) -> TopologyEvent {
+        ev(TopologyEventBody::MergeVerificationCharged {
+            data: crate::topology::events::MergeVerificationCharged {
+                sequence: SequenceId(sequence),
+                reviews: (0..passes)
+                    .map(|_| ReviewRecord {
+                        pass: "integration".to_owned(),
+                        agent: "aleph-Mid-agent".to_owned(),
+                        model: "aleph-Mid-model".to_owned(),
+                        adapter: None,
+                        preflight_cli_version: None,
+                        effort: None,
+                        pool: None,
+                        cost_usd: Some(0.1),
+                        outcome: ReviewPassOutcome::Passed,
+                    })
+                    .collect(),
+            },
+        })
+    }
+
     fn verification_deferred_by_outage(sequence: u32, defers: u32) -> TopologyEvent {
         ev(TopologyEventBody::MergeVerificationUnavailable {
             data: MergeVerificationUnavailable {
@@ -3908,7 +3945,7 @@ pub(crate) mod tests {
     #[test]
     fn every_plan_transition_arm_is_executed_by_the_census() {
         let arms = production_arms();
-        assert_eq!(arms.len(), 24, "{arms:?}");
+        assert_eq!(arms.len(), 25, "{arms:?}");
         let members = family();
         let executed: BTreeSet<&'static str> = members
             .iter()
