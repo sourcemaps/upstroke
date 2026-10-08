@@ -17738,16 +17738,34 @@ fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses(
     assert!(message.contains("the last failed with"), "{message}");
 }
 
+/// The production registry deadline: `REGISTRY_ACCESS_DEADLINE`'s
+/// `#[cfg(not(test))]` value, which a test build cannot name. A test whose
+/// accesses race real writers, rather than a tear it planted, holds it for its
+/// repository ([`super::RegistryDeadline`]), as the coordinator's tear
+/// witnesses hold `WITNESS_REGISTRY_DEADLINE`.
+const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// T10 (the legacy writer beside the manager): the legacy engine's gate
 /// snapshots, added and dropped in a linked checkout by four threads, beside
 /// the manager's snapshot cycles in the main checkout on four threads. The
 /// legacy accesses are follow-up D's and are counted, not asserted; the
 /// manager has no failure.
+///
+/// **Its accesses wait to the production deadline** (the record's §9.30.10,
+/// B13). Under the test build's 500 ms, one attempt the platform makes slow
+/// can spend the whole deadline: on the persistent Windows guest, under the
+/// suite's load, an add's one attempt failed on another add's registration in
+/// flight after the deadline had passed, and the access refused with no second
+/// attempt, which is the retry this test exists to exercise.
 #[test]
 fn the_manager_never_fails_beside_the_legacy_engines_gate_snapshots() {
     const THREADS: u32 = 4;
     const ROUNDS: u32 = 40;
     let fixture = Fixture::created("registry-legacy-beside");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let linked = fixture.root.join("legacy-checkout");
     git_os(
         &fixture.base,
