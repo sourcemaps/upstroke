@@ -638,9 +638,16 @@ unreadable registry file, or a fault of the whole repository that an add meets b
 destination over — or because its add failed after Git may have taken the destination over, or at
 once, because a fault of those kinds fails its add before Git takes the destination over and the
 access cannot prove the destination untouched, as when it is an empty directory the access cannot
-remove. The refusal ends the command resumably; the next resume settles the verification
-interrupted and verifies again under a new sequence. Such a fault that persists therefore stops the
-run at each resume until it is repaired, where an unavailable settlement would defer and then park.
+remove. The refusal ends the command resumably. A resume's recovery settles the verification
+interrupted, and once that recovery completes and the next integration can make a new staging
+worktree and cherry-pick the candidate there, the resume verifies again under a new sequence. A
+cause that persists can end each resume earlier, before another verification starts, with no
+unavailable settlement and no question: where the resume first lists the registry, before its
+recovery settles the verification, for a fault such as a registration Git cannot list; at
+recovery's removal, for a destination or a registration it cannot remove; or at the new staging
+worktree or its cherry-pick, for a fault such as a failing filter. Such a fault that persists
+therefore stops the run at each resume until it is repaired, where an unavailable settlement would
+defer and then park.
 A cause that persists — a tree the snapshot's path cannot hold, a failing filter, a destination the
 filesystem will not write, a missing object — therefore stops the run at each resume until the
 content or the environment changes, where an unavailable settlement would defer and then park. So
