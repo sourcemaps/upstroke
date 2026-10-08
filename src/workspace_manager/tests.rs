@@ -4832,10 +4832,16 @@ fn an_integration_ref_beside_a_torn_registration(fixture: &Fixture) -> (&'static
 /// (§9.13, R1). At `4253b2ca` the re-check asked the hook-less
 /// `assert_publishable`, so its waits slept on the calling thread, and the
 /// tear, which only a wait made through the hooks mends here, held the swap to
-/// its deadline.
+/// its deadline. The re-check waits to the production deadline (the record's
+/// §9.31, B14), so its first attempt reaches the wait whatever the platform's
+/// Git costs.
 #[test]
 fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
     let fixture = Fixture::created("cas1-recheck-waits");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
     let mut hooks = WaitsOutATear::mending(admin);
     let slept = super::fixture::slept_pauses();
@@ -4872,11 +4878,17 @@ fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
 /// ref is not moved. The topology coordinator's wait ends so once a shutdown
 /// it answered has ended its command (§9.16, I2-1). At `4253b2ca` the
 /// re-check never reached the hooks, and the swap refused at the access's
-/// deadline with the registry's error instead.
+/// deadline with the registry's error instead. The re-check waits to the
+/// production deadline (the record's §9.31, B14), so it reaches the wait that
+/// ends it whatever the platform's Git costs.
 #[test]
 fn a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref() {
     const ENDS: &str = "the command ended while the re-check waited";
     let fixture = Fixture::created("cas1-recheck-ends");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let (name, admin) = an_integration_ref_beside_a_torn_registration(&fixture);
     let mut hooks = WaitsOutATear {
         ends: Some(ENDS),
@@ -7778,12 +7790,21 @@ fn an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git() {
 /// is not safe against itself (`git worktree add` raced by `prune` or `list`
 /// fails, measured in the record's §8), so the lock is what keeps every cycle
 /// here from failing.
+///
+/// **Since #329 its accesses wait to the production deadline** (#329's record,
+/// §9.31, B14). Under the tolerant registry access they race each other's
+/// registry writes and are attempted again, and one attempt the platform
+/// makes slow must not spend the test build's 500 ms first.
 #[test]
 fn concurrent_snapshot_adds_and_removals_on_one_repository_never_fail() {
     const THREADS: u32 = 4;
     const ROUNDS: u32 = 30;
 
     let fixture = Fixture::created("registry-lock");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let failures: Vec<String> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..THREADS)
             .map(|thread| {
@@ -7947,10 +7968,17 @@ impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
 /// the coordinator answers its messages for the length of every wait — and the
 /// attempt after it reads the sibling as absent. At `f9c88fdb` the gate
 /// returned the failed read at once, as `UpstrokeError::Io`, and no wait ran.
+/// The gate's access waits to the production deadline (the record's §9.31,
+/// B14), so its first attempt reaches the wait whatever the platform's Git
+/// costs.
 #[cfg(unix)]
 #[test]
 fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add() {
     let fixture = Fixture::created("r7-sibling-read-add");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let sibling = plant_a_sibling_whose_checkout_cannot_be_read(&fixture, 1);
     let attempted_again = contended_attempts(fixture.manager.common_git_dir());
     let mut hooks = EndsTheSiblingsRemovalAtAPause {
@@ -8031,12 +8059,17 @@ fn a_sibling_whose_checkout_stays_unreadable_refuses_the_add_resumably_and_never
 /// gate has passed, and its removal ends at the lookup's first wait: the lookup
 /// attempts again and answers for the slot, which is not registered. At
 /// `f9c88fdb` the lookup returned the failed read at once, as
-/// `UpstrokeError::Io`.
+/// `UpstrokeError::Io`. The lookup waits to the production deadline (the
+/// record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_a_verification()
  {
     let fixture = Fixture::created("r7-sibling-read-verify");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let sibling = a_sibling_snapshot(&fixture, 1);
     let slot = fixture.task("alpha", 1);
     let mut hooks = EndsTheSiblingsRemovalAtAPause {
@@ -16142,9 +16175,18 @@ fn a_list_over_a_registration_half_written_refuses_at_its_deadline_and_is_never_
 /// T11, transient (and T18's second shape, FUB-D5-OPTFILE's effect): the same
 /// registration, finished by its writer only after the list has failed on it
 /// once (the `CONTENDED_ATTEMPTS` handshake), is passed by a later attempt.
+///
+/// **Its list waits to the production deadline** (the record's §9.31, B14).
+/// On the persistent Windows guest, under the suite's load, the list's first
+/// attempt ended past the test build's 500 ms, and the access refused with no
+/// attempt left for the registration its writer then finished.
 #[test]
 fn a_list_over_a_registration_half_written_passes_once_its_writer_finishes() {
     let fixture = Fixture::created("registry-tornok-transient");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let admin = plant_half_written_registration(&fixture, "foreign-transient");
     let common = fixture.manager.common_git_dir().to_path_buf();
@@ -16289,11 +16331,16 @@ fn an_add_into_a_store_nothing_can_write_refuses_at_its_deadline_and_leaves_noth
 /// the add's entry once ("could not create directory of
 /// '.git/worktrees/<name>'"). The destination is untouched, so the add is
 /// attempted again, and the store is made writable again only after the add
-/// has failed once (the handshake).
+/// has failed once (the handshake). The add waits to the production deadline
+/// (the record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt() {
     let fixture = Fixture::created("registry-own-entry-once");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let beta = fixture.task("beta", 1);
     fixture
@@ -16327,11 +16374,19 @@ fn an_add_whose_own_entry_cannot_be_made_once_succeeds_on_a_later_attempt() {
 /// scan dies. Removed once the add has failed on it twice, the add passes on a
 /// later attempt; kept, the add refuses at its deadline and leaves nothing at
 /// the slot. Nothing tells this from the add's own failure but another
-/// attempt, which the untouched destination licenses.
+/// attempt, which the untouched destination licenses. The add whose entry is
+/// removed waits to the production deadline (the record's §9.31, B14); the one
+/// whose entry is kept refuses at the test build's.
 #[test]
 fn an_add_whose_sibling_scan_meets_a_torn_entry_of_its_own_name_is_attempted_past_it() {
     for (windows, label) in [(Some(2_usize), "two"), (None, "every")] {
         let fixture = Fixture::created(&format!("registry-own-entry-{label}"));
+        let _deadline = windows.map(|_| {
+            super::RegistryDeadline::hold(
+                fixture.manager.common_git_dir(),
+                PRODUCTION_REGISTRY_DEADLINE,
+            )
+        });
         let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
         let beta = fixture.task("beta", 1);
         fixture
@@ -16822,12 +16877,17 @@ fn an_add_whose_destination_cannot_be_made_is_git_state_at_once() {
 /// and making again explain. The access is held at that answer until the
 /// destination has been read ([`hold_next_contended`]), so no second attempt
 /// and veto can remove it under the read. Then the sibling is repaired, the
-/// access released, and the add passes.
+/// access released, and the add passes. The add waits to the production
+/// deadline (the record's §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn after_an_untouched_failure_the_destination_is_removed_and_made_again() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::created("registry-destination-again");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let foreign = fixture.add_task(&mut NoHooks, "foreign", 1);
     let foreign_path = fixture.manager.slot_path(&foreign);
     let foreign_admin = super::fixture::registration_of(&fixture.manager, &foreign_path);
@@ -17214,7 +17274,9 @@ fn no_production_argv_of_the_manager_names_prune() {
 /// says it is ready, waits for `GO`, runs `B329_CYCLES` snapshot add-and-remove
 /// cycles through the production funnels, saying `B329_CYCLE` and the round
 /// after each one ([`result_through_cycles`]), and reports how many failed and
-/// each failure, on one line each.
+/// each failure, on one line each. Its manager's accesses wait to the
+/// production deadline (the record's §9.31, B14): they race the other
+/// processes' registry writes.
 #[test]
 #[ignore = "linked child of the two-process registry tests"]
 fn registry_cycles_child() {
@@ -17238,6 +17300,8 @@ fn registry_cycles_child() {
     let _run = crate::rundir::RunLock::acquire(&public).expect("the run's lock");
     let manager = WorkspaceManager::derive(&base, &private, &run_id, &format!("inc-{number}"))
         .expect("a manager over this run, in the shared repository");
+    let _deadline =
+        super::RegistryDeadline::hold(manager.common_git_dir(), PRODUCTION_REGISTRY_DEADLINE);
     manager
         .create_execution_root(&mut NoHooks)
         .expect("the execution root");
@@ -17637,10 +17701,15 @@ fn torn_by_another_process(
 /// Claim 1, another process's write in flight, across two processes: a list
 /// meets a registration another process is half way through writing, fails on
 /// it, and — the writer told to finish only once the list has failed on it
-/// (the `CONTENDED_ATTEMPTS` handshake) — passes on a later attempt.
+/// (the `CONTENDED_ATTEMPTS` handshake) — passes on a later attempt. The list
+/// waits to the production deadline (the record's §9.31, B14).
 #[test]
 fn a_list_passes_a_registration_another_process_finishes_writing() {
     let fixture = Fixture::created("registry-writer-in-flight");
+    let _deadline = super::RegistryDeadline::hold(
+        fixture.manager.common_git_dir(),
+        PRODUCTION_REGISTRY_DEADLINE,
+    );
     let _alpha = fixture.add_task(&mut NoHooks, "alpha", 1);
     let (child, lines, _admin, stderr) = torn_by_another_process(&fixture, "other-process");
     let common = fixture.manager.common_git_dir().to_path_buf();
@@ -17739,10 +17808,17 @@ fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses(
 }
 
 /// The production registry deadline: `REGISTRY_ACCESS_DEADLINE`'s
-/// `#[cfg(not(test))]` value, which a test build cannot name. A test whose
-/// accesses race real writers, rather than a tear it planted, holds it for its
-/// repository ([`super::RegistryDeadline`]), as the coordinator's tear
-/// witnesses hold `WITNESS_REGISTRY_DEADLINE`.
+/// `#[cfg(not(test))]` value, which a test build cannot name. A test holds it
+/// for its repository ([`super::RegistryDeadline`]), as the coordinator's tear
+/// witnesses hold `WITNESS_REGISTRY_DEADLINE`, when an access of its must be
+/// attempted again before what the test is about can happen: its accesses race
+/// real writers, or its own act ends the contention an access meets -- a
+/// writer finishing the registration it tore, a remover, a restorer, a wait
+/// made through its hooks. Under the test build's 500 ms one attempt the
+/// platform makes slow can spend the whole deadline first, and the access
+/// refuses with no second attempt (the record's §9.30.10 and §9.31). A test
+/// whose tear stays, and whose oracle is the refusal at the deadline, keeps
+/// the test build's.
 const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// T10 (the legacy writer beside the manager): the legacy engine's gate
@@ -17839,7 +17915,8 @@ fn the_manager_never_fails_beside_the_legacy_engines_gate_snapshots() {
 /// T18 (FUB-D5-SPELLING): T14's interleaving on a repository whose `.git` is a
 /// link to a directory of another name. Nothing reads Git's text, so no
 /// spelling of the store can be missed: the add is attempted past its own
-/// name's torn entry.
+/// name's torn entry. It waits to the production deadline (the record's
+/// §9.31, B14).
 #[cfg(unix)]
 #[test]
 fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry_of_its_name() {
@@ -17864,6 +17941,8 @@ fn an_add_in_a_repository_whose_git_dir_is_a_link_is_attempted_past_a_torn_entry
         .expect("public dir");
     let manager = WorkspaceManager::derive(&base, &private, super::fixture::RUN_ID, "inc-1")
         .expect("a manager over it");
+    let _deadline =
+        super::RegistryDeadline::hold(manager.common_git_dir(), PRODUCTION_REGISTRY_DEADLINE);
     manager
         .create_execution_root(&mut NoHooks)
         .expect("the execution root");

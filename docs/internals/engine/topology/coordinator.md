@@ -1702,7 +1702,8 @@ again, and passes once the writer finishes; nothing is deferred and both candida
 policy's `finish` returns `Ok`: an access failed on the tear, and only then did the writer finish
 it.
 Before #329 the same interleaving was durable: one `merge_verification_unavailable` (Deferred),
-or a park at `max_defers` (round 3's measurement of the round 8 witness).
+or a park at `max_defers` (round 3's measurement of the round 8 witness). Its repository's accesses
+wait to `WITNESS_REGISTRY_DEADLINE` (§9.31).
 
 ## `mod tests` › `fn a_verification_beside_a_registration_that_stays_torn_ends_resumably_and_its_resume_reverifies()`
 
@@ -1834,7 +1835,8 @@ tear, or its scheduler injects a shutdown -- once the coordinator reaches the po
 about, and how many Git processes run before that point is the platform's to say: on the Windows
 leg under the suite's load the three before a dispatch's intent witness could inject its shutdown
 took longer than 500 ms, and the access refused first. Fix P (P-all), follow-up C's round 5, in this
-change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's.
+change's B4 round (the follow-up B record's §9.22); the Windows reading is a Linux stand-in's. The
+four witnesses that plant their tear without `TearHeld` hold it themselves (the B14 round, §9.31).
 
 ## `mod tests` › `struct TearHeld {`
 
@@ -2337,12 +2339,15 @@ A registration with an empty `commondir`, spelt as Git writes it, in the run's o
 
 The regular review's dispatch witness at `a58c2ce3`, kept: alpha is live, a shutdown is queued and
 beta's dispatch meets a tear; an owned thread finishes the tear once alpha is cancelled. The
-shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing.
+shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+however long its first attempt takes.
 
 ## `mod tests` › `fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {`
 
 The same through the admission pass, the real call site of the spawn: `admit` ends with the stop's
-error, and no pipeline, no handle and no worker exist.
+error, and no pipeline, no handle and no worker exist. It waits to `WITNESS_REGISTRY_DEADLINE` as the
+dispatch witness above does.
 
 ## `mod tests` › `fn a_shutdown_consumed_during_a_registry_wait_publishes_no_candidate() {`
 
@@ -2352,7 +2357,9 @@ unmoved, and the interrupted integration ends the admission pass. Its access end
 not at the tear, so nothing waits for the prober: that the access failed on the tear first rests on
 the sample the prober takes after the cancel (`fn tear_sampling_every`, repair round 7). Should the
 wait not stop the integration, the prober still finishes the tear in time for the access's next
-attempt, and the integration then appends and publishes, which the witness refuses.
+attempt, and the integration then appends and publishes, which the witness refuses. Its
+repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
+however long its first attempt takes.
 
 ## `mod tests` › `fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {`
 
