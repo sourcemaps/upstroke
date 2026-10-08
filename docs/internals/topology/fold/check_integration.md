@@ -125,6 +125,29 @@ validator.
 
 --- merge_verification_interrupted ------------------------------------
 
+## `impl RunState` › `pub(super) fn check_verification_charged(`
+
+--- merge_verification_charged ----------------------------------------
+
+The known-spend record. Refused with no pass; refused for a sequence that already has one
+(`check_spend_unrecorded`); admitted for the sequence a lineage failure released while that sequence
+is still the latest this incarnation started (`abandoned`, and `sequence + 1 == next_sequence`);
+otherwise admitted only for the open `VerificationStarted` transaction of its sequence. So a sequence a
+terminal settled, an authorized publication (whose `merge_prepared` carries the passes), any other
+sequence, a finished run and a poisoned fold all refuse it.
+
+## `impl RunState` › `pub(super) fn check_spend_unrecorded(`
+
+The one rule that keeps a charged pass from being counted twice: once a sequence has its
+`merge_verification_charged`, nothing that carries a verification's passes is admitted for it. The
+record's own check calls it, and so do the three terminals that carry passes, at the point each has
+found the open `VerificationStarted` transaction: `check_verification_unavailable` after its class
+check, `check_merge_prepared`'s verified arm (`StaleClean | AlreadyPresent`) and
+`check_merge_rejected`'s code-rejection arm. `merge_verification_interrupted` carries none and is
+still admitted, which is what recovery step (f) and a halt's closure append. The rule is the fold's,
+so it holds live (`emit` plans before it writes) and on replay, where a log holding a second record or
+a carrying terminal after one is refused at that line.
+
 ## `impl RunState` › `pub(super) fn check_merge_prepared(&self, prepared: &MergePrepared) -> Result<(), FoldErr…`
 
 --- merge_prepared ----------------------------------------------------

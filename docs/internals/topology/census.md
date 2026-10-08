@@ -807,6 +807,15 @@ The fold parks a lineage's task only with nothing of the
 lineage in flight or under integration; a candidate awaiting
 its merge is where a task raises one on its own.
 
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `"merge_verification_charged/one-pass",`
+
+The known-spend record's candidates: for the open verification's sequence with one pass (admitted
+while it verifies) and with none (always refused), and, when no transaction is open, for the latest
+sequence (admitted only for a verification a lineage failure released). Offered at every state, so
+in a state that already has a record the same record again and the carrying terminals of its sequence
+are offered and refused there. The restricted generator of the seeded censuses does not offer them,
+so those members explore what they did.
+
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if fold.finished().is_none() {`
 
 The ceiling's event class is offered at every state of a run that is
@@ -975,6 +984,22 @@ and the union explored one.
 
 The packet's bound for one named dimension, read from
 `CensusBounds::default().dimensions()`.
+
+## `mod tests` › `fn declined_sibling_of(fold: &TopologyFold) -> Option<Vec<TopologyEvent>> {`
+
+The census reaches no released verification: no explored state of the family has `abandoned` set,
+and none has a candidate queued behind an open verification, because a lineage failure that meets a
+verification needs a second, concurrently active member of the verifying lineage and only a
+`task_spawned` registers one. So the record's second branch is witnessed on planted states, as the
+coordinator's L13 tests plant them: a sibling spawned into the verifying lineage, dispatched, parked
+with a question and declined, applied to an explored verifying state.
+
+## `mod tests` › `fn later_start(fold: &TopologyFold, after: SequenceId) -> Option<(TopologyFold, String)> {`
+
+A sequence consumed after a release: a runnable repair spawned over a merged original, driven by the
+census's own generator to a candidate and a publication of the next sequence. It is how the record's
+`sequence + 1 == next_sequence` condition is witnessed when no explored candidate can follow the
+release.
 
 ## `mod tests` › `fn the_prefix_reports_its_truncation_and_every_seeded_census_closes() {`
 

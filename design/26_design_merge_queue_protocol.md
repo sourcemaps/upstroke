@@ -597,7 +597,9 @@ reader through that one variant, quoted, never interpreted.
 
 Added 2026-09-12 under §13's same-change rule; not part of the verbatim record above. It records
 which of the two readings of "the four terminal shapes carry the complete gate/review records,
-usage/cost" the unavailable terminal implements, now that it can implement either.
+usage/cost" the unavailable terminal implements, now that it can implement either. Amended under the
+same rule when the known-spend record `merge_verification_charged` was added for verifications that
+reach no terminal carrying what they charged.
 
 `merge_verification_unavailable` carries the review passes its verification charged, in the
 `Vec<ReviewRecord>` shape the prepared and rejected terminals carry inside their verification
@@ -615,15 +617,47 @@ crash table above makes it: a coordinator that died holding a verification recor
 anything it was running.
 
 The spend a terminal records is what its verification *charged*, which is not always what a
-judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
-step can fail and take the whole judgement with it, and on an integration that failure settles the
-sequence unavailable rather than ending the command. So the records come from the account that
-charged them rather than from a judgement that may not survive, and the unavailable terminal of a
-verification whose judgement never returned still carries the passes that did.
+judgement reports. Review passes are charged as each returns, and a later pass's step can fail and
+take the whole judgement with it. On an integration, foreign Git state (`UpstrokeError::Git`)
+settles the sequence unavailable rather than ending the command, and so does a Runner failure whose
+process never started or is established gone, unless the verification was cancelled. A cancellation
+settles nothing unavailable, and what follows it is its cause's. Only a concurrent driver cancels a
+verification. A halt then closes the run `Halted`, its closure settling the verification
+interrupted, and no resume continues the run; if the Runner did not establish that every process of
+the run ended, the closure appends nothing and the command ends resumably instead, the halt still
+recorded. A lineage failure cancels the verification's transaction, and the same command goes on. A
+shutdown, another pipeline's error or an invocation left unresolved ends the command resumably, as
+any other error that takes the judgement does, and the next resume settles the verification
+interrupted and verifies the candidate again under a new sequence. So the records come from the
+account that charged them rather than from a judgement that may not survive: the unavailable
+terminal of a verification whose judgement never returned still carries the passes that did, and a
+verification that reaches no terminal carrying them has them recorded as the next paragraph says.
 
-The field is required, as every schema-4 payload field is. Schema 4 has never shipped in a
-release and a run reaches this vocabulary only by choosing it, so no schema-4 log is under a
-compatibility promise that a defaulted field would be protecting; one written before the field is
-refused at parse rather than folded to a total it cannot account for, which is the safe direction
-for a ceiling. This remains a Class C wire change under the `src/topology/**` freeze and it is the
-whole subject of the pull request that makes it, which is what the classification asks for.
+`merge_verification_charged` is that record. A process that charged review passes for a verification
+and leaves it without a terminal carrying them — the verification's own error or the refusal of the
+step after it, an invocation whose end the Runner did not establish, a cancellation, a halt, a
+shutdown, another pipeline's error, or a lineage failure that cancels its transaction — appends one,
+with every pass it charged for the sequence in the same `Vec<ReviewRecord>` shape, before the
+command or the integration ends, and replay charges its passes by the same addition. It is not a
+terminal and not a finish event: it records no outcome and settles, releases and authorizes nothing,
+so the transaction stays open, cleanup and readmission keep their conditions — a process the Runner
+did not establish as ended still blocks them — and which terminal settles the verification is not
+changed by it. The fold admits the record only for the open verification of its sequence, or for the
+one a lineage failure cancelled while it is still the latest sequence of the incarnation; never with
+no pass; and at most once for a sequence. Once a sequence has its record, no terminal that carries a
+verification's passes is admitted for it — `merge_verification_interrupted`, which carries none,
+still is — so its spend is counted once, whatever is appended after it. If the record's own append
+fails, that error ends the command, and what had ended the verification is kept as a warning. What
+no record carries stays unknown spend: a pass whose process ran but which no account charged, and
+whatever a coordinator that died, or a log that failed an append, could not record. A ledger row
+whose spend includes a record therefore states a lower bound.
+
+Each field is required, as every schema-4 payload field is: the unavailable terminal's `reviews` and
+the record's alike. Schema 4 has never shipped in a release and a run reaches this vocabulary only
+by choosing it, so no schema-4 log is under a compatibility promise that a defaulted field would be
+protecting; one written before a field is refused at parse rather than folded to a total it cannot
+account for, which is the safe direction for a ceiling, and a binary that predates the record
+refuses a log holding one for the same reason. Each is a Class C wire change under the
+`src/topology/**` freeze and the whole subject of the pull request that makes it, which is what the
+classification asks for; the record's also moves files G6 compares with its G5 range, which the
+owner's rulings on G6's diff proof name by path and merge.

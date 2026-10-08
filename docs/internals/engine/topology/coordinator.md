@@ -105,8 +105,9 @@ less than it had been told. As repaired:
   settlement — and `verify` unwinds when its transaction disappears, abandoning the integration
   without ending the command (`R1-CONC-3`). A halt the fold records is acted on before that (round
   R3, below).
-- **A verification's review spend is charged when its completion is accepted**, before the next
-  selection (phase 4; `R1-CONC-4`).
+- **A verification's review spend is charged when a live verification pipeline reports it, accepted
+  or discarded, and recorded when no terminal carries it**, before the next selection (phase 4;
+  `R1-CONC-4`; the O14(b) change's `merge_verification_charged`).
 
 ### What a halt interrupts, where admission stops, and whom a grant reaches (round R2)
 
@@ -317,8 +318,9 @@ Grant every waiting pipeline when the gate grants, in the order they asked.
 ## `struct Coordinator<'s> {`
 
 The source keeps the coordinator's protocol beside the struct (§10): the owner of every shared
-state, the linearization point, a pipeline's transitions, which completion wins, the cleanup after
-an interrupt, and why the unbounded channels are bounded.
+state, the linearization point, a pipeline's transitions, which completion wins, where a
+verification's charged passes go, the cleanup after an interrupt, and why the unbounded channels are
+bounded.
 
 ## `impl Coordinator<'_>` › `fn drive(&mut self) -> Result<Progress, UpstrokeError> {`
 
@@ -371,7 +373,9 @@ candidate at the head of the queue). A fast integration never reclaims and does 
 ends the admission pass: nothing was started, or the command is already ending — an error the
 interrupt already accounts for is not a second error. A verification abandoned because the fold
 cancelled its transaction (`abandoned`) ends the integration without ending the command:
-`integrate()` appends nothing after `verify`'s error, and admission goes on. Its staging worktree,
+`integrate()` appends no terminal after `verify`'s error; the coordinator records the passes the
+verification charged against the released sequence (`merge_verification_charged`), and admission
+goes on. Its staging worktree,
 pin and snapshots are left for the terminal finalization or the next resume's reclaim, which remove
 any staging and pin no open transaction owns; the snapshots are its own sequence's, and a later
 stale integration's reclaim takes them too.
@@ -413,7 +417,8 @@ will not write to.
 
 A refusal when asked inside another verification (one transaction is open at a time); the
 verification job's own refusals; and, when an interrupt ends the command first, a refusal naming
-it — the pipeline was cancelled, and `integrate()` appends nothing further for it. The sequence is
+it — the pipeline was cancelled, `integrate()` appends no terminal for it, and the coordinator
+records the passes it charged, if any (`merge_verification_charged`), before the command ends. The sequence is
 recorded as cancelled, whether or not its result had already arrived, so a halt's closure settles
 the transaction with `merge_verification_interrupted` (R-AF) — a halt recorded after the result
 arrived and before this returned included (round R2: the admission pass's halt check reads the fold's
@@ -574,6 +579,16 @@ does not settle — is the interrupt there and then, with no wait for the snapsh
 `R1-CONC-2`); a result is held for `verify_concurrently`. One that no open verification awaits is a
 cancelled pipeline's end (silent) or stale (warned).
 
+## `impl Coordinator<'_>` › `fn keep_discarded(`
+
+A live verification pipeline's completion that is discarded — its pipeline cancelled (a halt, a
+shutdown, an error elsewhere, an unresolved end), its transaction released, or the fold poisoned —
+still carries the passes its pipeline's account charged as each returned. They are charged to the
+run's spend here, which master never did, and kept for recording. Only a completion from a pipeline
+of this coordinator, live under the identity it names, is kept; stale, foreign and injected ones are
+not. An accepted completion is kept in `verified_arrived` beside its live charge, before `verified`
+consumes the vector.
+
 ## `impl Coordinator<'_>` › `fn cancel_all(&mut self) {`
 
 Cancel every live pipeline's token, withdraw every pending registration, and refuse every reply
@@ -592,18 +607,38 @@ intake has buffered but not applied is answered when it is applied, so its pipel
 itself waiting on the intake (round R1's class search found the phase-3 shape doing that here, and
 `stop` doing it first).
 
+## `impl Coordinator<'_>` › `fn supersede(&mut self, append: UpstrokeError, ended: Option<&UpstrokeError>) {`
+
+The record's own append error, made the command's. `fail` keeps the first interrupt and only warns of
+a later error, which is right for a second error while the command is already ending and wrong for
+this one: T-APPEND makes a returned append error the command's error. So the stored interrupt is
+replaced and kept as a warning (`superseded`): the stored error, a halt's or a shutdown's description,
+or else the frozen `integrate()`'s own error. No closure follows a halt it replaced, and none could
+append on the poisoned fold. It is called only at the two recording points.
+
 ## `impl Coordinator<'_>` › `fn finish(&mut self) -> Result<Progress, UpstrokeError> {`
 
 End the command: cancel, apply messages until no pipeline is live, then act on the interrupt.
 After a halt the closure runs with the identities this coordinator cancelled — unless a cancelled
 pipeline ended with its process unresolved, in which case nothing is appended and the command ends
-resumably naming it. A shutdown cancels any provisional reservation still held (none is expected)
-and ends resumably, appending nothing. An error is returned as it is: after an append error it is
-the protocol's report, and no closure, report or cleanup follows.
+resumably naming it. Before any of that, the passes a verification charged and no terminal carries
+are recorded (`merge_verification_charged`): a completion discarded in the receive loop, or one kept
+earlier and not yet recorded. A shutdown cancels any provisional reservation still held (none is
+expected) and ends resumably, appending nothing but that record. An error is returned as it is: after
+an append error it is the protocol's report, and no closure, report or cleanup follows. The record's
+own append error is the exception that ends the command in place of what was stored: `supersede`
+makes it the interrupt and keeps what it replaced as a warning.
 
 ## `struct Coordinator<'s>` › `cancelled_work: closure::Cancelled,`
 
 The in-flight identities this coordinator cancelled or abandoned, which a halt's closure settles.
+
+## `struct Coordinator<'s>` › `charged: Option<Charged>,`
+
+The passes of the one open verification, kept from its completion until they are recorded or a
+terminal carries them. Taken, never copied, at both recording points: after the frozen
+`integrate()` returns an error, and after `finish`'s receive loop. One verification is open at a
+time and each pipeline sends one completion, so at most one is kept.
 
 ## `struct Coordinator<'s>` › `unresolved: Vec<String>,`
 
