@@ -29,7 +29,7 @@ use super::identity::{
 use super::integrate::{self, Verified, VerifyRequest};
 use super::preflight::{Carried, Registrar};
 use super::run::{
-    DrivenJournal, Driver, Progress, Retrying, RunSeams, SpendAccount, TopologyRun,
+    Charged, DrivenJournal, Driver, Progress, Retrying, RunSeams, SpendAccount, TopologyRun,
     VerificationJob, verification_body, verified,
 };
 use super::seams::TopologyHooks;
@@ -245,6 +245,7 @@ impl TopologyRun {
             in_verify: None,
             arrived: None,
             abandoned: None,
+            charged: None,
             interrupt: None,
             cancelled_work: closure::Cancelled::none(),
             unresolved: Vec::new(),
@@ -404,7 +405,11 @@ impl SnapshotGate {
 // coordinator next acts. Winner and loser: a completion is settled only when its
 // pipeline is live, not cancelled, bound to the identity it names, and that
 // identity is open in the fold; any other message is discarded and counted and
-// releases nothing twice; a fatal completion interrupts as it is received. An
+// releases nothing twice; a fatal completion interrupts as it is received. A
+// verification completion from a live pipeline of this coordinator, settled or
+// discarded, has its review passes charged and kept, and they are recorded
+// (`merge_verification_charged`) when the integration or the command ends with no
+// terminal carrying them. An
 // invocation is released only when its end established that its process is
 // gone: one that ended unresolved, or was never reported ended, keeps its
 // registration and pair for the rest of this process, and interrupts. Every
@@ -438,6 +443,7 @@ struct Coordinator<'s> {
     in_verify: Option<(PipelineId, Identity)>,
     arrived: Option<Verified>,
     abandoned: Option<SequenceId>,
+    charged: Option<Charged>,
     interrupt: Option<Interrupt>,
     cancelled_work: closure::Cancelled,
     unresolved: Vec<String>,
@@ -598,6 +604,11 @@ impl Coordinator<'_> {
         self.run.reserve_integration(key)?;
         let manager = self.seams.manager;
         let terminal = integrate::integrate(&mut DrivenJournal(self), manager, &request);
+        if let (Some(charged), Err(ended)) = (self.charged.take(), &terminal) {
+            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                self.supersede(append, Some(ended));
+            }
+        }
         let settled = self.run.integration_settled(key, terminal);
         self.open_gate();
         let abandoned = self.abandoned.take() == Some(request.sequence);
@@ -840,8 +851,9 @@ impl Coordinator<'_> {
                 let message = format!(
                     "the verification of sequence {} of task {key} was abandoned: the fold no \
                      longer holds its transaction open (a decline, or a failed settlement, \
-                     failed its lineage), so its pipeline was cancelled, its late result \
-                     discarded and nothing is appended for it",
+                     failed its lineage), so its pipeline was cancelled and its late result \
+                     discarded; no terminal is appended for it here, and the coordinator records \
+                     next the review passes it charged, if any (`merge_verification_charged`)",
                     sequence.0
                 );
                 self.run.warn(message.clone());
@@ -852,7 +864,9 @@ impl Coordinator<'_> {
                 Err(UpstrokeError::Refused {
                     message: format!(
                         "the verification of sequence {} of task {key} was interrupted by {}; its \
-                         pipeline was cancelled and nothing further is appended for it",
+                         pipeline was cancelled, no terminal is appended for it here, and the \
+                         coordinator records the review passes it charged, if any \
+                         (`merge_verification_charged`), before the command ends",
                         sequence.0,
                         self.interrupt
                             .as_ref()
@@ -1439,12 +1453,27 @@ impl Coordinator<'_> {
         outcome: Result<Judgement, JudgeError>,
         charged: Vec<ReviewRecord>,
     ) {
+        let reported = match identity {
+            Identity::Verification {
+                sequence,
+                candidate,
+            } if origin == Origin::Pipeline
+                && self
+                    .live
+                    .get(&pipeline)
+                    .is_some_and(|live| live.identity == *identity) =>
+            {
+                Some((*sequence, candidate.key))
+            }
+            _ => None,
+        };
         if self.in_verify.as_ref().map(|(verifying, _)| *verifying) != Some(pipeline)
             || self.arrived.is_some()
         {
             if origin == Origin::Pipeline
                 && self.live.get(&pipeline).is_some_and(|live| live.cancelled)
             {
+                self.keep_discarded(reported, charged);
                 self.retire(pipeline);
                 self.run.record_discard(None);
                 return;
@@ -1457,6 +1486,7 @@ impl Coordinator<'_> {
             return;
         }
         if !self.accepts(origin, pipeline, identity) {
+            self.keep_discarded(reported, charged);
             return;
         }
         let Identity::Verification {
@@ -1468,6 +1498,10 @@ impl Coordinator<'_> {
             return;
         };
         self.run.charge_reviews(candidate.key, &charged);
+        self.charged = Some(Charged {
+            sequence: *sequence,
+            reviews: charged.clone(),
+        });
         match verified(outcome, charged, *sequence) {
             Ok(verified) => {
                 self.retire(pipeline);
@@ -1487,6 +1521,20 @@ impl Coordinator<'_> {
         self.cancel_all();
     }
 
+    fn keep_discarded(
+        &mut self,
+        reported: Option<(SequenceId, TaskKey)>,
+        charged: Vec<ReviewRecord>,
+    ) {
+        if let Some((sequence, key)) = reported {
+            self.run.charge_reviews(key, &charged);
+            self.charged = Some(Charged {
+                sequence,
+                reviews: charged,
+            });
+        }
+    }
+
     fn fail(&mut self, error: UpstrokeError) {
         if self.interrupt.is_none() {
             self.interrupt = Some(Interrupt::Failed(error));
@@ -1495,6 +1543,17 @@ impl Coordinator<'_> {
                 "after the command had begun to end, a further error: {error}"
             ));
         }
+        self.cancel_all();
+    }
+
+    fn supersede(&mut self, append: UpstrokeError, ended: Option<&UpstrokeError>) {
+        let cause = match self.interrupt.take() {
+            Some(Interrupt::Failed(error)) => error.to_string(),
+            Some(interrupt) => interrupt.describe().to_owned(),
+            None => ended.map_or_else(|| "no recorded cause".to_owned(), ToString::to_string),
+        };
+        self.run.warn(super::run::superseded(&cause));
+        self.interrupt = Some(Interrupt::Failed(append));
         self.cancel_all();
     }
 
@@ -1540,6 +1599,11 @@ impl Coordinator<'_> {
         while !self.live.is_empty() {
             self.receive_one();
         }
+        if let Some(charged) = self.charged.take() {
+            if let Err(append) = self.run.record_charged(charged, self.seams, self.hooks) {
+                self.supersede(append, None);
+            }
+        }
         let unresolved = std::mem::take(&mut self.unresolved);
         match self.interrupt.take() {
             Some(Interrupt::Halt) if unresolved.is_empty() => {
@@ -1562,7 +1626,8 @@ impl Coordinator<'_> {
                     message: format!(
                         "the coordinator was shut down: every pending request was withdrawn, \
                          every live pipeline was cancelled and its completion discarded, \
-                         {}nothing was settled or appended, and the run is resumable{}",
+                         {}nothing was settled, nothing was appended but the record of the review \
+                         passes a verification had charged, and the run is resumable{}",
                         if reserved {
                             "a provisional reservation still held was cancelled, "
                         } else {
@@ -3110,6 +3175,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
@@ -7114,6 +7180,7 @@ mod tests {
             &kinds[halted..],
             &[
                 "question_answered",
+                "merge_verification_charged",
                 "merge_verification_interrupted",
                 "run_finished"
             ],
@@ -7497,6 +7564,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),
@@ -7849,6 +7917,7 @@ mod tests {
                 in_verify: None,
                 arrived: None,
                 abandoned: None,
+                charged: None,
                 interrupt: None,
                 cancelled_work: closure::Cancelled::none(),
                 unresolved: Vec::new(),

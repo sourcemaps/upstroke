@@ -14,8 +14,8 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
-    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, SequenceId,
-    SessionId, TopologyEvent,
+    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
+    MergeVerificationCharged, SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -119,6 +119,7 @@ struct IntegrationCx<'a, 'h> {
     invocations: &'h mut InvocationLedger,
     spend: &'h mut Spend,
     seams: &'h RunSeams<'a>,
+    charged: Vec<crate::events::ReviewRecord>,
 }
 
 impl IntegrationJournal for IntegrationCx<'_, '_> {
@@ -241,6 +242,7 @@ impl Verification for IntegrationCx<'_, '_> {
             };
             verification_body(&mut work, &job, &mut account)
         };
+        self.charged.clone_from(&charged);
         verified(outcome, charged, request.sequence)
     }
 
@@ -444,6 +446,18 @@ impl ReviewAccount for SpendAccount<'_> {
         }
         self.charged.push(review.clone());
     }
+}
+
+pub(super) struct Charged {
+    pub(super) sequence: SequenceId,
+    pub(super) reviews: Vec<crate::events::ReviewRecord>,
+}
+
+pub(super) fn superseded(cause: &str) -> String {
+    format!(
+        "the append recording the review passes a verification charged failed, so its error \
+         ends the command in place of what had ended the verification: {cause}"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1055,7 +1069,7 @@ impl TopologyRun {
         let key = candidate.key;
         self.reserve_integration(key)?;
 
-        let terminal = {
+        let (terminal, charged) = {
             let (reservations, invocations) = self.broker.halves();
             let mut cx = IntegrationCx {
                 emitter: RunEmitter {
@@ -1073,8 +1087,26 @@ impl TopologyRun {
                 invocations,
                 spend: &mut self.spend,
                 seams,
+                charged: Vec::new(),
             };
-            integrate::integrate(&mut cx, seams.manager, &request)
+            let terminal = integrate::integrate(&mut cx, seams.manager, &request);
+            (terminal, cx.charged)
+        };
+        let terminal = match terminal {
+            Err(ended) => {
+                let charged = Charged {
+                    sequence: request.sequence,
+                    reviews: charged,
+                };
+                match self.record_charged(charged, seams, hooks) {
+                    Ok(()) => Err(ended),
+                    Err(append) => {
+                        self.warn(superseded(&ended.to_string()));
+                        Err(append)
+                    }
+                }
+            }
+            settled => settled,
         };
         self.integration_settled(key, terminal)
     }
@@ -1143,6 +1175,52 @@ impl TopologyRun {
 
     pub(super) fn charge_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
         self.spend.record_reviews(key, reviews);
+    }
+
+    pub(super) fn record_charged(
+        &mut self,
+        charged: Charged,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<(), UpstrokeError> {
+        if charged.reviews.is_empty() {
+            return Ok(());
+        }
+        let (sequence, passes) = (charged.sequence, charged.reviews.len());
+        let body = TopologyEventBody::MergeVerificationCharged {
+            data: MergeVerificationCharged {
+                sequence,
+                reviews: charged.reviews,
+            },
+        };
+        let probe = TopologyEvent {
+            ts: seams.clock.now_rfc3339(),
+            body: body.clone(),
+        };
+        if let Err(refusal) = self.handle.fold.plan_transition(&probe) {
+            let recorded = self.handle.events.iter().any(|event| {
+                matches!(&event.body, TopologyEventBody::MergeVerificationCharged { data }
+                    if data.sequence == sequence)
+            });
+            if self.handle.fold.is_poisoned() {
+                self.warn(format!(
+                    "no merge_verification_charged records the {passes} review pass(es) the \
+                     verification of sequence {} charged, because the fold is poisoned; the next \
+                     open's stable-prefix barrier decides which lines survived: {refusal}",
+                    sequence.0
+                ));
+            } else if recorded {
+                self.warn(format!(
+                    "the {passes} review pass(es) the verification of sequence {} charged were \
+                     offered for a second merge_verification_charged, which the fold refused: \
+                     that sequence's record already holds what it charged: {refusal}",
+                    sequence.0
+                ));
+            }
+            return Ok(());
+        }
+        self.emit(body, seams, hooks)?;
+        Ok(())
     }
 
     pub(super) fn broker_mut(&mut self) -> &mut PermitBroker {
