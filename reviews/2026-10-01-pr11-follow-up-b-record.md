@@ -10456,6 +10456,54 @@ unchanged** (`impl16/exposure/entry-points-492325c4.txt`, read-only):
 
 **Not required for B's merge:** O14(b)'s landing (B does not wait for it), and G6.
 
+**Corrected 2026-10-08: who merges B, and what step 7 asks of it** (the orchestrator's direction 2,
+`~/orch-pr11/answers/pr11_fub_impl16-2.md`, sha256 `08f429ba…`). Item 6's last clause above is wrong for this lane
+and is withdrawn; it stays above as history. That clause read "so where the delegate answers yes, or cannot tell, the
+merge is the owner's or needs a delegation the owner wrote for this pull request". It also contradicted this record's
+own §4.6.
+- **The authority** is the owner's standing direction for this lane, in force since 2026-09-27/28:
+  `~/orch-pr11/ORCH-PR11.md` §1 (the file's sha256 `ada7b512…`), as babysit_pr11 restated it in
+  `~/babysit-pr11/evidence/b11-standing-merge-authority-correction-20261008.md` (`75594ce8…`).
+  - **The bar.** The assigned agent merges once its review findings show no P1 and no blocking P2, and every finding
+    the reviews produced is filed under `findings/` in the merge.
+  - **How.** It records the determination under `## Merge delegation` in the body, and enqueues with
+    `gh pr merge 329 --repo sourcemaps/upstroke --auto`.
+  - **What it does not reach.** That authority does not reach `MAINTAINING.md` step 7's second limb: amendments to
+    step 7 itself, the trust boundary, `CLAUDE.md`, `AGENTS.md` and `findings/PROCESS.md`. Those stay the owner's.
+  - First-limb instrument reasoning does not gate the merge in this lane, as the orchestrator settled on
+    2026-10-02T03:05Z.
+- **The instruments, classified as they are.** Against master the diff changes two files that are instruments under
+  step 7's first limb, and they stay instruments.
+  - **Why they are instruments.** A deceptive `effect_free` entry would let the census
+    (`every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified`,
+    `every_effectful_wrapper_is_on_the_disallowed_list`) pass for a function that reaches an effect, without doing
+    its work. The allowlist is the effect governance that same census enforces.
+  - **`effects/wrappers.toml`, nine `effect_free` names.** In `[[module]] path = "src/workspace_manager.rs"`:
+    `assert_publishable_pausing`, `changed_paths_pausing`, `commit_parent_pausing`, `commit_tree_sha_pausing`,
+    `proposal_state_pausing` and `revalidate_pausing` (repair round 3), and `tolerant_registry_access` (round 1). In
+    `[[module]] path = "src/workspace_manager/hooks.rs"`: `funnel_lending` and `registry_pause` (repair round 3).
+  - **`effects/allowlist.toml`:** the `src/workspace.rs` row's `legacy_effect` text, R1's adopted second amendment
+    (`baffaf2d`, §9.28.1), and nothing else in any row, field or section.
+  - **What does not change.** Neither is reclassified as a subject, and neither one's technical scope changes. The
+    nine names need no further owner adoption merely to clear merge authority.
+- **The second-limb determination**, on the actual diff from master `5c222ff2` to this round's final head. It amends
+  none of these: `MAINTAINING.md` (its step 7 or trust boundary), `CLAUDE.md`, `AGENTS.md` and `findings/PROCESS.md`.
+  - `git diff --name-only` between those two commits, over those four paths, prints nothing, and each path's blob is
+    the same at both (the commands and their output: `impl16/second-limb/`).
+  - Had any of them been touched, it would be the owner's, returned.
+- **Every remaining check, as it is:**
+  - the frozen and instrument proof;
+  - the final-head gates;
+  - native CI on the published head;
+  - the two new-delta lenses;
+  - the per-finding triage;
+  - every finding filed;
+  - the review evidence;
+  - then the queue.
+
+  This correction is no finding waiver, no grant over frozen code and no policy-file amendment. It accepts no stopped
+  or replacement-review artifact.
+
 **This round's own operations, for review.** Every build ran through `upstroke-build` on this lane's iso by its
 physical path, never `/mnt/ramtarget`; no process table was read and no process was killed or signalled; no
 environment value or credential was read or saved. The inputs were read by exact path, with two exceptions, stated:
