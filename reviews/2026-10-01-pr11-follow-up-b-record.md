@@ -11062,3 +11062,10 @@ logs. All are left in place, cleanup being out of scope; the guest's `C:` went f
 (`impl18/guest/guest-facts.txt`). The triage's `TRIAGE.md` gained its dated precision after its `SHA256SUMS` were
 written, so that file's line no longer matches; the orchestrator's file is not changed here. Nothing was pushed, and
 the pull request's body was not edited.
+
+*Added 2026-10-08, after this section was committed:* three corrections of fact. The Windows suite at this round's
+final head, run on the guest after this section was written, built with CI's `RUSTFLAGS=-D warnings` beside the
+diagnostic build, so the guest's `C:` ended at 810 MB free (`impl18/guest/guest-final-state.txt`), not the 1.2 GB
+above. The round's guest logs, traces and scripts, with the bundle that carried its commits to the guest, were moved
+out of the clone to `C:\upstroke-b13-diag`, also left in place. And §9.30.2's diagnostic builds ran without CI's
+`RUSTFLAGS=-D warnings` too, a third difference from CI's build that changes no code generated.
