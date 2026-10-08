@@ -505,8 +505,9 @@ entitled to nothing: no dispatch, retry or integration is ever structurally admi
 can reach carries an outcome to derive, and no `run_finished` can therefore end it — the log folds
 to a state with no exit. The fold refuses that `run_started` rather than accepting such a log. The
 other two limits carry no such floor, because each gates a branch that still answers at zero: at
-`max_defers = 0` every integration outage parks rather than defers, and at `max_merge_repairs = 0`
-a rejection spawns a human-required repair reporting that same zero.
+`max_defers = 0` every integration outage parks rather than defers (an outage is an unavailable
+settlement; a registry refusal, which ends the command instead, is not one), and at
+`max_merge_repairs = 0` a rejection spawns a human-required repair reporting that same zero.
 
 #### Frozen ladders: a floor binds the chain start
 
@@ -616,10 +617,24 @@ anything it was running.
 
 The spend a terminal records is what its verification *charged*, which is not always what a
 judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
-step can fail and take the whole judgement with it, and on an integration that failure settles the
-sequence unavailable rather than ending the command. So the records come from the account that
-charged them rather than from a judgement that may not survive, and the unavailable terminal of a
-verification whose judgement never returned still carries the passes that did.
+step can fail and take the whole judgement with it. On an integration that failure settles the
+sequence unavailable rather than ending the command, except a snapshot whose registry access
+refuses (`UpstrokeError::RegistryRefused`, the tolerant registry access of `design/15`) because a
+fault outlasted its deadline — contention, a registration a dead writer left torn, any other fault
+of the worktree registry, such as a store nothing can write, a registration Git cannot list or an
+unreadable registry file, or a fault of the whole repository that an add meets before Git takes its
+destination over — or because its add failed after Git may have taken the destination over, or at
+once, because a fault of those kinds fails its add before Git takes the destination over and the
+access cannot prove the destination untouched, as when it is an empty directory the access cannot
+remove. The refusal ends the command resumably; the next resume settles the verification
+interrupted and verifies again under a new sequence. Such a fault that persists therefore stops the
+run at each resume until it is repaired, where an unavailable settlement would defer and then park.
+A cause that persists — a tree the snapshot's path cannot hold, a failing filter, a destination the
+filesystem will not write, a missing object — therefore stops the run at each resume until the
+content or the environment changes, where an unavailable settlement would defer and then park. So
+the records come from the account that charged them rather than from a judgement that may not
+survive, and the unavailable terminal of a verification whose judgement never returned still
+carries the passes that did.
 
 The field is required, as every schema-4 payload field is. Schema 4 has never shipped in a
 release and a run reaches this vocabulary only by choosing it, so no schema-4 log is under a
