@@ -611,10 +611,11 @@ excepted, for an interim only, by the owner's temporary ruling O14-BF of 2026-10
 whose command ends on an error after some of its review passes were charged — a registry refusal
 (`UpstrokeError::RegistryRefused`) of a later pass's snapshot, or of a pass whose checkout's
 registration is no longer whole, or any other error `run::verified` passes on — reaches no
-unavailable terminal. Its passes were charged in the ended process's memory only, so the resume that
-settles it interrupted forgets them, verifies again under a new sequence and pays for its passes
-again, and each such refusal and resume lets the passes it had charged escape the run's and the
-task's ceilings. This is a known loss accepted for that interim, not a repair and not a permanent
+unavailable terminal. Its passes were charged in the ended process's memory only, so the resume
+that settles it interrupted forgets them, the resume that verifies again under a new sequence pays
+for its passes again (a cause that persists can end resumes before one does, below), and each such
+refusal and resume lets the passes it had charged escape the run's and the task's ceilings. This is
+a known loss accepted for that interim, not a repair and not a permanent
 O14(a). It expires when the change implementing the owner's O14(b) lands, and that change replaces
 this exception; O14(b) is required before F's final merge, G6, PR12 and any change that activates
 the topology, and no such activation lands while the exception stands.
