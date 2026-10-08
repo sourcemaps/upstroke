@@ -14634,6 +14634,7 @@ mod tests {
             (live - before - 2.0 * PASS_COST).abs() < 1e-9,
             "the step charged two passes live: {before} -> {live}"
         );
+        records_both_passes(&wide, SequenceId(2));
         let limit = before + 1.5 * PASS_COST;
         let (_, mut resumed) = wide
             .resume(
