@@ -157,8 +157,8 @@ what a coordinator killed after making an add's destination leaves.
 - The frozen legacy engine's registry accesses do not take this access, and its coordinator discards
   an attempt's output on any error. Both are follow-up D's
   (`PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY`), a separate change
-  under the owner's decision that calls this access. *Proposed, conditional on the owner's ruling
-  B-W924-R1 and not adopted (the follow-up B record's §9.25):* the legacy gate and review snapshots'
+  under the owner's decision that calls this access. *By the owner's ruling B-W924-R1, adopted
+  2026-10-08 (the follow-up B record's §9.25 and §9.28):* the legacy gate and review snapshots'
   add, removal and list each run their Git command again while it dies reading another
   registration's `commondir` at zero bytes, against a nominal ten-second deadline checked after each
   attempt (the attempt after a sleep is admitted however late it starts, and no attempt's start or

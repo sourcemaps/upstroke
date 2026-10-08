@@ -39,12 +39,12 @@ the include file its role processes read that graph through. And
 `ensure_execution_prerequisites` refuses a Git older than 2.41 by name. This
 module reads that constant and calls none of the manager's funnels.
 
-**A second amendment is proposed, not adopted:** B-W924-R1, conditional on the
-owner's ruling (the follow-up B record, `reviews/2026-10-01-pr11-follow-up-b-record.md`,
-§9.25). The snapshot path's three registry commands run again past another
+**A second amendment, adopted:** B-W924-R1, by the owner's ruling of 2026-10-08
+(the follow-up B record, `reviews/2026-10-01-pr11-follow-up-b-record.md`, §9.25
+and §9.28). The snapshot path's three registry commands run again past another
 registration's empty `commondir` (`output_past_anothers_empty_commondir`, its
-section below), and nothing else in the module changes. Until that ruling the
-allowlist row still records one amendment.
+section below), and nothing else in the module changes. The allowlist row
+records both amendments.
 
 The section "may only shrink after PR5 (the test compares against the frozen
 list)", so this attribute is a ceiling rather than a licence.
@@ -462,8 +462,8 @@ shorter twin under test, so the legacy witnesses run the product's.
 
 ## `fn output_past_anothers_empty_commondir(`
 
-*Proposed and conditional: B-W924-R1, not adopted (the follow-up B record's
-§9.25).*
+*B-W924-R1, adopted by the owner's ruling of 2026-10-08 (the follow-up B
+record's §9.25 and §9.28).*
 
 **What it repairs.** Every checkout of a repository registers its linked
 worktrees in one store, `<common git dir>/worktrees/`, and Git writes a
