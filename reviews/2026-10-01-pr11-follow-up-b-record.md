@@ -10384,6 +10384,21 @@ unchanged** (`impl16/exposure/entry-points-492325c4.txt`, read-only):
   `validate`, `run` (and `--dry-run`, which only validates), `resume`, `status` (and `--follow`), `export-decisions` and
   `answer` — and the example `probe` (`examples/probe.rs`, adapters' `--version` and `--help` only). Cargo declares no
   other binary, example, bench or build script, and the tree has no `tests/` directory.
+  - *Corrected 2026-10-08 (B12, finding B11-3): the example runs more than `--version` and `--help`.* Through the host
+    runner (`examples/probe.rs:23`) it probes each adapter of `agent::ADAPTERS` (`src/agent/adapter.rs:146-150`) and
+    calls `discover` on each whose probe succeeds (`examples/probe.rs:24-49`). **Claude:** `claude --version` and
+    `claude --help` (`src/agent/claude.rs:55`, `:89`), then `claude auth status --json` (`:120`). **Copilot:**
+    `copilot --version` and `copilot --help` (`src/agent/copilot.rs:53`, `:87`); its discovery runs nothing
+    (`:113-128`). **Codex:** `codex --version`, `codex exec --help` and `codex exec resume --help`
+    (`src/agent/codex.rs:92`, `:126`, `:133`); six local parser probes, `codex exec` and
+    `codex exec resume 00000000-0000-0000-0000-000000000000`, each with
+    `--ignore-user-config --strict-config -c <assignment> --output-schema <a file that does not exist>` and the
+    prompt `upstroke-config-parser-probe`, the assignment `upstroke_probe_deliberately_unknown=true`,
+    `model_reasoning_effort=xhigh` or `model_reasoning_effort=max` (`:345-414`), the missing file named inside a
+    directory `upstroke-codex-config-probe-<ulid>` made in the temporary directory and removed after (`:322-342`);
+    `codex debug models` (`:143`); then, for its discovery, `codex login status` and `codex debug models` again
+    (`:178`, `:188`). None of these starts or resumes a run, and the example names only `upstroke::agent` and
+    `upstroke::runner::host::HostRunner` (`examples/probe.rs:17-18`), so the determination below stands.
 - **What each reaches:** `run` calls `engine::run` (`:310`), the legacy coordinator, which writes `schema:
   events::SCHEMA_VERSION`, 3 (`src/engine/coordinator.rs:205`, `src/events/mod.rs:25`); `resume` calls `engine::resume`
   (`:324`), which refuses a log whose effective schema exceeds 3 (`src/engine/resume.rs:110`, `:159`;
