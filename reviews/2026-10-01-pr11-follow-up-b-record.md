@@ -11165,3 +11165,19 @@ the validators. The body records them, and a red is returned.
 - **The hosted failure's historical cause is unknown.** The guest is diagnostic and not hosted-equivalent; nothing in
   §9.30 establishes what happened on the hosted runner.
 - **§9.30.1's retry attribution and its evidence levels stand.**
+
+#### 9.30.12 The final head's guest suite: red on T11, a fact, with no cause claimed
+
+*Added 2026-10-08, under the orchestrator's direction 3 (`~/orch-pr11/answers/pr11_fub_impl18-3.md`, sha256
+`fb932070…`), which stops this round here.* The guest's suite at `421cfab0`, CI's test command at the default thread
+count with no debug information on the persistent guest of §9.30.2, its `C:` at 752.9 MB free before and 747.0 MB
+after (`impl18/guest/final-tree-3.txt`, `impl18/guest/suite-421cfab0.disk-after.txt`), exited 101: 2,922 passed, 1
+failed, 87 ignored, in 513.51 s (`impl18/guest/suite-421cfab0/suite-421cfab0.log`, sha256 `7cc23ac1…`). The failed
+test is T11's transient case, `a_list_over_a_registration_half_written_passes_once_its_writer_finishes`
+(`src/workspace_manager/tests.rs:16163`): "the list passes once the writer finishes: RegistryRefused { message: \"…
+kept this access from completing until its deadline (500ms): 1 attempt(s), the last failed with: git error: worktree
+list record 1 names a HEAD but neither a branch nor a detached checkout\" }". T1, T3 and T10 passed in that run. This
+round leaves T11 unchanged. Its attempts in the guest's suites: `ok` at `f8909137`, `ok` twice at `d91ca49b`
+(§9.30.10's attempts 1, 2 and 5), and failed at `421cfab0`. No cause is claimed. This round's final-head validation is
+red; at `421cfab0` the ten gates ran only their first four, each rc 0 (`impl18/gates/at-421cfab0/SUMMARY.txt`), and
+nothing else ran there. T11, and the exposure of the class it belongs to, go to a fresh repairer.
