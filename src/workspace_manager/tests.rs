@@ -17212,7 +17212,8 @@ fn no_production_argv_of_the_manager_names_prune() {
 /// work in one checkout of the parent's repository. It takes that checkout's
 /// worktree lock and its own run's lock, derives a manager over its own run,
 /// says it is ready, waits for `GO`, runs `B329_CYCLES` snapshot add-and-remove
-/// cycles through the production funnels, and reports how many failed and
+/// cycles through the production funnels, saying `B329_CYCLE` and the round
+/// after each one ([`result_through_cycles`]), and reports how many failed and
 /// each failure, on one line each.
 #[test]
 #[ignore = "linked child of the two-process registry tests"]
@@ -17259,6 +17260,7 @@ fn registry_cycles_child() {
             }
             Err(error) => failures.push(format!("adding {name}: {error}")),
         }
+        link.send(&format!("B329_CYCLE {number} {round}"));
     }
     link.send(&format!(
         "B329_RESULT {number} cycles={cycles} failures={}",
@@ -17293,11 +17295,68 @@ fn line_from(lines: &std::sync::mpsc::Receiver<String>, prefix: &str, stderr: &P
     }
 }
 
+/// The `B329_RESULT` line of linked child `number`, read through the
+/// `B329_CYCLE` line it says after each of its `cycles` cycles, each within
+/// `bound` of the cycle line before it ([`super::fixture::LINK_BOUND`] in T1
+/// and T3); a panic carrying the child's stderr otherwise, or when a round
+/// arrives out of order or the result before the last round.
+///
+/// **Why the bound restarts at each cycle** (the record's §9.30, B13). The
+/// link's bound only turns a silent peer into a failure, and a child that is
+/// still cycling is not silent. Read with [`line_from`], the result's one
+/// deadline timed the whole run instead, which is the runner's speed and not
+/// the registry's: merge-queue run 37834058719 failed T1 on hosted
+/// `windows-latest` at that deadline, with no result line and an empty
+/// stderr, and on the persistent Windows guest under load every child was
+/// still cycling when the same deadline ended T1 and T3. A child that stops is
+/// still caught, `bound` after the last cycle it reported, and the message
+/// says how many that was.
+fn result_through_cycles(
+    lines: &std::sync::mpsc::Receiver<String>,
+    number: u32,
+    cycles: u32,
+    stderr: &Path,
+    bound: std::time::Duration,
+) -> String {
+    let mut reported = 0_u32;
+    let mut deadline = std::time::Instant::now() + bound;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match lines.recv_timeout(left) {
+            Ok(line) => line,
+            Err(error) => panic!(
+                "no `B329_RESULT` line from the linked child ({error}): process {number} \
+                 reported {reported} of its {cycles} cycles and then nothing for {bound:?}; \
+                 its stderr:\n{}",
+                fs::read_to_string(stderr).unwrap_or_default()
+            ),
+        };
+        if let Some(result) = line.find("B329_RESULT").and_then(|at| line.get(at..)) {
+            assert_eq!(
+                reported, cycles,
+                "process {number} reported its result after {reported} of {cycles} cycles: {result}"
+            );
+            return result.to_owned();
+        }
+        if let Some(cycle) = line.find("B329_CYCLE ").and_then(|at| line.get(at..)) {
+            reported += 1;
+            assert!(
+                reported <= cycles && cycle == format!("B329_CYCLE {number} {reported}"),
+                "process {number} said `{cycle}` where cycle {reported} of {cycles} was due"
+            );
+            deadline = std::time::Instant::now() + bound;
+        }
+    }
+}
+
 /// T1 and T3: `processes` coordinators of one repository, each in its own
 /// checkout — the first in the main checkout, the others in linked checkouts
 /// added with plain Git — each holding its own worktree lock and run lock,
 /// run their registry work at once. Each one's R-X is its own; tolerance is
-/// what keeps every cycle from failing on another's write in flight.
+/// what keeps every cycle from failing on another's write in flight. Each
+/// child's result is read through its cycle lines
+/// ([`result_through_cycles`]), so the link's bound ends a child that stops
+/// and never one still cycling, however long its cycles take on the runner.
 fn registry_cycles_across(tag: &str, processes: u32, cycles: u32) {
     let fixture = Fixture::created(tag);
     let mut children = Vec::new();
@@ -17340,7 +17399,8 @@ fn registry_cycles_across(tag: &str, processes: u32, cycles: u32) {
     }
     let mut failed = Vec::new();
     for (number, child, lines, stderr) in &children {
-        let result = line_from(lines, "B329_RESULT", stderr);
+        let result =
+            result_through_cycles(lines, *number, cycles, stderr, super::fixture::LINK_BOUND);
         loop {
             let line = line_from(lines, "B329_", stderr);
             if line.starts_with("B329_DONE") {
@@ -17391,6 +17451,106 @@ fn three_coordinators_in_three_checkouts_of_one_repository_never_fail_on_each_ot
         "registry-three-processes",
         3,
         if cfg!(windows) { 100 } else { 340 },
+    );
+}
+
+/// B13 (the record's §9.30): T1's and T3's wait restarts its bound at each
+/// cycle line, so a child whose cycles together outlast the bound, none of
+/// them near it, is read to its result. Eight cycle lines 400 ms apart, then
+/// the result, take at least 3.2 s against a 2 s bound: the one deadline
+/// [`line_from`] keeps from its call refuses that whatever the scheduling,
+/// and this refuses it only if a line comes 2 s after the one before it, five
+/// times its interval.
+#[test]
+fn a_childs_result_is_read_through_cycles_whose_sum_outlasts_the_bound() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    let speaker = std::thread::spawn(move || {
+        for round in 1..=8 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if say.send(format!("B329_CYCLE 0 {round}")).is_err() {
+                return;
+            }
+        }
+        let _ = say.send("B329_RESULT 0 cycles=8 failures=0".to_owned());
+    });
+    let started = std::time::Instant::now();
+    let result = result_through_cycles(
+        &lines,
+        0,
+        8,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
+    );
+    let took = started.elapsed();
+    speaker.join().expect("the speaker");
+    assert_eq!(result, "B329_RESULT 0 cycles=8 failures=0");
+    assert!(
+        took >= std::time::Duration::from_millis(3_200),
+        "the cycles together outlasted the bound: {took:?}"
+    );
+}
+
+/// B13 (the record's §9.30): a child that stops cycling is still caught, the
+/// bound after the last cycle it reported, and its failure says how many that
+/// was. Three cycle lines wait in the channel and its sender stays open, so
+/// only the bound ends the wait, as it does for a child that hangs.
+#[test]
+#[should_panic(
+    expected = "(timed out waiting on channel): process 0 reported 3 of its 10 cycles and then nothing for 100ms"
+)]
+fn a_child_that_stops_cycling_fails_naming_the_cycles_it_reported() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for round in 1..=3 {
+        say.send(format!("B329_CYCLE 0 {round}"))
+            .expect("a cycle line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        0,
+        10,
+        Path::new(""),
+        std::time::Duration::from_millis(100),
+    );
+    drop(say);
+}
+
+/// B13 (the record's §9.30): a result before the last cycle fails at once, so
+/// a child is held to the cycles its test claims.
+#[test]
+#[should_panic(expected = "process 1 reported its result after 2 of 3 cycles")]
+fn a_result_before_the_last_cycle_fails() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for line in [
+        "B329_CYCLE 1 1",
+        "B329_CYCLE 1 2",
+        "B329_RESULT 1 cycles=3 failures=0",
+    ] {
+        say.send(line.to_owned()).expect("a line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        1,
+        3,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
+    );
+}
+
+/// B13 (the record's §9.30): a cycle line out of order fails at once, so the
+/// wait reads at most one line per cycle.
+#[test]
+#[should_panic(expected = "process 1 said `B329_CYCLE 1 3` where cycle 2 of 10 was due")]
+fn a_cycle_line_out_of_order_fails() {
+    let (say, lines) = std::sync::mpsc::channel::<String>();
+    for line in ["B329_CYCLE 1 1", "B329_CYCLE 1 3"] {
+        say.send(line.to_owned()).expect("a line");
+    }
+    let _result = result_through_cycles(
+        &lines,
+        1,
+        10,
+        Path::new(""),
+        std::time::Duration::from_secs(2),
     );
 }
 
