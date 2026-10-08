@@ -606,14 +606,26 @@ record, and replay charges them by the same addition. This is the requirement ab
 literally, and the alternative — amending the record to say the unavailable terminal carries no
 spend — was rejected: the failure it would make permanent is that a restart forgets what the
 parked and deferred verifications of the incarnation it replaces cost, so every incarnation admits
-integration a ceiling had already refused and the overspend compounds once per restart.
+integration a ceiling had already refused and the overspend compounds once per restart. One case is
+excepted, for an interim only, by the owner's temporary ruling O14-BF of 2026-10-08: a verification
+whose command ends on an error after some of its review passes were charged — a registry refusal
+(`UpstrokeError::RegistryRefused`) of a later pass's snapshot, or of a pass whose checkout's
+registration is no longer whole, or any other error `run::verified` passes on — reaches no
+unavailable terminal. Its passes were charged in the ended process's memory only, so the resume that
+settles it interrupted forgets them, verifies again under a new sequence and pays for its passes
+again, and each such refusal and resume lets the passes it had charged escape the run's and the
+task's ceilings. This is a known loss accepted for that interim, not a repair and not a permanent
+O14(a). It expires when the change implementing the owner's O14(b) lands, and that change replaces
+this exception; O14(b) is required before F's final merge, G6, PR12 and any change that activates
+the topology, and no such activation lands while the exception stands.
 
 The terminal carries review records and no gate verdicts. A gate is a local process with no
 reported cost, so the sentence's "usage/cost" half is satisfied by the reviews alone; the
 gate-record half of it remains unimplemented for this one terminal and is a reporting gap, not a
 budget one. `merge_verification_interrupted` is unchanged and stays the unknown-spend terminal the
 crash table above makes it: a coordinator that died holding a verification recorded no cost for
-anything it was running.
+anything it was running, and a verification whose command ended on an error records none for the
+passes it had charged (the exception above).
 
 The spend a terminal records is what its verification *charged*, which is not always what a
 judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
