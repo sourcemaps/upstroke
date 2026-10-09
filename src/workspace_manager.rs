@@ -1795,16 +1795,17 @@ fn note_slept_pause() {}
 ///    state and never attempted past.
 /// 6. On [`Again::Attempt`], it counts the answer for the test handshake
 ///    (`note_contended`). If the attempt that failed began at or after the
-///    deadline, it refuses: that attempt was the final one. Otherwise, while
-///    the deadline has not passed, it waits out the backoff through
-///    `pause_for` — one millisecond, doubling, at most
-///    [`REGISTRY_BACKOFF_CEILING`], never past the deadline — and goes back to
-///    1; once the deadline has passed, it goes back to 1 at once.
+///    deadline, it refuses: that attempt was the final one. Otherwise, if the
+///    deadline has not passed, it waits out the backoff through `pause_for` —
+///    one millisecond, doubling, at most [`REGISTRY_BACKOFF_CEILING`], each
+///    wait asked for no longer than the time left before the deadline — and
+///    goes back to 1; if the deadline has passed, it asks for no wait and goes
+///    back to 1.
 /// 7. So the first attempt that begins at or after the deadline is made, and
 ///    it is the last: the attempt after a wait the deadline cut short or, when
-///    the deadline passed during an attempt, its veto or the count, the attempt
-///    made at once after them. A store a writer leaves whole by the deadline is
-///    passed.
+///    the deadline passed during an attempt, its veto or the count, the next
+///    attempt, with no wait asked for before it. A store a writer leaves whole
+///    by the deadline is passed.
 ///
 /// **Where it waits.** Every wait — each backoff, and each turn of the wait
 /// for R-X — is one call of `pause_for`. A caller passes the call's
@@ -1821,14 +1822,18 @@ fn note_slept_pause() {}
 /// wait has ended its command — a shutdown, or an error that ends it — so the
 /// transition waiting on the access stops there (the record's §9.16, I2-1).
 ///
-/// **The bound, end to end.** One deadline, [`REGISTRY_ACCESS_DEADLINE`] after
-/// the call begins. Every wait for R-X and every backoff sleep ends by it, and
-/// no attempt starts after it but the final one, which starts at it or, when
-/// the deadline passed during the attempt before it or that attempt's veto, as
-/// soon as that veto has returned. Nothing interrupts an attempt or a veto that
-/// has started — killing a Git writer mid-write is exactly what leaves a torn
-/// registration — so an access returns by the deadline plus the runtimes of its
-/// last two attempts and of the vetoes after them, and bounds none of them.
+/// **The bound, end to end.** One nominal deadline,
+/// [`REGISTRY_ACCESS_DEADLINE`] after the call begins, and one admission rule:
+/// no attempt is admitted after the first that begins at or after the
+/// deadline. Each wait, for R-X or a backoff, is asked for no longer than the
+/// time left before the deadline, and none is asked for once it has passed.
+/// Nothing else is bounded here: when a wait wakes, how the thread is
+/// scheduled, the bookkeeping between an attempt and its check (the count — in
+/// a test build `note_contended` and its locks — and the clock read), and the
+/// runtime of each attempt and of each veto. Nothing interrupts an attempt or a
+/// veto that has started — killing a Git writer mid-write is exactly what
+/// leaves a torn registration — so the access ends after the last attempt it
+/// admits and the veto after it, at a time this function does not bound.
 ///
 /// **What it returns:** `Ok` from the first successful attempt; the failed
 /// attempt's own error, unchanged, when `again` answers `Return`; the error of

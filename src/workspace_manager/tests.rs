@@ -15885,11 +15885,12 @@ fn an_undecidable_veto_refuses_at_once_naming_why() {
 
 /// T4 (the final attempt, FUD-D1-PROGRESS): a failure repaired by the
 /// deadline is passed by the final attempt, the first made at or after the
-/// deadline: after the deadline's cut-short sleep, or at once after an attempt
-/// the deadline passed during (the test below). Every attempt fails until the
-/// access's deadline, which is no earlier than `REGISTRY_ACCESS_DEADLINE` after
-/// this test's clock was read; only an attempt made at or after the deadline
-/// can succeed, and the contract makes exactly one.
+/// deadline: after the deadline's cut-short sleep or, when the deadline passed
+/// during the attempt before it, next, with no wait asked for before it (the
+/// test below). Every attempt fails until the access's deadline, which is no
+/// earlier than `REGISTRY_ACCESS_DEADLINE` after this test's clock was read;
+/// only an attempt made at or after the deadline can succeed, and the contract
+/// makes exactly one.
 #[test]
 fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
     let (_tree, key) = contract_key("registry-access-final");
@@ -15922,10 +15923,11 @@ fn the_final_attempt_passes_a_failure_repaired_by_the_deadline() {
 }
 
 /// T4 (the final attempt, FUD-D1-PROGRESS): an attempt that began before the
-/// deadline and failed after it is followed by the final attempt, at once, and
-/// a store repaired by the deadline is passed. The first attempt reads the
-/// store before its repair and the deadline passes while it runs, as a slow Git
-/// command or a descheduled thread makes it pass.
+/// deadline and failed after it is followed by the final attempt, with no wait
+/// asked for before it, and a store repaired by the deadline is passed. The
+/// first attempt reads the store before its repair and then sleeps the
+/// deadline's length and 100 ms more, so the nominal deadline passes while it
+/// runs, as a slow Git command or a descheduled thread makes it pass.
 #[test]
 fn the_final_attempt_follows_an_attempt_the_deadline_passed_during() {
     let (_tree, key) = contract_key("registry-access-straddle");
@@ -15988,11 +15990,12 @@ fn contended_attempts_counts_exactly_the_attempt_answers() {
     assert_eq!((made, contended_attempts(&key)), (3, 2));
 }
 
-/// T4 (FUB-D6-BOUND): a veto that blocks past the deadline, after an attempt
-/// that began before it, is followed by the final attempt alone, at once; the
-/// access returns after that attempt's veto, refusing. The bound is the
-/// deadline plus the runtimes of the last two attempts and of the vetoes after
-/// them, and the helper bounds none of them.
+/// T4 (FUB-D6-BOUND): a veto that blocks for the deadline's length and 100 ms
+/// more, after an attempt that began before the deadline, so that the nominal
+/// deadline passes while it runs, is followed by the final attempt alone, with
+/// no wait asked for before it; the access refuses after that attempt's veto.
+/// Nothing bounds the attempts' or the vetoes' runtimes, or the scheduling
+/// between them.
 #[test]
 fn a_veto_that_blocks_past_the_deadline_is_followed_by_the_final_attempt_alone() {
     let (_tree, key) = contract_key("registry-access-slow-veto");
