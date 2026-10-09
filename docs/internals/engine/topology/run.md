@@ -79,8 +79,14 @@ wait inside a transition met an interrupt on the topology coordinator) every
 append is refused before the protocol runs, as `EmitFailure::Clean`: nothing is
 written and nothing is poisoned. Every append the run makes passes this one
 point, so a transition that carried on past a wait that answered a shutdown
-appends nothing, whatever it did with that wait's error. The refusal writes
-nothing, so the type is still a forwarder with no append of its own.
+appends nothing, whatever it did with that wait's error. One offer is made with
+the stop lifted, and by no transition: the coordinator's `finish`, after its last
+receive, offers the record of the review passes a verification charged through
+[`TopologyRun::record_charged_past_the_stop`] (`O14B2-1`), and that append runs
+the protocol like any other. So the refusal reads "nothing further is appended
+in this process but the record of the review passes a verification had
+charged". The refusal writes nothing, so the type is still a forwarder with no
+append of its own.
 
 ## `pub struct RunEmitter<'a>` › `pub identity: &'a RunIdentity,`
 
@@ -100,7 +106,9 @@ Where the event's timestamp comes from.
 
 Why the run is stopped, while it is: the run's own latch, borrowed
 ([`TopologyRun::stopped`]). `None` at width 1, and on a coordinator until one of
-its waits meets an interrupt.
+its waits meets an interrupt; `None` again only for the one offer
+[`TopologyRun::record_charged_past_the_stop`] makes, which takes the latch and
+puts it back.
 
 ## `impl EventEmitter for RunEmitter<'_>` › `fn emit(`
 
@@ -970,7 +978,9 @@ transition ends with an interrupt recorded — a shutdown the wait answered, or 
 error that ends the command — and clears it when the coordinator is gone. While
 it is set the run's emitter refuses every append and the coordinator's effect
 hooks refuse every effect, so the transition that waited publishes, appends and
-spawns nothing further. The width-1 run never sets it: its waits sleep.
+spawns nothing further. The coordinator's `finish` takes it for one offer, the
+record of the passes a verification charged, and puts it back
+(`record_charged_past_the_stop`). The width-1 run never sets it: its waits sleep.
 
 ## `impl TopologyRun` › `pub(super) fn stop(&mut self, why: String) {`
 
@@ -2377,10 +2387,23 @@ lines survived). The driver's error mapping turns a refusal and an append failur
 `Refused`, so the helper asks before it appends rather than guessing afterwards; whether the sequence
 already has a record it reads from the log the fold admitted. Its append goes through `self.emit(…)?`,
 so the append-error protocol runs for it like every driver append. A stopped run (`stop`, above: a
-registry access's wait inside a transition met an interrupt on the coordinator) refuses this append
-as it refuses every append, before the protocol runs: the fold admits the record, the emitter writes
-nothing, the passes stay unknown spend, and the refusal is the error the recording point hands on, as
-an append error is. The width-1 run never stops.
+registry access's wait inside a transition met an interrupt on the coordinator) refuses this append as
+it refuses every append a transition makes, before the protocol runs. So the coordinator never offers
+the record from a transition on a stopped run: its integration's recording point leaves the passes to
+`finish`, which offers them through `record_charged_past_the_stop` (below) once every transition has
+returned (`O14B2-1`). The width-1 run never stops.
+
+## `impl TopologyRun` › `pub(super) fn record_charged_past_the_stop(`
+
+`record_charged`, offered with the run's stop lifted for that call alone, and the stop put back after
+it whatever the call returned (`O14B2-1`). Only the coordinator's `finish` calls it, after its last
+receive, when every transition has returned, the one whose wait met the interrupt included. So the
+record is appended for no stopped transition (`design/15`: nothing further is appended, published or
+spawned for the transition the wait was in), and the passes a cancelled verification charged, or an
+accepted result dropped by the interrupt, are recorded as `design/26`'s record paragraph says, rather
+than charged live only. On a run that is not stopped it is `record_charged`. The fold's admission, the
+append protocol and the record's own append error, which `finish` makes the command's error, are
+`record_charged`'s; everything after it in `finish` meets the stop as before.
 
 ## `impl TopologyRun` › `pub(super) fn limit_slots(`
 
