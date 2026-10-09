@@ -6146,7 +6146,7 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
         );
         let error = resolve_program(
             program,
-            &composed(&[("PATH", OsStr::new(entry))]),
+            &composed(&[("PATH", path_of(&[Path::new(entry)]).as_os_str())]),
             KeyCase::current(),
             naming,
         )
@@ -6221,7 +6221,7 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
     );
     let message = resolve_program(
         "upstroke-no-such-program",
-        &composed(&[("PATH", absent.as_os_str())]),
+        &composed(&[("PATH", path_of(&[&absent]).as_os_str())]),
         KeyCase::current(),
         naming,
     )

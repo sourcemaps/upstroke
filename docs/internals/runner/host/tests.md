@@ -2938,7 +2938,8 @@ Written from the two platforms' rules rather than read from
 `Path::is_absolute`, and then checked against it for the platform this
 is running on — the Windows column on the guest, the Unix column here.
 Every entry is free of both `PATH` separators, so one entry stays one
-entry under `std::env::split_paths` on either platform.
+entry under `std::env::split_paths` on either platform. None holds a
+`"` either, so `path_of` hands each back exactly as written.
 
 ## `("", false, false),`
 
@@ -3052,6 +3053,19 @@ up front (the shape of `never_created_directory` in `naming.rs`'s
 tests). Every candidate under it is a genuine `NotFound`, so the walk
 runs to its end and is counted, whatever a network share or
 `/usr/local/bin` would say.
+
+Its `PATH` is built by `path_of`, as every `PATH` this test passes is —
+the table's entries and the positive case's — and as both witnesses
+build theirs with `std::env::join_paths`, so the one entry searched is
+the directory whose absence was just checked. Handed over as the raw
+path, a temporary directory spelled with the platform's separator, a
+`;` on Windows or a `:` on Unix, split into two entries, and the search
+ran somewhere this test had never checked (`P335-PL-2`). `join_paths`
+quotes a `;` on Windows and the search unquotes it again. A spelling no
+`PATH` can carry — a `:` on Unix, a `"` on Windows — is refused, never
+searched around: `path_of` refuses it as both witnesses' `join_paths`
+refuse it, and the test fails there rather than search anywhere in its
+place.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
