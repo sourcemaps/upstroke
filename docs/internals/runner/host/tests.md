@@ -3012,12 +3012,26 @@ machine. Read whole, the message let that spelling decide: under a
 temporary directory named `temp-skipped`, a search that had finished
 without skipping anything read as skipped (`P335-PL-1`), and a spelling
 that holds `1 directory searched,` would have satisfied the count for a
-search that counted nothing. The clause is written before the echo and
-holds only text this test constructs — the counts, its own program name
-and the default extensions — so the first opening is always the
+search that counted nothing. In a refusal the clause is written before
+the echo and holds only text this test constructs — the counts, its own
+program name and the default extensions — so the first opening is the
 resolver's own, and no spelling of the temporary directory can reach
 the clause, add to it or close it early. A refusal without the clause
 fails the assertion that reads it.
+
+That holds of a refusal and of nothing else, so the clause is read from
+a refusal only. Both readers, the relative entries' and the absent
+entry's, first require `UpstrokeError::Refused`, and any other answer
+fails the case, naming its variant, before any of its text is read.
+Another error's message is no summary, and it can carry the machine's
+text: a `Filesystem` error's is "failed to stat" followed by the
+candidate's path, which begins with the temporary directory's spelling,
+and that spelling can hold the clause's own opening. Read as text, such
+an error passed for a finished search: under a temporary directory with
+a component named `this runner composes (1 directory searched,)`, long
+enough that the absent entry's candidate could not be asked, the
+resolver rightly stopped with `Filesystem`, and the test read the clause
+out of the path (`P335-R2-REG-1`).
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
 

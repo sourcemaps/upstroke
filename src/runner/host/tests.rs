@@ -6197,7 +6197,13 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
             }
         } else {
             relative += 1;
-            let message = error.to_string();
+            let message = match error {
+                UpstrokeError::Refused { message } => message,
+                other => panic!(
+                    "`{entry}` does not name a location and was searched: expected \
+                     `UpstrokeError::Refused`, got {other:?}"
+                ),
+            };
             assert!(
                 search_summary(&message).is_some_and(|summary| summary
                     .contains("0 directories searched, 1 PATH entry skipped as not absolute")),
@@ -6219,14 +6225,20 @@ fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {
         std::io::ErrorKind::NotFound,
         "the fixture must be absent, not merely unreadable, to count a finished search"
     );
-    let message = resolve_program(
+    let error = resolve_program(
         "upstroke-no-such-program",
         &composed(&[("PATH", path_of(&[&absent]).as_os_str())]),
         KeyCase::current(),
         naming,
     )
-    .expect_err("nothing of that name is installed there")
-    .to_string();
+    .expect_err("nothing of that name is installed there");
+    let message = match error {
+        UpstrokeError::Refused { message } => message,
+        other => panic!(
+            "an absent entry names a location and its search did not finish: expected \
+             `UpstrokeError::Refused`, got {other:?}"
+        ),
+    };
     assert!(
         search_summary(&message).is_some_and(|summary| summary.contains("1 directory searched,")),
         "an absent entry names a location and was not searched to its end: {message}"
