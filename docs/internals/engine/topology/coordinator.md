@@ -1846,8 +1846,9 @@ returned: `Ok` only when it finished the tear after what it waited for. The drop
 prober nobody finished. At `54a1ff14` the coordinator slept through every such access, so the prober
 never saw anything and the access refused at its deadline. While it lives it holds a
 `RegistryDeadline` giving its repository's accesses `WITNESS_REGISTRY_DEADLINE`, so every tear
-witness's access waits to the production length, whatever the platform's Git costs before the
-witness's own act ends the wait (fix P).
+witness's access waits to the production length, not the suite's 500 ms, before the witness's own
+act ends the wait (fix P). The platform's Git still counts against that deadline: a failed attempt
+it passes during is followed by the final attempt with no wait asked for (§9.32).
 
 
 ## `mod tests` › `impl TearHeld` › `fn tearing(&mut self, torn: Torn) {`
@@ -2341,7 +2342,9 @@ The regular review's dispatch witness at `a58c2ce3`, kept: alpha is live, a shut
 beta's dispatch meets a tear; an owned thread finishes the tear once alpha is cancelled. The
 shutdown is handled inside the wait, and beta's dispatch now fails and appends nothing. Its
 repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
-however long its first attempt takes.
+unless its first attempt outlasts that deadline: a failed attempt the deadline passes during is
+followed by the final attempt with no wait asked for (§9.32), and if that attempt fails too the
+access refuses without servicing the queued shutdown.
 
 ## `mod tests` › `fn a_shutdown_answered_during_an_admitted_dispatchs_pause_spawns_no_pipeline() {`
 
@@ -2359,7 +2362,9 @@ the sample the prober takes after the cancel (`fn tear_sampling_every`, repair r
 wait not stop the integration, the prober still finishes the tear in time for the access's next
 attempt, and the integration then appends and publishes, which the witness refuses. Its
 repository's accesses wait to `WITNESS_REGISTRY_DEADLINE` (§9.31), so the access reaches its wait
-however long its first attempt takes.
+unless its first attempt outlasts that deadline: a failed attempt the deadline passes during is
+followed by the final attempt with no wait asked for (§9.32), and if that attempt fails too the
+access refuses without servicing the queued shutdown.
 
 ## `mod tests` › `fn a_dispatch_begun_after_a_wait_answered_a_shutdown_appends_nothing() {`
 

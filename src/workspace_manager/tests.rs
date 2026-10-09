@@ -4833,8 +4833,9 @@ fn an_integration_ref_beside_a_torn_registration(fixture: &Fixture) -> (&'static
 /// `assert_publishable`, so its waits slept on the calling thread, and the
 /// tear, which only a wait made through the hooks mends here, held the swap to
 /// its deadline. The re-check waits to the production deadline (the record's
-/// §9.31, B14), so its first attempt reaches the wait whatever the platform's
-/// Git costs.
+/// §9.31, B14), so its first attempt reaches the wait unless that attempt
+/// outlasts the deadline: a failed attempt the deadline passes during is
+/// followed by the final attempt with no wait asked for (the record's §9.32).
 #[test]
 fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
     let fixture = Fixture::created("cas1-recheck-waits");
@@ -4880,7 +4881,9 @@ fn a_swaps_publishability_recheck_waits_through_the_calls_hooks() {
 /// re-check never reached the hooks, and the swap refused at the access's
 /// deadline with the registry's error instead. The re-check waits to the
 /// production deadline (the record's §9.31, B14), so it reaches the wait that
-/// ends it whatever the platform's Git costs.
+/// ends it unless its first attempt outlasts the deadline: then the final
+/// attempt follows with no wait asked for, and if that attempt fails the
+/// access refuses without the wait (the record's §9.32).
 #[test]
 fn a_wait_that_ends_a_swaps_publishability_recheck_moves_no_ref() {
     const ENDS: &str = "the command ended while the re-check waited";
@@ -7969,8 +7972,9 @@ impl EffectHooks for EndsTheSiblingsRemovalAtAPause {
 /// attempt after it reads the sibling as absent. At `f9c88fdb` the gate
 /// returned the failed read at once, as `UpstrokeError::Io`, and no wait ran.
 /// The gate's access waits to the production deadline (the record's §9.31,
-/// B14), so its first attempt reaches the wait whatever the platform's Git
-/// costs.
+/// B14), so its first attempt reaches the wait unless that attempt outlasts
+/// the deadline: a failed attempt the deadline passes during is followed by
+/// the final attempt with no wait asked for (the record's §9.32).
 #[cfg(unix)]
 #[test]
 fn a_sibling_whose_checkout_cannot_be_read_while_its_removal_is_in_flight_does_not_fail_an_add() {
