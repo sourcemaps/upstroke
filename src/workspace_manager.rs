@@ -7280,9 +7280,11 @@ fn registry_access_deadline(common_git_dir: &Path) -> std::time::Duration {
 /// [`REGISTRY_ACCESS_DEADLINE`]. For a test whose own act ends the access's
 /// wait once the code under test reaches the point the test is about -- a
 /// prober that finishes its tear, a scheduler that injects a shutdown -- so
-/// that the access does not refuse first on how long the platform takes to
-/// get there. Guards over one directory nest; its entry goes when the last
-/// drops.
+/// that how long the platform takes to get there does not make the access
+/// refuse first, as long as time remains when it reads its clock after a
+/// failed attempt's veto and count: with the guard's deadline passed by then,
+/// it asks for no wait (the record's §9.34). Guards over one directory nest;
+/// its entry goes when the last drops.
 #[cfg(test)]
 pub(crate) struct RegistryDeadline {
     common_git_dir: PathBuf,
