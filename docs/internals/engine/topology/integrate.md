@@ -304,6 +304,14 @@ A symbolic or checked-out integration ref (`assert_publishable`),
 reading the ref.
 
 
+## `fn decide_pausing(`
+
+[`decide`], with the hooks its `assert_publishable` waits through; [`integrate`] passes its journal's, so
+a coordinator that lends itself as those hooks answers its messages while the check waits. Proposed
+at follow-up B's repair round 3 as part of hunk H1, and adopted by the owner's ruling B-H on 2026-10-08
+(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13 and §9.28). [`decide`] keeps its signature and
+waits by sleeping.
+
 ## `pub fn dispatch_head(`
 
 The head a freshly dispatched task's worktree is created at.
@@ -335,6 +343,14 @@ it refuses rather than paying for work on a foreign head — the posture
 [`decide`] and [`super::recover::ensure_recorded_integration_ref`] already
 take, down to `assert_publishable` preceding the read. The ref is neither
 moved nor recreated here.
+
+**Its `refs` are its caller's to choose.** The topology run's dispatch passes
+`run::PausingRefs`, whose `assert_publishable` waits out its registry list
+through the operator's registry hooks, so on the topology coordinator the
+check's waits answer its messages; this function is master's, unchanged
+(follow-up B's repair round 6, I2-7, which withdrew the split round 3 had
+proposed here as hunk H2: `reviews/2026-10-01-pr11-follow-up-b-record.md`
+§9.16).
 
 **What a replay sees.** Nothing: the base a task was dispatched at is
 `task_dispatched.base_sha`, which is durable, and the fold reads it from
